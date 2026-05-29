@@ -1,5 +1,8 @@
 ## FLV 转码为 MP4 工具
-
+<p align="center">
+  <a href="./README.cn.md"><strong>🇨🇳 中文</strong></a> •
+  <a href="./README.md"><strong>🇬🇧 English</strong></a>
+</p>
 ### 介绍
 
 这是一款纯 PHP 开发的工具，用于将 FLV 媒体文件转换为 MP4 格式，便于存储和后续处理。
