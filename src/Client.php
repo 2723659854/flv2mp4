@@ -20,23 +20,18 @@ class Client
      */
     public static function run(string $inputFile,string $outputDir)
     {
-        ini_set('memory_limit', '512M');
-
+        // ini_set('memory_limit', '512M');
         if (!file_exists($inputFile)) {
             throw new \RuntimeException("flv not exist!");
         }
-
         if(!self::isFlvFile($inputFile)){
             throw new \RuntimeException("only support flv file!");
         }
-
         if (!is_dir($outputDir)) mkdir($outputDir, 0777, true);
         //array_map('unlink', glob("$outputDir/*"));
-
         $flvBinary = file_get_contents($inputFile);
 
         $flv2fmp4 = new Flv2Fmp4();
-
         $initSegment = null;
         $segments = [];
         $segmentIndex = 0;
