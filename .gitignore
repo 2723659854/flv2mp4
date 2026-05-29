@@ -1,0 +1,7 @@
+/.idea
+/.git
+/vendor
+composer.lock
+/output
+*.flv
+*.mp4

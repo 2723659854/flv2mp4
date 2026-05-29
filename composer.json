@@ -1,0 +1,26 @@
+{
+  "name": "xiaosongshu/flv2mp4",
+  "description": "A tool for transcoding flv files to mp4 using PHP",
+  "keywords": [
+    "flv",
+    "mp4",
+    "php"
+  ],
+  "type": "library",
+  "license": "MIT",
+  "autoload": {
+    "psr-4": {
+      "Xiaosongshu\\Flv2mp4\\": "src/"
+    }
+  },
+  "authors": [
+    {
+      "name": "songshu",
+      "email": "2723659854@qq.com"
+    }
+  ],
+  "require": {
+    "php": ">=7.3.0"
+  },
+  "minimum-stability": "stable"
+}
