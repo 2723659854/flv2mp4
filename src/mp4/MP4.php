@@ -1,11 +1,6 @@
 <?php
-namespace Xiaosongshu\Flv2mp4\MP4;
+namespace Xiaosongshu\Flv2mp4\Mp4;
 
-/**
- * @purpose mp4结构
- * @author yanglong
- * @time 2026年5月29日14:30:01
- */
 class MP4
 {
     public static $types = [];
@@ -90,17 +85,38 @@ class MP4
 
     public static function mvhd($timescale, $duration)
     {
-        $data = pack('C*',
-            0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-            ($timescale>>24)&0xFF, ($timescale>>16)&0xFF, ($timescale>>8)&0xFF, $timescale&0xFF,
-            ($duration>>24)&0xFF, ($duration>>16)&0xFF, ($duration>>8)&0xFF, $duration&0xFF,
-            0x00,0x01,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-            0x00,0x00,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,
-            0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x01,0x00,0x00,
-            0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-            0x40,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-            0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-            0xFF,0xFF,0xFF,0xFF
+        $data = pack('N*',
+            0x00000000,
+            0x00000000,
+            0x00000000,
+            $timescale,
+            $duration,
+            0x00010000,
+            0x01000000,
+            0x00000000,
+            0x00000000,
+            0x00010000,
+            0x00000000,
+            0x00000000,
+            0x00000000,
+            0x00010000,
+            0x00000000,
+            0x00000000,
+            0x00000000,
+            0x00000000,
+            0x40000000,
+            0x00000000,
+            0x00000000,
+            0x00000000,
+            0x00000000,
+            0x00000000,
+            0x00000000,
+            0x00000000,
+            0x00000000,
+            0x00000000,
+            0x00000000,
+            0x00000000,
+            0xFFFFFFFF
         );
         return self::box(self::$types['mvhd'], $data);
     }
@@ -284,9 +300,8 @@ class MP4
             0x00,0x00,0x00,0x00,
             ($baseMediaDecodeTime>>24)&0xFF, ($baseMediaDecodeTime>>16)&0xFF, ($baseMediaDecodeTime>>8)&0xFF, $baseMediaDecodeTime&0xFF
         ));
-        $sdtp = self::sdtp($track);
-        $trun = self::trun($track, strlen($sdtp) + 16 + 16 + 8 + 16 + 8 + 8);
-        return self::box(self::$types['traf'], $tfhd, $tfdt, $trun, $sdtp);
+        $trun = self::trun($track, strlen($tfdt) + 16 + 8 + 16 + 8 + 8);
+        return self::box(self::$types['traf'], $tfhd, $tfdt, $trun);
     }
 
     public static function sdtp($track)
@@ -321,10 +336,9 @@ class MP4
             $cts = $sample['cts'];
             $data .= pack('N', $duration);
             $data .= pack('N', $size);
-            $flagsHigh = (($flags['isLeading']<<2) | $flags['dependsOn']);
-            $flagsLow = (($flags['isDependedOn']<<6) | ($flags['hasRedundancy']<<4) | $flags['isNonSync']);
-            $data .= pack('C*', $flagsHigh, $flagsLow);
-            $data .= pack('n', 0);
+            $flagsHigh = (($flags['isLeading'] << 2) | $flags['dependsOn']);
+            $flagsLow = (($flags['isDependedOn'] << 6) | ($flags['hasRedundancy'] << 4) | $flags['isNonSync']);
+            $data .= pack('C*', $flagsHigh, $flagsLow, 0, 0);
             $data .= pack('N', $cts);
         }
         return self::box(self::$types['trun'], $data);

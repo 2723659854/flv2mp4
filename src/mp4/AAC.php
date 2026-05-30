@@ -1,11 +1,6 @@
 <?php
-namespace Xiaosongshu\Flv2mp4\MP4;
+namespace Xiaosongshu\Flv2mp4\Mp4;
 
-/**
- * @purpose mp4的aac音频静音包
- * @author yanglong
- * @time 2026年5月29日14:23:45
- */
 class AAC
 {
     public static function getSilentFrame($channelCount)

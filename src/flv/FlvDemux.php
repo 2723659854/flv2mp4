@@ -2,11 +2,6 @@
 
 namespace Xiaosongshu\Flv2mp4\Flv;
 
-/**
- * @purpose flv解码器
- * @author yanglong
- * @time 2026年5月29日14:19:22
- */
 class FlvDemux
 {
     public static function readUInt8($data, $offset)
@@ -33,7 +28,7 @@ class FlvDemux
 
     public static function readFloat64BE($data, $offset)
     {
-        return unpack('G', substr($data, $offset, 8))[1];
+        return unpack('E', substr($data, $offset, 8))[1];
     }
 
     public static function decodeUTF8($bytes)

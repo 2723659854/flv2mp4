@@ -4,14 +4,9 @@ namespace Xiaosongshu\Flv2mp4\Manage;
 
 use Xiaosongshu\Flv2mp4\Flv\FlvParse;
 use Xiaosongshu\Flv2mp4\Flv\TagDemux;
-use Xiaosongshu\Flv2mp4\MP4\MP4;
-use Xiaosongshu\Flv2mp4\MP4\MP4Remuxer;
+use Xiaosongshu\Flv2mp4\Mp4\MP4;
+use Xiaosongshu\Flv2mp4\Mp4\MP4Remuxer;
 
-/**
- * @purpose flv转mp4工具
- * @author yanglong
- * @time 2026年5月29日14:23:10
- */
 class Flv2Fmp4
 {
     public $_config;
@@ -110,8 +105,10 @@ class Flv2Fmp4
         return $offset;
     }
 
+    // 修改 Flv2Fmp4.php 中的 onMdiaSegment 方法
     public function onMdiaSegment($track, $value)
     {
+        // 直接输出，不要缓存
         if ($this->onMediaSegment) {
             call_user_func($this->onMediaSegment, $value['data']);
         }

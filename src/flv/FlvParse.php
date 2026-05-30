@@ -2,11 +2,6 @@
 
 namespace Xiaosongshu\Flv2mp4\Flv;
 
-/**
- * @purpose flv文件解码工具
- * @author yanglong
- * @time 2026年5月29日14:19:56
- */
 class FlvParse
 {
     public static $tempUint8;
@@ -34,6 +29,8 @@ class FlvParse
             self::$frist = false;
             return self::$offset;
         } elseif (!self::$frist) {
+            // 在直播模式下，每次解析前也需要清空标签数组，避免重复处理
+            self::$arrTag = [];
             return self::parse();
         } else {
             return self::$offset;

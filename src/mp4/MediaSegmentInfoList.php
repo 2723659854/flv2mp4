@@ -1,12 +1,7 @@
 <?php
 
-namespace Xiaosongshu\Flv2mp4\MP4;
+namespace Xiaosongshu\Flv2mp4\Mp4;
 
-/**
- * @purpose 单轨媒体包列表
- * @author yanglong
- * @time 2026年5月29日14:29:08
- */
 class MediaSegmentInfoList
 {
     private $_type;

@@ -1,12 +1,7 @@
 <?php
 
-namespace Xiaosongshu\Flv2mp4\MP4;
+namespace Xiaosongshu\Flv2mp4\Mp4;
 
-/**
- * @purpose 关键帧包
- * @author yanglong
- * @time 2026年5月29日14:24:52
- */
 class IDRSampleList
 {
     private $_list = [];

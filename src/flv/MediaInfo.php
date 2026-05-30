@@ -2,11 +2,6 @@
 
 namespace Xiaosongshu\Flv2mp4\Flv;
 
-/**
- * @purpose flv媒体信息
- * @author yanglong
- * @time 2026年5月29日14:20:45
- */
 class MediaInfo
 {
     public $mimeType = null;

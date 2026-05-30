@@ -2,11 +2,6 @@
 
 namespace Xiaosongshu\Flv2mp4\Flv;
 
-/**
- * @purpose flv数据包标签
- * @author yanglong
- * @time 2026年5月29日14:20:22
- */
 class FlvTag
 {
     public $tagType = -1;

@@ -1,12 +1,7 @@
 <?php
 
-namespace Xiaosongshu\Flv2mp4\MP4;
+namespace Xiaosongshu\Flv2mp4\Mp4;
 
-/**
- * @purpose 一段媒体切片
- * @author yanglong
- * @time 2026年5月29日14:26:06
- */
 class MediaSegmentInfo
 {
     public $beginDts;

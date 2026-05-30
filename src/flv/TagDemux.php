@@ -2,11 +2,6 @@
 
 namespace Xiaosongshu\Flv2mp4\Flv;
 
-/**
- * @purpose flv的tag包解码器
- * @author yanglong
- * @time 2026年5月29日14:22:10
- */
 class TagDemux
 {
     public $TAG;
@@ -202,6 +197,9 @@ class TagDemux
             if ($this->_dispatch && (count($this->_audioTrack['samples']) || count($this->_videoTrack['samples']))) {
                 if ($this->_onDataAvailable) {
                     call_user_func($this->_onDataAvailable, $this->_audioTrack, $this->_videoTrack);
+                    // 清空样本数组，避免重复处理
+                    $this->_audioTrack['samples'] = [];
+                    $this->_videoTrack['samples'] = [];
                 }
             }
         }
@@ -550,19 +548,9 @@ class TagDemux
             $extensionSamplingIndex = (($byte1 & 0x07) << 1) | ($byte2 >> 7);
             $audioExtensionObjectType = ($byte2 & 0x7C) >> 2;
         }
-        // 默认分支（chrome-like）
-        if ($samplingIndex >= 6) {
-            $audioObjectType = 5;
+        $configSize = 2;
+        if ($audioObjectType == 5) {
             $configSize = 4;
-            $extensionSamplingIndex = $samplingIndex - 3;
-        } elseif ($channelConfig == 1) {
-            $audioObjectType = 2;
-            $configSize = 2;
-            $extensionSamplingIndex = $samplingIndex;
-        } else {
-            $audioObjectType = 5;
-            $configSize = 4;
-            $extensionSamplingIndex = $samplingIndex;
         }
         $config = array_fill(0, $configSize, 0);
         $config[0] = $audioObjectType << 3;
@@ -576,7 +564,7 @@ class TagDemux
             $config[3] = 0;
         }
         return [
-            'config' => pack('C*', ...$config),  // 将整数数组转为二进制字符串
+            'config' => pack('C*', ...$config),
             'samplingRate' => $samplingFrequence,
             'channelCount' => $channelConfig,
             'codec' => 'mp4a.40.' . $audioObjectType,

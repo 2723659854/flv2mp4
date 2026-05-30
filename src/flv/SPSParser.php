@@ -2,11 +2,6 @@
 
 namespace Xiaosongshu\Flv2mp4\Flv;
 
-/**
- * @purpose flv播放控制信息解码器
- * @author yanglong
- * @time 2026年5月29日14:21:27
- */
 class SPSParser
 {
     public static function _ebsp2rbsp($uint8array)
