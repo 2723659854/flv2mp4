@@ -2,6 +2,10 @@
 
 namespace Xiaosongshu\Flv2mp4\Flv;
 
+/**
+ * @purpose 指数哥伦布缓冲解码器
+ * @author yanglong
+ */
 class ExpGolomb
 {
     public $_buffer;

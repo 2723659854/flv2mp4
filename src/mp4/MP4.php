@@ -1,6 +1,10 @@
 <?php
-namespace Xiaosongshu\Flv2mp4\Mp4;
+namespace Xiaosongshu\Flv2mp4\MP4;
 
+/**
+ * @purpose mp4格式
+ * @author yanglong
+ */
 class MP4
 {
     public static $types = [];

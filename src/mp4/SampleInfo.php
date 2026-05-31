@@ -1,7 +1,11 @@
 <?php
 
-namespace Xiaosongshu\Flv2mp4\Mp4;
+namespace Xiaosongshu\Flv2mp4\MP4;
 
+/**
+ * @purpose 采样率包
+ * @author yanglong
+ */
 class SampleInfo
 {
     public $dts;

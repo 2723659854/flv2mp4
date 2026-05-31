@@ -2,6 +2,11 @@
 
 namespace Xiaosongshu\Flv2mp4\Flv;
 
+/**
+ * @purpose FLV解复用器
+ * @note flv数据拆包
+ * @author yanglong
+ */
 class FlvDemux
 {
     public static function readUInt8($data, $offset)

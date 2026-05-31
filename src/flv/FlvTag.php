@@ -2,6 +2,10 @@
 
 namespace Xiaosongshu\Flv2mp4\Flv;
 
+/**
+ * @purpose flv标签
+ * @author yanglong
+ */
 class FlvTag
 {
     public $tagType = -1;

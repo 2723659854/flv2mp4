@@ -1,7 +1,11 @@
 <?php
 
-namespace Xiaosongshu\Flv2mp4\Mp4;
+namespace Xiaosongshu\Flv2mp4\MP4;
 
+/**
+ * @purpose 序列帧列表
+ * @author yanglong
+ */
 class IDRSampleList
 {
     private $_list = [];

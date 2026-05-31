@@ -7,6 +7,10 @@ use Xiaosongshu\Flv2mp4\Flv\TagDemux;
 use Xiaosongshu\Flv2mp4\Mp4\MP4;
 use Xiaosongshu\Flv2mp4\Mp4\MP4Remuxer;
 
+/**
+ * @purpose 静态flv转码fmp4工具
+ * @author yanglong
+ */
 class Flv2Fmp4
 {
     public $_config;

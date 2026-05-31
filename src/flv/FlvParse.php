@@ -2,6 +2,11 @@
 
 namespace Xiaosongshu\Flv2mp4\Flv;
 
+/**
+ * @purpose flv数据解码器
+ * @note 拆包
+ * @author yanglong
+ */
 class FlvParse
 {
     public static $tempUint8;

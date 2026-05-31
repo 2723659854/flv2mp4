@@ -2,6 +2,10 @@
 
 namespace Xiaosongshu\Flv2mp4\Flv;
 
+/**
+ * @purpose flv媒体信息包
+ * @author yanglong
+ */
 class MediaInfo
 {
     public $mimeType = null;

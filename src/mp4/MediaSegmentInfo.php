@@ -1,7 +1,11 @@
 <?php
 
-namespace Xiaosongshu\Flv2mp4\Mp4;
+namespace Xiaosongshu\Flv2mp4\MP4;
 
+/**
+ * @purpose 媒体信息切片
+ * @author yanglong
+ */
 class MediaSegmentInfo
 {
     public $beginDts;

@@ -1,6 +1,10 @@
 <?php
-namespace Xiaosongshu\Flv2mp4\Mp4;
+namespace Xiaosongshu\Flv2mp4\MP4;
 
+/**
+ * @purpose mp4编码器
+ * @author yanglong
+ */
 class MP4Remuxer
 {
     public $TAG;
@@ -201,7 +205,7 @@ class MP4Remuxer
         $minVideo = ($this->_videoDtsBase === INF) ? PHP_INT_MAX : $this->_videoDtsBase;
         $this->_dtsBase = min($minAudio, $minVideo);
 
-        error_log("MP4Remuxer: Audio DTS Base = {$this->_audioDtsBase}, Video DTS Base = {$this->_videoDtsBase}, Common Base = {$this->_dtsBase}");
+        //error_log("MP4Remuxer: Audio DTS Base = {$this->_audioDtsBase}, Video DTS Base = {$this->_videoDtsBase}, Common Base = {$this->_dtsBase}");
 
         $this->_dtsBaseInited = true;
     }
@@ -306,7 +310,7 @@ class MP4Remuxer
         }
         $this->_audioNextDts = $lastDts;
 
-        error_log("MP4Remuxer Audio: firstDts={$firstDts}, lastDts={$lastDts}, samples=" . count($mp4Samples));
+        //error_log("MP4Remuxer Audio: firstDts={$firstDts}, lastDts={$lastDts}, samples=" . count($mp4Samples));
 
         $mdatData = implode('', $mdatChunks);
         $mdatSize = 8 + strlen($mdatData);
@@ -462,7 +466,7 @@ class MP4Remuxer
         $lastPts = $latest['pts'] + $latest['duration'];
         $this->_videoNextDts = $lastDts;
 
-        error_log("MP4Remuxer Video: firstDts={$firstDts}, lastDts={$lastDts}, samples=" . count($mp4Samples));
+        //error_log("MP4Remuxer Video: firstDts={$firstDts}, lastDts={$lastDts}, samples=" . count($mp4Samples));
 
         $mdatData = implode('', $mdatChunks);
         $mdatSize = 8 + strlen($mdatData);

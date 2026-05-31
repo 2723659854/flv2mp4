@@ -1,6 +1,10 @@
 <?php
-namespace Xiaosongshu\Flv2mp4\Mp4;
+namespace Xiaosongshu\Flv2mp4\MP4;
 
+/**
+ * @purpose aac静音包，mp4有时候需要插入静音切片,否则无法播放
+ * @author yanglong
+ */
 class AAC
 {
     public static function getSilentFrame($channelCount)

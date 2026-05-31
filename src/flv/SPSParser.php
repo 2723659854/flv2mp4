@@ -2,6 +2,10 @@
 
 namespace Xiaosongshu\Flv2mp4\Flv;
 
+/**
+ * @purpose flv的媒体格式信息编码率等信息
+ * @author yanglong
+ */
 class SPSParser
 {
     public static function _ebsp2rbsp($uint8array)

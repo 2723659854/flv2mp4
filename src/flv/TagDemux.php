@@ -2,6 +2,10 @@
 
 namespace Xiaosongshu\Flv2mp4\Flv;
 
+/**
+ * @purpose flv标签解码器
+ * @author yanglong
+ */
 class TagDemux
 {
     public $TAG;
@@ -107,7 +111,7 @@ class TagDemux
     {
         $data = FlvDemux::parseMetadata($arr);
         $this->_parseScriptData($data);
-        error_log(print_r($this->_mediaInfo, true) . ' isComplete? ' . ($this->_mediaInfo->isComplete() ? 'yes' : 'no'));
+        //error_log(print_r($this->_mediaInfo, true) . ' isComplete? ' . ($this->_mediaInfo->isComplete() ? 'yes' : 'no'));
     }
 
     public function _parseScriptData($obj)
@@ -115,7 +119,7 @@ class TagDemux
         $scriptData = $obj;
         if (isset($scriptData['onMetaData'])) {
             if ($this->_metadata) {
-                error_log($this->TAG . ' Found another onMetaData tag!');
+                //error_log($this->TAG . ' Found another onMetaData tag!');
             }
             $this->_metadata = $scriptData;
             $onMetaData = $this->_metadata['onMetaData'];
@@ -169,7 +173,7 @@ class TagDemux
             }
             $this->_dispatch = false;
             $this->_mediaInfo->metadata = $onMetaData;
-            error_log($this->TAG . ' Parsed onMetaData');
+            //error_log($this->TAG . ' Parsed onMetaData');
             return $this->_mediaInfo;
         }
         return null;
@@ -223,10 +227,10 @@ class TagDemux
     public function _parseVideoData($arrayBuffer, $dataOffset, $dataSize, $tagTimestamp, $tagPosition)
     {
         if ($tagTimestamp == $this->_timestampBase && $this->_timestampBase != 0) {
-            error_log($tagTimestamp . ' ' . $this->_timestampBase . ' 夭寿啦这个视频不是从0开始');
+            //error_log($tagTimestamp . ' ' . $this->_timestampBase . ' 夭寿啦这个视频不是从0开始');
         }
         if ($dataSize <= 1) {
-            error_log($this->TAG . ' Flv: Invalid video packet, missing VideoData payload!');
+            //error_log($this->TAG . ' Flv: Invalid video packet, missing VideoData payload!');
             return;
         }
         $spec = ord($arrayBuffer[$dataOffset]);
@@ -242,7 +246,7 @@ class TagDemux
     public function _parseAVCVideoPacket($arrayBuffer, $dataOffset, $dataSize, $tagTimestamp, $tagPosition, $frameType)
     {
         if ($dataSize < 4) {
-            error_log($this->TAG . ' Flv: Invalid AVC packet, missing AVCPacketType or/and CompositionTime');
+            //error_log($this->TAG . ' Flv: Invalid AVC packet, missing AVCPacketType or/and CompositionTime');
             return;
         }
         $packetType = ord($arrayBuffer[$dataOffset]);
@@ -268,7 +272,7 @@ class TagDemux
     public function _parseAVCDecoderConfigurationRecord($arrayBuffer, $dataOffset, $dataSize)
     {
         if ($dataSize < 7) {
-            error_log($this->TAG . ' Flv: Invalid AVCDecoderConfigurationRecord, lack of data!');
+            //error_log($this->TAG . ' Flv: Invalid AVCDecoderConfigurationRecord, lack of data!');
             return;
         }
         $meta = $this->_videoMetadata;
@@ -281,7 +285,9 @@ class TagDemux
                 'duration' => $this->_duration
             ];
         } else {
-            if (isset($meta['avcc'])) error_log($this->TAG . ' Found another AVCDecoderConfigurationRecord!');
+            if (isset($meta['avcc'])) {
+                //error_log($this->TAG . ' Found another AVCDecoderConfigurationRecord!');
+            }
         }
         $version = ord($arrayBuffer[$dataOffset]);
         $avcProfile = ord($arrayBuffer[$dataOffset + 1]);
@@ -364,7 +370,7 @@ class TagDemux
         // 保存SPS和PPS数据，用于在关键帧前面添加
         $meta['sps'] = $sps ?? '';
         $meta['pps'] = $ppsData;
-        error_log($this->TAG . ' Parsed AVCDecoderConfigurationRecord');
+        //error_log($this->TAG . ' Parsed AVCDecoderConfigurationRecord');
         if ($this->_isInitialMetadataDispatched()) {
             if ($this->_dispatch && (count($this->_audioTrack['samples']) || count($this->_videoTrack['samples']))) {
                 if ($this->_onDataAvailable) call_user_func($this->_onDataAvailable, $this->_audioTrack, $this->_videoTrack);
@@ -392,7 +398,7 @@ class TagDemux
         $keyframe = ($frameType == 1);
         while ($offset < $dataSize) {
             if ($offset + $lengthSize > $dataSize) {
-                error_log($this->TAG . " Malformed Nalu near timestamp {$dts}, offset = {$offset}, dataSize = {$dataSize}");
+                //error_log($this->TAG . " Malformed Nalu near timestamp {$dts}, offset = {$offset}, dataSize = {$dataSize}");
                 break;
             }
             $naluSize = 0;
@@ -401,7 +407,7 @@ class TagDemux
             }
             if ($lengthSize == 3) $naluSize >>= 8;
             if ($naluSize > $dataSize - $lengthSize) {
-                error_log($this->TAG . " Malformed Nalus near timestamp {$dts}, NaluSize > DataSize!");
+                //error_log($this->TAG . " Malformed Nalus near timestamp {$dts}, NaluSize > DataSize!");
                 return;
             }
             $unitType = (ord($arrayBuffer[$dataOffset + $offset + $lengthSize]) & 0x1F);
@@ -431,10 +437,10 @@ class TagDemux
     public function _parseAudioData($arrayBuffer, $dataOffset, $dataSize, $tagTimestamp)
     {
         if ($tagTimestamp == $this->_timestampBase && $this->_timestampBase != 0) {
-            error_log($tagTimestamp . ' ' . $this->_timestampBase . ' 夭寿啦这个视频不是从0开始');
+            //error_log($tagTimestamp . ' ' . $this->_timestampBase . ' 这个视频不是从0开始');
         }
         if ($dataSize <= 1) {
-            error_log($this->TAG . ' Flv: Invalid audio packet, missing SoundData payload!');
+            //error_log($this->TAG . ' Flv: Invalid audio packet, missing SoundData payload!');
             return;
         }
         $meta = $this->_audioMetadata;
@@ -475,7 +481,7 @@ class TagDemux
             $meta['codec'] = $misc['codec'];
             $meta['config'] = $misc['config'];
             $meta['refSampleDuration'] = (int)(1024 / $meta['audioSampleRate'] * $meta['timescale']);
-            error_log($this->TAG . ' Parsed AudioSpecificConfig');
+            //error_log($this->TAG . ' Parsed AudioSpecificConfig');
             if ($this->_isInitialMetadataDispatched()) {
                 if ($this->_dispatch && (count($this->_audioTrack['samples']) || count($this->_videoTrack['samples']))) {
                     if ($this->_onDataAvailable) call_user_func($this->_onDataAvailable, $this->_audioTrack, $this->_videoTrack);
@@ -502,14 +508,14 @@ class TagDemux
             $track['samples'][] = $aacSample;
             $track['length'] += strlen($aacData['data']);
         } else {
-            error_log($this->TAG . " Flv: Unsupported AAC data type {$aacData['packetType']}");
+            //error_log($this->TAG . " Flv: Unsupported AAC data type {$aacData['packetType']}");
         }
     }
 
     public function _parseAACAudioData($arrayBuffer, $dataOffset, $dataSize)
     {
         if ($dataSize <= 1) {
-            error_log($this->TAG . ' Flv: Invalid AAC packet, missing AACPacketType or/and Data!');
+            //error_log($this->TAG . ' Flv: Invalid AAC packet, missing AACPacketType or/and Data!');
             return null;
         }
         $packetType = ord($arrayBuffer[$dataOffset]);
