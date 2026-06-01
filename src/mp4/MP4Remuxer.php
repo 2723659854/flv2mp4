@@ -420,9 +420,9 @@ class MP4Remuxer
             $cts = $avcSample['cts'];
             $pts = $dts + $cts;
 
-            echo "\n===== VIDEO SAMPLE =====\n";
-            echo "keyframe=" . ($keyframe ? "YES" : "NO") . "\n";
-            echo "units=" . count($avcSample['units']) . "\n";
+//            echo "\n===== VIDEO SAMPLE =====\n";
+//            echo "keyframe=" . ($keyframe ? "YES" : "NO") . "\n";
+//            echo "units=" . count($avcSample['units']) . "\n";
 
             if ($firstDts === -1) {
                 $firstDts = $dts;
@@ -444,17 +444,17 @@ class MP4Remuxer
             foreach ($avcSample['units'] as $unit) {
 
                 $data = $unit['data'];
-                printf(
-                    "type=%d len=%d first=%s\n",
-                    ord($data[0]) & 0x1f,
-                    strlen($data),
-                    bin2hex(substr($data,0,8))
-                );
-                echo sprintf(
-                    "NAL type=%d size=%d\n",
-                    ord($data[0]) & 0x1f,
-                    strlen($data)
-                );
+//                printf(
+//                    "type=%d len=%d first=%s\n",
+//                    ord($data[0]) & 0x1f,
+//                    strlen($data),
+//                    bin2hex(substr($data,0,8))
+//                );
+//                echo sprintf(
+//                    "NAL type=%d size=%d\n",
+//                    ord($data[0]) & 0x1f,
+//                    strlen($data)
+//                );
 
                 $mdatChunks[] =
                     pack('N', strlen($data))
@@ -462,7 +462,7 @@ class MP4Remuxer
 
                 $sampleSize += 4 + strlen($data);
             }
-            echo "sampleSize={$sampleSize}\n";
+//            echo "sampleSize={$sampleSize}\n";
             $sampleDuration = 0;
             if (count($samples) >= 1) {
                 $nextDts = $samples[0]['dts'] - $this->_videoDtsBase - $dtsCorrection;
@@ -479,18 +479,18 @@ class MP4Remuxer
                 $syncPoint = new SampleInfo($dts, $pts, $sampleDuration, $avcSample['dts'], true);
                 if (isset($avcSample['fileposition'])) $syncPoint->fileposition = $avcSample['fileposition'];
                 $info->appendSyncPoint($syncPoint);
-                foreach ($avcSample['units'] as $unit) {
-
-                    $data = $unit['data'];
-
-                    $type = ord($data[0]) & 0x1f;
-
-                    if ($type == 5) {
-                        echo "\n===== FIRST IDR =====\n";
-                        echo bin2hex(substr($data,0,32)) . "\n";
-                        break;
-                    }
-                }
+//                foreach ($avcSample['units'] as $unit) {
+//
+//                    $data = $unit['data'];
+//
+//                    $type = ord($data[0]) & 0x1f;
+//
+//                    if ($type == 5) {
+//                        echo "\n===== FIRST IDR =====\n";
+//                        echo bin2hex(substr($data,0,32)) . "\n";
+//                        break;
+//                    }
+//                }
             }
 
             $mp4Sample = [
@@ -524,16 +524,14 @@ class MP4Remuxer
         $mdatData = implode('', $mdatChunks);
         $mdatSize = 8 + strlen($mdatData);
         $mdat = pack('N', $mdatSize) . 'mdat' . $mdatData;
-        echo "mdatLength=".strlen($mdatData)."\n";
 
-        $totalSampleSize = 0;
-
-        foreach ($mp4Samples as $s) {
-            $totalSampleSize += $s['size'];
-        }
-
-        echo "sampleSizeTotal=$totalSampleSize\n";
-        echo "mdatDataSize=".strlen($mdatData)."\n";
+//        echo "mdatLength=".strlen($mdatData)."\n";
+//        $totalSampleSize = 0;
+//        foreach ($mp4Samples as $s) {
+//            $totalSampleSize += $s['size'];
+//        }
+//        echo "sampleSizeTotal=$totalSampleSize\n";
+//        echo "mdatDataSize=".strlen($mdatData)."\n";
 
         $info->beginDts = $firstDts;
         $info->endDts = $lastDts;

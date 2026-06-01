@@ -8,12 +8,12 @@ $file = __DIR__."/test.flv";
 // 示例1: 使用原有方法合并转换为单个MP4
 echo "=== 示例1: 合并转换为单个MP4 ===\n";
 $outputDir1 = __DIR__."/output_merge";
-//try{
-//    $res = \Xiaosongshu\Flv2mp4\Client::run($file, $outputDir1);
-//    echo "\n转换完成: " . $res . "\n\n";
-//}catch (\Exception $e){
-//    echo "错误: " . $e->getMessage() . "\n\n";
-//}
+try{
+    $res = \Xiaosongshu\Flv2mp4\Client::run($file, $outputDir1);
+    echo "\n转换完成: " . $res . "\n\n";
+}catch (\Exception $e){
+    echo "错误: " . $e->getMessage() . "\n\n";
+}
 
 // 示例2: 生成分开的音视频切片（用于浏览器播放）
 echo "=== 示例2: 生成分开的音视频切片 ===\n";
