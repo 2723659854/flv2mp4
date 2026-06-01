@@ -282,6 +282,70 @@ class MP4
     public static function avc1($meta)
     {
         $avcc = $meta['avcc'];
+
+        $width  = isset($meta['presentWidth'])
+            ? $meta['presentWidth']
+            : $meta['codecWidth'];
+
+        $height = isset($meta['presentHeight'])
+            ? $meta['presentHeight']
+            : $meta['codecHeight'];
+
+        $avcCBox = self::box(self::$types['avcC'], $avcc);
+
+        $reserved = str_repeat("\x00", 6);
+        $dataReferenceIndex = pack('n', 1);
+
+        // VisualSampleEntry 固定 16 字节
+        $preDefined =
+            pack('n', 0) .
+            pack('n', 0) .
+            pack('N', 0) .
+            pack('N', 0) .
+            pack('N', 0);
+
+        $widthBytes  = pack('n', $width);
+        $heightBytes = pack('n', $height);
+
+        $horizResolution = pack('N', 0x00480000);
+        $vertResolution  = pack('N', 0x00480000);
+
+        $reserved2 = pack('N', 0);
+
+        $frameCount = pack('n', 1);
+
+        $compressorName =
+            "\x00" .
+            str_repeat("\x00", 31);
+
+        $depth = pack('n', 0x0018);
+
+        $preDefined2 = pack('n', 0xFFFF);
+
+        $data =
+            $reserved .
+            $dataReferenceIndex .
+            $preDefined .
+            $widthBytes .
+            $heightBytes .
+            $horizResolution .
+            $vertResolution .
+            $reserved2 .
+            $frameCount .
+            $compressorName .
+            $depth .
+            $preDefined2;
+
+        return self::box(
+            self::$types['avc1'],
+            $data,
+            $avcCBox
+        );
+    }
+
+    public static function avc12($meta)
+    {
+        $avcc = $meta['avcc'];
         $width = isset($meta['presentWidth']) ? $meta['presentWidth'] : $meta['codecWidth'];
         $height = isset($meta['presentHeight']) ? $meta['presentHeight'] : $meta['codecHeight'];
 
