@@ -28,7 +28,7 @@ class Client
             throw new \RuntimeException("only support flv file!");
         }
         if (!is_dir($outputDir)) mkdir($outputDir, 0777, true);
-        //array_map('unlink', glob("$outputDir/*"));
+        array_map('unlink', glob("$outputDir/*"));
         $flvBinary = file_get_contents($inputFile);
 
         $flv2fmp4 = new Flv2Fmp4();
@@ -36,16 +36,48 @@ class Client
         $segments = [];
         $segmentIndex = 0;
 
-        $flv2fmp4->onInitSegment = function ($data) use (&$initSegment, $outputDir) {
+        $flv2fmp4->onInitSegment = function($data) use (&$initSegment, $outputDir, $flv2fmp4) {
+            echo "\n[回调] 初始化段生成\n";
+            echo "大小: " . strlen($data) . " bytes\n";
             $initSegment = $data;
+            file_put_contents("$outputDir/init.mp4", $data);
+            echo "已写入: $outputDir/init.mp4\n";
+            
+            // 生成 meta.json
+            $meta = [];
+            foreach ($flv2fmp4->metas as $trackMeta) {
+                if (isset($trackMeta['codec'])) {
+                    if ($trackMeta['type'] == 'video') {
+                        $meta['videoCodec'] = $trackMeta['codec'];
+                    } else if ($trackMeta['type'] == 'audio') {
+                        $meta['audioCodec'] = $trackMeta['codec'];
+                    }
+                }
+            }
+            if (!empty($meta)) {
+                file_put_contents("$outputDir/meta.json", json_encode($meta));
+                echo "已写入: $outputDir/meta.json\n";
+                echo "编解码器信息: " . json_encode($meta) . "\n";
+            }
         };
 
-        $flv2fmp4->onMediaSegment = function ($data) use (&$segments, &$segmentIndex, $outputDir) {
+        $flv2fmp4->onMediaSegment = function($data) use (&$segments, &$segmentIndex, $outputDir) {
             $segmentIndex++;
+            echo "\n[回调] 媒体段#$segmentIndex\n";
+            echo "大小: " . strlen($data) . " bytes\n";
             $segments[] = $data;
+            file_put_contents("$outputDir/segment_$segmentIndex.m4s", $data);
+            echo "已写入: $outputDir/segment_$segmentIndex.m4s\n";
         };
 
-        $flv2fmp4->onMediaInfo = function ($mediaInfo, $tracks) {
+        $flv2fmp4->onMediaInfo = function($mediaInfo, $tracks) {
+            echo "\n[回调] 媒体信息:\n";
+            echo "  宽度: " . ($mediaInfo->width ?? 'N/A') . "\n";
+            echo "  高度: " . ($mediaInfo->height ?? 'N/A') . "\n";
+            echo "  帧率: " . ($mediaInfo->fps ?? 'N/A') . "\n";
+            echo "  时长: " . ($mediaInfo->duration ?? 0) . "\n";
+            echo "  音频: " . ($tracks['hasAudio'] ? '是' : '否') . "\n";
+            echo "  视频: " . ($tracks['hasVideo'] ? '是' : '否') . "\n";
         };
 
         try {
