@@ -20,6 +20,12 @@ class Flv2Fmp4
     public $seekCallBack = null;
     public $error = null;
 
+    // 分开的音视频切片回调
+    public $onAudioInitSegment = null;
+    public $onVideoInitSegment = null;
+    public $onAudioSegment = null;
+    public $onVideoSegment = null;
+
     public $loadmetadata = false;
     public $ftyp_moov = null;
     public $metaSuccRun = false;
@@ -35,6 +41,10 @@ class Flv2Fmp4
 
     public $m4mof;
     protected $tagDemux;
+
+    // 单独的音视频初始化数据
+    public $audioInitSegment = null;
+    public $videoInitSegment = null;
 
     public function __construct($config = [])
     {
@@ -116,6 +126,14 @@ class Flv2Fmp4
         if ($this->onMediaSegment) {
             call_user_func($this->onMediaSegment, $value['data']);
         }
+
+        // 分开输出音视频切片
+        if ($track == 'audio' && $this->onAudioSegment) {
+            call_user_func($this->onAudioSegment, $value['data'], $value);
+        } elseif ($track == 'video' && $this->onVideoSegment) {
+            call_user_func($this->onVideoSegment, $value['data'], $value);
+        }
+
         if ($this->_pendingResolveSeekPoint != -1 && $track == 'video') {
             $seekpoint = $this->_pendingResolveSeekPoint;
             $this->_pendingResolveSeekPoint = -1;
@@ -166,6 +184,21 @@ class Flv2Fmp4
         if ($this->onInitSegment && $this->loadmetadata == false) {
             call_user_func($this->onInitSegment, $this->ftyp_moov);
             $this->loadmetadata = true;
+        }
+
+        // 生成单独的音视频初始化片段
+        foreach ($this->metas as $meta) {
+            if ($meta['type'] == 'audio') {
+                $this->audioInitSegment = MP4::generateAudioInitSegment($meta);
+                if ($this->onAudioInitSegment) {
+                    call_user_func($this->onAudioInitSegment, $this->audioInitSegment, $meta);
+                }
+            } elseif ($meta['type'] == 'video') {
+                $this->videoInitSegment = MP4::generateVideoInitSegment($meta);
+                if ($this->onVideoInitSegment) {
+                    call_user_func($this->onVideoInitSegment, $this->videoInitSegment, $meta);
+                }
+            }
         }
     }
 

@@ -2,7 +2,7 @@
 <html>
 <head>
     <meta charset="utf-8">
-    <title>fMP4 Player - 合并模式</title>
+    <title>fMP4 Player - 分开音视频模式</title>
     <style>
         body { 
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
@@ -23,6 +23,7 @@
             display: flex;
             gap: 10px;
             align-items: center;
+            flex-wrap: wrap;
         }
         .btn {
             padding: 10px 20px;
@@ -38,6 +39,8 @@
         .btn:disabled { background: #555; cursor: not-allowed; }
         .btn-danger { background: #f44336; }
         .btn-danger:hover { background: #da190b; }
+        .btn-secondary { background: #607D8B; }
+        .btn-secondary:hover { background: #546E7A; }
         #status { 
             margin-top: 15px; 
             padding: 15px; 
@@ -53,18 +56,74 @@
         .status-warning { color: #ff9800; }
         .status-error { color: #f44336; }
         .status-debug { color: #2196F3; }
+        .mode-selector {
+            margin-bottom: 15px;
+            display: flex;
+            gap: 10px;
+        }
+        .mode-btn {
+            padding: 8px 16px;
+            background: rgba(255,255,255,0.1);
+            border: 1px solid rgba(255,255,255,0.2);
+            border-radius: 6px;
+            color: white;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.3s;
+        }
+        .mode-btn.active {
+            background: #4CAF50;
+            border-color: #4CAF50;
+        }
+        .mode-btn:hover:not(.active) {
+            background: rgba(255,255,255,0.15);
+        }
+        .info-panel {
+            margin-top: 15px;
+            padding: 15px;
+            background: rgba(255,255,255,0.05);
+            border-radius: 8px;
+            font-size: 14px;
+        }
+        .info-panel h3 {
+            margin: 0 0 10px 0;
+            color: #4CAF50;
+        }
+        .info-panel ul {
+            margin: 0;
+            padding-left: 20px;
+        }
+        .info-panel li {
+            margin-bottom: 5px;
+        }
     </style>
 </head>
 <body>
-    <h1>fMP4 流媒体播放器（合并模式）</h1>
+    <h1>fMP4 流媒体播放器</h1>
     
+    <!-- 模式选择 -->
+    <div class="mode-selector">
+        <button class="mode-btn active" data-mode="separate">分开音视频模式</button>
+        <button class="mode-btn" data-mode="merged">合并模式</button>
+    </div>
+
+    <!-- 信息面板 -->
+    <div class="info-panel">
+        <h3>当前模式: <span id="modeInfo">分开音视频模式</span></h3>
+        <ul>
+            <li><strong>分开模式</strong>: 使用 audio_init.mp4 + video_init.mp4 + 分开的 m4s 切片</li>
+            <li><strong>合并模式</strong>: 使用 init.mp4 + 合并的 m4s 切片</li>
+            <li>输出目录: <code>/output_separate/</code> (分开模式) 或 <code>/output_merge/</code> (合并模式)</li>
+        </ul>
+    </div>
+
     <video id="video" controls autoplay muted playsinline></video>
     
     <div class="controls">
         <button id="playBtn" class="btn">播放</button>
         <button id="pauseBtn" class="btn" disabled>暂停</button>
         <button id="resetBtn" class="btn btn-danger">重置</button>
-        <button id="debugBtn" class="btn">显示调试信息</button>
+        <button id="debugBtn" class="btn btn-secondary">显示调试信息</button>
     </div>
     
     <div id="status">准备播放...</div>
@@ -72,12 +131,18 @@
 <script>
 const video = document.getElementById('video');
 const statusDiv = document.getElementById('status');
-const BASE_URL = '/output/';
+const modeInfo = document.getElementById('modeInfo');
 
-let mediaSource, sourceBuffer;
+// 当前播放模式
+let currentMode = 'separate';
+let BASE_URL = '/output_separate/';
+
+let mediaSource;
+let audioSourceBuffer, videoSourceBuffer;
 let streamEnded = false;
 let segmentIdx = 1;
 let isDebugMode = false;
+let metaInfo = null;
 
 // 添加状态日志
 function addStatus(message, type = 'info') {
@@ -89,7 +154,7 @@ function addStatus(message, type = 'info') {
 }
 
 // 追加数据到 SourceBuffer
-async function appendBuffer(data, description) {
+async function appendBuffer(sourceBuffer, data, description) {
     return new Promise((resolve, reject) => {
         const onUpdateEnd = () => {
             sourceBuffer.removeEventListener('error', onError);
@@ -125,8 +190,66 @@ async function appendBuffer(data, description) {
     });
 }
 
-// 加载初始化片段
-async function loadInit() {
+// 获取编解码器信息
+async function getCodecs() {
+    try {
+        const res = await fetch(BASE_URL + 'meta.json');
+        if (!res.ok) {
+            addStatus(`meta.json 加载失败: HTTP ${res.status}`, 'warning');
+            return { videoCodec: 'avc1.42E01E', audioCodec: 'mp4a.40.2' };
+        }
+        metaInfo = await res.json();
+        addStatus(`编解码器: 视频=${metaInfo.videoCodec}, 音频=${metaInfo.audioCodec}`, 'debug');
+        return {
+            videoCodec: metaInfo.videoCodec || 'avc1.42E01E',
+            audioCodec: metaInfo.audioCodec || 'mp4a.40.2'
+        };
+    } catch (e) {
+        addStatus(`获取编解码器失败: ${e.message}`, 'warning');
+        return { videoCodec: 'avc1.42E01E', audioCodec: 'mp4a.40.2' };
+    }
+}
+
+// 加载初始化片段（分开模式）
+async function loadInitSeparate(codecs) {
+    addStatus('开始加载初始化片段...', 'info');
+    
+    try {
+        // 加载音频初始化
+        const audioRes = await fetch(BASE_URL + 'audio_init.mp4');
+        if (!audioRes.ok) throw new Error(`音频初始化文件加载失败: HTTP ${audioRes.status}`);
+        const audioInit = await audioRes.arrayBuffer();
+        addStatus(`音频初始化数据: ${audioInit.byteLength} bytes`, 'debug');
+        
+        // 加载视频初始化
+        const videoRes = await fetch(BASE_URL + 'video_init.mp4');
+        if (!videoRes.ok) throw new Error(`视频初始化文件加载失败: HTTP ${videoRes.status}`);
+        const videoInit = await videoRes.arrayBuffer();
+        addStatus(`视频初始化数据: ${videoInit.byteLength} bytes`, 'debug');
+        
+        // 创建 SourceBuffer
+        audioSourceBuffer = mediaSource.addSourceBuffer(`audio/mp4; codecs="${codecs.audioCodec.toLowerCase()}"`);
+        audioSourceBuffer.mode = 'sequence';
+        
+        videoSourceBuffer = mediaSource.addSourceBuffer(`video/mp4; codecs="${codecs.videoCodec.toLowerCase()}"`);
+        videoSourceBuffer.mode = 'sequence';
+        
+        addStatus('SourceBuffer 创建成功', 'info');
+        
+        // 追加初始化数据
+        await appendBuffer(audioSourceBuffer, audioInit, '音频初始化');
+        await appendBuffer(videoSourceBuffer, videoInit, '视频初始化');
+        
+        addStatus('初始化完成', 'info');
+        
+    } catch (e) {
+        addStatus(`加载初始化片段失败: ${e.message}`, 'error');
+        throw e;
+    }
+}
+
+// 加载初始化片段（合并模式）
+async function loadInitMerged(codecs) {
     addStatus('开始加载初始化片段...', 'info');
     
     try {
@@ -136,7 +259,15 @@ async function loadInit() {
         const initData = await res.arrayBuffer();
         addStatus(`初始化数据: ${initData.byteLength} bytes`, 'debug');
         
-        await appendBuffer(initData, '初始化数据');
+        // 创建单个 SourceBuffer
+        const codecStr = `${codecs.videoCodec.toLowerCase()},${codecs.audioCodec.toLowerCase()}`;
+        audioSourceBuffer = mediaSource.addSourceBuffer(`video/mp4; codecs="${codecStr}"`);
+        audioSourceBuffer.mode = 'sequence';
+        videoSourceBuffer = null;
+        
+        addStatus(`SourceBuffer 创建成功: ${codecStr}`, 'info');
+        
+        await appendBuffer(audioSourceBuffer, initData, '初始化数据');
         addStatus('初始化完成', 'info');
         
     } catch (e) {
@@ -145,24 +276,40 @@ async function loadInit() {
     }
 }
 
-// 加载媒体片段
-async function loadSegments() {
+// 加载媒体片段（分开模式）
+async function loadSegmentsSeparate() {
     addStatus('开始加载媒体片段...', 'info');
     
     while (!streamEnded && mediaSource.readyState === 'open') {
         try {
-            const resp = await fetch(`${BASE_URL}segment_${segmentIdx}.m4s`);
+            // 加载音频片段
+            const audioResp = await fetch(`${BASE_URL}audio_${segmentIdx}.m4s`);
+            if (audioResp.status === 404) {
+                addStatus(`音频片段 ${segmentIdx} 不存在`, 'warning');
+            }
             
-            if (resp.status === 404) {
-                addStatus(`片段 ${segmentIdx} 不存在，流可能已结束`, 'warning');
+            // 加载视频片段
+            const videoResp = await fetch(`${BASE_URL}video_${segmentIdx}.m4s`);
+            if (videoResp.status === 404) {
+                addStatus(`视频片段 ${segmentIdx} 不存在，流可能已结束`, 'warning');
                 streamEnded = true;
                 break;
             }
             
-            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            if (!videoResp.ok) throw new Error(`HTTP ${videoResp.status}`);
             
-            const data = await resp.arrayBuffer();
-            await appendBuffer(data, `片段 ${segmentIdx}`);
+            // 并行加载数据
+            const [audioData, videoData] = await Promise.all([
+                audioResp.status === 200 ? audioResp.arrayBuffer() : null,
+                videoResp.arrayBuffer()
+            ]);
+            
+            // 追加数据
+            if (audioData) {
+                await appendBuffer(audioSourceBuffer, audioData, `音频片段 ${segmentIdx}`);
+            }
+            await appendBuffer(videoSourceBuffer, videoData, `视频片段 ${segmentIdx}`);
+            
             segmentIdx++;
             
         } catch (e) {
@@ -183,24 +330,41 @@ async function loadSegments() {
     }
 }
 
-// 获取编解码器信息
-async function getCodecs() {
-    try {
-        const res = await fetch(BASE_URL + 'meta.json');
-        if (!res.ok) {
-            addStatus(`meta.json 加载失败: HTTP ${res.status}`, 'warning');
-            return 'avc1.42E01E,mp4a.40.2';
+// 加载媒体片段（合并模式）
+async function loadSegmentsMerged() {
+    addStatus('开始加载媒体片段...', 'info');
+    
+    while (!streamEnded && mediaSource.readyState === 'open') {
+        try {
+            const resp = await fetch(`${BASE_URL}segment_${segmentIdx}.m4s`);
+            
+            if (resp.status === 404) {
+                addStatus(`片段 ${segmentIdx} 不存在，流可能已结束`, 'warning');
+                streamEnded = true;
+                break;
+            }
+            
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            
+            const data = await resp.arrayBuffer();
+            await appendBuffer(audioSourceBuffer, data, `片段 ${segmentIdx}`);
+            segmentIdx++;
+            
+        } catch (e) {
+            addStatus(`加载片段失败: ${e.message}`, 'error');
+            streamEnded = true;
+            break;
         }
-        const meta = await res.json();
-        const codecs = [];
-        if (meta.videoCodec) codecs.push(meta.videoCodec.toLowerCase());
-        if (meta.audioCodec) codecs.push(meta.audioCodec.toLowerCase());
-        const codecStr = codecs.join(',');
-        addStatus(`编解码器: ${codecStr}`, 'debug');
-        return codecStr || 'avc1.42E01E,mp4a.40.2';
-    } catch (e) {
-        addStatus(`获取编解码器失败: ${e.message}`, 'warning');
-        return 'avc1.42E01E,mp4a.40.2';
+    }
+    
+    // 结束流
+    if (mediaSource.readyState === 'open') {
+        try {
+            mediaSource.endOfStream();
+            addStatus('流媒体播放结束', 'info');
+        } catch (e) {
+            addStatus(`endOfStream 失败: ${e.message}`, 'warning');
+        }
     }
 }
 
@@ -218,11 +382,13 @@ async function initMediaSource() {
     
     streamEnded = false;
     segmentIdx = 1;
+    audioSourceBuffer = null;
+    videoSourceBuffer = null;
     
     // 重置 UI
     document.getElementById('playBtn').disabled = true;
     document.getElementById('pauseBtn').disabled = true;
-    statusDiv.innerHTML = '<div class="status-info">[初始化] 正在准备播放器...</div>';
+    statusDiv.innerHTML = `<div class="status-info">[初始化] 正在准备播放器... (模式: ${currentMode === 'separate' ? '分开音视频' : '合并'})</div>`;
     
     try {
         mediaSource = new MediaSource();
@@ -235,19 +401,14 @@ async function initMediaSource() {
                 // 获取编解码器信息
                 const codecs = await getCodecs();
                 
-                // 创建单个 SourceBuffer（合并模式）
-                try {
-                    sourceBuffer = mediaSource.addSourceBuffer(`video/mp4; codecs="${codecs}"`);
-                    sourceBuffer.mode = 'sequence';
-                    addStatus(`SourceBuffer 创建成功: ${codecs}`, 'info');
-                } catch (e) {
-                    addStatus(`创建 SourceBuffer 失败: ${e.message}`, 'error');
-                    throw e;
+                // 根据模式加载初始化片段
+                if (currentMode === 'separate') {
+                    await loadInitSeparate(codecs);
+                    await loadSegmentsSeparate();
+                } else {
+                    await loadInitMerged(codecs);
+                    await loadSegmentsMerged();
                 }
-                
-                // 加载初始化和片段
-                await loadInit();
-                await loadSegments();
                 
                 // 更新控制按钮
                 document.getElementById('playBtn').disabled = false;
@@ -271,6 +432,23 @@ async function initMediaSource() {
         addStatus(`创建 MediaSource 失败: ${e.message}`, 'error');
     }
 }
+
+// 切换模式
+document.querySelectorAll('.mode-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+        document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        
+        currentMode = btn.dataset.mode;
+        BASE_URL = currentMode === 'separate' ? '/output_separate/' : '/output_merge/';
+        
+        modeInfo.textContent = currentMode === 'separate' ? '分开音视频模式' : '合并模式';
+        addStatus(`切换到${currentMode === 'separate' ? '分开音视频' : '合并'}模式`, 'info');
+        
+        // 重新初始化播放器
+        initMediaSource();
+    });
+});
 
 // 事件监听
 document.getElementById('playBtn').addEventListener('click', () => {

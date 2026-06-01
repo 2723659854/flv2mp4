@@ -76,6 +76,43 @@ class MP4
         return $ftyp . $moov;
     }
 
+    /**
+     * 生成单独的音频初始化片段
+     * @param array $audioMeta 音频轨道元数据
+     * @return string 音频初始化片段数据
+     */
+    public static function generateAudioInitSegment($audioMeta)
+    {
+        $ftyp = self::box(self::$types['ftyp'], self::$constants['FTYP']);
+        $moov = self::moovForSingleTrack($audioMeta);
+        return $ftyp . $moov;
+    }
+
+    /**
+     * 生成单独的视频初始化片段
+     * @param array $videoMeta 视频轨道元数据
+     * @return string 视频初始化片段数据
+     */
+    public static function generateVideoInitSegment($videoMeta)
+    {
+        $ftyp = self::box(self::$types['ftyp'], self::$constants['FTYP']);
+        $moov = self::moovForSingleTrack($videoMeta);
+        return $ftyp . $moov;
+    }
+
+    /**
+     * 为单个轨道生成 moov box
+     * @param array $meta 轨道元数据
+     * @return string moov box 数据
+     */
+    public static function moovForSingleTrack($meta)
+    {
+        $mvhd = self::mvhd($meta['timescale'], $meta['duration']);
+        $trak = self::trak($meta);
+        $mvex = self::box(self::$types['mvex'], self::trex($meta));
+        return self::box(self::$types['moov'], $mvhd, $trak, $mvex);
+    }
+
     public static function moov($meta)
     {
         $mvhd = self::mvhd($meta[0]['timescale'], $meta[0]['duration']);
@@ -136,6 +173,11 @@ class MP4
         $duration = $meta['duration'];
         $width = isset($meta['presentWidth']) ? $meta['presentWidth'] : 0;
         $height = isset($meta['presentHeight']) ? $meta['presentHeight'] : 0;
+
+        // tkhd width and height are 32-bit fixed-point (16.16 format)
+        $fixedWidth = $width << 16;
+        $fixedHeight = $height << 16;
+
         $data = pack('C*',
             0x00,0x00,0x00,0x07,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
             ($trackId>>24)&0xFF, ($trackId>>16)&0xFF, ($trackId>>8)&0xFF, $trackId&0xFF,
@@ -146,8 +188,8 @@ class MP4
             0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x01,0x00,0x00,
             0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
             0x40,0x00,0x00,0x00,
-            ($width>>8)&0xFF, $width&0xFF, 0x00,0x00,
-            ($height>>8)&0xFF, $height&0xFF, 0x00,0x00
+            ($fixedWidth>>24)&0xFF, ($fixedWidth>>16)&0xFF, ($fixedWidth>>8)&0xFF, $fixedWidth&0xFF,
+            ($fixedHeight>>24)&0xFF, ($fixedHeight>>16)&0xFF, ($fixedHeight>>8)&0xFF, $fixedHeight&0xFF
         );
         return self::box(self::$types['tkhd'], $data);
     }
@@ -240,21 +282,29 @@ class MP4
     public static function avc1($meta)
     {
         $avcc = $meta['avcc'];
-        $width = $meta['codecWidth'];
-        $height = $meta['codecHeight'];
-        $data = pack('C*',
-            0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x01,
-            0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-            0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-            ($width>>8)&0xFF, $width&0xFF,
-            ($height>>8)&0xFF, $height&0xFF,
-            0x00,0x48,0x00,0x00,0x00,0x48,0x00,0x00,0x00,0x00,0x00,0x00,
-            0x00,0x01,0x04,0x67,0x31,0x31,0x31,
-            0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-            0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-            0x00,0x00,0x00,0x00,0x00,0x18,0xFF,0xFF
-        );
+        $width = isset($meta['presentWidth']) ? $meta['presentWidth'] : $meta['codecWidth'];
+        $height = isset($meta['presentHeight']) ? $meta['presentHeight'] : $meta['codecHeight'];
+
         $avcCBox = self::box(self::$types['avcC'], $avcc);
+
+        $reserved = str_repeat("\x00", 6);
+        $dataReferenceIndex = "\x00\x01";
+        $preDefined = str_repeat("\x00", 22);
+        $widthBytes = pack('n', $width);
+        $heightBytes = pack('n', $height);
+        $horizResolution = "\x00\x48\x00\x00";
+        $vertResolution = "\x00\x48\x00\x00";
+        $reserved2 = "\x00\x00\x00\x00";
+        $frameCount = "\x00\x01";
+        $compressorName = str_repeat("\x00", 32);
+        $depth = "\x00\x18";
+        $preDefined2 = "\xFF\xFF";
+
+        $data = $reserved . $dataReferenceIndex . $preDefined .
+                 $widthBytes . $heightBytes .
+                 $horizResolution . $vertResolution . $reserved2 .
+                 $frameCount . $compressorName . $depth . $preDefined2;
+
         return self::box(self::$types['avc1'], $data, $avcCBox);
     }
 

@@ -97,6 +97,125 @@ class Client
     }
 
     /**
+     * flv转MP4生成分开的音视频切片（用于浏览器播放）
+     * @param string $inputFile 需要转换的flv文件
+     * @param string $outputDir 存储切片的目录
+     * @return array 返回生成的文件信息
+     */
+    public static function runSeparate(string $inputFile, string $outputDir)
+    {
+        if (!file_exists($inputFile)) {
+            throw new \RuntimeException("flv not exist!");
+        }
+        if (!self::isFlvFile($inputFile)) {
+            throw new \RuntimeException("only support flv file!");
+        }
+        if (!is_dir($outputDir)) mkdir($outputDir, 0777, true);
+        
+        // 清空输出目录
+        foreach (glob("$outputDir/*") as $file) {
+            if (is_file($file)) {
+                unlink($file);
+            }
+        }
+
+        $flvBinary = file_get_contents($inputFile);
+        $flv2fmp4 = new Flv2Fmp4();
+
+        $audioSegmentIndex = 0;
+        $videoSegmentIndex = 0;
+        $outputFiles = [
+            'audioInit' => null,
+            'videoInit' => null,
+            'audioSegments' => [],
+            'videoSegments' => [],
+            'meta' => null
+        ];
+
+        // 音频初始化片段回调
+        $flv2fmp4->onAudioInitSegment = function($data, $meta) use ($outputDir, &$outputFiles) {
+            echo "\n[回调] 音频初始化段生成\n";
+            echo "大小: " . strlen($data) . " bytes\n";
+            $outputFiles['audioInit'] = "$outputDir/audio_init.mp4";
+            file_put_contents($outputFiles['audioInit'], $data);
+            echo "已写入: " . $outputFiles['audioInit'] . "\n";
+        };
+
+        // 视频初始化片段回调
+        $flv2fmp4->onVideoInitSegment = function($data, $meta) use ($outputDir, &$outputFiles) {
+            echo "\n[回调] 视频初始化段生成\n";
+            echo "大小: " . strlen($data) . " bytes\n";
+            $outputFiles['videoInit'] = "$outputDir/video_init.mp4";
+            file_put_contents($outputFiles['videoInit'], $data);
+            echo "已写入: " . $outputFiles['videoInit'] . "\n";
+        };
+
+        // 音频切片回调
+        $flv2fmp4->onAudioSegment = function($data, $value) use ($outputDir, &$audioSegmentIndex, &$outputFiles) {
+            $audioSegmentIndex++;
+            echo "\n[回调] 音频段#$audioSegmentIndex\n";
+            echo "大小: " . strlen($data) . " bytes\n";
+            $filename = "$outputDir/audio_$audioSegmentIndex.m4s";
+            file_put_contents($filename, $data);
+            $outputFiles['audioSegments'][] = $filename;
+            echo "已写入: $filename\n";
+        };
+
+        // 视频切片回调
+        $flv2fmp4->onVideoSegment = function($data, $value) use ($outputDir, &$videoSegmentIndex, &$outputFiles) {
+            $videoSegmentIndex++;
+            echo "\n[回调] 视频段#$videoSegmentIndex\n";
+            echo "大小: " . strlen($data) . " bytes\n";
+            $filename = "$outputDir/video_$videoSegmentIndex.m4s";
+            file_put_contents($filename, $data);
+            $outputFiles['videoSegments'][] = $filename;
+            echo "已写入: $filename\n";
+        };
+
+        // 媒体信息回调
+        $flv2fmp4->onMediaInfo = function($mediaInfo, $tracks) use ($outputDir, &$outputFiles, $flv2fmp4) {
+            echo "\n[回调] 媒体信息:\n";
+            echo "  宽度: " . ($mediaInfo->width ?? 'N/A') . "\n";
+            echo "  高度: " . ($mediaInfo->height ?? 'N/A') . "\n";
+            echo "  帧率: " . ($mediaInfo->fps ?? 'N/A') . "\n";
+            echo "  时长: " . ($mediaInfo->duration ?? 0) . "\n";
+            echo "  音频: " . ($tracks['hasAudio'] ? '是' : '否') . "\n";
+            echo "  视频: " . ($tracks['hasVideo'] ? '是' : '否') . "\n";
+
+            // 生成 meta.json
+            $meta = [];
+            foreach ($flv2fmp4->metas as $trackMeta) {
+                if (isset($trackMeta['codec'])) {
+                    if ($trackMeta['type'] == 'video') {
+                        $meta['videoCodec'] = $trackMeta['codec'];
+                    } else if ($trackMeta['type'] == 'audio') {
+                        $meta['audioCodec'] = $trackMeta['codec'];
+                    }
+                }
+            }
+            $meta['hasAudio'] = $tracks['hasAudio'];
+            $meta['hasVideo'] = $tracks['hasVideo'];
+            $meta['width'] = $mediaInfo->width ?? 0;
+            $meta['height'] = $mediaInfo->height ?? 0;
+            $meta['duration'] = $mediaInfo->duration ?? 0;
+            $meta['fps'] = $mediaInfo->fps ?? 0;
+
+            $outputFiles['meta'] = "$outputDir/meta.json";
+            file_put_contents($outputFiles['meta'], json_encode($meta));
+            echo "已写入: " . $outputFiles['meta'] . "\n";
+            echo "编解码器信息: " . json_encode($meta) . "\n";
+        };
+
+        try {
+            $flv2fmp4->setflv($flvBinary, 0);
+        } catch (\Exception $e) {
+            throw new \RuntimeException("error:".$e->getMessage());
+        }
+
+        return $outputFiles;
+    }
+
+    /**
      * 判断文件是否是flv文件
      * @param string $filename
      * @return bool
