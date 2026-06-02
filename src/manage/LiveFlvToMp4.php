@@ -129,6 +129,27 @@ class LiveFlvToMp4
     protected $videoSegmentIndex = 0;
 
     /**
+     * 混合切片缓冲区（用于累积多个包，减少分片数量）
+     */
+    protected $mixedBuffer = [];
+    protected $mixedBufferIndex = 0;
+    protected $mixedBufferSize = 30; // 默认每个混合切片包含 30 个包
+
+    /**
+     * 音频切片缓冲区（用于累积多个包，减少分片数量）
+     */
+    protected $audioBuffer = [];
+    protected $audioBufferIndex = 0;
+    protected $audioBufferSize = 30; // 默认每个音频切片包含 30 个包
+
+    /**
+     * 视频切片缓冲区（用于累积多个包，减少分片数量）
+     */
+    protected $videoBuffer = [];
+    protected $videoBufferIndex = 0;
+    protected $videoBufferSize = 30; // 默认每个视频切片包含 30 个包
+
+    /**
      * 构造函数
      * @param array $config 配置参数
      *                       - isLive: 是否为直播模式（默认 true）
@@ -136,6 +157,9 @@ class LiveFlvToMp4
      *                       - maxSegmentSize: 单个分片最大字节数（默认 10MB）
      *                       - segmentDir: 分片文件存储目录
      *                       - separateTracks: 是否生成分开的音视频切片（默认 false）
+     *                       - mixedBufferSize: 混合切片缓冲区大小（默认 30）
+     *                       - audioBufferSize: 音频切片缓冲区大小（默认 30）
+     *                       - videoBufferSize: 视频切片缓冲区大小（默认 30）
      */
     public function __construct($config = [])
     {
@@ -145,6 +169,9 @@ class LiveFlvToMp4
         $this->streamPath = isset($config['streamPath']) ? $config['streamPath'] : '';
         $this->maxSegmentSize = isset($config['maxSegmentSize']) ? $config['maxSegmentSize'] : $this->maxSegmentSize;
         $this->separateTracks = isset($config['separateTracks']) ? $config['separateTracks'] : false;
+        $this->mixedBufferSize = isset($config['mixedBufferSize']) ? $config['mixedBufferSize'] : $this->mixedBufferSize;
+        $this->audioBufferSize = isset($config['audioBufferSize']) ? $config['audioBufferSize'] : $this->audioBufferSize;
+        $this->videoBufferSize = isset($config['videoBufferSize']) ? $config['videoBufferSize'] : $this->videoBufferSize;
 
         $this->loadmetadata = false;
         $this->ftyp_moov = null;
@@ -265,22 +292,31 @@ class LiveFlvToMp4
             call_user_func($this->onMediaSegment, $value['data']);
         }
 
-        // 如果是文件输出模式，写入到文件（混合切片）
+        // 如果是文件输出模式，使用缓冲区累积混合切片
         if (isset($this->_config['segmentDir']) && !empty($this->_config['segmentDir'])) {
-            $this->writeSegmentToFile($value['data']);
+            $this->mixedBuffer[] = $value['data'];
+            if (count($this->mixedBuffer) >= $this->mixedBufferSize) {
+                $this->flushMixedBuffer();
+            }
         }
 
         // 分开输出音视频切片（如果配置了）
         if ($this->separateTracks) {
             if ($track == 'audio') {
                 $this->audioSegmentIndex++;
-                $this->writeAudioSegmentToFile($value['data']);
+                $this->audioBuffer[] = $value['data'];
+                if (count($this->audioBuffer) >= $this->audioBufferSize) {
+                    $this->flushAudioBuffer();
+                }
                 if ($this->onAudioSegment) {
                     call_user_func($this->onAudioSegment, $value['data'], $value);
                 }
             } elseif ($track == 'video') {
                 $this->videoSegmentIndex++;
-                $this->writeVideoSegmentToFile($value['data']);
+                $this->videoBuffer[] = $value['data'];
+                if (count($this->videoBuffer) >= $this->videoBufferSize) {
+                    $this->flushVideoBuffer();
+                }
                 if ($this->onVideoSegment) {
                     call_user_func($this->onVideoSegment, $value['data'], $value);
                 }
@@ -294,6 +330,54 @@ class LiveFlvToMp4
                 call_user_func($this->seekCallBack, $seekpoint);
             }
         }
+    }
+
+    /**
+     * 刷新混合切片缓冲区
+     */
+    protected function flushMixedBuffer()
+    {
+        if (empty($this->mixedBuffer)) {
+            return;
+        }
+        $this->mixedBufferIndex++;
+        $segmentData = implode('', $this->mixedBuffer);
+        $segmentDir = $this->_config['segmentDir'];
+        $filename = rtrim($segmentDir, '/') . "/segment_{$this->mixedBufferIndex}.m4s";
+        file_put_contents($filename, $segmentData);
+        $this->mixedBuffer = [];
+    }
+
+    /**
+     * 刷新音频切片缓冲区
+     */
+    protected function flushAudioBuffer()
+    {
+        if (empty($this->audioBuffer)) {
+            return;
+        }
+        $this->audioBufferIndex++;
+        $segmentData = implode('', $this->audioBuffer);
+        $segmentDir = $this->_config['segmentDir'];
+        $filename = rtrim($segmentDir, '/') . "/audio_{$this->audioBufferIndex}.m4s";
+        file_put_contents($filename, $segmentData);
+        $this->audioBuffer = [];
+    }
+
+    /**
+     * 刷新视频切片缓冲区
+     */
+    protected function flushVideoBuffer()
+    {
+        if (empty($this->videoBuffer)) {
+            return;
+        }
+        $this->videoBufferIndex++;
+        $segmentData = implode('', $this->videoBuffer);
+        $segmentDir = $this->_config['segmentDir'];
+        $filename = rtrim($segmentDir, '/') . "/video_{$this->videoBufferIndex}.m4s";
+        file_put_contents($filename, $segmentData);
+        $this->videoBuffer = [];
     }
 
     /**
@@ -352,7 +436,9 @@ class LiveFlvToMp4
      */
     protected function flushMediaBuffer()
     {
-        // 不再需要缓冲区，所有数据直接写入文件
+        $this->flushMixedBuffer();
+        $this->flushAudioBuffer();
+        $this->flushVideoBuffer();
     }
 
     /**
@@ -641,6 +727,12 @@ class LiveFlvToMp4
         $this->flvBuffer = '';
         $this->audioSegmentIndex = 0;
         $this->videoSegmentIndex = 0;
+        $this->mixedBuffer = [];
+        $this->mixedBufferIndex = 0;
+        $this->audioBuffer = [];
+        $this->audioBufferIndex = 0;
+        $this->videoBuffer = [];
+        $this->videoBufferIndex = 0;
     }
 
     /**
@@ -925,10 +1017,10 @@ class LiveFlvToMp4
         $meta['duration'] = $duration;
 
         if ($this->separateTracks) {
-            $meta['audioSegmentCount'] = $this->audioSegmentIndex;
-            $meta['videoSegmentCount'] = $this->videoSegmentIndex;
+            $meta['audioSegmentCount'] = $this->audioBufferIndex;
+            $meta['videoSegmentCount'] = $this->videoBufferIndex;
         } else {
-            $meta['segmentCount'] = $this->segmentIndex;
+            $meta['segmentCount'] = $this->mixedBufferIndex;
         }
 
         $metaFile = rtrim($segmentDir, '/') . '/meta.json';
@@ -1079,14 +1171,17 @@ class LiveFlvToMp4
         return [
             'streamPath' => $this->streamPath,
             'totalReceivedBytes' => $this->totalReceivedBytes,
-            'segmentIndex' => $this->segmentIndex,
+            'segmentIndex' => $this->mixedBufferIndex,
             'currentSegmentSize' => $this->currentSegmentSize,
             'hasAudio' => $this->hasAudio,
             'hasVideo' => $this->hasVideo,
             'metadataLoaded' => $this->loadmetadata,
             'separateTracks' => $this->separateTracks,
-            'audioSegmentIndex' => $this->audioSegmentIndex,
-            'videoSegmentIndex' => $this->videoSegmentIndex
+            'audioSegmentIndex' => $this->audioBufferIndex,
+            'videoSegmentIndex' => $this->videoBufferIndex,
+            'mixedBufferSize' => $this->mixedBufferSize,
+            'audioBufferSize' => $this->audioBufferSize,
+            'videoBufferSize' => $this->videoBufferSize
         ];
     }
 

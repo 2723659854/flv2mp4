@@ -16,15 +16,15 @@ class Client
      * flv转MP4入口函数
      * @param string $inputFile 需要转换的flv文件
      * @param string $outputDir 存储mp4的目录
+     * @param int $segmentPackets 每个切片包含的包数量（默认30）
      * @return string|void
      */
-    public static function run(string $inputFile,string $outputDir)
+    public static function run(string $inputFile, string $outputDir, int $segmentPackets = 30)
     {
-        // ini_set('memory_limit', '512M');
         if (!file_exists($inputFile)) {
             throw new \RuntimeException("flv not exist!");
         }
-        if(!self::isFlvFile($inputFile)){
+        if (!self::isFlvFile($inputFile)) {
             throw new \RuntimeException("only support flv file!");
         }
         if (!is_dir($outputDir)) mkdir($outputDir, 0777, true);
@@ -36,13 +36,17 @@ class Client
         $segments = [];
         $segmentIndex = 0;
 
-        $flv2fmp4->onInitSegment = function($data) use (&$initSegment, $outputDir, $flv2fmp4) {
+        /** 切片缓冲区 */
+        $buffer = [];
+        $index = 1;
+
+        $flv2fmp4->onInitSegment = function ($data) use (&$initSegment, $outputDir, $flv2fmp4) {
             echo "\n[回调] 初始化段生成\n";
             echo "大小: " . strlen($data) . " bytes\n";
             $initSegment = $data;
             file_put_contents("$outputDir/init.mp4", $data);
             echo "已写入: $outputDir/init.mp4\n";
-            
+
             // 生成 meta.json
             $meta = [];
             foreach ($flv2fmp4->metas as $trackMeta) {
@@ -61,16 +65,25 @@ class Client
             }
         };
 
-        $flv2fmp4->onMediaSegment = function($data) use (&$segments, &$segmentIndex, $outputDir) {
+        $flv2fmp4->onMediaSegment = function ($data) use (&$segments, &$segmentIndex, $outputDir, &$buffer, &$index, $segmentPackets) {
+            /** 将多个包合并成一个切片，防止生成过多的切片 */
+            $buffer[] = $data;
+            $segments[] = $data;
+
+            if (count($buffer) >= $segmentPackets) {
+                $segmentData = implode("", $buffer);
+                file_put_contents("$outputDir/segment_$index.m4s", $segmentData);
+                echo "已写入: $outputDir/segment_$index.m4s (大小: " . strlen($segmentData) . " bytes)\n";
+                $buffer = [];
+                $index++;
+            }
+
             $segmentIndex++;
             echo "\n[回调] 媒体段#$segmentIndex\n";
             echo "大小: " . strlen($data) . " bytes\n";
-            $segments[] = $data;
-            file_put_contents("$outputDir/segment_$segmentIndex.m4s", $data);
-            echo "已写入: $outputDir/segment_$segmentIndex.m4s\n";
         };
 
-        $flv2fmp4->onMediaInfo = function($mediaInfo, $tracks) {
+        $flv2fmp4->onMediaInfo = function ($mediaInfo, $tracks) {
             echo "\n[回调] 媒体信息:\n";
             echo "  宽度: " . ($mediaInfo->width ?? 'N/A') . "\n";
             echo "  高度: " . ($mediaInfo->height ?? 'N/A') . "\n";
@@ -83,15 +96,22 @@ class Client
         try {
             $flv2fmp4->setflv($flvBinary, 0);
         } catch (\Exception $e) {
-           throw new \RuntimeException("error:".$e->getMessage());
+            throw new \RuntimeException("error:" . $e->getMessage());
+        }
+
+        // 写入剩余的缓冲区内容
+        if (!empty($buffer)) {
+            $segmentData = implode("", $buffer);
+            file_put_contents("$outputDir/segment_$index.m4s", $segmentData);
+            echo "\n已写入剩余切片: $outputDir/segment_$index.m4s (大小: " . strlen($segmentData) . " bytes)\n";
         }
 
         if ($initSegment && !empty($segments)) {
             $fullBinary = $initSegment . implode('', $segments);
-            $mp4Name = date("Y_m_d_H_i_s")."_".uniqid().'.mp4';
+            $mp4Name = date("Y_m_d_H_i_s") . "_" . uniqid() . '.mp4';
             file_put_contents("$outputDir/$mp4Name", $fullBinary);
             return "$outputDir/$mp4Name";
-        }else{
+        } else {
             return "";
         }
     }
@@ -100,9 +120,10 @@ class Client
      * flv转MP4生成分开的音视频切片（用于浏览器播放）
      * @param string $inputFile 需要转换的flv文件
      * @param string $outputDir 存储切片的目录
+     * @param int $segmentPackets 每个切片包含的包数量（默认30）
      * @return array 返回生成的文件信息
      */
-    public static function runSeparate(string $inputFile, string $outputDir)
+    public static function runSeparate(string $inputFile, string $outputDir, int $segmentPackets = 30)
     {
         if (!file_exists($inputFile)) {
             throw new \RuntimeException("flv not exist!");
@@ -111,7 +132,7 @@ class Client
             throw new \RuntimeException("only support flv file!");
         }
         if (!is_dir($outputDir)) mkdir($outputDir, 0777, true);
-        
+
         // 清空输出目录
         foreach (glob("$outputDir/*") as $file) {
             if (is_file($file)) {
@@ -132,8 +153,12 @@ class Client
             'meta' => null
         ];
 
+        // 音频缓冲区和视频缓冲区
+        $audioBuffer = [];
+        $videoBuffer = [];
+
         // 音频初始化片段回调
-        $flv2fmp4->onAudioInitSegment = function($data, $meta) use ($outputDir, &$outputFiles) {
+        $flv2fmp4->onAudioInitSegment = function ($data, $meta) use ($outputDir, &$outputFiles) {
             echo "\n[回调] 音频初始化段生成\n";
             echo "大小: " . strlen($data) . " bytes\n";
             $outputFiles['audioInit'] = "$outputDir/audio_init.mp4";
@@ -142,7 +167,7 @@ class Client
         };
 
         // 视频初始化片段回调
-        $flv2fmp4->onVideoInitSegment = function($data, $meta) use ($outputDir, &$outputFiles) {
+        $flv2fmp4->onVideoInitSegment = function ($data, $meta) use ($outputDir, &$outputFiles) {
             echo "\n[回调] 视频初始化段生成\n";
             echo "大小: " . strlen($data) . " bytes\n";
             $outputFiles['videoInit'] = "$outputDir/video_init.mp4";
@@ -151,29 +176,51 @@ class Client
         };
 
         // 音频切片回调
-        $flv2fmp4->onAudioSegment = function($data, $value) use ($outputDir, &$audioSegmentIndex, &$outputFiles) {
+        $flv2fmp4->onAudioSegment = function ($data, $value) use ($outputDir, &$audioSegmentIndex, &$outputFiles, &$audioBuffer, $segmentPackets) {
             $audioSegmentIndex++;
+
+            // 将数据添加到缓冲区
+            $audioBuffer[] = $data;
+
+            // 当缓冲区达到指定数量时，写入切片文件
+            if (count($audioBuffer) >= $segmentPackets) {
+                $segmentData = implode("", $audioBuffer);
+                $audioBufferIndex = count($outputFiles['audioSegments']) + 1;
+                $filename = "$outputDir/audio_$audioBufferIndex.m4s";
+                file_put_contents($filename, $segmentData);
+                $outputFiles['audioSegments'][] = $filename;
+                echo "\n已写入: $filename (大小: " . strlen($segmentData) . " bytes, 包含 " . $segmentPackets . " 个包)\n";
+                $audioBuffer = [];
+            }
+
             echo "\n[回调] 音频段#$audioSegmentIndex\n";
             echo "大小: " . strlen($data) . " bytes\n";
-            $filename = "$outputDir/audio_$audioSegmentIndex.m4s";
-            file_put_contents($filename, $data);
-            $outputFiles['audioSegments'][] = $filename;
-            echo "已写入: $filename\n";
         };
 
         // 视频切片回调
-        $flv2fmp4->onVideoSegment = function($data, $value) use ($outputDir, &$videoSegmentIndex, &$outputFiles) {
+        $flv2fmp4->onVideoSegment = function ($data, $value) use ($outputDir, &$videoSegmentIndex, &$outputFiles, &$videoBuffer, $segmentPackets) {
             $videoSegmentIndex++;
+
+            // 将数据添加到缓冲区
+            $videoBuffer[] = $data;
+
+            // 当缓冲区达到指定数量时，写入切片文件
+            if (count($videoBuffer) >= $segmentPackets) {
+                $segmentData = implode("", $videoBuffer);
+                $videoBufferIndex = count($outputFiles['videoSegments']) + 1;
+                $filename = "$outputDir/video_$videoBufferIndex.m4s";
+                file_put_contents($filename, $segmentData);
+                $outputFiles['videoSegments'][] = $filename;
+                echo "\n已写入: $filename (大小: " . strlen($segmentData) . " bytes, 包含 " . $segmentPackets . " 个包)\n";
+                $videoBuffer = [];
+            }
+
             echo "\n[回调] 视频段#$videoSegmentIndex\n";
             echo "大小: " . strlen($data) . " bytes\n";
-            $filename = "$outputDir/video_$videoSegmentIndex.m4s";
-            file_put_contents($filename, $data);
-            $outputFiles['videoSegments'][] = $filename;
-            echo "已写入: $filename\n";
         };
 
         // 媒体信息回调
-        $flv2fmp4->onMediaInfo = function($mediaInfo, $tracks) use ($outputDir, &$outputFiles, $flv2fmp4) {
+        $flv2fmp4->onMediaInfo = function ($mediaInfo, $tracks) use ($outputDir, &$outputFiles, $flv2fmp4) {
             echo "\n[回调] 媒体信息:\n";
             echo "  宽度: " . ($mediaInfo->width ?? 'N/A') . "\n";
             echo "  高度: " . ($mediaInfo->height ?? 'N/A') . "\n";
@@ -209,7 +256,27 @@ class Client
         try {
             $flv2fmp4->setflv($flvBinary, 0);
         } catch (\Exception $e) {
-            throw new \RuntimeException("error:".$e->getMessage());
+            throw new \RuntimeException("error:" . $e->getMessage());
+        }
+
+        // 写入剩余的音频缓冲区内容
+        if (!empty($audioBuffer)) {
+            $segmentData = implode("", $audioBuffer);
+            $audioBufferIndex = count($outputFiles['audioSegments']) + 1;
+            $filename = "$outputDir/audio_$audioBufferIndex.m4s";
+            file_put_contents($filename, $segmentData);
+            $outputFiles['audioSegments'][] = $filename;
+            echo "\n已写入剩余音频切片: $filename (大小: " . strlen($segmentData) . " bytes, 包含 " . count($audioBuffer) . " 个包)\n";
+        }
+
+        // 写入剩余的视频缓冲区内容
+        if (!empty($videoBuffer)) {
+            $segmentData = implode("", $videoBuffer);
+            $videoBufferIndex = count($outputFiles['videoSegments']) + 1;
+            $filename = "$outputDir/video_$videoBufferIndex.m4s";
+            file_put_contents($filename, $segmentData);
+            $outputFiles['videoSegments'][] = $filename;
+            echo "\n已写入剩余视频切片: $filename (大小: " . strlen($segmentData) . " bytes, 包含 " . count($videoBuffer) . " 个包)\n";
         }
 
         return $outputFiles;
@@ -220,7 +287,8 @@ class Client
      * @param string $filename
      * @return bool
      */
-    protected static function isFlvFile(string $filename) {
+    protected static function isFlvFile(string $filename)
+    {
         return strtolower(pathinfo($filename, PATHINFO_EXTENSION)) === 'flv';
     }
 }
