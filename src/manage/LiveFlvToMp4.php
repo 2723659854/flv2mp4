@@ -22,6 +22,13 @@ class LiveFlvToMp4
     public $seekCallBack = null;
     public $error = null;
 
+
+    // 分开的音视频切片回调
+    public $onAudioInitSegment = null;
+    public $onVideoInitSegment = null;
+    public $onAudioSegment = null;
+    public $onVideoSegment = null;
+
     public $loadmetadata = false;
     public $ftyp_moov = null;
     public $metaSuccRun = false;
@@ -47,6 +54,16 @@ class LiveFlvToMp4
      * 是否已初始化
      */
     protected $initialized = false;
+
+    /**
+     * 缓存的音频数据（用于延迟 remux）
+     */
+    protected $_cachedAudioTrack = [];
+
+    /**
+     * 缓存的视频数据（用于延迟 remux）
+     */
+    protected $_cachedVideoTrack = [];
 
     /**
      * 累计接收的数据量
@@ -89,12 +106,36 @@ class LiveFlvToMp4
     protected $flvBufferSize = 2 * 1024 * 1024; // 累积 2MB FLV 数据后再处理
 
     /**
+     * 记录第一个和最后一个包的时间戳（毫秒）
+     */
+    protected $_firstPacketTimestamp = -1;
+    protected $_lastPacketTimestamp = -1;
+
+    /**
+     * 单独的音视频初始化数据
+     */
+    public $audioInitSegment = null;
+    public $videoInitSegment = null;
+
+    /**
+     * 是否生成分开的音视频切片
+     */
+    protected $separateTracks = false;
+
+    /**
+     * 音视频分片索引（用于分开切片）
+     */
+    protected $audioSegmentIndex = 0;
+    protected $videoSegmentIndex = 0;
+
+    /**
      * 构造函数
      * @param array $config 配置参数
      *                       - isLive: 是否为直播模式（默认 true）
      *                       - streamPath: 直播流路径
      *                       - maxSegmentSize: 单个分片最大字节数（默认 10MB）
      *                       - segmentDir: 分片文件存储目录
+     *                       - separateTracks: 是否生成分开的音视频切片（默认 false）
      */
     public function __construct($config = [])
     {
@@ -103,6 +144,7 @@ class LiveFlvToMp4
         $this->isLive = isset($config['isLive']) ? $config['isLive'] : true;
         $this->streamPath = isset($config['streamPath']) ? $config['streamPath'] : '';
         $this->maxSegmentSize = isset($config['maxSegmentSize']) ? $config['maxSegmentSize'] : $this->maxSegmentSize;
+        $this->separateTracks = isset($config['separateTracks']) ? $config['separateTracks'] : false;
 
         $this->loadmetadata = false;
         $this->ftyp_moov = null;
@@ -218,13 +260,31 @@ class LiveFlvToMp4
      */
     public function onMdiaSegment($track, $value)
     {
+        // 混合切片输出（始终生成）
         if ($this->onMediaSegment) {
             call_user_func($this->onMediaSegment, $value['data']);
         }
 
-        // 如果是文件输出模式，写入到文件
+        // 如果是文件输出模式，写入到文件（混合切片）
         if (isset($this->_config['segmentDir']) && !empty($this->_config['segmentDir'])) {
             $this->writeSegmentToFile($value['data']);
+        }
+
+        // 分开输出音视频切片（如果配置了）
+        if ($this->separateTracks) {
+            if ($track == 'audio') {
+                $this->audioSegmentIndex++;
+                $this->writeAudioSegmentToFile($value['data']);
+                if ($this->onAudioSegment) {
+                    call_user_func($this->onAudioSegment, $value['data'], $value);
+                }
+            } elseif ($track == 'video') {
+                $this->videoSegmentIndex++;
+                $this->writeVideoSegmentToFile($value['data']);
+                if ($this->onVideoSegment) {
+                    call_user_func($this->onVideoSegment, $value['data'], $value);
+                }
+            }
         }
 
         if ($this->_pendingResolveSeekPoint != -1 && $track == 'video') {
@@ -237,10 +297,27 @@ class LiveFlvToMp4
     }
 
     /**
-     * 将分片数据写入文件
+     * 将混合分片数据写入文件
      * @param string $data 分片数据
      */
     protected function writeSegmentToFile($data)
+    {
+        $segmentDir = $this->_config['segmentDir'];
+
+        if (!is_dir($segmentDir)) {
+            mkdir($segmentDir, 0755, true);
+        }
+
+        $this->segmentIndex++;
+        $filename = rtrim($segmentDir, '/') . "/segment_{$this->segmentIndex}.m4s";
+        file_put_contents($filename, $data);
+    }
+
+    /**
+     * 将音频分片数据写入文件
+     * @param string $data 分片数据
+     */
+    protected function writeAudioSegmentToFile($data)
     {
         $segmentDir = $this->_config['segmentDir'];
 
@@ -249,45 +326,25 @@ class LiveFlvToMp4
             mkdir($segmentDir, 0755, true);
         }
 
-        // 将数据添加到临时缓冲区
-        $this->mediaBuffer .= $data;
+        $filename = rtrim($segmentDir, '/') . "/audio_{$this->audioSegmentIndex}.m4s";
+        file_put_contents($filename, $data);
+    }
 
-        // 调试日志
-        static $callCount = 0;
-        $callCount++;
-        //error_log("LiveFlvToMp4: writeSegmentToFile call #{$callCount}, dataSize=" . strlen($data) . ", mediaBufferSize=" . strlen($this->mediaBuffer) . ", currentSegmentFile=" . ($this->currentSegmentFile ? 'open' : 'null'));
+    /**
+     * 将视频分片数据写入文件
+     * @param string $data 分片数据
+     */
+    protected function writeVideoSegmentToFile($data)
+    {
+        $segmentDir = $this->_config['segmentDir'];
 
-        // 只有当缓冲区达到最小大小才写入
-        if (strlen($this->mediaBuffer) >= $this->minMediaBufferSize) {
-
-            // 如果文件未打开，创建新文件
-            if ($this->currentSegmentFile === null) {
-                // 创建新文件名
-                $this->segmentIndex++;
-                $timestamp = date('YmdHis');
-                $filename = rtrim($segmentDir, '/') . '/' .
-                    basename($this->streamPath) . '_' .
-                    $timestamp . '_' .
-                    $this->segmentIndex . '.m4s';
-
-                //error_log("LiveFlvToMp4: Creating new segment file: {$filename} (index={$this->segmentIndex})");
-
-                $this->currentSegmentFile = fopen($filename, 'wb');
-                $this->currentSegmentSize = 0;
-            }
-
-            // 写入缓冲区中的数据
-            fwrite($this->currentSegmentFile, $this->mediaBuffer);
-            $this->currentSegmentSize += strlen($this->mediaBuffer);
-            $this->mediaBuffer = ''; // 清空缓冲区
-
-            // 如果当前分片大小超过限制，关闭并准备新分片
-            if ($this->currentSegmentSize >= $this->maxSegmentSize) {
-                fclose($this->currentSegmentFile);
-                $this->currentSegmentFile = null;
-                //error_log("LiveFlvToMp4: Segment file closed, size={$this->currentSegmentSize}");
-            }
+        // 如果目录不存在，创建目录
+        if (!is_dir($segmentDir)) {
+            mkdir($segmentDir, 0755, true);
         }
+
+        $filename = rtrim($segmentDir, '/') . "/video_{$this->videoSegmentIndex}.m4s";
+        file_put_contents($filename, $data);
     }
 
     /**
@@ -295,28 +352,7 @@ class LiveFlvToMp4
      */
     protected function flushMediaBuffer()
     {
-        if (strlen($this->mediaBuffer) > 0) {
-            if ($this->currentSegmentFile === null) {
-                // 如果文件未打开，创建新文件
-                $segmentDir = $this->_config['segmentDir'];
-                $this->segmentIndex++;
-                $timestamp = date('YmdHis');
-                $filename = rtrim($segmentDir, '/') . '/' .
-                    basename($this->streamPath) . '_' .
-                    $timestamp . '_' .
-                    $this->segmentIndex . '.m4s';
-
-                //error_log("LiveFlvToMp4: Creating new segment file in flushMediaBuffer: {$filename} (index={$this->segmentIndex})");
-
-                $this->currentSegmentFile = fopen($filename, 'wb');
-                $this->currentSegmentSize = 0;
-            }
-
-            fwrite($this->currentSegmentFile, $this->mediaBuffer);
-            $this->currentSegmentSize += strlen($this->mediaBuffer);
-            $this->mediaBuffer = '';
-            //error_log("LiveFlvToMp4: Flushed media buffer, size=" . strlen($this->mediaBuffer));
-        }
+        // 不再需要缓冲区，所有数据直接写入文件
     }
 
     /**
@@ -367,23 +403,58 @@ class LiveFlvToMp4
         }
         $this->ftyp_moov = MP4::generateInitSegment($this->metas);
 
-        // 自动保存初始化分片到 segmentDir
+        // 自动保存初始化分片到 segmentDir (init.mp4)
         if (isset($this->_config['segmentDir']) && !empty($this->_config['segmentDir']) && $this->ftyp_moov) {
             $segmentDir = $this->_config['segmentDir'];
             if (!is_dir($segmentDir)) {
                 mkdir($segmentDir, 0755, true);
             }
-            $baseName = basename($this->streamPath);
-            $initFile = rtrim($segmentDir, '/') . "/{$baseName}_init.mp4";
+            $initFile = rtrim($segmentDir, '/') . "/init.mp4";
             file_put_contents($initFile, $this->ftyp_moov);
-            error_log("LiveFlvToMp4: Saved init segment to {$initFile}");
         }
 
         if ($this->onInitSegment && $this->loadmetadata == false) {
             call_user_func($this->onInitSegment, $this->ftyp_moov);
             $this->loadmetadata = true;
         }
+
+        // 如果需要分开的音视频切片，生成单独的音视频初始化片段
+        if ($this->separateTracks) {
+            foreach ($this->metas as $meta) {
+                if ($meta['type'] == 'audio') {
+                    $this->audioInitSegment = MP4::generateAudioInitSegment($meta);
+                    // 保存音频初始化片段
+                    if (isset($this->_config['segmentDir']) && !empty($this->_config['segmentDir'])) {
+                        $segmentDir = $this->_config['segmentDir'];
+                        $audioInitFile = rtrim($segmentDir, '/') . "/audio_init.mp4";
+                        file_put_contents($audioInitFile, $this->audioInitSegment);
+                    }
+                    if ($this->onAudioInitSegment) {
+                        call_user_func($this->onAudioInitSegment, $this->audioInitSegment, $meta);
+                    }
+                } elseif ($meta['type'] == 'video') {
+                    $this->videoInitSegment = MP4::generateVideoInitSegment($meta);
+                    // 保存视频初始化片段
+                    if (isset($this->_config['segmentDir']) && !empty($this->_config['segmentDir'])) {
+                        $segmentDir = $this->_config['segmentDir'];
+                        $videoInitFile = rtrim($segmentDir, '/') . "/video_init.mp4";
+                        file_put_contents($videoInitFile, $this->videoInitSegment);
+                    }
+                    if ($this->onVideoInitSegment) {
+                        call_user_func($this->onVideoInitSegment, $this->videoInitSegment, $meta);
+                    }
+                }
+            }
+            // 分离切片模式下，在生成初始化片段后立即生成 meta.json（支持直播）
+            $this->writeMetaJson($this->_config['segmentDir'] ?? '', 0);
+        } else {
+            // 混合切片模式下，在生成初始化片段后立即生成 meta.json（支持直播）
+            if (isset($this->_config['segmentDir']) && !empty($this->_config['segmentDir'])) {
+                $this->writeMetaJson($this->_config['segmentDir'], 0);
+            }
+        }
     }
+
 
     /**
      * 数据可用回调
@@ -392,8 +463,62 @@ class LiveFlvToMp4
      */
     public function onDataAvailable($audiotrack, $videotrack)
     {
-        // 直接调用 remux，数据累积在 processFlvData 层面处理
-        $this->m4mof->remux($audiotrack, $videotrack);
+        // 缓存音频数据（如果有）
+        if (!empty($audiotrack['samples']) && count($audiotrack['samples']) > 0) {
+            if (!isset($this->_cachedAudioTrack['samples'])) {
+                $this->_cachedAudioTrack['samples'] = [];
+            }
+            $this->_cachedAudioTrack['samples'] = array_merge(
+                $this->_cachedAudioTrack['samples'],
+                $audiotrack['samples']
+            );
+            // 复制其他必要字段
+            foreach (['id', 'sequenceNumber', 'addcoefficient'] as $key) {
+                if (isset($audiotrack[$key])) {
+                    $this->_cachedAudioTrack[$key] = $audiotrack[$key];
+                }
+            }
+        }
+
+        // 缓存视频数据（如果有）
+        if (!empty($videotrack['samples']) && count($videotrack['samples']) > 0) {
+            if (!isset($this->_cachedVideoTrack['samples'])) {
+                $this->_cachedVideoTrack['samples'] = [];
+            }
+            $this->_cachedVideoTrack['samples'] = array_merge(
+                $this->_cachedVideoTrack['samples'],
+                $videotrack['samples']
+            );
+            // 复制其他必要字段
+            foreach (['id', 'sequenceNumber', 'addcoefficient'] as $key) {
+                if (isset($videotrack[$key])) {
+                    $this->_cachedVideoTrack[$key] = $videotrack[$key];
+                }
+            }
+        }
+
+        // 检查是否有缓存的数据
+        $hasCachedAudio = !empty($this->_cachedAudioTrack['samples']) && count($this->_cachedAudioTrack['samples']) > 0;
+        $hasCachedVideo = !empty($this->_cachedVideoTrack['samples']) && count($this->_cachedVideoTrack['samples']) > 0;
+
+        // 场景1：同时有音频和视频数据 - 调用 remux
+        if ($hasCachedAudio && $hasCachedVideo) {
+            $this->m4mof->remux($this->_cachedAudioTrack, $this->_cachedVideoTrack);
+            $this->_cachedAudioTrack = [];
+            $this->_cachedVideoTrack = [];
+        }
+        // 场景2：只有音频数据（纯音频流）- 调用 remux
+        elseif ($hasCachedAudio && !$this->hasVideo) {
+            $this->m4mof->remux($this->_cachedAudioTrack, []);
+            $this->_cachedAudioTrack = [];
+        }
+        // 场景3：只有视频数据（纯视频流）- 调用 remux
+        elseif ($hasCachedVideo && !$this->hasAudio) {
+            $this->m4mof->remux([], $this->_cachedVideoTrack);
+            $this->_cachedVideoTrack = [];
+        }
+        // 场景4：有缓存但还在等待另一种数据类型 - 继续等待
+        // （这种情况是临时的，等待音频和视频都到达）
     }
 
     /**
@@ -425,17 +550,36 @@ class LiveFlvToMp4
      * 处理接收到的 FLV 数据
      * 这是主要的数据处理入口
      * @param string $flvData FLV 格式的原始数据
-     * @param int $baseTime 基础时间戳（可选，默认 0）
+     * @param int $timestamp 当前包的时间戳（毫秒），如果为 0 则从 FLV 包中解析
      * @return int 处理的字节数
      */
-    public function processFlvData($flvData, $baseTime = 0)
+    public function processFlvData($flvData, $timestamp = 0)
     {
         if (!$this->initialized) {
-            //error_log("LiveFlvToMp4: Not initialized");
             return 0;
         }
 
         $this->totalReceivedBytes += strlen($flvData);
+
+        // 如果没有传时间戳，则从 FLV 包中解析时间戳
+        if ($timestamp <= 0 && strlen($flvData) >= 11) {
+            // FLV tag 格式：类型 (1) + 大小 (3) + 时间戳 (3 字节，小端序) + 时间戳扩展 (1) + streamID(3)
+            // 时间戳是 24 位小端序，扩展字节是高 8 位
+            $tsBytes = substr($flvData, 4, 3);
+            $timestamp = ord($tsBytes[0]) | (ord($tsBytes[1]) << 8) | (ord($tsBytes[2]) << 16);
+            if (strlen($flvData) >= 15) {
+                $timestampExt = ord(substr($flvData, 7));
+                $timestamp |= ($timestampExt << 24);
+            }
+        }
+
+        // 记录第一个和最后一个包的时间戳
+        if ($timestamp > 0) {
+            if ($this->_firstPacketTimestamp < 0) {
+                $this->_firstPacketTimestamp = $timestamp;
+            }
+            $this->_lastPacketTimestamp = $timestamp;
+        }
 
         // 将新数据添加到缓冲区
         $this->flvBuffer .= $flvData;
@@ -451,23 +595,23 @@ class LiveFlvToMp4
         }
 
         // 处理缓冲区中的数据
-        $processed = $this->processBuffer($baseTime);
+        $processed = $this->processBuffer($timestamp);
 
         return $processed;
     }
 
     /**
      * 处理缓冲区中的 FLV 数据
-     * @param int $baseTime 基础时间戳
+     * @param int $timestamp 当前包的时间戳
      * @return int 处理的字节数
      */
-    protected function processBuffer($baseTime)
+    protected function processBuffer($timestamp)
     {
         $totalProcessed = 0;
 
         // 如果数据量足够，尝试处理
         while (strlen($this->flvBuffer) >= 11) { // 最小标签大小
-            $processed = $this->setflv($this->flvBuffer, $baseTime);
+            $processed = $this->setflv($this->flvBuffer, $timestamp);
 
             if ($processed > 0) {
                 // 移除已处理的数据
@@ -495,55 +639,42 @@ class LiveFlvToMp4
         $this->currentSegmentSize = 0;
         $this->totalReceivedBytes = 0;
         $this->flvBuffer = '';
+        $this->audioSegmentIndex = 0;
+        $this->videoSegmentIndex = 0;
     }
 
     /**
      * 从分片文件计算视频时长
      * @param array $segmentFiles 分片文件列表
-     * @return int 时长（毫秒）
+     * @return int 视频时长（毫秒）
      */
     protected function calculateDurationFromSegments($segmentFiles)
     {
-        $totalDuration = 0;
+        // 优先使用记录的时间戳差值计算时长
+        if ($this->_firstPacketTimestamp >= 0 && $this->_lastPacketTimestamp >= 0) {
+            $duration = $this->_lastPacketTimestamp - $this->_firstPacketTimestamp;
+            //error_log("calculateDurationFromSegments: duration from timestamps = $duration ms (first={$this->_firstPacketTimestamp}, last={$this->_lastPacketTimestamp})");
+            return $duration;
+        }
+
+        // 如果没有记录时间戳，则从分片文件计算（备用方案）
         $videoTimescale = 0;
         $audioTimescale = 0;
 
-        //error_log("LiveFlvToMp4: calculateDurationFromSegments called with " . count($segmentFiles) . " files");
-
         // 获取 segmentDir
         $segmentDir = $this->_config['segmentDir'] ?? '';
-        $baseName = basename($this->streamPath);
 
         // 查找 init.mp4 文件
-        $initFile = rtrim($segmentDir, '/') . '/' . $baseName . '_init.mp4';
+        $initFile = rtrim($segmentDir, '/') . '/init.mp4';
 
         if ($initFile === null || !file_exists($initFile)) {
-            //error_log("LiveFlvToMp4: init file not found: {$initFile}");
             return 0;
         }
 
         $initData = file_get_contents($initFile);
         if (!$initData) {
-            //error_log("LiveFlvToMp4: failed to read init file");
             return 0;
         }
-
-        //error_log("LiveFlvToMp4: init file size = " . strlen($initData) . " bytes");
-
-        // 检查 init 文件的 box 结构
-        $firstBoxSize = unpack('N', substr($initData, 0, 4))[1];
-        $firstBoxType = substr($initData, 4, 4);
-        //error_log("LiveFlvToMp4: init first box: size={$firstBoxSize}, type={$firstBoxType}");
-
-        // 检查 offset 28-60 的数据（ftyp 之后应该是 moov）
-        $hex28 = bin2hex(substr($initData, 28, 32));
-        //error_log("LiveFlvToMp4: init data at offset 28-59: {$hex28}");
-
-        // 查找所有可能的 box
-        $moovPos = strpos($initData, 'moov');
-        $moofPos = strpos($initData, 'moof');
-        $mvhdPos = strpos($initData, 'mvhd');
-        //error_log("LiveFlvToMp4: box positions: moov=" . ($moovPos !== false ? $moovPos : 'not found') . ", moof=" . ($moofPos !== false ? $moofPos : 'not found') . ", mvhd=" . ($mvhdPos !== false ? $mvhdPos : 'not found'));
 
         // 从 init.mp4 的 moov 中获取 timescale
         $moovStart = strpos($initData, 'moov');
@@ -568,10 +699,8 @@ class LiveFlvToMp4
                             $handlerType = substr($initData, $hdlrStart + 16, 4);
                             if ($handlerType == 'vide' && $videoTimescale == 0) {
                                 $videoTimescale = $timescale;
-                                //error_log("LiveFlvToMp4: found video timescale = {$videoTimescale}");
                             } elseif ($handlerType == 'soun' && $audioTimescale == 0) {
                                 $audioTimescale = $timescale;
-                                //error_log("LiveFlvToMp4: found audio timescale = {$audioTimescale}");
                             }
                         }
                     }
@@ -581,10 +710,15 @@ class LiveFlvToMp4
         }
 
         $timescale = $videoTimescale > 0 ? $videoTimescale : ($audioTimescale > 0 ? $audioTimescale : 1000);
-        //error_log("LiveFlvToMp4: using timescale = {$timescale} (video={$videoTimescale}, audio={$audioTimescale})");
 
         // 第二步：从分片文件获取总时长
         $maxEndTime = 0;
+
+        // 调试信息
+        //error_log("calculateDurationFromSegments: segmentFiles count = " . count($segmentFiles));
+        foreach ($segmentFiles as $sf) {
+            //error_log("  segment file: $sf, size: " . filesize($sf) . " bytes");
+        }
 
         foreach ($segmentFiles as $segmentFile) {
             $data = file_get_contents($segmentFile);
@@ -662,8 +796,6 @@ class LiveFlvToMp4
             $durationMs = (int)($maxEndTime * 1000 / $timescale);
         }
 
-        //error_log("LiveFlvToMp4: Calculated duration = {$durationMs} ms (maxEndTime={$maxEndTime}, timescale={$timescale})");
-
         return $durationMs;
     }
 
@@ -675,54 +807,42 @@ class LiveFlvToMp4
      */
     protected function updateInitSegmentDuration($initData, $duration)
     {
-        //error_log("LiveFlvToMp4: updateInitSegmentDuration called, duration = {$duration} ms, initData length = " . strlen($initData));
-
         $mvhdStart = strpos($initData, 'mvhd');
         if ($mvhdStart === false) {
-            //error_log("LiveFlvToMp4: mvhd box not found");
             return $initData;
         }
 
-        //error_log("LiveFlvToMp4: mvhd found at offset {$mvhdStart}");
-
         if ($mvhdStart + 8 > strlen($initData)) {
-            //error_log("LiveFlvToMp4: mvhd box position out of bounds");
             return $initData;
         }
 
         $mvhdSize = unpack('N', substr($initData, $mvhdStart, 4))[1];
-        //error_log("LiveFlvToMp4: mvhd size from box = {$mvhdSize}, actual data available = " . (strlen($initData) - $mvhdStart));
-
         $mvhdVersion = ord(substr($initData, $mvhdStart + 8, 1));
 
         if ($mvhdVersion == 0) {
             if ($mvhdSize < 28 || $mvhdStart + 28 > strlen($initData)) {
-                //error_log("LiveFlvToMp4: mvhd box too small for version 0, size={$mvhdSize}");
                 return $initData;
             }
-            $timescale = unpack('N', substr($initData, $mvhdStart + 20, 4))[1];
+            $mvhdTimescale = unpack('N', substr($initData, $mvhdStart + 20, 4))[1];
             $durationOffset = 24;
             $durationLength = 4;
         } else {
             if ($mvhdSize < 36 || $mvhdStart + 36 > strlen($initData)) {
-                //error_log("LiveFlvToMp4: mvhd box too small for version 1, size={$mvhdSize}");
                 return $initData;
             }
-            $timescale = unpack('N', substr($initData, $mvhdStart + 28, 4))[1];
+            $mvhdTimescale = unpack('N', substr($initData, $mvhdStart + 28, 4))[1];
             $durationOffset = 32;
             $durationLength = 8;
         }
 
-        $durationInTimescale = (int)($duration * $timescale / 1000);
+        $mvhdDurationInTimescale = (int)($duration * $mvhdTimescale / 1000);
 
         if ($durationLength == 4) {
-            $durationBytes = pack('N', $durationInTimescale);
+            $durationBytes = pack('N', $mvhdDurationInTimescale);
         } else {
-            $durationBytes = pack('J', $durationInTimescale);
+            $durationBytes = pack('J', $mvhdDurationInTimescale);
         }
         $initData = substr_replace($initData, $durationBytes, $mvhdStart + $durationOffset, $durationLength);
-
-        //error_log("LiveFlvToMp4: Updated mvhd duration = {$durationInTimescale} ({$duration} ms), timescale = {$timescale}, version = {$mvhdVersion}, size = {$mvhdSize}");
 
         $trakStart = strpos($initData, 'trak');
         while ($trakStart !== false && $trakStart + 8 <= strlen($initData)) {
@@ -733,7 +853,6 @@ class LiveFlvToMp4
 
                 if ($tkhdVersion == 0) {
                     if ($tkhdSize < 32 || $tkhdStart + 32 > strlen($initData)) {
-                        //error_log("LiveFlvToMp4: tkhd box too small for version 0, size={$tkhdSize}");
                         $trakStart = strpos($initData, 'trak', $trakStart + 4);
                         continue;
                     }
@@ -741,7 +860,6 @@ class LiveFlvToMp4
                     $durationLength = 4;
                 } else {
                     if ($tkhdSize < 44 || $tkhdStart + 44 > strlen($initData)) {
-                        //error_log("LiveFlvToMp4: tkhd box too small for version 1, size={$tkhdSize}");
                         $trakStart = strpos($initData, 'trak', $trakStart + 4);
                         continue;
                     }
@@ -750,9 +868,9 @@ class LiveFlvToMp4
                 }
 
                 if ($durationLength == 4) {
-                    $durationBytes = pack('N', $durationInTimescale);
+                    $durationBytes = pack('N', $mvhdDurationInTimescale);
                 } else {
-                    $durationBytes = pack('J', $durationInTimescale);
+                    $durationBytes = pack('J', $mvhdDurationInTimescale);
                 }
                 $initData = substr_replace($initData, $durationBytes, $tkhdStart + $durationOffset, $durationLength);
             }
@@ -760,6 +878,61 @@ class LiveFlvToMp4
         }
 
         return $initData;
+    }
+
+    /**
+     * 生成 meta.json 文件
+     * @param string $segmentDir 分片目录
+     * @param int $duration 视频时长（毫秒）
+     */
+    protected function generateMetaJson($segmentDir, $duration)
+    {
+        $this->writeMetaJson($segmentDir, $duration);
+    }
+
+    /**
+     * 生成分离切片的 meta.json 文件（公共方法）
+     * @param string $segmentDir 分片目录
+     */
+    public function writeMetaJson($segmentDir = null, $duration = 0)
+    {
+        if ($segmentDir === null) {
+            $segmentDir = $this->_config['segmentDir'] ?? '';
+        }
+
+        if (empty($segmentDir)) {
+            return;
+        }
+
+        $meta = [];
+
+        foreach ($this->metas as $trackMeta) {
+            if (isset($trackMeta['codec'])) {
+                if ($trackMeta['type'] == 'video') {
+                    $meta['videoCodec'] = $trackMeta['codec'];
+                    $meta['width'] = isset($trackMeta['presentWidth']) ? $trackMeta['presentWidth'] : (isset($trackMeta['codecWidth']) ? $trackMeta['codecWidth'] : 0);
+                    $meta['height'] = isset($trackMeta['presentHeight']) ? $trackMeta['presentHeight'] : (isset($trackMeta['codecHeight']) ? $trackMeta['codecHeight'] : 0);
+                } else if ($trackMeta['type'] == 'audio') {
+                    $meta['audioCodec'] = $trackMeta['codec'];
+                    $meta['sampleRate'] = isset($trackMeta['audioSampleRate']) ? $trackMeta['audioSampleRate'] : 0;
+                    $meta['channels'] = isset($trackMeta['channelCount']) ? $trackMeta['channelCount'] : 0;
+                }
+            }
+        }
+
+        $meta['hasAudio'] = $this->hasAudio;
+        $meta['hasVideo'] = $this->hasVideo;
+        $meta['duration'] = $duration;
+
+        if ($this->separateTracks) {
+            $meta['audioSegmentCount'] = $this->audioSegmentIndex;
+            $meta['videoSegmentCount'] = $this->videoSegmentIndex;
+        } else {
+            $meta['segmentCount'] = $this->segmentIndex;
+        }
+
+        $metaFile = rtrim($segmentDir, '/') . '/meta.json';
+        file_put_contents($metaFile, json_encode($meta, JSON_PRETTY_PRINT));
     }
 
     /**
@@ -773,6 +946,7 @@ class LiveFlvToMp4
     {
         // 处理剩余的 FLV 数据缓冲区
         if (strlen($this->flvBuffer) > 0) {
+
             $this->processBuffer(0);
         }
 
@@ -787,62 +961,76 @@ class LiveFlvToMp4
 
         // 检查是否有分片目录配置
         if (!isset($this->_config['segmentDir']) || empty($this->_config['segmentDir'])) {
-            //error_log("LiveFlvToMp4: segmentDir not configured");
             return false;
         }
 
         $segmentDir = $this->_config['segmentDir'];
-        $baseName = basename($this->streamPath);
 
         // 如果目录不存在，返回失败
         if (!is_dir($segmentDir)) {
-            //error_log("LiveFlvToMp4: segmentDir does not exist: {$segmentDir}");
             return false;
         }
 
         // 构建输出文件路径
         if ($outputFile === null) {
+            $baseName = basename($this->streamPath);
             $outputFile = rtrim($segmentDir, '/') . "/{$baseName}_full.mp4";
         }
 
         // 查找所有分片文件
-        $initFile = rtrim($segmentDir, '/') . "/{$baseName}_init.mp4";
-        $segmentPattern = rtrim($segmentDir, '/') . "/{$baseName}_*.m4s";
+        $initFile = rtrim($segmentDir, '/') . "/init.mp4";
+        $segmentPattern = rtrim($segmentDir, '/') . "/segment_*.m4s";
 
         // 检查初始化文件是否存在
         if (!file_exists($initFile)) {
-            //error_log("LiveFlvToMp4: init file not found: {$initFile}");
             return false;
         }
 
         // 获取所有分片文件并排序
         $segmentFiles = glob($segmentPattern);
         if (empty($segmentFiles)) {
-            //error_log("LiveFlvToMp4: no segment files found: {$segmentPattern}");
             return false;
         }
 
-        // 按创建时间排序
+        // 按分片索引排序
         usort($segmentFiles, function($a, $b) {
-            return filemtime($a) - filemtime($b);
+            $pattern = '/segment_(\d+)\.m4s/';
+            preg_match($pattern, $a, $matchesA);
+            preg_match($pattern, $b, $matchesB);
+            $indexA = isset($matchesA[1]) ? (int)$matchesA[1] : 0;
+            $indexB = isset($matchesB[1]) ? (int)$matchesB[1] : 0;
+            return $indexA - $indexB;
         });
 
         try {
             // 创建输出文件
             $outputHandle = fopen($outputFile, 'wb');
             if (!$outputHandle) {
-                //error_log("LiveFlvToMp4: failed to create output file: {$outputFile}");
                 return false;
             }
 
-            // 读取初始化文件
+            // 读取初始化文件（用于获取原始元数据）
             $initData = file_get_contents($initFile);
 
-            // 计算实际时长并更新初始化片段
+            // 计算实际时长
             $duration = $this->calculateDurationFromSegments($segmentFiles);
-            //error_log("LiveFlvToMp4: Final duration calculated = {$duration} ms (expected ~10000 ms for 10s recording)");
-            if ($duration > 0) {
-                $initData = $this->updateInitSegmentDuration($initData, $duration);
+
+            // 调试信息
+            //error_log("finalize: duration = $duration ms, metas count = " . count($this->metas));
+            foreach ($this->metas as $i => $meta) {
+                //error_log("  meta[$i]: timescale = " . ($meta['timescale'] ?? 'N/A') . ", duration = " . ($meta['duration'] ?? 'N/A'));
+            }
+
+            // 如果计算出了有效时长，更新 metas 中的 duration 并重新生成 init.mp4
+            if ($duration > 0 && count($this->metas) > 0) {
+                // 更新所有轨道的 duration
+                foreach ($this->metas as &$meta) {
+                    if (isset($meta['timescale'])) {
+                        $meta['duration'] = (int)($duration * $meta['timescale'] / 1000);
+                    }
+                }
+                // 重新生成包含正确时长的 init.mp4
+                $initData = MP4::generateInitSegment($this->metas);
             }
 
             fwrite($outputHandle, $initData);
@@ -863,12 +1051,13 @@ class LiveFlvToMp4
             // 关闭输出文件
             fclose($outputHandle);
 
+            // 生成 meta.json
+            $this->generateMetaJson($segmentDir, $duration);
+
             // 删除初始化文件
             if ($deleteSegments && file_exists($initFile)) {
                 unlink($initFile);
             }
-
-            //error_log("LiveFlvToMp4: Successfully merged MP4 file: {$outputFile} ({$totalSize} bytes)");
 
             // 触发回调
             if ($this->onMediaInfo) {
@@ -877,7 +1066,6 @@ class LiveFlvToMp4
 
             return $outputFile;
         } catch (\Exception $e) {
-            //error_log("LiveFlvToMp4: Failed to merge MP4 file: " . $e->getMessage());
             return false;
         }
     }
@@ -895,7 +1083,10 @@ class LiveFlvToMp4
             'currentSegmentSize' => $this->currentSegmentSize,
             'hasAudio' => $this->hasAudio,
             'hasVideo' => $this->hasVideo,
-            'metadataLoaded' => $this->loadmetadata
+            'metadataLoaded' => $this->loadmetadata,
+            'separateTracks' => $this->separateTracks,
+            'audioSegmentIndex' => $this->audioSegmentIndex,
+            'videoSegmentIndex' => $this->videoSegmentIndex
         ];
     }
 
@@ -905,6 +1096,5 @@ class LiveFlvToMp4
     public function __destruct()
     {
         $this->cleanup();
-        //error_log("LiveFlvToMp4: Stream {$this->streamPath} destroyed");
     }
 }
