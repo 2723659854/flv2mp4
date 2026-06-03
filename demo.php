@@ -30,3 +30,11 @@ try{
     echo "错误: " . $e->getMessage() . "\n";
 }
 
+echo "\n === 示例3: 转换flv为hls === \n";
+$outputDir1 = __DIR__ . "/hls";
+try {
+    $res = \Xiaosongshu\Flv2mp4\Client::flv2Hls($file, $outputDir1);
+    echo "\n hls转换完成 index = {$res['index']} dir = {$res['outputDir']}\n\n";
+} catch (\Exception $e) {
+    echo "错误: " . $e->getMessage() . "\n\n";
+}

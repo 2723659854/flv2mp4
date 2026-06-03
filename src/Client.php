@@ -3,6 +3,7 @@
 namespace Xiaosongshu\Flv2mp4;
 
 use Xiaosongshu\Flv2mp4\Manage\Flv2Fmp4;
+use Xiaosongshu\Flv2mp4\manage\Flv2Hls;
 
 /**
  * @purpose flv文件转码mp4客户端
@@ -290,5 +291,28 @@ class Client
     protected static function isFlvFile(string $filename)
     {
         return strtolower(pathinfo($filename, PATHINFO_EXTENSION)) === 'flv';
+    }
+
+    /**
+     * flv转hls
+     * @param string $inputFile
+     * @param string $outputDir
+     * @return array
+     */
+    public static function flv2Hls(string $inputFile, string $outputDir)
+    {
+        // ini_set('memory_limit', '512M');
+        if (!file_exists($inputFile)) {
+            throw new \RuntimeException("flv not exist!");
+        }
+        if(!self::isFlvFile($inputFile)){
+            throw new \RuntimeException("only support flv file!");
+        }
+        $streamId = "a/b";
+        $hls = new Flv2Hls($streamId,['segmentDuration'=>4,'outputDir'=>$outputDir."/".$streamId."/"]);
+        $back = ['index'=>$hls->getIndex(),'outputDir'=>$hls->getStreamDir()];
+        $hls->run($inputFile);
+        $hls->close();
+        return $back;
     }
 }

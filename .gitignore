@@ -8,3 +8,5 @@ composer.lock
 *.zip
 /output_merge
 /output_separate
+/hls
+/.htaccess
