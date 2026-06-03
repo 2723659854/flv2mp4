@@ -35,6 +35,15 @@ $outputDir1 = __DIR__ . "/hls";
 try {
     $res = \Xiaosongshu\Flv2mp4\Client::flv2Hls($file, $outputDir1);
     echo "\n hls转换完成 index = {$res['index']} dir = {$res['outputDir']}\n\n";
+
+    echo "\n === 示例4: 转换hls回flv === \n";
+    $outputFlv = __DIR__ . "/output_from_hls.flv";
+    try {
+        $res2 = \Xiaosongshu\Flv2mp4\Client::hls2Flv($res['index'], $outputFlv);
+        echo "\n hls转flv完成: {$res2}\n\n";
+    } catch (\Exception $e) {
+        echo "错误: " . $e->getMessage() . "\n\n";
+    }
 } catch (\Exception $e) {
     echo "错误: " . $e->getMessage() . "\n\n";
 }

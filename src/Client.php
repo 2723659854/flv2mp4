@@ -4,6 +4,7 @@ namespace Xiaosongshu\Flv2mp4;
 
 use Xiaosongshu\Flv2mp4\Manage\Flv2Fmp4;
 use Xiaosongshu\Flv2mp4\manage\Flv2Hls;
+use Xiaosongshu\Flv2mp4\manage\Hls2Flv;
 
 /**
  * @purpose flv文件转码mp4客户端
@@ -314,5 +315,21 @@ class Client
         $hls->run($inputFile);
         $hls->close();
         return $back;
+    }
+
+    /**
+     * hls转flv
+     * @param string $m3u8File M3U8文件路径
+     * @param string $outputFile 输出的FLV文件路径
+     * @return string 返回输出的FLV文件路径
+     */
+    public static function hls2Flv(string $m3u8File, string $outputFile)
+    {
+        if (!file_exists($m3u8File)) {
+            throw new \RuntimeException("m3u8 file not exist!");
+        }
+        $hls2Flv = new Hls2Flv($outputFile);
+        $hls2Flv->run($m3u8File);
+        return $outputFile;
     }
 }

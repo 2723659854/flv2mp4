@@ -426,32 +426,12 @@
         SOURCE: '/hls/a/b/index.m3u8',
         HLS_CONFIG: {
             autoStartLoad: true,
-            // 【关键】直播使用 -1，表示从最新片段开始播放
-            startPosition: -1,
-            debug: true,
-
-            // 超时配置
-            fragLoadingTimeOut: 20000,
-            manifestLoadingTimeOut: 10000,
-            levelLoadingTimeOut: 10000,
-
-            // 【关键】直播缓冲配置：收紧缓冲，保持接近直播边缘
-            maxBufferLength: 30,          // 最大缓冲30秒（约4个8秒片段）
-            maxMaxBufferLength: 60,       // 硬上限60秒，防止无限缓冲
-            maxBufferSize: 60 * 1000 * 1000,
-            maxBufferHole: 0.5,
-
-            // 【关键】直播同步参数
-            liveSyncDurationCount: 3,     // 保持3个片段的同步延迟
-            liveMaxLatencyDurationCount: 10, // 最大延迟不超过10个片段
-            liveDurationInfinity: true,   // 标记为无限时长直播
-
-            // 其他
+            startPosition: 0,
+            debug: false,
             strictMode: false,
-            enableWorker: true,
-            appendErrorMaxRetry: 3,
-            testBandwidth: false,
-            // 移除 forceVideoCodec 和 startFragPrefetch（非标准配置项，可能导致未知问题）
+            enableWorker: false,
+            lowLatencyMode: false,
+            maxBufferLength: 30,
         }
     };
 
@@ -574,28 +554,22 @@
             const levels = data.levels;
             addDebugLog(`清单解析成功: ${levels.length} 个质量级别`, 'success');
 
-            // 【关键】手动设置编解码器信息
+            // 【关键】强制设置编解码器信息
             if (levels.length > 0) {
                 const level = levels[0];
 
-                // 如果 M3U8 没有 CODECS，手动设置
-                if (!level.attrs?.CODECS) {
-                    // 根据 ffprobe 结果：H.264 High Profile + AAC-LC
-                    const forcedCodecs = 'avc1.64001f,mp4a.40.2';
+                // 强制设置为 H.264 High Profile + AAC-LC
+                const forcedCodecs = 'avc1.64001f,mp4a.40.2';
 
-                    // 尝试更新 level 的 codecs
-                    if (level.audioCodec === undefined) {
-                        level.audioCodec = 'mp4a.40.2';
-                    }
-                    if (level.videoCodec === undefined) {
-                        level.videoCodec = 'avc1.64001f';
-                    }
-
-                    addDebugLog(`手动设置编解码器: ${forcedCodecs}`, 'info');
-                    document.getElementById('codecInfo').textContent = forcedCodecs;
-                } else {
-                    document.getElementById('codecInfo').textContent = level.attrs.CODECS;
+                // 强制更新 level 的 codecs（覆盖可能不正确的检测结果）
+                level.audioCodec = 'mp4a.40.2';
+                level.videoCodec = 'avc1.64001f';
+                if (level.attrs) {
+                    level.attrs.CODECS = forcedCodecs;
                 }
+
+                addDebugLog(`强制设置编解码器: ${forcedCodecs}`, 'info');
+                document.getElementById('codecInfo').textContent = forcedCodecs;
             }
 
             // 检测片段类型
@@ -609,13 +583,8 @@
 
             document.getElementById('playState').textContent = '就绪';
 
-            // 尝试播放
-            video.play().then(() => {
-                addDebugLog('自动播放成功', 'success');
-            }).catch(e => {
-                addDebugLog(`自动播放失败: ${e.message}`, 'warn');
-                showToast('请手动点击播放', 'warning');
-            });
+            // 不自动播放，等待用户手动点击
+            showToast('视频已加载，点击播放按钮开始播放', 'success');
         });
 
         // 【关键事件】级别切换
