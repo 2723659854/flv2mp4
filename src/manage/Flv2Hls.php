@@ -4,6 +4,11 @@ namespace Xiaosongshu\Flv2mp4\manage;
 
 use Xiaosongshu\Flv2mp4\Flv\FlvParse;
 
+/**
+ * @purpose flv转hls协议工具
+ * @author yanglong
+ * @time 2026年6月3日15:46:52
+ */
 class Flv2Hls
 {
     private  $segmentDuration = 4;
