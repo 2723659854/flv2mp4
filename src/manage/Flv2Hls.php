@@ -23,9 +23,19 @@ class Flv2Hls
     private $segmentDurations = [];
     private $currentSegmentLastTime = 0;
 
+    private $videoFrameCount = 0;
+    private $frameInterval = 3000; // 假设 30fps，90kHz 时钟下的帧间隔
+    private $audioFrameCount = 0;
+    private $audioInterval = 1024; // AAC 帧间隔（基于采样率）
     private $lastVideoPts = -1;
+    private $lastVideoDts = -1;
     private $lastAudioPts = -1;
-    private $spsPpsWritten = false;   // 当前切片是否已写入 SPS/PPS
+    private $spsPpsWritten = false;
+    private $audioObjectType = 2;
+    private $samplingFrequencyIndex = 4;
+    private $channelConfiguration = 2;
+    private $sbrPresent = false;
+    private $extensionSamplingIndex = null;
 
     public function __construct(string $streamId, array $config = [])
     {
@@ -141,7 +151,7 @@ class Flv2Hls
         $offset += 3;
         $timestampExt = ord($flvTagData[$offset]); $offset += 1;
         $timestamp = ($timestampExt << 24) | $timestampLow;
-        $offset += 3; // skip streamID
+        $offset += 3;
         if ($offset + $dataSize > $dataLen) return;
         $payload = substr($flvTagData, $offset, $dataSize);
         if ($type === 9) {
@@ -181,24 +191,35 @@ class Flv2Hls
 
         $this->currentSegmentLastTime = $relativeTime;
 
+        // CTS 已在 avcPacketRead 中正确解析为有符号整数
         $cts = $avc['compositionTime'] ?? 0;
-        if ($cts & 0x800000) { $cts -= 0x1000000; }
-        $dts = (int)($relativeTime * 90);
-        $pts = (int)(($relativeTime + $cts) * 90);
-        if ($pts < $dts) { $pts = $dts; }
 
-        // PTS 单调递增
-        if ($this->lastVideoPts >= 0 && $pts <= $this->lastVideoPts) {
-            $pts = $this->lastVideoPts + 1;
+        // 使用单调递增的帧计数器生成 DTS（确保严格递增）
+        // DTS = 帧计数 * 帧间隔（90kHz）
+        $dts = $this->videoFrameCount * $this->frameInterval;
+        
+        // PTS = DTS + CTS * 90
+        $pts = $dts + $cts * 90;
+
+        // 确保 PTS >= DTS
+        if ($pts < $dts) {
+            $pts = $dts;
         }
+
+        // 更新帧计数器
+        $this->videoFrameCount++;
+
+        // 保存当前时间戳用于参考
+        $this->lastVideoDts = $dts;
         $this->lastVideoPts = $pts;
 
+        // 构建 AnnexB 格式的 NAL 单元
         $annexb = $this->avccToAnnexB($avc['data']);
 
-        // ★ 关键修复：只在每个切片的第一个关键帧处添加 SPS/PPS
-        if ($isKeyFrame && $this->spsPpsData !== '' && !$this->spsPpsWritten) {
+        // 如果是关键帧，并且有 SPS/PPS 数据，将其拼接在关键帧前面
+        // 这确保解码器可以正确初始化
+        if ($isKeyFrame && $this->spsPpsData !== '') {
             $annexb = $this->spsPpsData . $annexb;
-            $this->spsPpsWritten = true;
         }
 
         $pes = $this->createPES(0xE0, $annexb, $pts, ($pts != $dts) ? $dts : null);
@@ -214,24 +235,64 @@ class Flv2Hls
 
         $aacPacketType = ord($raw[1]);
         if ($aacPacketType == 0) {
-            if (strlen($raw) >= 4) $this->audioSpecificConfig = substr($raw, 2, 2);
+            $asc = substr($raw, 2);
+            if (strlen($asc) >= 2) $this->parseAudioSpecificConfig($asc);
             return;
         }
-        if ($aacPacketType != 1 || $this->baseTimestamp === null || $this->audioSpecificConfig === null) return;
+        if ($aacPacketType != 1 || $this->baseTimestamp === null || $this->audioObjectType === null) return;
 
         $aacRaw = substr($raw, 2);
         if ($aacRaw === '') return;
-        $relativeTime = $timestamp - $this->baseTimestamp;
-        $pts = (int)($relativeTime * 90);
-
-        if ($this->lastAudioPts >= 0 && $pts <= $this->lastAudioPts) {
-            $pts = $this->lastAudioPts + 1;
-        }
-        $this->lastAudioPts = $pts;
+        
+        // 使用单调递增的计数器生成音频 PTS
+        $pts = $this->audioFrameCount * $this->audioInterval;
+        $this->audioFrameCount++;
 
         $adts = $this->createADTSHeader(strlen($aacRaw));
         $pes = $this->createPES(0xC0, $adts . $aacRaw, $pts, null);
         $this->writeTSPackets($this->audioPid, $pes, false, 0);
+    }
+
+    private function parseAudioSpecificConfig(string $asc): void
+    {
+        if (strlen($asc) < 2) return;
+        $b1 = ord($asc[0]);
+        $b2 = ord($asc[1]);
+        $this->audioObjectType = ($b1 >> 3) & 0x1F;
+        $this->samplingFrequencyIndex = (($b1 & 0x07) << 1) | (($b2 >> 7) & 0x01);
+        $this->channelConfiguration = ($b2 >> 3) & 0x0F;
+        $this->sbrPresent = false;
+        $this->extensionSamplingIndex = null;
+
+        // 处理 HE-AAC / SBR
+        if ($this->audioObjectType == 5 || $this->audioObjectType == 29) {
+            $this->sbrPresent = true;
+            if (strlen($asc) >= 4) {
+                $extSamplingIndex = (ord($asc[2]) >> 3) & 0x0F;
+                $this->extensionSamplingIndex = $extSamplingIndex;
+            }
+        }
+    }
+
+    private function createADTSHeader(int $aacLength): string
+    {
+        $profile = $this->audioObjectType - 1;
+        if ($profile < 0) $profile = 1;
+        $samplingIndex = $this->samplingFrequencyIndex;
+        if ($this->sbrPresent && $this->extensionSamplingIndex !== null) {
+            $samplingIndex = $this->extensionSamplingIndex;
+        }
+        $channelConfig = $this->channelConfiguration;
+        $frameLength = $aacLength + 7;
+
+        return pack('CCCCCCC',
+            0xFF, 0xF1,
+            (($profile & 0x03) << 6) | (($samplingIndex & 0x0F) << 2) | (($channelConfig >> 2) & 0x01),
+            (($channelConfig & 0x03) << 6) | (($frameLength >> 11) & 0x03),
+            ($frameLength >> 3) & 0xFF,
+            (($frameLength & 0x07) << 5) | 0x1F,
+            0xFC
+        );
     }
 
     static function videoFrameDataRead($videoData) {
@@ -240,9 +301,14 @@ class Flv2Hls
     }
 
     static function avcPacketRead($avcPacket) {
+        // CompositionTime 是有符号 24 位整数 (SI24)，不是无符号 (UI24)
+        $cts = (ord($avcPacket[1]) << 16) | (ord($avcPacket[2]) << 8) | ord($avcPacket[3]);
+        if ($cts & 0x800000) {
+            $cts -= 0x1000000;
+        }
         return [
             'avcPacketType' => ord($avcPacket[0]),
-            'compositionTime' => (ord($avcPacket[1]) << 16) | (ord($avcPacket[2]) << 8) | ord($avcPacket[3]),
+            'compositionTime' => $cts,
             'data' => substr($avcPacket, 4)
         ];
     }
@@ -316,22 +382,6 @@ class Flv2Hls
         return $result;
     }
 
-    private function createADTSHeader(int $aacLength): string
-    {
-        $asc = $this->audioSpecificConfig;
-        $b1 = ord($asc[0]); $b2 = ord($asc[1]);
-        $audioObjectType = ($b1 >> 3) & 0x1F;
-        $freqIndex = (($b1 & 0x07) << 1) | (($b2 >> 7) & 0x01);
-        $channelConfig = ($b2 >> 3) & 0x0F;
-        $profile = $audioObjectType - 1; if ($profile < 0) $profile = 1;
-        $frameLength = $aacLength + 7;
-        return pack('CCCCCCC', 0xFF, 0xF1,
-            (($profile & 0x03) << 6) | (($freqIndex & 0x0F) << 2) | (($channelConfig >> 2) & 0x01),
-            (($channelConfig & 0x03) << 6) | (($frameLength >> 11) & 0x03),
-            ($frameLength >> 3) & 0xFF,
-            (($frameLength & 0x07) << 5) | 0x1F, 0xFC);
-    }
-
     private function createPES(int $streamId, string $payload, int $pts, ?int $dts): string
     {
         $ptsDtsFlags = ($dts !== null && $dts != $pts) ? 0xC0 : 0x80;
@@ -402,14 +452,21 @@ class Flv2Hls
         $this->sequenceNumber++;
         $this->continuityCounters = [];
         $this->lastVideoPts = -1;
+        $this->lastVideoDts = -1;
         $this->lastAudioPts = -1;
-        $this->spsPpsWritten = false;   // 新切片重置
+        $this->spsPpsWritten = false;
 
         $file = $this->streamDir . "segment_{$this->sequenceNumber}.ts";
         $this->tsHandle = fopen($file, 'wb');
         $this->writePAT();
         $this->writePMT();
-        // ★ 不再在此处写入 SPS/PPS，留给第一个关键帧处理
+
+        // ★ 独立发送 SPS/PPS，不影响视频帧 DTS 序列
+        if ($this->spsPpsData !== '') {
+            $startPcr = (int)($this->segmentStartTime * 90);
+            $spsPpsPes = $this->createPES(0xE0, $this->spsPpsData, $startPcr, null);
+            $this->writeTSPackets($this->videoPid, $spsPpsPes, false, $startPcr);
+        }
     }
 
     private function closeSegment(int $endTime = 0): void
