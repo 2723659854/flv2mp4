@@ -9,4 +9,4 @@ composer.lock
 /output_merge
 /output_separate
 /hls
-/.htaccess
+*.htaccess
