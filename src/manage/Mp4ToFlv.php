@@ -6,7 +6,6 @@ namespace Xiaosongshu\Flv2mp4\Manage;
  * @purpose MP4转FLV工具
  * @author yanglong
  * @time 2026年6月4日
- * 修复版：正确处理样本表、时间戳、交错写入
  */
 class Mp4ToFlv
 {
@@ -23,26 +22,20 @@ class Mp4ToFlv
     private $hasWrittenVideoHeader = false;
     private $hasWrittenAudioHeader = false;
 
-    // 视频相关
     private $sps = '';
     private $pps = '';
-    private $avcConfig = '';
-
-    // 音频相关
     private $audioSpecificConfig = '';
     private $audioSampleRate = 44100;
     private $audioChannels = 2;
-    private $audioProfile = 2; // AAC LC
+    private $audioProfile = 2;
 
     public function __construct(string $inputFile, string $outputFile)
     {
         $this->inputFile = $inputFile;
         $this->outputFile = $outputFile;
-
         if (!file_exists($inputFile)) {
             throw new \RuntimeException("MP4文件不存在: {$inputFile}");
         }
-
         $outputDir = dirname($outputFile);
         if (!is_dir($outputDir)) {
             mkdir($outputDir, 0777, true);
@@ -56,8 +49,6 @@ class Mp4ToFlv
             throw new \RuntimeException("无法读取MP4文件");
         }
 
-        echo "[DEBUG] MP4文件大小: " . strlen($this->mp4Data) . " bytes\n";
-
         $this->parseMp4Boxes();
 
         $this->flvHandle = fopen($this->outputFile, 'wb');
@@ -67,23 +58,15 @@ class Mp4ToFlv
 
         try {
             $this->parseTracks();
-
-            echo "[DEBUG] 视频轨道: " . ($this->videoTrack ? "存在 (ID: {$this->videoTrack['id']})" : "不存在") . "\n";
-            echo "[DEBUG] 音频轨道: " . ($this->audioTrack ? "存在 (ID: {$this->audioTrack['id']})" : "不存在") . "\n";
-            echo "[DEBUG] SPS: " . (empty($this->sps) ? "空" : "存在 (" . strlen($this->sps) . " bytes)") . "\n";
-            echo "[DEBUG] PPS: " . (empty($this->pps) ? "空" : "存在 (" . strlen($this->pps) . " bytes)") . "\n";
-            echo "[DEBUG] AudioConfig: " . (empty($this->audioSpecificConfig) ? "空" : "存在 (" . strlen($this->audioSpecificConfig) . " bytes)") . "\n";
-
             $this->writeFLVHeader();
             $this->extractAndWriteMediaData();
-
             return true;
         } finally {
             fclose($this->flvHandle);
         }
     }
 
-    /* ========== Box 解析 ========== */
+    /* ========== Box 解析 (不变) ========== */
     private function parseMp4Boxes(): void
     {
         $this->boxTree = $this->parseBox($this->mp4Data, 0, strlen($this->mp4Data));
@@ -95,7 +78,6 @@ class Mp4ToFlv
         while ($offset + 8 <= $end) {
             $size = unpack('N', substr($data, $offset, 4))[1];
             $type = substr($data, $offset + 4, 4);
-
             if ($size == 1) {
                 if ($offset + 16 <= $end) {
                     $size = unpack('J', substr($data, $offset + 8, 8))[1];
@@ -107,23 +89,13 @@ class Mp4ToFlv
             } else {
                 $headerSize = 8;
             }
-
             $boxEnd = $offset + $size;
             if ($boxEnd > $end) break;
-
             $boxData = substr($data, $offset + $headerSize, $size - $headerSize);
-            $box = [
-                'type' => $type,
-                'size' => $size,
-                'offset' => $offset,
-                'data' => $boxData,
-                'children' => []
-            ];
-
+            $box = ['type' => $type, 'size' => $size, 'offset' => $offset, 'data' => $boxData, 'children' => []];
             if ($size > $headerSize) {
                 $box['children'] = $this->parseBox($data, $offset + $headerSize, $boxEnd);
             }
-
             $boxes[] = $box;
             $offset = $boxEnd;
         }
@@ -159,12 +131,10 @@ class Mp4ToFlv
     {
         $moov = $this->findBox($this->boxTree, 'moov');
         if (!$moov) throw new \RuntimeException("未找到moov盒子");
-
         $traks = $this->findAllBoxes([$moov], 'trak');
         foreach ($traks as $trak) {
             $this->parseTrack($trak);
         }
-
         if (!$this->videoTrack && !$this->audioTrack) {
             throw new \RuntimeException("未找到有效的视频或音频轨道");
         }
@@ -175,55 +145,37 @@ class Mp4ToFlv
         $tkhd = $this->findBox([$trak], 'tkhd');
         if (!$tkhd) return;
         $trackId = unpack('N', substr($tkhd['data'], 12, 4))[1];
-
         $mdia = $this->findBox([$trak], 'mdia');
         if (!$mdia) return;
-
         $hdlr = $this->findBox([$mdia], 'hdlr');
         if (!$hdlr) return;
         $handlerType = substr($hdlr['data'], 8, 4);
-
-        $stbl = $this->findBox([$mdia], 'stbl');
+        
+        // stbl 在 minf 里面，而不是直接在 mdia 里面
+        $minf = $this->findBox([$mdia], 'minf');
+        if (!$minf) return;
+        
+        $stbl = $this->findBox([$minf], 'stbl');
         if (!$stbl) return;
-
         $stsd = $this->findBox([$stbl], 'stsd');
         if (!$stsd) return;
-
-        // timescale
         $mdhd = $this->findBox([$mdia], 'mdhd');
         $timescale = 90000;
         if ($mdhd) {
             $timescale = unpack('N', substr($mdhd['data'], 12, 4))[1];
         }
-
         $stsdData = $stsd['data'];
-        // 跳过 version(4) + entry_count(4) = 8 bytes
         $pos = 8;
         while ($pos + 8 <= strlen($stsdData)) {
             $entrySize = unpack('N', substr($stsdData, $pos, 4))[1];
             $entryType = substr($stsdData, $pos + 4, 4);
-
             if ($handlerType === 'vide' && $entryType === 'avc1') {
-                $this->videoTrack = [
-                    'id' => $trackId,
-                    'type' => 'video',
-                    'codec' => 'avc1',
-                    'timescale' => $timescale
-                ];
-                // 在avc1盒子内部搜索avcC
-                $avc1Data = substr($stsdData, $pos, $entrySize);
-                $this->parseAvcCFromBox($avc1Data);
+                $this->videoTrack = ['id' => $trackId, 'type' => 'video', 'codec' => 'avc1', 'timescale' => $timescale];
+                $this->parseAvcCFromBox(substr($stsdData, $pos, $entrySize));
                 break;
-            }
-            elseif ($handlerType === 'soun' && $entryType === 'mp4a') {
-                $this->audioTrack = [
-                    'id' => $trackId,
-                    'type' => 'audio',
-                    'codec' => 'mp4a',
-                    'timescale' => $timescale
-                ];
-                $mp4aData = substr($stsdData, $pos, $entrySize);
-                $this->parseEsdsFromBox($mp4aData);
+            } elseif ($handlerType === 'soun' && $entryType === 'mp4a') {
+                $this->audioTrack = ['id' => $trackId, 'type' => 'audio', 'codec' => 'mp4a', 'timescale' => $timescale];
+                $this->parseEsdsFromBox(substr($stsdData, $pos, $entrySize));
                 break;
             }
             $pos += $entrySize;
@@ -232,129 +184,212 @@ class Mp4ToFlv
 
     private function parseAvcCFromBox(string $data): void
     {
-        // 搜索avcC盒子
-        $offset = 0;
-        $len = strlen($data);
-        while ($offset + 8 <= $len) {
-            $boxSize = unpack('N', substr($data, $offset, 4))[1];
-            $boxType = substr($data, $offset + 4, 4);
-            if ($boxType === 'avcC') {
-                $avcC = substr($data, $offset + 8, $boxSize - 8);
-                $this->parseAvcC($avcC);
-                break;
-            }
-            $offset += $boxSize;
+        // 直接在数据中查找 avcC box
+        $pos = strpos($data, 'avcC');
+        if ($pos === false) {
+            return;
         }
+        
+        // avcC box 的结构：4字节大小 + 4字节类型 + 内容
+        // pos 是 'avcC' 的位置，所以大小在 pos - 4
+        if ($pos < 4) {
+            return;
+        }
+        
+        $boxSize = unpack('N', substr($data, $pos - 4, 4))[1];
+        $avcCData = substr($data, $pos + 4, $boxSize - 8);
+        
+        $this->parseAvcC($avcCData);
     }
 
     private function parseAvcC(string $data): void
     {
         if (strlen($data) < 8) return;
-        $this->avcConfig = $data;
-
         $numSps = ord($data[5]) & 0x1F;
         $offset = 6;
-        $allSps = '';
         for ($i = 0; $i < $numSps; $i++) {
             if ($offset + 2 > strlen($data)) break;
             $spsLength = unpack('n', substr($data, $offset, 2))[1];
             $offset += 2;
             if ($offset + $spsLength > strlen($data)) break;
-            $sps = substr($data, $offset, $spsLength);
+            $this->sps = substr($data, $offset, $spsLength);
             $offset += $spsLength;
-            $allSps .= $sps;
-            if ($i == 0) $this->sps = $sps; // 仅保存第一个SPS
+            break; // 只取第一个SPS
         }
         $numPps = ord($data[$offset]); $offset++;
-        $allPps = '';
         for ($i = 0; $i < $numPps; $i++) {
             if ($offset + 2 > strlen($data)) break;
             $ppsLength = unpack('n', substr($data, $offset, 2))[1];
             $offset += 2;
             if ($offset + $ppsLength > strlen($data)) break;
-            $pps = substr($data, $offset, $ppsLength);
-            $offset += $ppsLength;
-            $allPps .= $pps;
-            if ($i == 0) $this->pps = $pps;
+            $this->pps = substr($data, $offset, $ppsLength);
+            break;
         }
     }
 
     private function parseEsdsFromBox(string $data): void
     {
-        $offset = 0;
-        $len = strlen($data);
-        while ($offset + 8 <= $len) {
-            $boxSize = unpack('N', substr($data, $offset, 4))[1];
-            $boxType = substr($data, $offset + 4, 4);
-            if ($boxType === 'esds') {
-                $esdsData = substr($data, $offset + 8, $boxSize - 8);
-                $this->parseEsds($esdsData);
-                break;
-            }
-            $offset += $boxSize;
+        // 直接在数据中查找 esds box
+        $pos = strpos($data, 'esds');
+        if ($pos === false) {
+            return;
         }
+        
+        // esds box 的结构：4字节大小 + 4字节类型 + 内容
+        // pos 是 'esds' 的位置，所以大小在 pos - 4
+        if ($pos < 4) {
+            return;
+        }
+        
+        $boxSize = unpack('N', substr($data, $pos - 4, 4))[1];
+        $esdsData = substr($data, $pos + 4, $boxSize - 8);
+        
+        $this->parseEsds($esdsData);
     }
 
     private function parseEsds(string $data): void
     {
-        // ESDS 结构复杂，这里简易解析：跳过 4 字节 version/flags，寻找 0x05 描述符
         if (strlen($data) < 20) return;
-        $pos = 4;
-        // 搜索 0x05 (DecSpecificInfoTag) 并读取长度
+        $pos = 4; // 跳过 version+flags
+        
         while ($pos < strlen($data)) {
+            if ($pos + 1 > strlen($data)) break;
             $tag = ord($data[$pos]);
-            if ($tag == 0x05) {
+            $pos++;
+            
+            // 解析长度（可变长度编码）
+            if ($pos >= strlen($data)) break;
+            $length = 0;
+            while ($pos < strlen($data)) {
+                $byte = ord($data[$pos]);
+                $length = ($length << 7) | ($byte & 0x7F);
                 $pos++;
-                // 读取变长长度
-                $length = 0;
-                while ($pos < strlen($data)) {
-                    $byte = ord($data[$pos]);
-                    $length = ($length << 7) | ($byte & 0x7F);
-                    $pos++;
-                    if (($byte & 0x80) == 0) break;
-                }
-                if ($pos + $length <= strlen($data)) {
-                    $this->audioSpecificConfig = substr($data, $pos, $length);
-                    // 解析参数
+                if (($byte & 0x80) == 0) break;
+            }
+            
+            if ($pos + $length > strlen($data)) {
+                break;
+            }
+            
+            $contentStart = $pos;
+            
+            switch ($tag) {
+                case 0x03: // ES Descriptor
+                    // ES_ID (2 bytes) + streamPriority (1 byte)
+                    $pos += 3;
+                    // 剩余部分包含子描述符
+                    $remainingLength = $length - 3;
+                    if ($remainingLength > 0 && $pos + $remainingLength <= strlen($data)) {
+                        $subData = substr($data, $pos, $remainingLength);
+                        $this->parseEsdsNested($subData);
+                    }
+                    break;
+                    
+                case 0x04: // Decoder Config Descriptor
+                    // objectTypeIndication (1) + streamType (1) + bufferSizeDB (3) + maxBitrate (4) + avgBitrate (4)
+                    $pos += 13;
+                    // 剩余部分包含子描述符（如 Decoder Specific Info）
+                    $remainingLength = $length - 13;
+                    if ($remainingLength > 0 && $pos + $remainingLength <= strlen($data)) {
+                        $subData = substr($data, $pos, $remainingLength);
+                        $this->parseEsdsNested($subData);
+                    }
+                    break;
+                    
+                case 0x05: // Decoder Specific Info
+                    $this->audioSpecificConfig = substr($data, $contentStart, $length);
                     if ($length >= 2) {
                         $config = unpack('n', $this->audioSpecificConfig)[1];
                         $this->audioProfile = ($config >> 11) & 0x1F;
                         $freqIndex = ($config >> 7) & 0x0F;
                         $this->audioChannels = ($config >> 3) & 0x0F;
-                        $freqMap = [96000,88200,64000,48000,44100,32000,24000,22050,16000,12000,11025,8000,7350];
-                        $this->audioSampleRate = $freqMap[$freqIndex] ?? 44100;
+                        $rates = [96000,88200,64000,48000,44100,32000,24000,22050,16000,12000,11025,8000,7350];
+                        $this->audioSampleRate = $rates[$freqIndex] ?? 44100;
                     }
-                }
-                break;
-            } else {
-                // 跳过其他描述符
-                $pos++;
-                if ($pos >= strlen($data)) break;
-                $length = 0;
-                while ($pos < strlen($data)) {
-                    $byte = ord($data[$pos]);
-                    $length = ($length << 7) | ($byte & 0x7F);
-                    $pos++;
-                    if (($byte & 0x80) == 0) break;
-                }
-                $pos += $length;
+                    return; // 找到目标，退出
+                    
+                default:
+                    // 未知描述符，跳过
+                    break;
             }
+            
+            $pos = $contentStart + $length;
+        }
+    }
+    
+    private function parseEsdsNested(string $data): void
+    {
+        $pos = 0;
+        while ($pos < strlen($data)) {
+            if ($pos + 1 > strlen($data)) break;
+            $tag = ord($data[$pos]);
+            $pos++;
+            
+            // 解析长度（可变长度编码）
+            if ($pos >= strlen($data)) break;
+            $length = 0;
+            while ($pos < strlen($data)) {
+                $byte = ord($data[$pos]);
+                $length = ($length << 7) | ($byte & 0x7F);
+                $pos++;
+                if (($byte & 0x80) == 0) break;
+            }
+            
+            if ($pos + $length > strlen($data)) {
+                break;
+            }
+            
+            $contentStart = $pos;
+            
+            switch ($tag) {
+                case 0x03: // ES Descriptor
+                    $pos += 3; // ES_ID + streamPriority
+                    $remainingLength = $length - 3;
+                    if ($remainingLength > 0 && $pos + $remainingLength <= strlen($data)) {
+                        $subData = substr($data, $pos, $remainingLength);
+                        $this->parseEsdsNested($subData);
+                    }
+                    break;
+                    
+                case 0x04: // Decoder Config Descriptor
+                    $pos += 13; // objectTypeIndication + streamType + bufferSizeDB + maxBitrate + avgBitrate
+                    $remainingLength = $length - 13;
+                    if ($remainingLength > 0 && $pos + $remainingLength <= strlen($data)) {
+                        $subData = substr($data, $pos, $remainingLength);
+                        $this->parseEsdsNested($subData);
+                    }
+                    break;
+                    
+                case 0x05: // Decoder Specific Info
+                    $this->audioSpecificConfig = substr($data, $contentStart, $length);
+                    if ($length >= 2) {
+                        $config = unpack('n', $this->audioSpecificConfig)[1];
+                        $this->audioProfile = ($config >> 11) & 0x1F;
+                        $freqIndex = ($config >> 7) & 0x0F;
+                        $this->audioChannels = ($config >> 3) & 0x0F;
+                        $rates = [96000,88200,64000,48000,44100,32000,24000,22050,16000,12000,11025,8000,7350];
+                        $this->audioSampleRate = $rates[$freqIndex] ?? 44100;
+                    }
+                    return;
+                    
+                default:
+                    break;
+            }
+            
+            $pos = $contentStart + $length;
         }
     }
 
-    /* ========== 媒体数据提取与写入 ========== */
+    /* ========== 媒体数据提取 (关键修复) ========== */
     private function extractAndWriteMediaData(): void
     {
         $mdat = $this->findBox($this->boxTree, 'mdat');
         if (!$mdat) throw new \RuntimeException("未找到mdat盒子");
-
         $moov = $this->findBox($this->boxTree, 'moov');
         if (!$moov) return;
 
-        $videoSamples = [];
-        $audioSamples = [];
+        $allSamples = []; // 统一按毫秒DTS排序
 
-        // 分别处理视频和音频轨道
         $traks = $this->findAllBoxes([$moov], 'trak');
         foreach ($traks as $trak) {
             $mdia = $this->findBox([$trak], 'mdia');
@@ -362,33 +397,34 @@ class Mp4ToFlv
             $hdlr = $this->findBox([$mdia], 'hdlr');
             if (!$hdlr) continue;
             $handlerType = substr($hdlr['data'], 8, 4);
-
             $stbl = $this->findBox([$mdia], 'stbl');
             if (!$stbl) continue;
 
             $samples = $this->extractSamplesFromStbl($stbl, $mdat['data'], $mdat['offset'], $handlerType);
-            if ($handlerType === 'vide') {
-                $videoSamples = $samples;
-            } elseif ($handlerType === 'soun') {
-                $audioSamples = $samples;
+            foreach ($samples as &$s) {
+                $s['type'] = ($handlerType === 'vide') ? 'video' : 'audio';
             }
+            $allSamples = array_merge($allSamples, $samples);
         }
 
-        // 按时间戳交错写入
-        $allSamples = array_merge($videoSamples, $audioSamples);
+        // 按毫秒DTS排序
         usort($allSamples, function($a, $b) {
-            return $a['dts'] - $b['dts'];
+            return $a['dtsMs'] - $b['dtsMs'];
         });
 
+        // 交错写入
         foreach ($allSamples as $sample) {
             if ($sample['type'] === 'video') {
-                $this->writeVideoSample($sample['data'], $sample['dts'], $sample['cts'] ?? 0, $sample['keyframe']);
+                $this->writeVideoSample($sample['data'], $sample['dtsMs'], $sample['ctsMs'] ?? 0, $sample['keyframe']);
             } else {
-                $this->writeAudioSample($sample['data'], $sample['dts']);
+                $this->writeAudioSample($sample['data'], $sample['dtsMs']);
             }
         }
     }
 
+    /**
+     * 从stbl盒子提取样本数组，返回的DTS/CTS已转换为毫秒
+     */
     private function extractSamplesFromStbl(array $stbl, string $mdatData, int $mdatOffset, string $handlerType): array
     {
         $stsz = $this->findBox([$stbl], 'stsz');
@@ -396,84 +432,88 @@ class Mp4ToFlv
         $stsc = $this->findBox([$stbl], 'stsc');
         $stts = $this->findBox([$stbl], 'stts');
         $ctts = $this->findBox([$stbl], 'ctts');
+        $stss = $this->findBox([$stbl], 'stss');
 
         if (!$stsz || !$stco || !$stsc || !$stts) return [];
 
-        // 解析 STSZ (样本大小)
+        // 获取轨道 timescale
+        $timescale = ($handlerType === 'vide') ? ($this->videoTrack['timescale'] ?? 90000) : ($this->audioTrack['timescale'] ?? 90000);
+
+        // 解析 STSZ
         $stszData = $stsz['data'];
-        $version = unpack('N', substr($stszData, 0, 4))[1];       // flags+version 打包
-        $sampleSize = unpack('N', substr($stszData, 4, 4))[1];    // 全0则每个样本单独指定
-        $sampleCount = unpack('N', substr($stszData, 8, 4))[1];
+        // stsz 内容结构: version(1) + flags(3) + sampleSize(4) + sampleCount(4) + entries...
+        // stsz 是 FullBox，总是包含 version/flags（4 字节）
+        $stszOffset = 4; // 跳过 version/flags
+        
+        $sampleSize = unpack('N', substr($stszData, $stszOffset, 4))[1];
+        $sampleCount = unpack('N', substr($stszData, $stszOffset + 4, 4))[1];
         $sampleSizes = [];
         if ($sampleSize == 0) {
             for ($i = 0; $i < $sampleCount; $i++) {
-                $sampleSizes[] = unpack('N', substr($stszData, 12 + $i * 4, 4))[1];
+                $sampleSizes[] = unpack('N', substr($stszData, $stszOffset + 8 + $i * 4, 4))[1];
             }
         } else {
             $sampleSizes = array_fill(0, $sampleCount, $sampleSize);
         }
 
-        // 解析 STSC (chunk 到 sample 映射)
+        // 解析 STSC (chunk -> samples per chunk)
         $stscData = $stsc['data'];
-        $stscEntries = unpack('N', substr($stscData, 4, 4))[1];
-        $chunkMap = []; // chunk编号 -> samples_per_chunk
-        $descIdx = [];
-        $pos = 8;
+        $stscOffset = 0;
+        
+        // 检查是否有 version/flags
+        if (strlen($stscData) >= 8 && unpack('N', substr($stscData, 0, 4))[1] == 0) {
+            $stscOffset = 4;
+        }
+        
+        $stscEntries = unpack('N', substr($stscData, $stscOffset, 4))[1];
+        $chunkMap = []; // chunkNum => ['samples' => int, 'desc' => int]
+        $pos = $stscOffset + 4;
         for ($i = 0; $i < $stscEntries; $i++) {
             $firstChunk = unpack('N', substr($stscData, $pos, 4))[1];
             $samplesPerChunk = unpack('N', substr($stscData, $pos+4, 4))[1];
-            $sampleDescIndex = unpack('N', substr($stscData, $pos+8, 4))[1];
+            $descIndex = unpack('N', substr($stscData, $pos+8, 4))[1];
             $pos += 12;
-            $chunkMap[$firstChunk] = ['samples' => $samplesPerChunk, 'desc' => $sampleDescIndex];
+            $chunkMap[$firstChunk] = ['samples' => $samplesPerChunk, 'desc' => $descIndex];
         }
 
-        // 解析 STCO (chunk offsets)
+        // 解析 STCO
         $stcoData = $stco['data'];
-        $chunkCount = unpack('N', substr($stcoData, 4, 4))[1];
+        $stcoOffset = 0;
+        
+        // 检查是否有 version/flags
+        if (strlen($stcoData) >= 8 && unpack('N', substr($stcoData, 0, 4))[1] == 0) {
+            $stcoOffset = 4;
+        }
+        
+        $chunkCount = unpack('N', substr($stcoData, $stcoOffset, 4))[1];
         $chunkOffsets = [];
         for ($i = 0; $i < $chunkCount; $i++) {
-            $chunkOffsets[] = unpack('N', substr($stcoData, 8 + $i * 4, 4))[1];
+            $chunkOffsets[] = unpack('N', substr($stcoData, $stcoOffset + 4 + $i * 4, 4))[1];
         }
 
-        // 构建 sample 偏移序列
-        $sampleOffsets = [];
-        $currentSample = 0;
-        $currentChunkSamples = 0;
-        $currentChunkSamplesPer = 0;
-        $lastChunkIdx = 0;
-        foreach ($chunkOffsets as $chunkIdx => $chunkOffset) {
-            $chunkNum = $chunkIdx + 1;
-            // 查找该 chunk 的 samples_per_chunk
-            $samplesPerChunk = 0;
+        // 构建每个chunk的samples per chunk列表
+        $chunkSamples = [];
+        for ($chunk = 0; $chunk < $chunkCount; $chunk++) {
+            $chunkNum = $chunk + 1;
+            $samples = 0;
             foreach ($chunkMap as $firstChunk => $map) {
                 if ($chunkNum >= $firstChunk) {
-                    $samplesPerChunk = $map['samples'];
+                    $samples = $map['samples'];
                 }
             }
-            for ($j = 0; $j < $samplesPerChunk; $j++) {
-                if ($currentSample >= count($sampleSizes)) break;
-                $sampleOffsets[$currentSample] = $chunkOffset + array_sum(array_slice($sampleSizes, $currentSample - $j, $j));
-                $currentSample++;
-            }
+            $chunkSamples[] = $samples;
         }
-        // 修正偏移计算方式
+
+        // 计算每个样本在mdat中的偏移
         $sampleOffsets = [];
-        $sampleIdx = 0;
+        $sampleIndex = 0;
         foreach ($chunkOffsets as $chunkIdx => $chunkOffset) {
-            $chunkNum = $chunkIdx + 1;
-            $samplesPerChunk = 0;
-            foreach ($chunkMap as $firstChunk => $map) {
-                if ($chunkNum >= $firstChunk) {
-                    $samplesPerChunk = $map['samples'];
-                }
-            }
-            for ($j = 0; $j < $samplesPerChunk && $sampleIdx < count($sampleSizes); $j++) {
-                $offset = $chunkOffset;
-                for ($k = 0; $k < $j; $k++) {
-                    $offset += $sampleSizes[$sampleIdx - $j + $k];
-                }
-                $sampleOffsets[$sampleIdx] = $offset;
-                $sampleIdx++;
+            $count = $chunkSamples[$chunkIdx];
+            $runningOffset = $chunkOffset;
+            for ($j = 0; $j < $count && $sampleIndex < count($sampleSizes); $j++) {
+                $sampleOffsets[$sampleIndex] = $runningOffset;
+                $runningOffset += $sampleSizes[$sampleIndex];
+                $sampleIndex++;
             }
         }
 
@@ -491,7 +531,7 @@ class Mp4ToFlv
             }
         }
 
-        // 解析 CTTS (composition offset) - 视频所需
+        // 解析 CTTS (视频)
         $ctOffsets = [];
         if ($ctts && $handlerType === 'vide') {
             $cttsData = $ctts['data'];
@@ -507,109 +547,123 @@ class Mp4ToFlv
             }
         }
 
-        // 判断是否关键帧 (stss)
-        $stss = $this->findBox([$stbl], 'stss');
-        $keyframeSamples = [];
-        if ($stss) {
+        // 关键帧样本 (stss)
+        $keyframeSet = [];
+        if ($stss && $handlerType === 'vide') {
             $stssData = $stss['data'];
-            $stssEntries = unpack('N', substr($stssData, 4, 4))[1];
-            for ($i = 0; $i < $stssEntries; $i++) {
-                $keyframeSamples[] = unpack('N', substr($stssData, 8 + $i * 4, 4))[1] - 1; // 转为0-based
+            $entries = unpack('N', substr($stssData, 4, 4))[1];
+            for ($i = 0; $i < $entries; $i++) {
+                $keyframeSet[unpack('N', substr($stssData, 8 + $i*4, 4))[1] - 1] = true; // 0-based
             }
         }
-        $keyFrameSet = array_flip($keyframeSamples);
 
-        // 构建样本数组
+        // 构建样本数组，DTS/CTS 转换为毫秒
         $samples = [];
-        $dts = 0;
+        $dtsTicks = 0;
         for ($i = 0; $i < count($sampleSizes) && $i < count($sampleOffsets); $i++) {
-            $offset = $sampleOffsets[$i] - ($mdatOffset + 8); // mdat数据偏移
-            if ($offset < 0 || $offset + $sampleSizes[$i] > strlen($mdatData)) continue;
-            $rawData = substr($mdatData, $offset, $sampleSizes[$i]);
+            // 使用文件绝对偏移读取样本数据
+            $offset = $sampleOffsets[$i];
+            if ($offset < 0 || $offset + $sampleSizes[$i] > strlen($this->mp4Data)) continue;
+            $rawData = substr($this->mp4Data, $offset, $sampleSizes[$i]);
 
-            $cts = $ctOffsets[$i] ?? 0;
-            $pts = $dts + $cts;
-            $isKeyframe = isset($keyFrameSet[$i]);
+            $ctsTicks = $ctOffsets[$i] ?? 0;
+            // DTS 是当前累计的解码时间戳
+            $dtsMs = round($dtsTicks * 1000 / $timescale);
+            // CTS 是 PTS - DTS，需要转换为毫秒
+            $ctsMs = round($ctsTicks * 1000 / $timescale);
+            $isKeyframe = isset($keyframeSet[$i]);
 
             $samples[] = [
-                'type' => $handlerType === 'vide' ? 'video' : 'audio',
                 'data' => $rawData,
-                'dts' => $dts,
-                'cts' => $cts,
-                'pts' => $pts,
-                'keyframe' => $isKeyframe,
-                'size' => $sampleSizes[$i]
+                'dtsMs' => $dtsMs,
+                'ctsMs' => $ctsMs,
+                'keyframe' => $isKeyframe
             ];
-            $dts += $timeDeltas[$i] ?? 0;
+
+            $dtsTicks += $timeDeltas[$i] ?? 0;
         }
         return $samples;
     }
 
     /* ========== FLV 写入 ========== */
-    private function writeVideoSample(string $data, int $dts, int $cts = 0, bool $isKeyFrame = false): void
+    private function writeVideoSample(string $data, int $dtsMs, int $ctsMs, bool $isKeyFrame): void
     {
+        // 确保 AVC Sequence Header 在第一个视频帧之前被写入
         if (!$this->hasWrittenVideoHeader && !empty($this->sps)) {
             $this->writeAVCSequenceHeader();
         }
 
-        $timescale = $this->videoTrack['timescale'] ?? 90000;
-        // 将 timescale 时间戳转换为毫秒
-        $flvTimestamp = (int)round($dts * 1000 / $timescale);
-        $flvCts = (int)round($cts * 1000 / $timescale);
-
-        // 保证时间戳不减
-        static $lastVideoTs = -1;
-        if ($flvTimestamp <= $lastVideoTs) $flvTimestamp = $lastVideoTs + 1;
-        $lastVideoTs = $flvTimestamp;
-
-        // 数据不变，直接写入
-        $nalus = $this->avccToAnnexb($data);
-        $avccData = $this->annexbToAvcc($nalus);
-
         $codecId = 7;
         $frameType = $isKeyFrame ? 1 : 2;
-        $videoTag = chr(($frameType << 4) | $codecId) . "\x01" . pack('N', $flvCts);
-        $videoTag = chr(($frameType << 4) | $codecId) . "\x01" . chr(($flvCts>>16)&0xFF) . chr(($flvCts>>8)&0xFF) . chr($flvCts&0xFF) . $avccData;
-        $this->writeFLVTag(9, $videoTag, $flvTimestamp);
+        
+        // 构建 FLV 视频数据
+        // 字节1: frameType(高4位) | codecId(低4位)
+        // 字节2: AVCPacketType = 1 (NALU)
+        // 字节3-5: Composition Time (CTS)
+        // 后续: MP4 中的原始 AVCC 数据（包含长度前缀的多个 NAL 单元）
+        $videoData = chr(($frameType << 4) | $codecId) . "\x01" .
+            chr(($ctsMs >> 16) & 0xFF) . chr(($ctsMs >> 8) & 0xFF) . chr($ctsMs & 0xFF) .
+            $data;
+
+        $this->writeFLVTag(9, $videoData, $dtsMs);
+    }
+    
+    /**
+     * 解析 AVCC 格式的数据，拆分成单独的 NAL 单元
+     * MP4 中的样本数据包含多个 NAL 单元，每个单元前面有 4 字节长度前缀
+     */
+    private function parseAvccNalUnits(string $data): array
+    {
+        $nalUnits = [];
+        $offset = 0;
+        $length = strlen($data);
+        
+        while ($offset + 4 <= $length) {
+            // 读取 4 字节长度前缀
+            $nalLength = unpack('N', substr($data, $offset, 4))[1];
+            $offset += 4;
+            
+            if ($offset + $nalLength <= $length) {
+                $nalUnit = substr($data, $offset, $nalLength);
+                $nalUnits[] = $nalUnit;
+                $offset += $nalLength;
+            } else {
+                break;
+            }
+        }
+        
+        return $nalUnits;
     }
 
-    private function writeAudioSample(string $data, int $dts): void
+    private function writeAudioSample(string $data, int $dtsMs): void
     {
         if (!$this->hasWrittenAudioHeader && !empty($this->audioSpecificConfig)) {
             $this->writeAACSequenceHeader();
         }
 
-        $timescale = $this->audioTrack['timescale'] ?? 90000;
-        $flvTimestamp = (int)round($dts * 1000 / $timescale);
-
-        static $lastAudioTs = -1;
-        if ($flvTimestamp <= $lastAudioTs) $flvTimestamp = $lastAudioTs + 1;
-        $lastAudioTs = $flvTimestamp;
-
-        $soundFormat = 10; // AAC
+        $soundFormat = 10;
         $soundRate = $this->getSoundRate();
-        $soundSize = 1; // 16-bit
+        $soundSize = 1;
         $soundType = ($this->audioChannels == 2) ? 1 : 0;
         $audioHeader = ($soundFormat << 4) | ($soundRate << 2) | ($soundSize << 1) | $soundType;
-        $audioData = chr($audioHeader) . "\x01" . $data; // AACPacketType=1 (raw)
+        $audioData = chr($audioHeader) . "\x01" . $data;
 
-        $this->writeFLVTag(8, $audioData, $flvTimestamp);
+        $this->writeFLVTag(8, $audioData, $dtsMs);
     }
 
     private function writeAVCSequenceHeader(): void
     {
-        // 构建完整的AVCDecoderConfigurationRecord (参考FLV规范)
-        $record = "\x01"; // configurationVersion
-        $record .= $this->sps[1] ?? "\x42"; // AVCProfileIndication
-        $record .= $this->sps[2] ?? "\x00"; // profile_compatibility
-        $record .= $this->sps[3] ?? "\x1F"; // AVCLevelIndication
-        $record .= "\xFF"; // lengthSizeMinusOne (4字节) + 0xE1 (numOfSequenceParameterSets)
-        $record .= "\xE1"; // SPS count = 1 (为了简单，只写第一个SPS)
-        $record .= pack('n', strlen($this->sps));
-        $record .= $this->sps;
-        $record .= "\x01"; // numOfPictureParameterSets
-        $record .= pack('n', strlen($this->pps));
-        $record .= $this->pps;
+        // 构建 AVCDecoderConfigurationRecord
+        $configVersion = "\x01";
+        $profile = $this->sps[1] ?? "\x42";
+        $compat  = $this->sps[2] ?? "\x00";
+        $level   = $this->sps[3] ?? "\x1F";
+        $lengthMinusOne = "\xFF"; // lengthSize = 4
+        $spsNum = "\xE1";         // 1 SPS
+        $spsLen = pack('n', strlen($this->sps));
+        $ppsNum = "\x01";
+        $ppsLen = pack('n', strlen($this->pps));
+        $record = $configVersion . $profile . $compat . $level . $lengthMinusOne . $spsNum . $spsLen . $this->sps . $ppsNum . $ppsLen . $this->pps;
 
         $videoData = "\x17\x00\x00\x00\x00" . $record;
         $this->writeFLVTag(9, $videoData, 0);
@@ -618,48 +672,26 @@ class Mp4ToFlv
 
     private function writeAACSequenceHeader(): void
     {
-        $soundFormat = 10; // AAC
+        $soundFormat = 10;
         $soundRate = $this->getSoundRate();
         $soundSize = 1;
         $soundType = ($this->audioChannels == 2) ? 1 : 0;
         $audioHeader = ($soundFormat << 4) | ($soundRate << 2) | ($soundSize << 1) | $soundType;
-        $audioData = chr($audioHeader) . "\x00" . $this->audioSpecificConfig; // AACPacketType=0
+        $audioData = chr($audioHeader) . "\x00" . $this->audioSpecificConfig;
         $this->writeFLVTag(8, $audioData, 0);
         $this->hasWrittenAudioHeader = true;
     }
 
     private function getSoundRate(): int
     {
-        $rates = [5500=>0, 11025=>1, 22050=>2, 44100=>3, 48000=>4];
-        foreach ($rates as $rate => $code) {
-            if ($this->audioSampleRate == $rate) return $code;
+        switch ($this->audioSampleRate) {
+            case 5500:  return 0;
+            case 11025: return 1;
+            case 22050: return 2;
+            case 44100: return 3;
+            case 48000: return 4;
+            default:    return 3;
         }
-        return 3; // 默认44100
-    }
-
-    private function avccToAnnexb(string $data): array
-    {
-        $nalus = [];
-        $offset = 0; $len = strlen($data);
-        while ($offset + 4 <= $len) {
-            $naluLength = unpack('N', substr($data, $offset, 4))[1];
-            $offset += 4;
-            if ($offset + $naluLength > $len) break;
-            $nalus[] = substr($data, $offset, $naluLength);
-            $offset += $naluLength;
-        }
-        return $nalus;
-    }
-
-    private function annexbToAvcc(array $nalus): string
-    {
-        $result = '';
-        foreach ($nalus as $nalu) {
-            if (strlen($nalu) > 0) {
-                $result .= pack('N', strlen($nalu)) . $nalu;
-            }
-        }
-        return $result;
     }
 
     private function writeFLVHeader(): void
@@ -676,12 +708,7 @@ class Mp4ToFlv
     private function writeFLVTag(int $tagType, string $data, int $timestamp): void
     {
         $dataSize = strlen($data);
-        $timestamp &= 0xFFFFFF;
-        $tsExt = 0;
-        $tsLow = $timestamp & 0x00FFFFFF;
-        $tsHigh = ($timestamp >> 24) & 0xFF;
-        // 实际FLV时间戳只有24位低部分，扩展位放在ExtendedTimestamp字段（这里是单字节）
-        // 标准做法：将完整32位时间戳拆分为低24位和高8位，高8位放入timestampExtended。
+        $timestamp &= 0xFFFFFFFF;
         $tsLow = $timestamp & 0xFFFFFF;
         $tsHigh = ($timestamp >> 24) & 0xFF;
 
@@ -689,7 +716,7 @@ class Mp4ToFlv
         $tag .= chr(($dataSize >> 16) & 0xFF) . chr(($dataSize >> 8) & 0xFF) . chr($dataSize & 0xFF);
         $tag .= chr(($tsLow >> 16) & 0xFF) . chr(($tsLow >> 8) & 0xFF) . chr($tsLow & 0xFF);
         $tag .= chr($tsHigh);
-        $tag .= "\x00\x00\x00"; // StreamID (always 0)
+        $tag .= "\x00\x00\x00"; // StreamID
 
         fwrite($this->flvHandle, $tag);
         fwrite($this->flvHandle, $data);

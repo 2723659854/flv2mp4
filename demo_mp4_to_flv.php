@@ -22,9 +22,37 @@ try {
     // 调用mp4ToFlv方法进行转换
     echo "开始转换...\n";
     
-    // 创建转换器实例并手动调用以获取更多信息
+    // 创建转换器实例
     $converter = new \Xiaosongshu\Flv2mp4\manage\Mp4ToFlv($mp4File, $flvFile);
+    
+    // 添加调试信息
+    $reflection = new \ReflectionClass($converter);
+    $spsProperty = $reflection->getProperty('sps');
+    $spsProperty->setAccessible(true);
+    $ppsProperty = $reflection->getProperty('pps');
+    $ppsProperty->setAccessible(true);
+    $audioConfigProperty = $reflection->getProperty('audioSpecificConfig');
+    $audioConfigProperty->setAccessible(true);
+    $videoTrackProperty = $reflection->getProperty('videoTrack');
+    $videoTrackProperty->setAccessible(true);
+    $audioTrackProperty = $reflection->getProperty('audioTrack');
+    $audioTrackProperty->setAccessible(true);
+    $boxTreeProperty = $reflection->getProperty('boxTree');
+    $boxTreeProperty->setAccessible(true);
+    
+    // 手动执行各个步骤并添加调试
+    echo "解析 MP4 boxes...\n";
     $converter->run();
+    
+    echo "\n调试信息:\n";
+    echo "视频轨道: " . ($videoTrackProperty->getValue($converter) ? '存在' : '不存在') . "\n";
+    echo "音频轨道: " . ($audioTrackProperty->getValue($converter) ? '存在' : '不存在') . "\n";
+    echo "SPS 长度: " . strlen($spsProperty->getValue($converter)) . " bytes\n";
+    echo "PPS 长度: " . strlen($ppsProperty->getValue($converter)) . " bytes\n";
+    echo "音频配置长度: " . strlen($audioConfigProperty->getValue($converter)) . " bytes\n";
+    
+    $boxTree = $boxTreeProperty->getValue($converter);
+    echo "Box树深度: " . count($boxTree) . "\n";
     
     $result = $flvFile;
     
