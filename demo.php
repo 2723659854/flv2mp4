@@ -30,6 +30,7 @@ $file = __DIR__."/test.flv";
 //    echo "错误: " . $e->getMessage() . "\n";
 //}
 
+// mp4转码生成测试的flv文件 ffmpeg -i test.mp4 -c:v libx264 -c:a aac -f flv test.flv
 // 检查切片是否错误的命令 ffmpeg -v trace -i hls\a\b\segment_1.ts -f null -
 echo "\n === 示例3: 转换flv为hls === \n";
 $outputDir1 = __DIR__ . "/hls";
