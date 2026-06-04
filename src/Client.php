@@ -15,7 +15,19 @@ class Client
 {
 
     /**
-     * flv转MP4入口函数
+     * 静态flv转MP4入口函数，音视频混合切片，并生成合并的mp4文件
+     * @param string $inputFile 需要转换的flv文件
+     * @param string $outputDir 存储mp4的目录
+     * @param int $segmentPackets 每个切片包含的包数量（默认30）
+     * @return string|null
+     */
+    public static function runFlv2mp4(string $inputFile, string $outputDir, int $segmentPackets = 30)
+    {
+        return self::run($inputFile, $outputDir, $segmentPackets);
+    }
+
+    /**
+     * 静态flv转MP4入口函数，音视频混合切片，并生成合并的mp4文件
      * @param string $inputFile 需要转换的flv文件
      * @param string $outputDir 存储mp4的目录
      * @param int $segmentPackets 每个切片包含的包数量（默认30）
@@ -116,6 +128,18 @@ class Client
         } else {
             return "";
         }
+    }
+
+    /**
+     * 静态flv转MP4入口函数，音视频分开切片，适用于高级自定义播放场景
+     * @param string $inputFile 需要转换的flv文件
+     * @param string $outputDir 存储切片的目录
+     * @param int $segmentPackets 每个切片包含的包数量（默认30）
+     * @return array 返回生成的文件信息
+     */
+    public static function runFlv2mp4Separate(string $inputFile, string $outputDir, int $segmentPackets = 30)
+    {
+        return self::runSeparate($inputFile, $outputDir, $segmentPackets);
     }
 
     /**
@@ -286,7 +310,7 @@ class Client
 
     /**
      * 判断文件是否是flv文件
-     * @param string $filename
+     * @param string $filename 静态flv文件
      * @return bool
      */
     protected static function isFlvFile(string $filename)
@@ -295,12 +319,12 @@ class Client
     }
 
     /**
-     * flv转hls
-     * @param string $inputFile
-     * @param string $outputDir
-     * @return array
+     * 静态flv文件转hls协议，切片
+     * @param string $inputFile 静态flv文件
+     * @param string $outputDir 生成的切片目录
+     * @return array 返回转码切片的目录及相关信息
      */
-    public static function flv2Hls(string $inputFile, string $outputDir)
+    public static function runFlv2Hls(string $inputFile, string $outputDir)
     {
         // ini_set('memory_limit', '512M');
         if (!file_exists($inputFile)) {
@@ -318,12 +342,12 @@ class Client
     }
 
     /**
-     * hls转flv
+     * 静态hls转flv
      * @param string $m3u8File M3U8文件路径
      * @param string $outputFile 输出的FLV文件路径
      * @return string 返回输出的FLV文件路径
      */
-    public static function hls2Flv(string $m3u8File, string $outputFile)
+    public static function runHls2Flv(string $m3u8File, string $outputFile)
     {
         if (!file_exists($m3u8File)) {
             throw new \RuntimeException("m3u8 file not exist!");

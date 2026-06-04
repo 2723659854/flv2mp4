@@ -9,7 +9,7 @@ $file = __DIR__."/test.flv";
 echo "=== 示例1: 合并转换为单个MP4 ===\n";
 $outputDir1 = __DIR__."/output_merge";
 try{
-    $res = \Xiaosongshu\Flv2mp4\Client::run($file, $outputDir1);
+    $res = \Xiaosongshu\Flv2mp4\Client::runFlv2mp4($file, $outputDir1);
     echo "\n转换完成: " . $res . "\n\n";
 }catch (\Exception $e){
     echo "错误: " . $e->getMessage() . "\n\n";
@@ -19,7 +19,7 @@ try{
 echo "=== 示例2: 生成分开的音视频切片 ===\n";
 $outputDir2 = __DIR__."/output_separate";
 try{
-    $res = \Xiaosongshu\Flv2mp4\Client::runSeparate($file, $outputDir2);
+    $res = \Xiaosongshu\Flv2mp4\Client::runFlv2mp4Separate($file, $outputDir2);
     echo "\n转换完成！生成的文件:\n";
     echo "  音频初始化: " . ($res['audioInit'] ?? '无') . "\n";
     echo "  视频初始化: " . ($res['videoInit'] ?? '无') . "\n";
@@ -37,13 +37,13 @@ try{
 echo "\n === 示例3: 转换flv为hls === \n";
 $outputDir1 = __DIR__ . "/hls";
 try {
-    $res = \Xiaosongshu\Flv2mp4\Client::flv2Hls($file, $outputDir1);
+    $res = \Xiaosongshu\Flv2mp4\Client::runFlv2Hls($file, $outputDir1);
     echo "\n hls转换完成 index = {$res['index']} dir = {$res['outputDir']}\n\n";
 
     echo "\n === 示例4: 转换hls回flv === \n";
     $outputFlv = __DIR__ . "/output_from_hls.flv";
     try {
-        $res2 = \Xiaosongshu\Flv2mp4\Client::hls2Flv($res['index'], $outputFlv);
+        $res2 = \Xiaosongshu\Flv2mp4\Client::runHls2Flv($res['index'], $outputFlv);
         echo "\n hls转flv完成: {$res2}\n\n";
     } catch (\Exception $e) {
         echo "错误: " . $e->getMessage() . "\n\n";
