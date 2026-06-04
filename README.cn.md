@@ -12,6 +12,7 @@
 - **FLV → MP4**（普通 MP4 或 fMP4 切片）
 - **FLV → HLS**（生成 m3u8 + TS 切片）
 - **HLS → FLV**（将 HLS 切片合并回单个 FLV 文件）
+- **MP4 → FLV**（将 MP4 转码回单个 FLV 文件）
 
 适用于存储、分发和在线播放场景，尤其适合与 RTMP 直播服务器配合使用。
 
@@ -28,47 +29,64 @@ composer require xiaosongshu/flv2mp4
 require_once __DIR__ . '/vendor/autoload.php';
 ini_set('memory_limit', '512M');
 
-$file = __DIR__ . '/test.flv'; // 待转换的 FLV 文件
+$file = __DIR__."/test.flv";
 
-// 示例 1：转换为单个 MP4 文件（适合点播）
-$outputDir1 = __DIR__ . '/output_merge';
-try {
+
+echo "=== 示例1: flv静态文件切片fMP4并合并为mp4文件 ===\n";
+$outputDir1 = __DIR__."/output_merge";
+try{
     $res = \Xiaosongshu\Flv2mp4\Client::runFlv2mp4($file, $outputDir1);
-    echo "转换完成: {$res}\n";
-} catch (\Exception $e) {
-    echo "错误: " . $e->getMessage() . "\n";
+    echo "\n转换完成: " . $res . "\n\n";
+}catch (\Exception $e){
+    echo "错误: " . $e->getMessage() . "\n\n";
 }
 
-// 示例 2：转换为分立的音视频 fMP4 切片（适合浏览器 MSE 播放）
-$outputDir2 = __DIR__ . '/output_separate';
-try {
+
+echo "=== 示例2: 生成分开的音视频切片 ===\n";
+$outputDir2 = __DIR__."/output_separate";
+try{
     $res = \Xiaosongshu\Flv2mp4\Client::runFlv2mp4Separate($file, $outputDir2);
-    echo "音频初始化: {$res['audioInit']}\n";
-    echo "视频初始化: {$res['videoInit']}\n";
-    echo "音频切片数: " . count($res['audioSegments']) . "\n";
-    echo "视频切片数: " . count($res['videoSegments']) . "\n";
-} catch (\Exception $e) {
+    echo "\n转换完成！生成的文件:\n";
+    echo "  音频初始化: " . ($res['audioInit'] ?? '无') . "\n";
+    echo "  视频初始化: " . ($res['videoInit'] ?? '无') . "\n";
+    echo "  音频切片数量: " . count($res['audioSegments']) . "\n";
+    echo "  视频切片数量: " . count($res['videoSegments']) . "\n";
+    echo "  元数据文件: " . ($res['meta'] ?? '无') . "\n";
+}catch (\Exception $e){
     echo "错误: " . $e->getMessage() . "\n";
 }
 
-// 示例 3：FLV → HLS
-$outputDir3 = __DIR__ . '/hls';
+echo "\n === 示例3: 转换flv为hls === \n";
+$outputDir1 = __DIR__ . "/hls";
 try {
-    $res = \Xiaosongshu\Flv2mp4\Client::runFlv2Hls($file, $outputDir3);
-    echo "HLS 索引: {$res['index']}\n";
-    echo "输出目录: {$res['outputDir']}\n";
+    $res = \Xiaosongshu\Flv2mp4\Client::runFlv2Hls($file, $outputDir1);
+    echo "\n hls转换完成 index = {$res['index']} dir = {$res['outputDir']}\n\n";
+
+    echo "\n === 示例4: 转换hls回flv === \n";
+    $outputFlv = __DIR__ . "/output_from_hls.flv";
+    try {
+        $res2 = \Xiaosongshu\Flv2mp4\Client::runHls2Flv($res['index'], $outputFlv);
+        echo "\n hls转flv完成: {$res2}\n\n";
+    } catch (\Exception $e) {
+        echo "错误: " . $e->getMessage() . "\n\n";
+    }
 } catch (\Exception $e) {
-    echo "错误: " . $e->getMessage() . "\n";
+    echo "错误: " . $e->getMessage() . "\n\n";
 }
 
-// 示例 4：HLS → FLV（将上面生成的 HLS 合并回 FLV）
-$outputFlv = __DIR__ . '/output_from_hls.flv';
+
+echo "\n === 示例5: 转换mp4为flv === \n";
+$mp4File = __DIR__ . "/test.mp4";
+$flvFromMp4 = __DIR__ . "/output_from_mp4.flv";
 try {
-    $index = __DIR__ . '/hls/a/b/index.m3u8'; // 替换为实际 m3u8 路径
-    $res2 = \Xiaosongshu\Flv2mp4\Client::runHls2Flv($index, $outputFlv);
-    echo "合并完成: {$res2}\n";
+    if (file_exists($mp4File)) {
+        $res3 = \Xiaosongshu\Flv2mp4\Client::runMp42Flv($mp4File, $flvFromMp4);
+        echo "\n mp4转flv完成: {$res3}\n\n";
+    } else {
+        echo "跳过: 测试文件不存在 {$mp4File}\n\n";
+    }
 } catch (\Exception $e) {
-    echo "错误: " . $e->getMessage() . "\n";
+    echo "错误: " . $e->getMessage() . "\n\n";
 }
 ```
 
@@ -78,8 +96,8 @@ try {
 - 生成的 fMP4 切片适用于流式播放，参考 `play_merge.html`
 - 生成的 HLS 切片同时支持点播与直播，参考 `play.html`
 - 使用 HLS 切片合并为flv支持点播，参考 `flv.html`
+- 使用 MP3 转码为flv支持点播，参考 `flv.html`
 
-> 💡 提示：可用 `ffmpeg -i test.mp4 -c:v libx264 -c:a aac -f flv test.flv` 生成测试用 FLV 文件
 
 ## 🔧 背景
 

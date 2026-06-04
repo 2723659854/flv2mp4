@@ -10,8 +10,9 @@
 A pure PHP media conversion tool that supports:
 
 - **FLV → MP4** (regular MP4 or fMP4 segments)
-- **FLV → HLS** (m3u8 + TS segments)
+- **FLV → HLS** (generate m3u8 + TS segments)
 - **HLS → FLV** (merge HLS segments back into a single FLV file)
+- **MP4 → FLV** (transmux MP4 back to a single FLV file)
 
 Ideal for storage, distribution, and online playback, especially when paired with an RTMP live streaming server.
 
@@ -28,56 +29,74 @@ composer require xiaosongshu/flv2mp4
 require_once __DIR__ . '/vendor/autoload.php';
 ini_set('memory_limit', '512M');
 
-$file = __DIR__ . '/test.flv'; // the FLV file to convert
+$file = __DIR__."/test.flv";
 
-// Example 1: Convert to a single MP4 (video-on-demand)
-$outputDir1 = __DIR__ . '/output_merge';
-try {
+
+echo "=== Example 1: Segment FLV into fMP4 and merge to a single MP4 ===\n";
+$outputDir1 = __DIR__."/output_merge";
+try{
     $res = \Xiaosongshu\Flv2mp4\Client::runFlv2mp4($file, $outputDir1);
-    echo "Conversion done: {$res}\n";
-} catch (\Exception $e) {
-    echo "Error: " . $e->getMessage() . "\n";
+    echo "\nDone: " . $res . "\n\n";
+}catch (\Exception $e){
+    echo "Error: " . $e->getMessage() . "\n\n";
 }
 
-// Example 2: Generate separate audio/video fMP4 segments (for browser MSE playback)
-$outputDir2 = __DIR__ . '/output_separate';
-try {
+
+echo "=== Example 2: Generate separate audio/video fMP4 segments ===\n";
+$outputDir2 = __DIR__."/output_separate";
+try{
     $res = \Xiaosongshu\Flv2mp4\Client::runFlv2mp4Separate($file, $outputDir2);
-    echo "Audio init: {$res['audioInit']}\n";
-    echo "Video init: {$res['videoInit']}\n";
-    echo "Audio segments: " . count($res['audioSegments']) . "\n";
-    echo "Video segments: " . count($res['videoSegments']) . "\n";
-} catch (\Exception $e) {
+    echo "\nDone! Generated files:\n";
+    echo "  Audio init: " . ($res['audioInit'] ?? 'none') . "\n";
+    echo "  Video init: " . ($res['videoInit'] ?? 'none') . "\n";
+    echo "  Audio segments: " . count($res['audioSegments']) . "\n";
+    echo "  Video segments: " . count($res['videoSegments']) . "\n";
+    echo "  Metadata file: " . ($res['meta'] ?? 'none') . "\n";
+}catch (\Exception $e){
     echo "Error: " . $e->getMessage() . "\n";
 }
 
-// Example 3: FLV → HLS
-$outputDir3 = __DIR__ . '/hls';
+echo "\n === Example 3: Convert FLV to HLS === \n";
+$outputDir1 = __DIR__ . "/hls";
 try {
-    $res = \Xiaosongshu\Flv2mp4\Client::runFlv2Hls($file, $outputDir3);
-    echo "HLS index: {$res['index']}\n";
-    echo "Output dir: {$res['outputDir']}\n";
+    $res = \Xiaosongshu\Flv2mp4\Client::runFlv2Hls($file, $outputDir1);
+    echo "\n HLS conversion done: index = {$res['index']} dir = {$res['outputDir']}\n\n";
+
+    echo "\n === Example 4: Merge HLS back to FLV === \n";
+    $outputFlv = __DIR__ . "/output_from_hls.flv";
+    try {
+        $res2 = \Xiaosongshu\Flv2mp4\Client::runHls2Flv($res['index'], $outputFlv);
+        echo "\n HLS → FLV done: {$res2}\n\n";
+    } catch (\Exception $e) {
+        echo "Error: " . $e->getMessage() . "\n\n";
+    }
 } catch (\Exception $e) {
-    echo "Error: " . $e->getMessage() . "\n";
+    echo "Error: " . $e->getMessage() . "\n\n";
 }
 
-// Example 4: HLS → FLV (merge the HLS generated above back into FLV)
-$outputFlv = __DIR__ . '/output_from_hls.flv';
+
+echo "\n === Example 5: Convert MP4 to FLV === \n";
+$mp4File = __DIR__ . "/test.mp4";
+$flvFromMp4 = __DIR__ . "/output_from_mp4.flv";
 try {
-    $index = __DIR__ . '/hls/a/b/index.m3u8'; // replace with actual m3u8 path
-    $res2 = \Xiaosongshu\Flv2mp4\Client::runHls2Flv($index, $outputFlv);
-    echo "Merge completed: {$res2}\n";
+    if (file_exists($mp4File)) {
+        $res3 = \Xiaosongshu\Flv2mp4\Client::runMp42Flv($mp4File, $flvFromMp4);
+        echo "\n MP4 → FLV done: {$res3}\n\n";
+    } else {
+        echo "Skipped: test file not found {$mp4File}\n\n";
+    }
 } catch (\Exception $e) {
-    echo "Error: " . $e->getMessage() . "\n";
+    echo "Error: " . $e->getMessage() . "\n\n";
 }
 ```
 
 ## 🧪 Testing & Playback
 
-- The generated regular MP4 can be played directly with the HTML5 `<video>` tag, see `index.html`
-- The fMP4 segments are suitable for streaming playback, see `play_merge.html`
-- The HLS segments support both live and on-demand playback, see `play.html`
-- Merging HLS segments back to FLV enables on-demand playback, see `flv.html`
+- Generated MP4 files can be played directly with the HTML5 `<video>` tag, see `index.html`
+- fMP4 segments are suitable for streaming playback, see `play_merge.html`
+- HLS segments support both on-demand and live playback, see `play.html`
+- Merge HLS segments back to FLV for on-demand playback, see `flv.html`
+- MP4 to FLV conversion also supports on-demand, see `flv.html`
 
 > 💡 Tip: Use `ffmpeg -i test.mp4 -c:v libx264 -c:a aac -f flv test.flv` to generate a test FLV file.
 
@@ -87,7 +106,7 @@ Originally developed for [xiaosongshu/rtmp_server](https://github.com/2723659854
 
 ## ⚠️ Disclaimer
 
-- Some code or materials may originate from the internet. If any infringement is found, please contact the author for removal.
+- This project may contain code or materials from the internet. If any infringement occurs, please contact the author for removal.
 - This project is for technical communication and learning only. Any legal risks, commercial disputes, or copyright issues arising from its use are the sole responsibility of the user.
 - Please comply with local laws and regulations when using this tool.
 

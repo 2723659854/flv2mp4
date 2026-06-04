@@ -356,4 +356,22 @@ class Client
         $hls2Flv->run($m3u8File);
         return $outputFile;
     }
+
+    /**
+     * 将mp4转码为flv文件
+     * @param string $mp4File 原始mp4静态文件
+     * @param string $flvFile 输出的flv静态文件
+     * @return string|void 返回转码成功的flv文件
+     */
+    public static function runMp42Flv(string $mp4File, string $flvFile)
+    {
+        try{
+            $converter = new \Xiaosongshu\Flv2mp4\manage\Mp4ToFlv($mp4File, $flvFile);
+            if ($converter->run()){
+                return $flvFile;
+            }
+        }catch (\Exception $e){
+            throw new \RuntimeException("error:" . $e->getMessage());
+        }
+    }
 }
