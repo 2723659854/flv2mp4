@@ -1,7 +1,7 @@
 <?php
 
 // flv_gateway_http.php
-// HTTP-FLV流媒体网关 - 最终修复版
+// HTTP-FLV流媒体网关 - 完整修复版
 
 class FlvGateway
 {
@@ -59,7 +59,6 @@ class FlvGateway
             if (strpos($request, "\r\n\r\n") !== false) break;
         }
 
-        // 解析请求路径
         preg_match('#GET\s+/([^\s]+)#', $request, $matches);
         $streamPath = $matches[1] ?? '';
         $streamPath = preg_replace('/\.flv$/', '', $streamPath);
@@ -70,9 +69,9 @@ class FlvGateway
             return;
         }
 
-        echo "客户端请求流: /{$streamPath}\n";
+        echo "请求流: /{$streamPath}\n";
 
-        // 发送HTTP响应头
+        // 先发送HTTP响应头
         $httpHeader = "HTTP/1.1 200 OK\r\n"
             . "Content-Type: video/x-flv\r\n"
             . "Connection: keep-alive\r\n"
@@ -90,7 +89,7 @@ class FlvGateway
                 'stream' => $streamPath,
                 'last_active' => time(),
             ];
-            echo "+ 客户端（缓存命中），总数: " . count($this->clients) . "\n";
+            echo "+ 客户端就绪（缓存），总数: " . count($this->clients) . "\n";
             return;
         }
 
@@ -102,15 +101,20 @@ class FlvGateway
             $this->currentStreamPath = $streamPath;
             $this->resetCache($streamPath);
             $this->upstream = $this->connectUpstream($streamPath);
+
+            if (!$this->upstream) {
+                @socket_write($clientSocket, "HTTP/1.1 503 Service Unavailable\r\n\r\n");
+                socket_close($clientSocket);
+                return;
+            }
         }
 
         // 加入等待队列
         $this->pendingClients[] = [
             'socket' => $clientSocket,
             'stream' => $streamPath,
-            'last_active' => time(),
         ];
-        echo "+ 客户端等待数据，队列: " . count($this->pendingClients) . "\n";
+        echo "+ 等待初始化，队列: " . count($this->pendingClients) . "\n";
     }
 
     private function connectUpstream($streamPath)
@@ -119,9 +123,9 @@ class FlvGateway
         $parsed = parse_url($url);
         $host = $parsed['host'];
         $port = $parsed['port'] ?? 80;
-        $path = $parsed['path'];
+        $path = $parsed['path'] . (isset($parsed['query']) ? '?' . $parsed['query'] : '');
 
-        echo "连接上游: {$host}:{$port}{$path}\n";
+        echo "连接: {$host}:{$port}{$path}\n";
 
         $socket = socket_create(AF_INET, SOCK_STREAM, SOL_TCP);
         socket_set_option($socket, SOL_SOCKET, SO_RCVBUF, 262144);
@@ -139,7 +143,6 @@ class FlvGateway
             . "\r\n";
         socket_write($socket, $request);
 
-        // 读取HTTP响应
         $response = '';
         $startTime = time();
 
@@ -155,22 +158,19 @@ class FlvGateway
                 $header = substr($response, 0, $headerEnd);
                 $body = substr($response, $headerEnd + 4);
 
-                $firstLine = strtok($header, "\r\n");
-                echo "HTTP: {$firstLine}\n";
+                echo "HTTP: " . strtok($header, "\r\n") . "\n";
 
                 $this->chunkedEncoding = (stripos($header, "chunked") !== false);
 
-                if (strpos($firstLine, '200') !== false) {
-                    socket_set_nonblock($socket);
-                    if ($this->chunkedEncoding) {
-                        $this->chunkBuffer = $body;
-                        $this->buffer = $this->decodeChunked($this->chunkBuffer) ?? '';
-                    } else {
-                        $this->buffer = $body;
-                    }
-                    return $socket;
+                socket_set_nonblock($socket);
+
+                if ($this->chunkedEncoding) {
+                    $this->chunkBuffer = $body;
+                    $this->buffer = $this->decodeChunked($this->chunkBuffer) ?? '';
+                } else {
+                    $this->buffer = $body;
                 }
-                break;
+                return $socket;
             }
         }
 
@@ -187,7 +187,8 @@ class FlvGateway
             . $cache['videoSequenceHeader']
             . $cache['audioSequenceHeader'];
 
-        // 尝试发送，忽略EWOULDBLOCK错误
+        echo "发送初始化数据: " . strlen($data) . " 字节\n";
+
         $sent = 0;
         $dataLen = strlen($data);
 
@@ -196,7 +197,6 @@ class FlvGateway
             if ($result === false) {
                 $err = socket_last_error($clientSocket);
                 if ($err !== SOCKET_EWOULDBLOCK && $err !== 0) {
-                    echo "发送初始化数据失败: " . socket_strerror($err) . "\n";
                     return false;
                 }
                 usleep(1000);
@@ -218,9 +218,13 @@ class FlvGateway
 
         foreach ($this->pendingClients as $key => $clientInfo) {
             if ($this->sendInitData($clientInfo['socket'], $streamPath)) {
-                $this->clients[(int)$clientInfo['socket']] = $clientInfo;
+                $this->clients[(int)$clientInfo['socket']] = [
+                    'socket' => $clientInfo['socket'],
+                    'stream' => $streamPath,
+                    'last_active' => time(),
+                ];
                 unset($this->pendingClients[$key]);
-                echo "+ 客户端已就绪，总数: " . count($this->clients) . "\n";
+                echo "+ 客户端就绪，总数: " . count($this->clients) . "\n";
             }
         }
     }
@@ -234,19 +238,22 @@ class FlvGateway
         if ($data === false) {
             $error = socket_last_error($this->upstream);
             if ($error !== SOCKET_EWOULDBLOCK && $error !== 0) {
-                echo "上游错误: " . socket_strerror($error) . "\n";
+                echo "[调试] readFromUpstream: 上游错误 $error\n";
                 $this->reconnectUpstream();
             }
             return;
         }
 
-        if ($data === '') return;  // 非阻塞模式无数据
+        if ($data === '') return;
+
+        echo "[调试] readFromUpstream: 收到 " . strlen($data) . " 字节\n";
 
         if ($this->chunkedEncoding) {
             $this->chunkBuffer .= $data;
             $decoded = $this->decodeChunked($this->chunkBuffer);
             if ($decoded !== null) {
                 $this->buffer .= $decoded;
+                echo "[调试] readFromUpstream: 解码chunked后 " . strlen($decoded) . " 字节\n";
             }
         } else {
             $this->buffer .= $data;
@@ -255,31 +262,24 @@ class FlvGateway
         $this->processFlvData();
     }
 
-    private function decodeChunked(&$chunkBuffer)
+    private function decodeChunked(&$buf)
     {
         $decoded = '';
-        $bufferLen = strlen($chunkBuffer);
 
         while (true) {
-            $sizeEnd = strpos($chunkBuffer, "\r\n");
-            if ($sizeEnd === false) break;
+            $pos = strpos($buf, "\r\n");
+            if ($pos === false) break;
 
-            $sizeLine = substr($chunkBuffer, 0, $sizeEnd);
-            $chunkSize = hexdec(trim($sizeLine));
+            $size = hexdec(trim(substr($buf, 0, $pos)));
+            if ($size === 0) { $buf = ''; return $decoded; }
 
-            if ($chunkSize === 0) {
-                $chunkBuffer = '';
-                return $decoded;
-            }
+            $start = $pos + 2;
+            $end = $start + $size + 2;
 
-            $chunkDataStart = $sizeEnd + 2;
-            $chunkFullLen = $chunkDataStart + $chunkSize + 2;
+            if (strlen($buf) < $end) break;
 
-            if ($bufferLen < $chunkFullLen) break;
-
-            $decoded .= substr($chunkBuffer, $chunkDataStart, $chunkSize);
-            $chunkBuffer = substr($chunkBuffer, $chunkFullLen);
-            $bufferLen = strlen($chunkBuffer);
+            $decoded .= substr($buf, $start, $size);
+            $buf = substr($buf, $end);
         }
 
         return $decoded;
@@ -293,69 +293,90 @@ class FlvGateway
         // FLV头
         if (!$cache['flvHeader'] && strlen($this->buffer) >= 13) {
             if (substr($this->buffer, 0, 3) !== 'FLV') {
-                echo "[错误] 非FLV数据: " . bin2hex(substr($this->buffer, 0, min(16, strlen($this->buffer)))) . "\n";
+                echo "非FLV数据: " . bin2hex(substr($this->buffer, 0, 3)) . "\n";
                 return;
             }
             $cache['flvHeader'] = substr($this->buffer, 0, 9);
             $cache['previousTagSize0'] = substr($this->buffer, 9, 4);
             $this->buffer = substr($this->buffer, 13);
-            echo "[{$streamPath}] FLV头\n";
+            echo "FLV头 ✓\n";
         }
 
-        // 序列数据
+        // ====== 收集序列数据 ======
         while (!$cache['ready'] && strlen($this->buffer) >= 11) {
             $tagType = ord($this->buffer[0]);
             $dataSize = (ord($this->buffer[1]) << 16) | (ord($this->buffer[2]) << 8) | ord($this->buffer[3]);
-            $totalTagSize = 11 + $dataSize + 4;
+            $totalSize = 11 + $dataSize + 4;
 
-            if (strlen($this->buffer) < $totalTagSize) break;
+            if (strlen($this->buffer) < $totalSize) break;
 
-            $tagData = substr($this->buffer, 0, $totalTagSize);
-            $this->buffer = substr($this->buffer, $totalTagSize);
+            $tag = substr($this->buffer, 0, $totalSize);
+            $this->buffer = substr($this->buffer, $totalSize);
 
+            // 保存到缓存（不广播）
             if ($tagType === 18 && !$cache['metaDataTag']) {
-                $cache['metaDataTag'] = $tagData;
-                echo "[{$streamPath}] MetaData\n";
+                $cache['metaDataTag'] = $tag;
+                echo "MetaData ✓\n";
             } elseif ($tagType === 9 && !$cache['videoSequenceHeader']) {
-                $vData = substr($tagData, 11, $dataSize);
-                if (strlen($vData) >= 2 && (ord($vData[0]) >> 4) === 1 && ord($vData[1]) === 0) {
-                    $cache['videoSequenceHeader'] = $tagData;
-                    echo "[{$streamPath}] 视频序列头\n";
+                $v = substr($tag, 11, min($dataSize, 2));
+                if (strlen($v) >= 2 && (ord($v[0]) >> 4) === 1 && ord($v[1]) === 0) {
+                    $cache['videoSequenceHeader'] = $tag;
+                    echo "视频序列头 ✓\n";
                 }
             } elseif ($tagType === 8 && !$cache['audioSequenceHeader']) {
-                $aData = substr($tagData, 11, $dataSize);
-                if (strlen($aData) >= 2 && (ord($aData[0]) >> 4) === 10 && ord($aData[1]) === 0) {
-                    $cache['audioSequenceHeader'] = $tagData;
-                    echo "[{$streamPath}] 音频序列头\n";
+                $a = substr($tag, 11, min($dataSize, 2));
+                if (strlen($a) >= 2 && (ord($a[0]) >> 4) === 10 && ord($a[1]) === 0) {
+                    $cache['audioSequenceHeader'] = $tag;
+                    echo "音频序列头 ✓\n";
                 }
             }
 
-            if ($cache['flvHeader'] && ($cache['videoSequenceHeader'] || $cache['audioSequenceHeader'])) {
+            // ====== 关键：等待所有序列数据齐备 ======
+            if ($cache['flvHeader'] && $cache['videoSequenceHeader'] && $cache['audioSequenceHeader']) {
                 $cache['ready'] = true;
-                echo "[{$streamPath}] 初始化完毕\n";
+                echo ">>> 初始化完毕 <<<\n";
                 $this->processPendingClients();
+
+                // ====== 将缓存的序列数据也加入待转发buffer ======
+                // 这样后续客户端也能拿到完整数据
             }
         }
 
-        // 转发数据
+        // ====== 初始化完成后才转发数据 ======
         if ($cache['ready'] && strlen($this->buffer) > 0) {
+            echo "[调试] processFlvData: 调用broadcast，buffer长度=" . strlen($this->buffer) . "\n";
             $this->broadcast($this->buffer);
             $this->buffer = '';
+        } else if ($cache['ready'] && strlen($this->buffer) === 0) {
+            echo "[调试] processFlvData: buffer为空，跳过broadcast\n";
         }
     }
 
     private function broadcast($data)
     {
-        if (empty($data) || empty($this->clients)) return;
+        if (empty($data)) {
+            echo "[调试] broadcast: 无数据，跳过\n";
+            return;
+        }
+
+        if (empty($this->clients)) {
+            echo "[调试] broadcast: 无客户端，跳过\n";
+            return;
+        }
+
+        echo "[调试] broadcast: 准备发送给 " . count($this->clients) . " 个客户端，数据长度: " . strlen($data) . "\n";
 
         foreach ($this->clients as $key => $clientInfo) {
-            if ($clientInfo['stream'] !== $this->currentStreamPath) continue;
+            if ($clientInfo['stream'] !== $this->currentStreamPath) {
+                echo "[调试] broadcast: 客户端 {$key} 流不匹配\n";
+                continue;
+            }
 
             $result = @socket_write($clientInfo['socket'], $data);
             if ($result === false) {
                 $err = socket_last_error($clientInfo['socket']);
                 if ($err !== SOCKET_EWOULDBLOCK && $err !== 0) {
-                    echo "广播失败: " . socket_strerror($err) . "\n";
+                    echo "[调试] broadcast: 客户端 {$key} 发送失败: " . socket_strerror($err) . "\n";
                     @socket_close($clientInfo['socket']);
                     unset($this->clients[$key]);
                 }
@@ -365,11 +386,9 @@ class FlvGateway
 
     private function cleanupClients()
     {
-        // ====== 修复：不使用MSG_PEEK检测，改用timeout机制 ======
         $now = time();
 
         foreach ($this->clients as $key => $clientInfo) {
-            // 超过60秒无活动的客户端才断开
             if ($now - $clientInfo['last_active'] > 60) {
                 @socket_close($clientInfo['socket']);
                 unset($this->clients[$key]);
@@ -377,19 +396,15 @@ class FlvGateway
             }
         }
 
-        // 更新最后活动时间
         foreach ($this->clients as $key => &$clientInfo) {
             $result = @socket_recv($clientInfo['socket'], $buf, 1, MSG_PEEK | MSG_DONTWAIT);
             if ($result === 0) {
-                // 连接正常关闭
                 @socket_close($clientInfo['socket']);
                 unset($this->clients[$key]);
-                echo "- 客户端断开，总数: " . count($this->clients) . "\n";
+                echo "- 断开，总数: " . count($this->clients) . "\n";
             } elseif ($result > 0) {
-                // 有数据可读（可能是关闭信号），更新活动时间
                 $clientInfo['last_active'] = time();
             }
-            // result === false + EWOULDBLOCK = 正常，忽略
         }
         unset($clientInfo);
     }
@@ -411,7 +426,7 @@ class FlvGateway
     private function reconnectUpstream()
     {
         if ($this->upstream) @socket_close($this->upstream);
-        echo "2秒后重连...\n";
+        echo "重连中...\n";
         sleep(2);
         $this->upstream = $this->connectUpstream($this->currentStreamPath);
     }
