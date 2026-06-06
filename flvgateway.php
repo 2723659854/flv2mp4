@@ -4,556 +4,523 @@ class FlvGateway
 {
     private $upstreamBaseUrl = 'http://192.168.224.1:8501';
     private $listenPort = 8080;
-    
+
     private $serverSocket = null;
-    private $currentStream = '';
-    private $upstreamSocket = null;
-    private $upstreamReady = false;
-    
-    private $streamCache = [];
-    private $buffer = '';
-    private $chunkBuffer = '';
-    private $chunkedEncoding = false;
-    
+    private $streams = [];
     private $clients = [];
     private $pendingClients = [];
-    
-    public function __construct()
+
+    private $debug = true;
+    private $statsInterval = 10;
+    private $lastStatsTime = 0;
+
+    private function log($msg)
     {
-        $this->resetCache();
+        $time = date('H:i:s');
+        echo "[{$time}] {$msg}\n";
     }
-    
-    private function resetCache()
-    {
-        $this->streamCache = [
-            'flvHeader' => '',
-            'previousTagSize0' => '',
-            'metaDataTag' => '',
-            'videoSequenceHeader' => '',
-            'audioSequenceHeader' => '',
-            'ready' => false,
-        ];
-        $this->buffer = '';
-        $this->chunkBuffer = '';
-        $this->chunkedEncoding = false;
-        $this->upstreamReady = false;
-    }
-    
+
     public function start()
     {
         $this->serverSocket = socket_create(AF_INET, SOCK_STREAM, SOL_TCP);
-        if (!$this->serverSocket) {
-            die("socket_create 失败: " . socket_strerror(socket_last_error()) . "\n");
-        }
-        
         socket_set_option($this->serverSocket, SOL_SOCKET, SO_REUSEADDR, 1);
-        
-        if (!socket_bind($this->serverSocket, '0.0.0.0', $this->listenPort)) {
-            die("socket_bind 失败: " . socket_strerror(socket_last_error($this->serverSocket)) . "\n");
-        }
-        
-        if (!socket_listen($this->serverSocket, 50)) {
-            die("socket_listen 失败: " . socket_strerror(socket_last_error($this->serverSocket)) . "\n");
-        }
-        
+        socket_bind($this->serverSocket, '0.0.0.0', $this->listenPort);
+        socket_listen($this->serverSocket, 50);
         socket_set_nonblock($this->serverSocket);
-        
-        echo "HTTP-FLV网关启动，监听端口: {$this->listenPort}\n";
-        echo "上游服务器: {$this->upstreamBaseUrl}\n\n";
-        
+
+        $this->log("网关启动 端口:{$this->listenPort}");
+        $this->lastStatsTime = time();
         $this->eventLoop();
     }
-    
+
+    private function initStream($path)
+    {
+        if (!isset($this->streams[$path])) {
+            $this->streams[$path] = [
+                'path' => $path,
+                'upstreamSocket' => null,
+                'buffer' => '',
+                'chunkBuffer' => '',
+                'chunked' => false,
+                'httpHeaderParsed' => false,
+                'bytesReceived' => 0,
+                'bytesSent' => 0,
+                'lastReadTime' => 0,
+                'cache' => [
+                    'flvHeader' => '',
+                    'metaDataTag' => '',
+                    'videoSequence' => '',
+                    'audioSequence' => '',
+                    'ready' => false,
+                ],
+            ];
+            $this->log("[{$path}] 新流创建");
+        }
+        return $this->streams[$path];
+    }
+
     private function eventLoop()
     {
         while (true) {
-            $readSockets = [$this->serverSocket];
-            
-            if ($this->upstreamSocket) {
-                $readSockets[] = $this->upstreamSocket;
-            }
-            
-            foreach ($this->clients as $client) {
-                $readSockets[] = $client['socket'];
-            }
-            
-            foreach ($this->pendingClients as $client) {
-                $readSockets[] = $client['socket'];
-            }
-            
-            $writeSockets = [];
-            $exceptSockets = [];
-            
-            $timeout = ['sec' => 0, 'usec' => 10000];
-            $result = socket_select($readSockets, $writeSockets, $exceptSockets, $timeout['sec'], $timeout['usec']);
-            
-            if ($result === false) {
-                echo "socket_select 错误: " . socket_strerror(socket_last_error()) . "\n";
-                continue;
-            }
-            
-            if ($result === 0) {
-                continue;
-            }
-            
-            foreach ($readSockets as $socket) {
-                if ($socket === $this->serverSocket) {
-                    $this->acceptClient();
-                } elseif ($socket === $this->upstreamSocket) {
-                    $this->readFromUpstream();
-                } else {
-                    $this->checkClientDisconnect($socket);
+            $read = [$this->serverSocket];
+
+            foreach ($this->streams as $stream) {
+                if ($stream['upstreamSocket']) {
+                    $read[] = $stream['upstreamSocket'];
                 }
             }
-            
-            $this->sendPendingData();
-        }
-    }
-    
-    private function acceptClient()
-    {
-        $clientSocket = @socket_accept($this->serverSocket);
-        if (!$clientSocket) {
-            return;
-        }
-        
-        socket_set_nonblock($clientSocket);
-        socket_set_option($clientSocket, SOL_SOCKET, TCP_NODELAY, 1);
-        
-        $request = '';
-        $maxAttempts = 30;
-        $attempt = 0;
-        
-        while ($attempt++ < $maxAttempts) {
-            $chunk = @socket_read($clientSocket, 4096);
-            if ($chunk === false) {
-                usleep(1000);
-                continue;
+
+            foreach ($this->clients as $c) $read[] = $c['socket'];
+            foreach ($this->pendingClients as $c) $read[] = $c['socket'];
+
+            // 只收集select需要的write sockets，但不在回调中写数据
+            // 所有写操作统一在flushAllClientBuffers中处理
+            $write = [];
+            foreach ($this->clients as $id => $c) {
+                if (!empty($c['sendBuffer'])) $write[] = $c['socket'];
             }
-            if ($chunk === '') {
-                break;
+            foreach ($this->pendingClients as $id => $c) {
+                if (!empty($c['initData'])) $write[] = $c['socket'];
             }
-            $request .= $chunk;
-            if (strpos($request, "\r\n\r\n") !== false) {
-                break;
-            }
-        }
-        
-        if (empty($request)) {
-            @socket_close($clientSocket);
-            return;
-        }
-        
-        preg_match('#GET\s+/([^\s]+)#', $request, $matches);
-        $streamPath = $matches[1] ?? '';
-        $streamPath = preg_replace('/\.flv$/', '', $streamPath);
-        
-        if (empty($streamPath)) {
-            @socket_write($clientSocket, "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
-            socket_close($clientSocket);
-            return;
-        }
-        
-        echo "请求流: /{$streamPath}\n";
-        
-        $httpHeader = "HTTP/1.1 200 OK\r\n"
-            . "Content-Type: video/x-flv\r\n"
-            . "Connection: keep-alive\r\n"
-            . "Cache-Control: no-cache\r\n"
-            . "Access-Control-Allow-Origin: *\r\n"
-            . "\r\n";
-        @socket_write($clientSocket, $httpHeader);
-        
-        if ($this->currentStream !== $streamPath) {
-            $this->switchStream($streamPath);
-        }
-        
-        if ($this->streamCache['ready']) {
-            $this->sendInitData($clientSocket);
-            $this->clients[(int)$clientSocket] = [
-                'socket' => $clientSocket,
-                'stream' => $streamPath,
-                'sendBuffer' => '',
-            ];
-            echo "+ 客户端就绪（缓存），总数: " . count($this->clients) . "\n";
-        } else {
-            $this->pendingClients[(int)$clientSocket] = [
-                'socket' => $clientSocket,
-                'stream' => $streamPath,
-            ];
-            echo "+ 等待初始化，队列: " . count($this->pendingClients) . "\n";
-        }
-    }
-    
-    private function switchStream($streamPath)
-    {
-        echo "切换流: {$streamPath}\n";
-        
-        if ($this->upstreamSocket) {
-            @socket_close($this->upstreamSocket);
-            $this->upstreamSocket = null;
-        }
-        
-        $this->currentStream = $streamPath;
-        $this->resetCache();
-        
-        $this->upstreamSocket = $this->connectUpstream($streamPath);
-        if (!$this->upstreamSocket) {
-            echo "上游连接失败\n";
-            foreach ($this->pendingClients as $key => $client) {
-                @socket_write($client['socket'], "HTTP/1.1 503 Service Unavailable\r\n\r\n");
-                @socket_close($client['socket']);
-                unset($this->pendingClients[$key]);
-            }
-            $this->currentStream = '';
-        }
-    }
-    
-    private function connectUpstream($streamPath)
-    {
-        $url = "{$this->upstreamBaseUrl}/{$streamPath}.flv";
-        $parsed = parse_url($url);
-        $host = $parsed['host'];
-        $port = $parsed['port'] ?? 80;
-        $path = $parsed['path'] . (isset($parsed['query']) ? '?' . $parsed['query'] : '');
-        
-        echo "连接上游: {$host}:{$port}{$path}\n";
-        
-        $socket = socket_create(AF_INET, SOCK_STREAM, SOL_TCP);
-        if (!$socket) {
-            return false;
-        }
-        
-        socket_set_option($socket, SOL_SOCKET, SO_RCVBUF, 262144);
-        
-        if (!@socket_connect($socket, $host, $port)) {
-            socket_close($socket);
-            return false;
-        }
-        
-        $request = "GET {$path} HTTP/1.1\r\n"
-            . "Host: {$host}\r\n"
-            . "Accept: */*\r\n"
-            . "Connection: keep-alive\r\n"
-            . "User-Agent: FlvGateway/1.0\r\n"
-            . "\r\n";
-        
-        if (!socket_write($socket, $request)) {
-            socket_close($socket);
-            return false;
-        }
-        
-        $response = '';
-        $maxAttempts = 50;
-        $attempt = 0;
-        
-        while ($attempt++ < $maxAttempts) {
-            $chunk = @socket_read($socket, 4096);
-            if ($chunk === false) {
+
+            $except = null;
+            $n = @socket_select($read, $write, $except, 0, 200000);
+
+            if ($n === false) {
                 usleep(10000);
                 continue;
             }
-            if ($chunk === '') {
-                socket_close($socket);
-                return false;
-            }
-            
-            $response .= $chunk;
-            $headerEnd = strpos($response, "\r\n\r\n");
-            
-            if ($headerEnd !== false) {
-                $header = substr($response, 0, $headerEnd);
-                $body = substr($response, $headerEnd + 4);
-                
-                echo "HTTP: " . strtok($header, "\r\n") . "\n";
-                
-                if (stripos($header, "HTTP/1.1 200") === false) {
-                    echo "上游返回错误\n";
-                    socket_close($socket);
-                    return false;
+
+            // 处理可读
+            if ($n > 0) {
+                foreach ($read as $sock) {
+                    if ($sock === $this->serverSocket) {
+                        $this->acceptClient();
+                    } else {
+                        $this->handleRead($sock);
+                    }
                 }
-                
-                $this->chunkedEncoding = (stripos($header, "Transfer-Encoding: chunked") !== false);
-                socket_set_nonblock($socket);
-                
-                if ($this->chunkedEncoding) {
-                    $this->chunkBuffer = $body;
-                } else {
-                    $this->buffer = $body;
-                }
-                
-                $this->upstreamReady = true;
-                return $socket;
             }
-        }
-        
-        socket_close($socket);
-        return false;
-    }
-    
-    private function readFromUpstream()
-    {
-        if (!$this->upstreamReady) {
-            return;
-        }
-        
-        $data = @socket_read($this->upstreamSocket, 65536);
-        
-        if ($data === false) {
-            $error = socket_last_error($this->upstreamSocket);
-            if ($error !== SOCKET_EWOULDBLOCK && $error !== 0) {
-                $this->handleUpstreamDisconnect();
+
+            // ====== 统一处理所有写操作 ======
+            $this->flushAllClients();
+
+            // 定期统计
+            if (time() - $this->lastStatsTime >= $this->statsInterval) {
+                $this->printStats();
+                $this->lastStatsTime = time();
             }
-            return;
-        }
-        
-        if ($data === '') {
-            $this->handleUpstreamDisconnect();
-            return;
-        }
-        
-        if ($this->chunkedEncoding) {
-            $this->chunkBuffer .= $data;
-            $decoded = $this->decodeChunked();
-            if ($decoded !== null) {
-                $this->buffer .= $decoded;
-            }
-        } else {
-            $this->buffer .= $data;
-        }
-        
-        $this->processFlvData();
-    }
-    
-    private function decodeChunked()
-    {
-        $decoded = '';
-        
-        while (true) {
-            $pos = strpos($this->chunkBuffer, "\r\n");
-            if ($pos === false) {
-                return $decoded === '' ? null : $decoded;
-            }
-            
-            $sizeLine = trim(substr($this->chunkBuffer, 0, $pos));
-            $size = hexdec($sizeLine);
-            
-            if ($size === 0) {
-                $this->chunkBuffer = '';
-                return $decoded;
-            }
-            
-            $start = $pos + 2;
-            $end = $start + $size + 2;
-            
-            if (strlen($this->chunkBuffer) < $end) {
-                return $decoded === '' ? null : $decoded;
-            }
-            
-            $decoded .= substr($this->chunkBuffer, $start, $size);
-            $this->chunkBuffer = substr($this->chunkBuffer, $end);
         }
     }
-    
-    private function processFlvData()
+
+    /**
+     * 统一的客户端数据发送（唯一写入点）
+     */
+    private function flushAllClients()
     {
-        $cache = &$this->streamCache;
-        $pendingData = '';
-        
-        if (!$cache['flvHeader'] && strlen($this->buffer) >= 13) {
-            if (substr($this->buffer, 0, 3) !== 'FLV') {
-                echo "非FLV数据\n";
-                return;
-            }
-            $cache['flvHeader'] = substr($this->buffer, 0, 9);
-            $cache['previousTagSize0'] = substr($this->buffer, 9, 4);
-            $this->buffer = substr($this->buffer, 13);
-            echo "FLV头 ✓\n";
-        }
-        
-        while (!$cache['ready'] && strlen($this->buffer) >= 11) {
-            $tagType = ord($this->buffer[0]);
-            $dataSize = (ord($this->buffer[1]) << 16) | (ord($this->buffer[2]) << 8) | ord($this->buffer[3]);
-            $totalSize = 11 + $dataSize + 4;
-            
-            if (strlen($this->buffer) < $totalSize) {
-                break;
-            }
-            
-            $tag = substr($this->buffer, 0, $totalSize);
-            $this->buffer = substr($this->buffer, $totalSize);
-            
-            if ($tagType === 18 && !$cache['metaDataTag']) {
-                $cache['metaDataTag'] = $tag;
-                echo "MetaData ✓\n";
-            } elseif ($tagType === 9 && !$cache['videoSequenceHeader']) {
-                $v = substr($tag, 11, min($dataSize, 2));
-                if (strlen($v) >= 2 && (ord($v[0]) >> 4) === 1 && ord($v[1]) === 0) {
-                    $cache['videoSequenceHeader'] = $tag;
-                    echo "视频序列头 ✓\n";
-                } else {
-                    $pendingData .= $tag;
+        // 1. 发送pending客户端的初始化数据
+        foreach ($this->pendingClients as $id => &$c) {
+            if (empty($c['initData'])) continue;
+
+            $written = @socket_write($c['socket'], $c['initData']);
+            if ($written === false) {
+                $err = socket_last_error($c['socket']);
+                if ($err !== SOCKET_EWOULDBLOCK && $err !== 0) {
+                    $this->log("pending客户端{$id}写入失败: " . socket_strerror($err));
+                    $this->removeClient($id);
                 }
-            } elseif ($tagType === 8 && !$cache['audioSequenceHeader']) {
-                $a = substr($tag, 11, min($dataSize, 2));
-                if (strlen($a) >= 2 && (ord($a[0]) >> 4) === 10 && ord($a[1]) === 0) {
-                    $cache['audioSequenceHeader'] = $tag;
-                    echo "音频序列头 ✓\n";
-                } else {
-                    $pendingData .= $tag;
-                }
-            } else {
-                $pendingData .= $tag;
+                continue;
             }
-            
-            if ($cache['flvHeader'] && $cache['videoSequenceHeader'] && $cache['audioSequenceHeader']) {
-                $cache['ready'] = true;
-                echo ">>> 初始化完毕 <<<\n";
-                $this->processPendingClients();
-                
-                if (strlen($pendingData) > 0) {
-                    $this->broadcast($pendingData);
-                }
-                $pendingData = '';
+
+            $c['initData'] = substr($c['initData'], $written);
+            $streamPath = $c['stream'];
+            if (isset($this->streams[$streamPath])) {
+                $this->streams[$streamPath]['bytesSent'] += $written;
             }
-        }
-        
-        if ($cache['ready'] && strlen($this->buffer) > 0) {
-            $broadcastData = $this->buffer;
-            $this->buffer = '';
-            $this->broadcast($broadcastData);
-        }
-        
-        if (!$cache['ready'] && strlen($pendingData) > 0) {
-            $this->buffer = $pendingData . $this->buffer;
-        }
-    }
-    
-    private function processPendingClients()
-    {
-        foreach ($this->pendingClients as $key => $clientInfo) {
-            if ($this->sendInitData($clientInfo['socket'])) {
-                $this->clients[$key] = [
-                    'socket' => $clientInfo['socket'],
-                    'stream' => $clientInfo['stream'],
+
+            // 初始化数据发送完毕，迁移到正式客户端
+            if (empty($c['initData'])) {
+                $this->clients[$id] = [
+                    'socket' => $c['socket'],
+                    'stream' => $streamPath,
                     'sendBuffer' => '',
                 ];
-                unset($this->pendingClients[$key]);
-                echo "+ 客户端就绪，总数: " . count($this->clients) . "\n";
+                unset($this->pendingClients[$id]);
+                $this->log("[{$streamPath}] 客户端{$id}就绪 总数:" . count($this->clients));
             }
         }
-    }
-    
-    private function sendInitData($clientSocket)
-    {
-        $cache = $this->streamCache;
-        $data = $cache['flvHeader']
-            . $cache['previousTagSize0']
-            . $cache['metaDataTag']
-            . $cache['videoSequenceHeader']
-            . $cache['audioSequenceHeader'];
-        
-        $sent = 0;
-        $dataLen = strlen($data);
-        
-        while ($sent < $dataLen) {
-            $result = @socket_write($clientSocket, substr($data, $sent));
-            if ($result === false) {
-                $err = socket_last_error($clientSocket);
+        unset($c);
+
+        // 2. 发送正式客户端的缓冲数据
+        foreach ($this->clients as $id => &$c) {
+            if (empty($c['sendBuffer'])) continue;
+
+            $written = @socket_write($c['socket'], $c['sendBuffer']);
+            if ($written === false) {
+                $err = socket_last_error($c['socket']);
                 if ($err !== SOCKET_EWOULDBLOCK && $err !== 0) {
-                    return false;
+                    $this->log("客户端{$id}写入失败: " . socket_strerror($err));
+                    $this->removeClient($id);
                 }
-                usleep(1000);
                 continue;
             }
-            $sent += $result;
+
+            $c['sendBuffer'] = substr($c['sendBuffer'], $written);
+            if (isset($this->streams[$c['stream']])) {
+                $this->streams[$c['stream']]['bytesSent'] += $written;
+            }
         }
-        
-        return true;
+        unset($c);
     }
-    
-    private function broadcast($data)
+
+    private function printStats()
     {
-        if (empty($data) || empty($this->clients)) {
+        $this->log("========== 统计 ==========");
+        $this->log("活跃流: " . count($this->streams) . " | 客户端: " . count($this->clients) . " | 等待: " . count($this->pendingClients));
+
+        foreach ($this->streams as $path => $stream) {
+            $clientCount = 0;
+            $totalBuffer = 0;
+            foreach ($this->clients as $c) {
+                if ($c['stream'] === $path) {
+                    $clientCount++;
+                    $totalBuffer += strlen($c['sendBuffer']);
+                }
+            }
+            $pendingCount = 0;
+            foreach ($this->pendingClients as $c) {
+                if ($c['stream'] === $path) $pendingCount++;
+            }
+
+            $upstreamStatus = $stream['upstreamSocket'] ? '✓' : '✗';
+            $lastRead = $stream['lastReadTime'] ? (time() - $stream['lastReadTime']) . 's' : '-';
+
+            $this->log("  /{$path} 上游:{$upstreamStatus} 客户端:{$clientCount}+{$pendingCount} "
+                . "收:" . $this->formatBytes($stream['bytesReceived'])
+                . " 发:" . $this->formatBytes($stream['bytesSent'])
+                . " 缓冲:{$totalBuffer}B 最后读:{$lastRead}");
+        }
+        $this->log("==========================");
+    }
+
+    private function formatBytes($bytes)
+    {
+        if ($bytes >= 1048576) return round($bytes / 1048576, 2) . 'MB';
+        if ($bytes >= 1024) return round($bytes / 1024, 2) . 'KB';
+        return $bytes . 'B';
+    }
+
+    private function acceptClient()
+    {
+        $client = @socket_accept($this->serverSocket);
+        if (!$client) return;
+
+        $sockId = (int)$client;
+        socket_set_nonblock($client);
+        socket_set_option($client, SOL_SOCKET, TCP_NODELAY, 1);
+        socket_set_option($client, SOL_SOCKET, SO_SNDBUF, 262144);
+
+        $req = '';
+        for ($i = 0; $i < 30; $i++) {
+            $chunk = @socket_read($client, 4096);
+            if ($chunk === false) { usleep(1000); continue; }
+            if ($chunk === '') break;
+            $req .= $chunk;
+            if (strpos($req, "\r\n\r\n") !== false) break;
+        }
+
+        preg_match('#GET\s+/([^\s]+)#', $req, $m);
+        $path = preg_replace('/\.flv$/', '', $m[1] ?? '');
+
+        if (!$path) {
+            @socket_write($client, "HTTP/1.1 400\r\nConnection: close\r\n\r\n");
+            socket_close($client);
+            $this->log("客户端{$sockId}无效请求");
             return;
         }
-        
-        foreach ($this->clients as $key => &$client) {
-            if ($client['stream'] !== $this->currentStream) {
-                continue;
-            }
-            $client['sendBuffer'] .= $data;
+
+        $this->log("[{$path}] 新请求 客户端{$sockId}");
+
+        @socket_write($client, "HTTP/1.1 200 OK\r\nContent-Type: video/x-flv\r\nConnection: keep-alive\r\n\r\n");
+
+        $stream = $this->initStream($path);
+
+        if ($stream['cache']['ready']) {
+            $initData = $stream['cache']['flvHeader']
+                . $stream['cache']['metaDataTag']
+                . $stream['cache']['videoSequence']
+                . $stream['cache']['audioSequence'];
+
+            $this->clients[$sockId] = [
+                'socket' => $client,
+                'stream' => $path,
+                'sendBuffer' => $initData,
+            ];
+            $this->log("[{$path}] 客户端{$sockId}缓存命中 " . strlen($initData) . "字节");
+            return;
+        }
+
+        $this->pendingClients[$sockId] = [
+            'socket' => $client,
+            'stream' => $path,
+            'initData' => '',
+        ];
+
+        if (!$stream['upstreamSocket']) {
+            $this->log("[{$path}] 连接上游");
+            $this->connectUpstream($path);
         }
     }
-    
-    private function sendPendingData()
+
+    private function connectUpstream($path)
     {
-        foreach ($this->clients as $key => &$client) {
-            if (empty($client['sendBuffer'])) {
-                continue;
-            }
-            
-            $result = @socket_write($client['socket'], $client['sendBuffer']);
-            if ($result === false) {
-                $err = socket_last_error($client['socket']);
-                if ($err !== SOCKET_EWOULDBLOCK && $err !== 0) {
-                    @socket_close($client['socket']);
-                    unset($this->clients[$key]);
-                    echo "- 客户端断开，总数: " . count($this->clients) . "\n";
+        $stream = &$this->streams[$path];
+
+        $url = "{$this->upstreamBaseUrl}/{$path}.flv";
+        $p = parse_url($url);
+        $host = $p['host'];
+        $port = $p['port'] ?? 80;
+        $reqPath = $p['path'];
+
+        $this->log("[{$path}] 连接上游 {$host}:{$port}{$reqPath}");
+
+        $sock = socket_create(AF_INET, SOCK_STREAM, SOL_TCP);
+        socket_set_option($sock, SOL_SOCKET, SO_RCVBUF, 262144);
+
+        if (!@socket_connect($sock, $host, $port)) {
+            $this->log("[{$path}] 连接失败");
+            socket_close($sock);
+            return;
+        }
+
+        $req = "GET {$reqPath} HTTP/1.1\r\nHost: {$host}\r\nAccept: */*\r\nConnection: keep-alive\r\n\r\n";
+        socket_write($sock, $req);
+
+        $resp = '';
+        for ($i = 0; $i < 50; $i++) {
+            $chunk = @socket_read($sock, 4096);
+            if ($chunk === false) { usleep(10000); continue; }
+            if ($chunk === '') break;
+            $resp .= $chunk;
+            $pos = strpos($resp, "\r\n\r\n");
+            if ($pos !== false) {
+                $header = substr($resp, 0, $pos);
+                $body = substr($resp, $pos + 4);
+                $stream['chunked'] = (stripos($header, "chunked") !== false);
+                $stream['httpHeaderParsed'] = true;
+                socket_set_nonblock($sock);
+
+                if ($stream['chunked']) {
+                    $stream['chunkBuffer'] = $body;
+                } else {
+                    $stream['buffer'] = $body;
                 }
-            } else {
-                $client['sendBuffer'] = substr($client['sendBuffer'], $result);
+                $stream['upstreamSocket'] = $sock;
+                $stream['lastReadTime'] = time();
+                $this->log("[{$path}] 上游连接成功 chunked={$stream['chunked']}");
+                return;
             }
         }
+        $this->log("[{$path}] HTTP响应超时");
+        socket_close($sock);
     }
-    
-    private function checkClientDisconnect($socket)
+
+    private function handleRead($sock)
     {
-        $result = @socket_recv($socket, $buf, 1, MSG_PEEK | MSG_DONTWAIT);
-        if ($result === 0) {
-            $socketId = (int)$socket;
-            
-            if (isset($this->clients[$socketId])) {
-                @socket_close($socket);
-                unset($this->clients[$socketId]);
-                echo "- 客户端断开，总数: " . count($this->clients) . "\n";
-            } elseif (isset($this->pendingClients[$socketId])) {
-                @socket_close($socket);
-                unset($this->pendingClients[$socketId]);
-                echo "- 等待客户端断开\n";
+        // 查找上游
+        foreach ($this->streams as $path => &$stream) {
+            if ($stream['upstreamSocket'] === $sock) {
+                $this->readUpstream($path);
+                return;
             }
         }
+        unset($stream);
+
+        // 检测客户端断开
+        $data = @socket_read($sock, 1);
+        if ($data === '' || ($data === false && socket_last_error($sock) !== SOCKET_EWOULDBLOCK)) {
+            $this->removeClient((int)$sock);
+        }
     }
-    
-    private function handleUpstreamDisconnect()
+
+    private function readUpstream($path)
     {
-        if ($this->upstreamSocket) {
-            @socket_close($this->upstreamSocket);
-            $this->upstreamSocket = null;
+        $stream = &$this->streams[$path];
+
+        $data = @socket_read($stream['upstreamSocket'], 65536);
+        if ($data === false || $data === '') {
+            $this->log("[{$path}] 上游断开");
+            $this->reconnectUpstream($path);
+            return;
         }
-        
-        echo "关闭所有下游客户端\n";
-        
-        foreach ($this->clients as $client) {
-            @socket_close($client['socket']);
+
+        $stream['bytesReceived'] += strlen($data);
+        $stream['lastReadTime'] = time();
+
+        if ($stream['chunked']) {
+            $stream['chunkBuffer'] .= $data;
+            $decoded = $this->decodeChunked($stream['chunkBuffer']);
+            if ($decoded !== null) $stream['buffer'] .= $decoded;
+        } else {
+            $stream['buffer'] .= $data;
         }
-        $this->clients = [];
-        
-        foreach ($this->pendingClients as $client) {
-            @socket_close($client['socket']);
+
+        $this->processFlvData($path);
+    }
+
+    private function reconnectUpstream($path)
+    {
+        $stream = &$this->streams[$path];
+
+        if ($stream['upstreamSocket']) {
+            @socket_close($stream['upstreamSocket']);
+            $stream['upstreamSocket'] = null;
         }
-        $this->pendingClients = [];
-        
-        $this->currentStream = '';
-        $this->resetCache();
+
+        $stream['buffer'] = '';
+        $stream['chunkBuffer'] = '';
+        $stream['chunked'] = false;
+        $stream['httpHeaderParsed'] = false;
+        $stream['cache'] = [
+            'flvHeader' => '',
+            'metaDataTag' => '',
+            'videoSequence' => '',
+            'audioSequence' => '',
+            'ready' => false,
+        ];
+
+        // 现有客户端移到等待队列
+        foreach ($this->clients as $id => $c) {
+            if ($c['stream'] === $path) {
+                $this->pendingClients[$id] = [
+                    'socket' => $c['socket'],
+                    'stream' => $path,
+                    'initData' => '',
+                ];
+                unset($this->clients[$id]);
+            }
+        }
+
+        $this->log("[{$path}] 2秒后重连...");
+        sleep(2);
+        $this->connectUpstream($path);
+    }
+
+    private function decodeChunked(&$buf)
+    {
+        $decoded = '';
+        while (true) {
+            $pos = strpos($buf, "\r\n");
+            if ($pos === false) break;
+            $size = hexdec(trim(substr($buf, 0, $pos)));
+            if ($size === 0) { $buf = ''; return $decoded; }
+            $start = $pos + 2;
+            $end = $start + $size + 2;
+            if (strlen($buf) < $end) break;
+            $decoded .= substr($buf, $start, $size);
+            $buf = substr($buf, $end);
+        }
+        return $decoded;
+    }
+
+    private function processFlvData($path)
+    {
+        $stream = &$this->streams[$path];
+        $cache = &$stream['cache'];
+
+        if (!$cache['flvHeader'] && strlen($stream['buffer']) >= 13) {
+            $cache['flvHeader'] = substr($stream['buffer'], 0, 13);
+            $stream['buffer'] = substr($stream['buffer'], 13);
+            if ($this->debug) $this->log("[{$path}] FLV头 ✓");
+        }
+
+        while (strlen($stream['buffer']) >= 11) {
+            $tagType = ord($stream['buffer'][0]);
+            $dataSize = (ord($stream['buffer'][1]) << 16) | (ord($stream['buffer'][2]) << 8) | ord($stream['buffer'][3]);
+            $totalSize = 11 + $dataSize + 4;
+            if (strlen($stream['buffer']) < $totalSize) break;
+
+            $tag = substr($stream['buffer'], 0, $totalSize);
+            $stream['buffer'] = substr($stream['buffer'], $totalSize);
+            $payload = substr($tag, 11, $dataSize);
+
+            if (!$cache['ready']) {
+                if ($tagType === 18 && !$cache['metaDataTag']) {
+                    $cache['metaDataTag'] = $tag;
+                    $this->log("[{$path}] MetaData ✓");
+                    continue;
+                }
+                if ($tagType === 9 && !$cache['videoSequence']) {
+                    if (strlen($payload) >= 2 && ((ord($payload[0]) >> 4) & 0x0F) === 1 && ord($payload[1]) === 0) {
+                        $cache['videoSequence'] = $tag;
+                        $this->log("[{$path}] 视频序列头 ✓");
+                        continue;
+                    }
+                }
+                if ($tagType === 8 && !$cache['audioSequence']) {
+                    if (strlen($payload) >= 2 && ((ord($payload[0]) >> 4) & 0x0F) === 10 && ord($payload[1]) === 0) {
+                        $cache['audioSequence'] = $tag;
+                        $this->log("[{$path}] 音频序列头 ✓");
+                        continue;
+                    }
+                }
+
+                if ($cache['flvHeader'] && $cache['videoSequence'] && $cache['audioSequence']) {
+                    $cache['ready'] = true;
+                    $this->log("[{$path}] >>> 初始化完毕 <<<");
+                    $this->notifyPendingClients($path);
+                }
+            }
+
+            // 广播到该流的所有客户端
+            $this->broadcastToStream($path, $tag);
+        }
+    }
+
+    private function notifyPendingClients($path)
+    {
+        $cache = $this->streams[$path]['cache'];
+        $initData = $cache['flvHeader'] . $cache['metaDataTag'] . $cache['videoSequence'] . $cache['audioSequence'];
+
+        $count = 0;
+        foreach ($this->pendingClients as $id => &$c) {
+            if ($c['stream'] === $path) {
+                $c['initData'] = $initData;
+                $count++;
+            }
+        }
+        unset($c);
+        $this->log("[{$path}] 通知{$count}个等待客户端");
+    }
+
+    private function broadcastToStream($path, $data)
+    {
+        foreach ($this->clients as $id => &$c) {
+            if ($c['stream'] === $path) {
+                $c['sendBuffer'] .= $data;
+            }
+        }
+        unset($c);
+    }
+
+    private function removeClient($id)
+    {
+        $path = null;
+        if (isset($this->clients[$id])) {
+            $path = $this->clients[$id]['stream'];
+            @socket_close($this->clients[$id]['socket']);
+            unset($this->clients[$id]);
+        }
+        if (isset($this->pendingClients[$id])) {
+            $path = $this->pendingClients[$id]['stream'];
+            @socket_close($this->pendingClients[$id]['socket']);
+            unset($this->pendingClients[$id]);
+        }
+        $this->log("客户端{$id}断开 流:/{$path} 剩余:" . count($this->clients));
     }
 }
-
+# 推流多路直播测试  ffmpeg -re -stream_loop -1 -i test.mp4 -c:v libx264 -c:a aac -f flv rtmp://127.0.0.1:1935/c/d
 error_reporting(E_ALL);
-ini_set('display_errors', 1);
 set_time_limit(0);
-ignore_user_abort(true);
-
 $gateway = new FlvGateway();
 $gateway->start();
-?>
