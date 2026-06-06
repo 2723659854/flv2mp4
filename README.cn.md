@@ -13,6 +13,7 @@
 - **FLV → HLS**（生成 m3u8 + TS 切片）
 - **HLS → FLV**（将 HLS 切片合并回单个 FLV 文件）
 - **MP4 → FLV**（将 MP4 转码回单个 FLV 文件）
+- **FLV → GATEWAY**（网关转发flv直播流，支持高并发）
 
 适用于存储、分发和在线播放场景，尤其适合与 RTMP 直播服务器配合使用。
 
@@ -89,7 +90,36 @@ try {
     echo "错误: " . $e->getMessage() . "\n\n";
 }
 ```
+flv直播网关示例代码
 
+```php
+require_once __DIR__ . '/vendor/autoload.php';
+// ====== 启动 ======
+error_reporting(E_ALL);
+set_time_limit(0);
+
+/** 本网关对下游提供服务的端口 */
+$port = isset($argv[1]) ? (int)$argv[1] : 8080;
+/** 上游flv播放地址 */
+$upstream = isset($argv[2]) ? $argv[2] : 'http://127.0.0.1:8501';
+
+/**
+ * # 一级网关
+ * php gateway.php 8080 http://127.0.0.1:8501 播放地址 http://127.0.0.1:8080/{应用名}/{频道名}.flv
+ *
+ * # 二级网关
+ * php gateway.php 8081 http://127.0.0.1:8080 播放地址 http://127.0.0.1:8081/{应用名}/{频道名}.flv
+ *
+ * # 三级网关
+ * php gateway.php 8082 http://127.0.0.1:8081 播放地址 http://127.0.0.1:8082/{应用名}/{频道名}.flv
+ */
+$gateway = new \Xiaosongshu\Flv2mp4\manage\FlvGateway($port, $upstream);
+/** 是否开启调试模式，调试模式打印日志 */
+$gateway->debug = true;
+/** 启动网关 */
+$gateway->start();
+
+```
 ## 🧪 测试与播放
 
 - 生成的普通 MP4 可直接用 HTML5 `<video>` 标签播放，参考 `index.html`
@@ -97,6 +127,7 @@ try {
 - 生成的 HLS 切片同时支持点播与直播，参考 `play.html`
 - 使用 HLS 切片合并为flv支持点播，参考 `flv.html`
 - 使用 MP3 转码为flv支持点播，参考 `flv.html`
+- FLV网关是支持直播转发流量，支持高并发，可以多层级多节点部署
 
 
 ## 🔧 背景
