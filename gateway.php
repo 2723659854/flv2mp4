@@ -2,8 +2,8 @@
 
 class FlvGateway
 {
-    private $upstreamBaseUrl = 'http://192.168.96.1:8501';
-    private $listenPort = 8080;
+    private $upstreamBaseUrl = 'http://127.0.0.1:8501';
+    private $listenPort = 8082;
     private $clients = [];
     private $pendingClients = [];
 
