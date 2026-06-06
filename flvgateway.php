@@ -302,14 +302,12 @@ class FlvGateway
         if ($data === false) {
             $error = socket_last_error($this->upstreamSocket);
             if ($error !== SOCKET_EWOULDBLOCK && $error !== 0) {
-                echo "上游错误\n";
                 $this->handleUpstreamDisconnect();
             }
             return;
         }
         
         if ($data === '') {
-            echo "上游断开\n";
             $this->handleUpstreamDisconnect();
             return;
         }
