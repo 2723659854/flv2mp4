@@ -1,4 +1,4 @@
-# FLV ↔ MP4 / HLS Converter Tool
+# FLV ↔ MP4 / HLS Conversion Tool
 
 <p align="center">
   <a href="./README.cn.md"><strong>🇨🇳 Chinese</strong></a> •
@@ -6,21 +6,25 @@
 </p>
 
 ## 📖 Introduction
-A media conversion tool written entirely in pure PHP, supporting the following conversion workflows:
-- **FLV → MP4**: Standard MP4 or fragmented fMP4 chunks
-- **FLV → HLS**: Generate HLS m3u8 index + TS segment files
-- **HLS → FLV**: Merge split HLS TS segments back into a single FLV file
-- **MP4 → FLV**: Remux existing MP4 files into standalone FLV format
-- **FLV → GATEWAY**: FLV live stream relay gateway with high concurrency support
 
-Optimized for media storage, content distribution and online playback scenarios, perfectly paired with the RTMP live streaming server project.
+A pure PHP media conversion tool supporting:
+
+- **FLV → MP4** (regular MP4 or fMP4 segments)
+- **FLV → HLS** (generate m3u8 + TS segments)
+- **HLS → FLV** (merge HLS segments back into a single FLV file)
+- **MP4 → FLV** (transcode MP4 back to a single FLV file)
+- **FLV → GATEWAY** (gateway forwarding for FLV live streams, supports high concurrency)
+
+Suitable for storage, distribution, and online playback scenarios, especially when used with RTMP live streaming servers.
 
 ## 📦 Installation
+
 ```bash
 composer require xiaosongshu/flv2mp4
 ```
 
 ## 🚀 Quick Start
+
 ```php
 <?php
 require_once __DIR__ . '/vendor/autoload.php';
@@ -28,40 +32,42 @@ ini_set('memory_limit', '512M');
 
 $file = __DIR__."/test.flv";
 
-echo "=== Example1: Convert static FLV to merged fMP4 & full MP4 file ===\n";
+
+echo "=== Example 1: FLV static file to fMP4 segments and merge to MP4 ===\n";
 $outputDir1 = __DIR__."/output_merge";
 try{
     $res = \Xiaosongshu\Flv2mp4\Client::runFlv2mp4($file, $outputDir1);
-    echo "\nConvert finished: " . $res . "\n\n";
+    echo "\nConversion completed: " . $res . "\n\n";
 }catch (\Exception $e){
     echo "Error: " . $e->getMessage() . "\n\n";
 }
 
-echo "=== Example2: Generate separate audio & video fMP4 chunks ===\n";
+
+echo "=== Example 2: Generate separate audio/video segments ===\n";
 $outputDir2 = __DIR__."/output_separate";
 try{
     $res = \Xiaosongshu\Flv2mp4\Client::runFlv2mp4Separate($file, $outputDir2);
-    echo "\nConvert completed! Generated files:\n";
-    echo "  Audio init file: " . ($res['audioInit'] ?? 'N/A') . "\n";
-    echo "  Video init file: " . ($res['videoInit'] ?? 'N/A') . "\n";
-    echo "  Total audio segments: " . count($res['audioSegments']) . "\n";
-    echo "  Total video segments: " . count($res['videoSegments']) . "\n";
-    echo "  Metadata file: " . ($res['meta'] ?? 'N/A') . "\n";
+    echo "\nConversion completed! Generated files:\n";
+    echo "  Audio init: " . ($res['audioInit'] ?? 'None') . "\n";
+    echo "  Video init: " . ($res['videoInit'] ?? 'None') . "\n";
+    echo "  Audio segment count: " . count($res['audioSegments']) . "\n";
+    echo "  Video segment count: " . count($res['videoSegments']) . "\n";
+    echo "  Metadata file: " . ($res['meta'] ?? 'None') . "\n";
 }catch (\Exception $e){
     echo "Error: " . $e->getMessage() . "\n";
 }
 
-echo "\n === Example3: Convert FLV to HLS stream === \n";
+echo "\n === Example 3: Convert FLV to HLS === \n";
 $outputDir1 = __DIR__ . "/hls";
 try {
     $res = \Xiaosongshu\Flv2mp4\Client::runFlv2Hls($file, $outputDir1);
-    echo "\n HLS conversion done | Index Path = {$res['index']} | Output Dir = {$res['outputDir']}\n\n";
+    echo "\n HLS conversion completed index = {$res['index']} dir = {$res['outputDir']}\n\n";
 
-    echo "\n === Example4: Convert HLS back to single FLV === \n";
+    echo "\n === Example 4: Convert HLS back to FLV === \n";
     $outputFlv = __DIR__ . "/output_from_hls.flv";
     try {
         $res2 = \Xiaosongshu\Flv2mp4\Client::runHls2Flv($res['index'], $outputFlv);
-        echo "\n HLS to FLV finished: {$res2}\n\n";
+        echo "\n HLS to FLV conversion completed: {$res2}\n\n";
     } catch (\Exception $e) {
         echo "Error: " . $e->getMessage() . "\n\n";
     }
@@ -69,65 +75,97 @@ try {
     echo "Error: " . $e->getMessage() . "\n\n";
 }
 
-echo "\n === Example5: Convert MP4 source file to FLV === \n";
+
+echo "\n === Example 5: Convert MP4 to FLV === \n";
 $mp4File = __DIR__ . "/test.mp4";
 $flvFromMp4 = __DIR__ . "/output_from_mp4.flv";
 try {
     if (file_exists($mp4File)) {
         $res3 = \Xiaosongshu\Flv2mp4\Client::runMp42Flv($mp4File, $flvFromMp4);
-        echo "\n MP4 to FLV finished: {$res3}\n\n";
+        echo "\n MP4 to FLV conversion completed: {$res3}\n\n";
     } else {
-        echo "Skipped: Source test file not found {$mp4File}\n\n";
+        echo "Skipped: Test file does not exist {$mp4File}\n\n";
     }
 } catch (\Exception $e) {
     echo "Error: " . $e->getMessage() . "\n\n";
 }
 ```
 
-### FLV Live Gateway Sample Code
+### FLV Live Gateway Example Code
+
 ```php
 require_once __DIR__ . '/vendor/autoload.php';
-// ====== Service Bootstrap ======
+// ====== Start ======
 error_reporting(E_ALL);
 set_time_limit(0);
 
-/** Gateway listening port for downstream client access */
+/** Port for downstream service */
 $port = isset($argv[1]) ? (int)$argv[1] : 8080;
-/** Upstream source FLV live address */
+/** Upstream FLV playback URL */
 $upstream = isset($argv[2]) ? $argv[2] : 'http://127.0.0.1:8501';
 
 /**
- * # Tier 1 Gateway
- * php gateway.php 8080 http://127.0.0.1:8501 | Play URL: http://127.0.0.1:8080/{AppName}/{StreamName}.flv
+ * # Level 1 Gateway
+ * php gateway.php 8080 http://127.0.0.1:8501 Playback URL: http://127.0.0.1:8080/{app_name}/{stream_name}.flv
  *
- * # Tier 2 Gateway
- * php gateway.php 8081 http://127.0.0.1:8080 | Play URL: http://127.0.0.1:8081/{AppName}/{StreamName}.flv
+ * # Level 2 Gateway
+ * php gateway.php 8081 http://127.0.0.1:8080 Playback URL: http://127.0.0.1:8081/{app_name}/{stream_name}.flv
  *
- * # Tier 3 Gateway
- * php gateway.php 8082 http://127.0.0.1:8081 | Play URL: http://127.0.0.1:8082/{AppName}/{StreamName}.flv
+ * # Level 3 Gateway
+ * php gateway.php 8082 http://127.0.0.1:8081 Playback URL: http://127.0.0.1:8082/{app_name}/{stream_name}.flv
  */
 $gateway = new \Xiaosongshu\Flv2mp4\manage\FlvGateway($port, $upstream);
-/** Toggle debug mode to print runtime logs */
+/** Enable debug mode, prints logs when enabled */
 $gateway->debug = true;
-/** Start gateway service */
+/** Start gateway */
 $gateway->start();
 ```
 
-## 🧪 Testing & Playback Guide
-- Standard generated MP4: Direct playback via HTML5 `<video>` tag, reference `index.html`
-- Generated fMP4 chunks: Designed for chunked streaming playback, reference `play_merge.html`
-- Generated HLS segments: Supports both VOD and live streaming, reference `play.html`
-- FLV merged from HLS chunks: Available for on-demand playback, reference `flv.html`
-- MP4 converted into FLV: Ready for VOD playback, reference `flv.html`
-- FLV Gateway: High-performance live stream relay, supports multi-layer & multi-node distributed deployment
+### Static File Gateway
 
-## 🔧 Project Background
-Initially developed as a dependent component for [xiaosongshu/rtmp_server](https://github.com/2723659854/rtmp-server), to add permanent MP4/HLS recording and VOD playback capability for RTMP live streams.
+```php
+require_once __DIR__ . '/vendor/autoload.php';
+// ========== Start static file server ==========
+
+$host = $argv[1] ?? '0.0.0.0';
+$port = isset($argv[2]) ? (int)$argv[2] : 8100;
+$documentRoot = $argv[3] ?? __DIR__;
+$enableDirListing = isset($argv[4]) && $argv[4] === '--dir';
+
+echo "========================================\n";
+echo "  High Performance Static File Gateway\n";
+echo "========================================\n";
+echo "Usage: php fileGateway.php [host] [port] [document_root] [--dir]\n\n";
+
+try {
+    $server = new \Xiaosongshu\Flv2mp4\manage\StaticFileServer($host, $port, $documentRoot, $enableDirListing);
+    $server->debug = true;
+    $server->start();
+} catch (\Exception $e) {
+    echo "Error: " . $e->getMessage() . "\n";
+    exit(1);
+}
+```
+
+## 🧪 Testing and Playback
+
+- Generated regular MP4 files can be played directly with HTML5 `<video>` tag, refer to `index.html`
+- Generated fMP4 segments are suitable for streaming playback, refer to `play_merge.html`
+- Generated HLS segments support both VOD and live streaming, refer to `play.html`
+- Merging HLS segments back to FLV supports VOD playback, refer to `flv.html`
+- Transcoding MP3 to FLV supports VOD playback, refer to `flv.html`
+- FLV Gateway supports live stream traffic forwarding with high concurrency, multi-level multi-node deployment
+
+## 🔧 Background
+
+Originally developed for the [xiaosongshu/rtmp_server](https://github.com/2723659854/rtmp-server) project, providing MP4/HLS recording and playback capabilities for live streams.
 
 ## ⚠️ Disclaimer
-- Partial open-source code snippets collected from public resources; contact author for immediate removal if any copyright infringement exists.
-- This project is built solely for technical learning & research. End users bear full legal, commercial and copyright liabilities arising from any production usage.
-- Comply with local laws and regulations during usage.
+
+- Some code or materials in this project may reference content from the internet. If there are copyright concerns, please contact the author for removal.
+- This project is for technical exchange and learning purposes only. Any legal risks, commercial disputes, or copyright issues arising from its use are the sole responsibility of the user.
+- Please comply with local laws and regulations and use responsibly.
 
 ## 📧 Contact Author
+
 Email: 2723659854@qq.com

@@ -120,6 +120,32 @@ $gateway->debug = true;
 $gateway->start();
 
 ```
+
+file文件网关
+```php
+require_once __DIR__ . '/vendor/autoload.php';
+// ========== 启动静态文件服务器 ==========
+
+$host = $argv[1] ?? '0.0.0.0';
+$port = isset($argv[2]) ? (int)$argv[2] : 8100;
+$documentRoot = $argv[3] ?? __DIR__;
+$enableDirListing = isset($argv[4]) && $argv[4] === '--dir';
+
+echo "========================================\n";
+echo "  高性能静态文件服务器网关\n";
+echo "========================================\n";
+echo "用法: php fileGateway.php [host] [port] [document_root] [--dir]\n\n";
+
+try {
+    $server = new \Xiaosongshu\Flv2mp4\manage\StaticFileServer($host, $port, $documentRoot, $enableDirListing);
+    $server->debug = true;
+    $server->start();
+} catch (\Exception $e) {
+    echo "错误: " . $e->getMessage() . "\n";
+    exit(1);
+}
+
+```
 ## 🧪 测试与播放
 
 - 生成的普通 MP4 可直接用 HTML5 `<video>` 标签播放，参考 `index.html`
