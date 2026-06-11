@@ -1,6 +1,7 @@
 <?php
 
-namespace Xiaosongshu\Flv2mp4\manage;
+namespace Xiaosongshu\Flv2mp4\Manage;
+
 
 /**
  * 静态文件服务器
@@ -9,25 +10,25 @@ namespace Xiaosongshu\Flv2mp4\manage;
  * @note 启动命令： php fileGateway.php 0.0.0.0 8100 /path/to/media --dir 表示监听所有IP，指定监听8100端口，指定根目录，开启目录扫描
  * @command php fileGateway.php [host] [port] [document_root] [--dir]
  */
-class StaticFileServer
+class FileGatewaySelect
 {
     // 服务器配置
-    private  $host;
-    private  $port;
-    private  $documentRoot;
-    private  $enableDirListing;
+    private string $host;
+    private int $port;
+    private string $documentRoot;
+    private bool $enableDirListing;
 
     // 连接相关
     private $serverSocket;
-    private  $clients = [];
-    private  $clientBuffers = [];
-    private  $clientFiles = [];      // 文件句柄
-    private  $clientFileSizes = []; // 文件总大小
-    private  $clientSentBytes = []; // 已发送字节数
-    private  $clientRanges = [];    // Range 请求范围
+    private array $clients = [];
+    private array $clientBuffers = [];
+    private array $clientFiles = [];      // 文件句柄
+    private array $clientFileSizes = []; // 文件总大小
+    private array $clientSentBytes = []; // 已发送字节数
+    private array $clientRanges = [];    // Range 请求范围
 
     // MIME 类型映射
-    private  $mimeTypes = [
+    private array $mimeTypes = [
         // 视频
         'mp4' => 'video/mp4',
         'm4v' => 'video/mp4',
@@ -737,3 +738,4 @@ class StaticFileServer
         $this->stop();
     }
 }
+
