@@ -208,6 +208,28 @@ class MP4Remuxer
     {
         if ($this->_dtsBaseInited) return;
 
+        // ★ 使用统一基准：取音视频第一个DTS的最小值
+        $minDts = PHP_INT_MAX;
+
+        if (!empty($audioTrack['samples']) && count($audioTrack['samples'])) {
+            $minDts = min($minDts, $audioTrack['samples'][0]['dts']);
+        }
+        if (!empty($videoTrack['samples']) && count($videoTrack['samples'])) {
+            $minDts = min($minDts, $videoTrack['samples'][0]['dts']);
+        }
+
+        $this->_dtsBase = ($minDts === PHP_INT_MAX) ? 0 : $minDts;
+        $this->_audioDtsBase = $this->_dtsBase;
+        $this->_videoDtsBase = $this->_dtsBase;
+
+        $this->_dtsBaseInited = true;
+    }
+
+
+    public function _calculateDtsBase2($audioTrack, $videoTrack)
+    {
+        if ($this->_dtsBaseInited) return;
+
         // 分别记录音频和视频的第一个DTS
         if (!empty($audioTrack['samples']) && count($audioTrack['samples'])) {
             $this->_audioDtsBase = $audioTrack['samples'][0]['dts'];
@@ -244,8 +266,8 @@ class MP4Remuxer
             $unit = $aacSample['unit'];
 
             // 使用音频自己的DTS基准
-            $originalDts = $aacSample['dts'] - $this->_audioDtsBase;
-
+            //$originalDts = $aacSample['dts'] - $this->_audioDtsBase;
+            $originalDts = $aacSample['dts'] - $this->_dtsBase;
             if ($dtsCorrection === null) {
                 if ($this->_audioNextDts === null) {
                     if ($this->_audioSegmentInfoList->isEmpty()) {
@@ -394,8 +416,9 @@ class MP4Remuxer
             $keyframe = $avcSample['isKeyframe'];
 
             // 使用视频自己的DTS基准
-            $originalDts = $avcSample['dts'] - $this->_videoDtsBase;
-
+            //$originalDts = $avcSample['dts'] - $this->_videoDtsBase;
+            //方法1
+            $originalDts = $avcSample['dts'] - $this->_dtsBase;
             if ($dtsCorrection === null) {
                 if ($this->_videoNextDts === null) {
                     if ($this->_videoSegmentInfoList->isEmpty()) {
