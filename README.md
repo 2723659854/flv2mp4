@@ -1,4 +1,4 @@
-# FLV ↔ MP4 / HLS Conversion Toolkit
+# FLV ↔ MP4 / HLS Converter
 
 <p align="center">
   <a href="./README.cn.md"><strong>🇨🇳 中文</strong></a> •
@@ -14,25 +14,25 @@
 
 ## 📖 Introduction
 
-A lightweight media processing toolkit written in pure PHP 8.1+, with **zero external dependencies**, supporting bidirectional conversion between FLV and MP4/HLS.
+A lightweight media processing toolkit written in pure PHP 8.1+ with **zero external dependencies**, supporting bidirectional conversion between FLV, MP4, and HLS.
 
 | Feature | Direction | Description |
 |---------|-----------|-------------|
-| 🎬 Transcoding | FLV → MP4 | Generate standard MP4 or fMP4 segments |
-| 📺 Segmentation | FLV → HLS | Generate M3U8 playlist + TS segments |
-| 🔄 Reverse | HLS → FLV | Merge HLS segments back to FLV |
-| 🔁 Interchange | MP4 → FLV | Transcode MP4 back to FLV |
-| 🌐 Live Gateway | FLV Gateway | High-performance multi-tier relay for high concurrency |
-| 📁 File Server | File Gateway | Lightweight HTTP file server |
-| 📤 Stream Pusher | FLV Pusher | Push static FLV files as simulated live streams to RTMP server |
+| 🎬 Remux | FLV → MP4 | Generate standard MP4 or fMP4 segments |
+| 📺 Segment | FLV → HLS | Generate M3U8 + TS segments |
+| 🔄 Reconstruct | HLS → FLV | Merge HLS segments back to FLV |
+| 🔁 Convert | MP4 → FLV | Transcode MP4 file back to FLV |
+| 🌐 Live Gateway | FLV Gateway | High-performance multi-level forwarding, high concurrency support |
+| 📁 File Service | File Gateway | Lightweight HTTP file server |
+| 📤 Push Client | FLV/MP4 Pusher | Simulate live streaming from static files to RTMP server |
 
-> Ideal for video recording, playback, and live stream relay scenarios. Works best with RTMP streaming servers.
+> Ideal for video recording, playback, live forwarding, and works great with RTMP live streaming servers.
 
 ## 📦 Requirements
 
 - **PHP >= 8.1**
-- `ext-pcntl` recommended (for signal handling, optional)
-- No FFmpeg or other external dependencies required
+- Recommended: `ext-pcntl` (for signal handling, optional)
+- No FFmpeg or other external dependencies
 
 ## 🚀 Installation
 
@@ -41,8 +41,6 @@ composer require xiaosongshu/flv2mp4
 ```
 
 ## 📚 Quick Start
-
-### Basic Conversion
 
 ```php
 <?php
@@ -53,10 +51,10 @@ ini_set('memory_limit', '512M');
 
 $file = __DIR__ . '/test.flv';
 
-// 1. FLV → Merged MP4
+// 1. FLV → merged MP4
 $result = \Xiaosongshu\Flv2mp4\Client::runFlv2mp4($file, __DIR__ . '/output_merge');
 
-// 2. FLV → Separate audio/video fMP4 segments
+// 2. FLV → separate audio/video fMP4 segments
 $result = \Xiaosongshu\Flv2mp4\Client::runFlv2mp4Separate($file, __DIR__ . '/output_separate');
 
 // 3. FLV → HLS
@@ -69,42 +67,45 @@ $result = \Xiaosongshu\Flv2mp4\Client::runHls2Flv($m3u8Path, __DIR__ . '/output.
 $result = \Xiaosongshu\Flv2mp4\Client::runMp42Flv($mp4File, __DIR__ . '/output.flv');
 ```
 
-### 🌐 FLV Live Stream Gateway
+## 🌐 Advanced Features
 
-Supports multi-tier cascade deployment for high-concurrency live stream relay:
+### 1. FLV Live Gateway
+
+Supports multi-level cascading deployment for high-concurrency live streaming.
+
+**Create gateway script** (e.g., `gateway.php`):
 
 ```php
 <?php
 declare(strict_types=1);
 
 require_once __DIR__ . '/vendor/autoload.php';
-error_reporting(E_ALL);
-set_time_limit(0);
 
-// Listen port + upstream URL
 $gateway = new \Xiaosongshu\Flv2mp4\manage\FlvGateway(8080, 'http://127.0.0.1:8501');
 $gateway->debug = true;
 $gateway->start();
 ```
 
-**Multi-tier deployment example:**
+**Multi-level deployment example**:
 
 ```bash
-# Tier 1 (direct to origin)
+# Level 1 gateway (directly connected to origin)
 php gateway.php 8080 http://127.0.0.1:8501
 
-# Tier 2 (proxy tier 1)
+# Level 2 gateway (proxies level 1)
 php gateway.php 8081 http://127.0.0.1:8080
 
-# Tier 3 (proxy tier 2)
+# Level 3 gateway (proxies level 2)
 php gateway.php 8082 http://127.0.0.1:8081
 
 # Playback URL: http://127.0.0.1:8082/{app}/{stream}.flv
 ```
 
-### 📁 Static File Gateway
+### 2. Static File Gateway
 
-Built-in high-performance HTTP file server with optional directory listing:
+High-performance HTTP file server with directory listing support.
+
+**Create file server script** (e.g., `file_server.php`):
 
 ```php
 <?php
@@ -122,21 +123,20 @@ $server->debug = true;
 $server->start();
 ```
 
-### 📤 FLV Stream Pusher
+### 3. FLV Push Client
 
-Push static FLV files to RTMP server as simulated live streams with original timestamps. Supports automatic reconnection, multi-speed pushing, and real-time progress reporting.
+Push static FLV files to an RTMP server with original timestamps (simulated live streaming).
 
-**Features:**
+**Features**:
 
-- ✅ Precise timestamp-based pushing (simulated live)
-- ✅ Automatic reconnection on disconnect
-- ✅ Memory optimized (streaming read, no full file loading)
+- ✅ Accurate push with original timestamps (simulated live)
+- ✅ Automatic reconnection
+- ✅ Memory efficient (streaming read)
 - ✅ Real-time progress reporting
-- ✅ Adjustable playback speed (0.5x / 1x / 2x)
-- ✅ Detailed logging output
+- ✅ Speed control (0.5x / 1x / 2x)
 - ✅ Signal handling (graceful shutdown)
 
-**Full example:**
+**Create push script** (e.g., `flv_pusher.php`):
 
 ```php
 <?php
@@ -145,25 +145,17 @@ declare(strict_types=1);
 require_once __DIR__ . '/vendor/autoload.php';
 ini_set('memory_limit', '2048M');
 
-// ============ CLI Entry Point ============
-
 if (PHP_SAPI !== 'cli') {
     die("This script can only be run from command line.\n");
 }
 
-// Parse command line arguments
 if ($argc < 2) {
     echo "Usage: php " . basename($argv[0]) . " <flv_file> [push_url] [speed] [--no-reconnect]\n";
-    echo "\n";
     echo "Examples:\n";
     echo "  php flv_pusher.php test.flv\n";
     echo "  php flv_pusher.php test.flv http://127.0.0.1:8501/live/stream\n";
     echo "  php flv_pusher.php test.flv http://127.0.0.1:8501/live/stream 2.0\n";
     echo "  php flv_pusher.php test.flv http://127.0.0.1:8501/live/stream 1.0 --no-reconnect\n";
-    echo "\n";
-    echo "Options:\n";
-    echo "  speed           Push speed multiplier (0.1-10.0, default: 1.0)\n";
-    echo "  --no-reconnect  Disable automatic reconnection\n";
     exit(1);
 }
 
@@ -172,14 +164,18 @@ $pushUrl = $argv[2] ?? 'http://127.0.0.1:8501/live/stream';
 $speed = isset($argv[3]) ? (float)$argv[3] : 1.0;
 $autoReconnect = !in_array('--no-reconnect', $argv);
 
-// Create pusher instance
 $pusher = new \Xiaosongshu\Flv2mp4\manage\FLVPusher($flvFile, $pushUrl, $speed, $autoReconnect);
-
-// Start pushing
 $pusher->start();
 ```
 
-**Command line usage:**
+**Command line usage**:
+
+| Argument | Description | Default |
+|----------|-------------|---------|
+| `flv_file` | FLV source file path | **Required** |
+| `push_url` | Target push URL | `http://127.0.0.1:8501/live/stream` |
+| `speed` | Push speed multiplier (0.1–10.0) | `1.0` |
+| `--no-reconnect` | Disable auto-reconnect | Off (enabled by default) |
 
 ```bash
 # Basic push (1x speed)
@@ -195,43 +191,54 @@ php flv_pusher.php test.flv http://127.0.0.1:8501/live/stream 0.5
 php flv_pusher.php test.flv http://127.0.0.1:8501/live/stream 1.0 --no-reconnect
 ```
 
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `flv_file` | Path to FLV source file | *Required* |
-| `push_url` | Push target URL | `http://127.0.0.1:8501/live/stream` |
-| `speed` | Push speed multiplier (0.1 - 10.0) | `1.0` |
-| `--no-reconnect` | Disable automatic reconnection | Off (reconnect enabled) |
+### 4. MP4 Push Client
+
+Usage is identical to the FLV push client; just replace the file path.
+
+**Example** (save as `mp4_pusher.php`):
+
+```php
+<?php
+require_once __DIR__ . '/vendor/autoload.php';
+ini_set('memory_limit', '2048M');
+
+$mp4File = __DIR__ . "/test.mp4";
+$pusher = new \Xiaosongshu\Flv2mp4\Manage\Mp4Pusher($mp4File, 'http://localhost:8501/a/b');
+$pusher->start();
+```
+
+> Command line arguments are the same as the FLV pusher: `speed` and `--no-reconnect` are supported.
 
 ## 🧪 Testing & Playback
 
-| Output Format | Recommended Player | Reference File |
-|---------------|-------------------|----------------|
+| Output Format | Recommended Player | Example File |
+|---------------|--------------------|---------------|
 | Standard MP4 | HTML5 `<video>` tag | `index.html` |
-| fMP4 Segments | MSE-based player | `play_merge.html` |
-| HLS (TS) | hls.js / Native Safari | `play.html` |
+| fMP4 segments | MSE player | `play_merge.html` |
+| HLS (TS) | hls.js / native Safari | `play.html` |
 | Merged FLV | flv.js | `flv.html` |
 
 ## 🎯 Use Cases
 
-- **Live Recording**: Real-time RTMP stream recording to MP4/HLS
+- **Live Recording**: Save RTMP live streams as MP4/HLS in real time
 - **Video Playback**: On-demand playback of recorded streams
-- **Stream Distribution**: Load balancing and edge acceleration via multi-tier gateway
-- **Batch Processing**: Offline batch conversion of FLV files
-- **Simulated Live Push**: Push VOD files as simulated live streams
+- **Stream Distribution**: Multi-level gateways for load balancing and edge acceleration
+- **Offline Batch Processing**: Batch convert FLV files
+- **Simulated Live Streaming**: Push on-demand files as a live stream
 
 ## 🔧 Technical Background
 
-This project was originally developed for [xiaosongshu/rtmp_server](https://github.com/2723659854/rtmp-server) to provide recording and playback capabilities for live streams.
+This project was originally developed for [xiaosongshu/rtmp_server](https://github.com/2723659854/rtmp-server) to provide live stream recording and playback capabilities.
 
-- Pure PHP 8.1+ implementation, **no FFmpeg or external dependencies required**
-- Supports strict type declarations (`declare(strict_types=1)`)
-- PHPStan Level 8 compatible for static analysis
+- Pure PHP 8.1+ implementation, **no FFmpeg or any external dependencies**
+- Strict type declarations (`declare(strict_types=1)`)
+- Recommended to use with PHPStan Level 8 for static analysis
 
 ## ⚠️ Disclaimer
 
-- This project is intended for technical exchange and learning purposes only
-- Any legal risks, commercial disputes, or copyright issues arising from its use shall be borne by the user
-- Please comply with local laws and regulations and use responsibly
+- This project is for technical exchange and learning purposes only.
+- The user assumes all legal risks, commercial disputes, or copyright issues arising from its use.
+- Please comply with local laws and regulations and use responsibly.
 
 ## 📧 Contact
 

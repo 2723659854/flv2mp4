@@ -1,7 +1,3 @@
-你说得对，FLV 推流客户端部分缺少了完整的命令行入口示例。以下是修正后的完整 README 文档：
-
----
-
 # FLV ↔ MP4 / HLS 转换工具
 
 <p align="center">
@@ -18,7 +14,7 @@
 
 ## 📖 简介
 
-一个纯 PHP 8.1+ 编写的轻量级媒体处理工具包，**零外部依赖**，支持 FLV 与 MP4/HLS 之间的双向转换。
+纯 PHP 8.1+ 编写的轻量级媒体处理工具包，**零外部依赖**，支持 FLV 与 MP4/HLS 之间的双向转换。
 
 | 功能 | 方向 | 说明 |
 |------|------|------|
@@ -28,14 +24,14 @@
 | 🔁 格式互转 | MP4 → FLV | MP4 文件转码回 FLV |
 | 🌐 直播网关 | FLV Gateway | 高性能多级转发，支持高并发 |
 | 📁 文件服务 | File Gateway | 轻量级 HTTP 文件服务器 |
-| 📤 推流客户端 | FLV Pusher | 静态文件伪直播推流至 RTMP 服务器 |
+| 📤 推流客户端 | FLV/MP4 Pusher | 静态文件伪直播推流至 RTMP 服务器 |
 
 > 适用于视频录制、回放、直播转发等场景，与 RTMP 直播服务器配合使用效果更佳。
 
 ## 📦 环境要求
 
 - **PHP >= 8.1**
-- 推荐使用 `ext-pcntl`（用于信号处理，可选）
+- 推荐 `ext-pcntl`（用于信号处理，可选）
 - 无需 FFmpeg 或其他外部依赖
 
 ## 🚀 安装
@@ -45,8 +41,6 @@ composer require xiaosongshu/flv2mp4
 ```
 
 ## 📚 快速开始
-
-### 基础转换
 
 ```php
 <?php
@@ -73,25 +67,26 @@ $result = \Xiaosongshu\Flv2mp4\Client::runHls2Flv($m3u8Path, __DIR__ . '/output.
 $result = \Xiaosongshu\Flv2mp4\Client::runMp42Flv($mp4File, __DIR__ . '/output.flv');
 ```
 
-### 🌐 FLV 直播网关
+## 🌐 高级功能
 
-支持多层级级联部署，轻松实现高并发直播流转发：
+### 1. FLV 直播网关
+
+支持多层级级联部署，轻松实现高并发直播流转发。
+
+**创建网关脚本**（例如 `gateway.php`）：
 
 ```php
 <?php
 declare(strict_types=1);
 
 require_once __DIR__ . '/vendor/autoload.php';
-error_reporting(E_ALL);
-set_time_limit(0);
 
-// 监听端口 + 上游地址
 $gateway = new \Xiaosongshu\Flv2mp4\manage\FlvGateway(8080, 'http://127.0.0.1:8501');
 $gateway->debug = true;
 $gateway->start();
 ```
 
-**多级部署示例：**
+**多级部署示例**：
 
 ```bash
 # 一级网关（直连源站）
@@ -106,9 +101,11 @@ php gateway.php 8082 http://127.0.0.1:8081
 # 播放地址：http://127.0.0.1:8082/{app}/{stream}.flv
 ```
 
-### 📁 静态文件网关
+### 2. 静态文件网关
 
-内置高性能 HTTP 文件服务器，支持目录浏览：
+高性能 HTTP 文件服务器，支持目录浏览。
+
+**创建文件服务器脚本**（例如 `file_server.php`）：
 
 ```php
 <?php
@@ -126,21 +123,20 @@ $server->debug = true;
 $server->start();
 ```
 
-### 📤 FLV 推流客户端
+### 3. FLV 推流客户端
 
-将静态 FLV 文件按原始时间戳以伪直播方式推送至 RTMP 服务器，支持断线重连、多倍速推流和实时进度上报。
+将静态 FLV 文件按原始时间戳以伪直播方式推送至 RTMP 服务器。
 
-**推流器特性：**
+**特性**：
 
 - ✅ 按原始时间戳精确推流（伪直播）
 - ✅ 自动断线重连
-- ✅ 内存优化（流式读取，不加载整个文件）
+- ✅ 内存优化（流式读取）
 - ✅ 实时进度上报
 - ✅ 支持推流倍速（0.5x / 1x / 2x）
-- ✅ 详细的日志输出
 - ✅ 信号处理（优雅退出）
 
-**完整示例：**
+**创建推流脚本**（例如 `flv_pusher.php`）：
 
 ```php
 <?php
@@ -149,25 +145,17 @@ declare(strict_types=1);
 require_once __DIR__ . '/vendor/autoload.php';
 ini_set('memory_limit', '2048M');
 
-// ============ 命令行入口 ============
-
 if (PHP_SAPI !== 'cli') {
     die("This script can only be run from command line.\n");
 }
 
-// 解析命令行参数
 if ($argc < 2) {
     echo "Usage: php " . basename($argv[0]) . " <flv_file> [push_url] [speed] [--no-reconnect]\n";
-    echo "\n";
     echo "Examples:\n";
     echo "  php flv_pusher.php test.flv\n";
     echo "  php flv_pusher.php test.flv http://127.0.0.1:8501/live/stream\n";
     echo "  php flv_pusher.php test.flv http://127.0.0.1:8501/live/stream 2.0\n";
     echo "  php flv_pusher.php test.flv http://127.0.0.1:8501/live/stream 1.0 --no-reconnect\n";
-    echo "\n";
-    echo "Options:\n";
-    echo "  speed           推流速度倍数 (0.1-10.0, default: 1.0)\n";
-    echo "  --no-reconnect  禁用自动重连\n";
     exit(1);
 }
 
@@ -176,14 +164,18 @@ $pushUrl = $argv[2] ?? 'http://127.0.0.1:8501/live/stream';
 $speed = isset($argv[3]) ? (float)$argv[3] : 1.0;
 $autoReconnect = !in_array('--no-reconnect', $argv);
 
-// 创建推流器
 $pusher = new \Xiaosongshu\Flv2mp4\manage\FLVPusher($flvFile, $pushUrl, $speed, $autoReconnect);
-
-// 启动推流
 $pusher->start();
 ```
 
-**命令行用法：**
+**命令行用法**：
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `flv_file` | FLV 源文件路径 | **必填** |
+| `push_url` | 推流目标地址 | `http://127.0.0.1:8501/live/stream` |
+| `speed` | 推流倍速（0.1–10.0） | `1.0` |
+| `--no-reconnect` | 禁用断线重连 | 关闭（默认启用重连） |
 
 ```bash
 # 基础推流（1倍速）
@@ -199,12 +191,23 @@ php flv_pusher.php test.flv http://127.0.0.1:8501/live/stream 0.5
 php flv_pusher.php test.flv http://127.0.0.1:8501/live/stream 1.0 --no-reconnect
 ```
 
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `flv_file` | FLV 源文件路径 | *必填* |
-| `push_url` | 推流目标地址 | `http://127.0.0.1:8501/live/stream` |
-| `speed` | 推流倍速 (0.1 - 10.0) | `1.0` |
-| `--no-reconnect` | 禁用断线重连 | 关闭（默认启用重连） |
+### 4. MP4 推流客户端
+
+用法与 FLV 推流客户端完全一致，仅需替换文件路径。
+
+**示例**（保存为 `mp4_pusher.php`）：
+
+```php
+<?php
+require_once __DIR__ . '/vendor/autoload.php';
+ini_set('memory_limit', '2048M');
+
+$mp4File = __DIR__ . "/test.mp4";
+$pusher = new \Xiaosongshu\Flv2mp4\Manage\Mp4Pusher($mp4File, 'http://localhost:8501/a/b');
+$pusher->start();
+```
+
+> 命令行参数与 FLV 推流器相同，支持 `speed` 和 `--no-reconnect`。
 
 ## 🧪 测试与播放
 
@@ -225,10 +228,10 @@ php flv_pusher.php test.flv http://127.0.0.1:8501/live/stream 1.0 --no-reconnect
 
 ## 🔧 技术背景
 
-本项目最初为 [xiaosongshu/rtmp_server](https://github.com/2723659854/rtmp-server) 开发，为其提供直播流的录制与回放能力。
+本项目最初为 [xiaosongshu/rtmp_server](https://github.com/2723659854/rtmp-server) 开发，提供直播流的录制与回放能力。
 
 - 纯 PHP 8.1+ 实现，**无需 FFmpeg 或任何外部依赖**
-- 支持严格类型声明 (`declare(strict_types=1)`)
+- 严格类型声明 (`declare(strict_types=1)`)
 - 推荐搭配 PHPStan Level 8 进行静态分析
 
 ## ⚠️ 免责声明
