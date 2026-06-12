@@ -102,3 +102,18 @@ $pusher = new \Xiaosongshu\Flv2mp4\manage\FLVPusher($flvFile, $pushUrl, $speed, 
 
 // 启动推流
 $pusher->start();
+
+// ============ MP4 Pusher 示例 ============
+// 如果需要推流 MP4 文件，可以使用 Mp4Pusher
+// 用法：php demo.php test.mp4 http://127.0.0.1:8501/live/stream 1.0
+
+if (isset($argv[1]) && preg_match('/\.mp4$/i', $argv[1])) {
+    $mp4File = $argv[1];
+    $pushUrl = $argv[2] ?? 'http://127.0.0.1:8501/live/stream';
+    $speed = $argv[3] ?? 1.0;
+    $autoReconnect = !in_array('--no-reconnect', $argv);
+
+    echo "\n=== MP4 Pusher 模式 ===\n";
+    $mp4Pusher = new \Xiaosongshu\Flv2mp4\manage\Mp4Pusher($mp4File, $pushUrl, $speed, $autoReconnect);
+    $mp4Pusher->start();
+}

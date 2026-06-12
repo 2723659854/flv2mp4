@@ -29,6 +29,13 @@ class Mp4ToFlv
     private $audioChannels = 2;
     private $audioProfile = 2;
 
+    private $duration = 0;
+    private $videoWidth = 0;
+    private $videoHeight = 0;
+    private $videoFrameRate = 30;
+    private $videoCodecId = 'avc1';
+    private $audioCodecId = 'mp4a';
+
     public function __construct(string $inputFile, string $outputFile)
     {
         $this->inputFile = $inputFile;
@@ -131,6 +138,22 @@ class Mp4ToFlv
     {
         $moov = $this->findBox($this->boxTree, 'moov');
         if (!$moov) throw new \RuntimeException("未找到moov盒子");
+        
+        // 读取时长
+        $mvhd = $this->findBox([$moov], 'mvhd');
+        if ($mvhd) {
+            $mvhdData = $mvhd['data'];
+            $version = ord($mvhdData[0]);
+            if ($version == 0) {
+                $timescale = unpack('N', substr($mvhdData, 12, 4))[1];
+                $duration = unpack('N', substr($mvhdData, 16, 4))[1];
+            } else {
+                $timescale = unpack('N', substr($mvhdData, 20, 4))[1];
+                $duration = unpack('J', substr($mvhdData, 24, 8))[1];
+            }
+            $this->duration = round($duration * 1000 / $timescale) / 1000;
+        }
+        
         $traks = $this->findAllBoxes([$moov], 'trak');
         foreach ($traks as $trak) {
             $this->parseTrack($trak);
@@ -214,6 +237,7 @@ class Mp4ToFlv
             if ($offset + $spsLength > strlen($data)) break;
             $this->sps = substr($data, $offset, $spsLength);
             $offset += $spsLength;
+            $this->parseSpsForDimensions($this->sps);
             break; // 只取第一个SPS
         }
         $numPps = ord($data[$offset]); $offset++;
@@ -225,6 +249,134 @@ class Mp4ToFlv
             $this->pps = substr($data, $offset, $ppsLength);
             break;
         }
+    }
+
+    private function parseSpsForDimensions(string $sps): void
+    {
+        if (strlen($sps) < 10) return;
+        
+        $pos = 0;
+        // 跳过 NALU 头
+        if (ord($sps[0]) & 0x80) {
+            $pos++;
+        }
+        
+        // 跳过 profile_idc, constraint_set_flags, level_idc
+        $pos += 3;
+        
+        // 跳过 seq_parameter_set_id
+        $pos++;
+        
+        // 读取 log2_max_frame_num_minus4
+        $pos = $this->skipUEG($sps, $pos);
+        
+        // 读取 pic_order_cnt_type
+        $picOrderCntType = $this->readUEG($sps, $pos);
+        $pos = $this->skipUEG($sps, $pos);
+        
+        if ($picOrderCntType == 0) {
+            $pos = $this->skipUEG($sps, $pos);
+            $pos = $this->skipUEG($sps, $pos);
+        } elseif ($picOrderCntType == 1) {
+            $pos = $this->skipUEG($sps, $pos);
+            $pos = $this->skipUEG($sps, $pos);
+            $pos = $this->skipUEG($sps, $pos);
+            $pos = $this->skipUEG($sps, $pos);
+            $numRefFramesInPicOrderCntCycle = $this->readUEG($sps, $pos);
+            $pos = $this->skipUEG($sps, $pos);
+            for ($i = 0; $i < $numRefFramesInPicOrderCntCycle; $i++) {
+                $pos = $this->skipSEG($sps, $pos);
+            }
+        }
+        
+        // 读取 num_ref_frames
+        $pos = $this->skipUEG($sps, $pos);
+        
+        // 读取 gaps_in_frame_num_value_allowed_flag
+        $pos++;
+        
+        // 读取 pic_width_in_mbs_minus1
+        $picWidthInMbsMinus1 = $this->readUEG($sps, $pos);
+        $pos = $this->skipUEG($sps, $pos);
+        
+        // 读取 pic_height_in_map_units_minus1
+        $picHeightInMapUnitsMinus1 = $this->readUEG($sps, $pos);
+        $pos = $this->skipUEG($sps, $pos);
+        
+        $this->videoWidth = ($picWidthInMbsMinus1 + 1) * 16;
+        $this->videoHeight = ($picHeightInMapUnitsMinus1 + 1) * 16;
+    }
+
+    private function readUEG(string $data, int &$pos): int
+    {
+        $result = 0;
+        $leadingZeroBits = 0;
+        
+        while ($pos < strlen($data) && (ord($data[$pos]) & 0x80) == 0) {
+            $leadingZeroBits++;
+            $pos++;
+        }
+        
+        if ($pos >= strlen($data)) return 0;
+        
+        $result = ord($data[$pos]) & 0x7F;
+        $pos++;
+        
+        for ($i = 0; $i < $leadingZeroBits; $i++) {
+            if ($pos >= strlen($data)) break;
+            $result = ($result << 7) | (ord($data[$pos]) & 0x7F);
+            $pos++;
+        }
+        
+        return $result - 1;
+    }
+
+    private function skipUEG(string $data, int $pos): int
+    {
+        $result = 0;
+        $leadingZeroBits = 0;
+        
+        while ($pos < strlen($data) && (ord($data[$pos]) & 0x80) == 0) {
+            $leadingZeroBits++;
+            $pos++;
+        }
+        
+        if ($pos >= strlen($data)) return $pos;
+        
+        $result = ord($data[$pos]) & 0x7F;
+        $pos++;
+        
+        for ($i = 0; $i < $leadingZeroBits; $i++) {
+            if ($pos >= strlen($data)) break;
+            $result = ($result << 7) | (ord($data[$pos]) & 0x7F);
+            $pos++;
+        }
+        
+        return $pos;
+    }
+
+    private function skipSEG(string $data, int $pos): int
+    {
+        $uegResult = 0;
+        $leadingZeroBits = 0;
+        
+        while ($pos < strlen($data) && (ord($data[$pos]) & 0x80) == 0) {
+            $leadingZeroBits++;
+            $pos++;
+        }
+        
+        if ($pos >= strlen($data)) return $pos;
+        
+        $uegResult = ord($data[$pos]) & 0x7F;
+        $pos++;
+        
+        for ($i = 0; $i < $leadingZeroBits; $i++) {
+            if ($pos >= strlen($data)) break;
+            $uegResult = ($uegResult << 7) | (ord($data[$pos]) & 0x7F);
+            $pos++;
+        }
+        
+        return $pos;
     }
 
     private function parseEsdsFromBox(string $data): void
@@ -703,6 +855,53 @@ class Mp4ToFlv
         fwrite($this->flvHandle, "FLV\x01" . chr($flags) . "\x00\x00\x00\x09");
         fwrite($this->flvHandle, "\x00\x00\x00\x00");
         $this->hasWrittenHeader = true;
+        
+        // 写入 onMetaData 标签
+        $this->writeMetaData();
+    }
+
+    private function writeMetaData(): void
+    {
+        $metaData = [
+            'duration' => $this->duration,
+            'width' => $this->videoWidth,
+            'height' => $this->videoHeight,
+            'videocodecid' => $this->videoCodecId,
+            'audiocodecid' => $this->audioCodecId,
+            'audiosamplerate' => $this->audioSampleRate,
+            'audiochannels' => $this->audioChannels,
+            'framerate' => $this->videoFrameRate,
+        ];
+        
+        $data = $this->serializeAmf0($metaData);
+        $onMetaData = "\x00\x0BonMetaData" . $data;
+        
+        $this->writeFLVTag(18, $onMetaData, 0);
+    }
+
+    private function serializeAmf0($value): string
+    {
+        if (is_string($value)) {
+            return "\x02" . pack('n', strlen($value)) . $value;
+        } elseif (is_numeric($value)) {
+            return "\x00" . pack('d', $value);
+        } elseif (is_bool($value)) {
+            return $value ? "\x01\x01" : "\x01\x00";
+        } elseif (is_array($value)) {
+            $result = "\x03"; // Object type
+            $count = 0;
+            foreach ($value as $key => $val) {
+                if (!is_string($key)) continue;
+                $result .= pack('n', strlen($key)) . $key;
+                $result .= $this->serializeAmf0($val);
+                $count++;
+            }
+            $result .= "\x00\x00\x09"; // End of object marker
+            return $result;
+        } elseif ($value === null) {
+            return "\x05";
+        }
+        return '';
     }
 
     private function writeFLVTag(int $tagType, string $data, int $timestamp): void
