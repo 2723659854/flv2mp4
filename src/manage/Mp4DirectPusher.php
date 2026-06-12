@@ -39,9 +39,20 @@ class Mp4DirectPusher
     private $maxRetries = 5;
     private $retryDelay = 3;
     private $useChunked = true;
+    private $verbose = true;
+    private $statsEnabled = true;
 
     private $socket;
     private $isRunning = true;
+
+    // 统计信息
+    private $stats = [
+        'tags_sent' => 0,
+        'bytes_sent' => 0,
+        'start_time' => 0,
+        'last_report_time' => 0,
+        'reconnect_count' => 0,
+    ];
 
     public function __construct(string $inputFile, string $pushUrl, float $speed = 1.0, bool $autoReconnect = true)
     {
@@ -58,10 +69,12 @@ class Mp4DirectPusher
     public function run(): bool
     {
         $this->log("========================================", 'info');
-        $this->log("MP4 Direct Pusher", 'info');
+        $this->log("MP4 Direct Pusher v1.0.1", 'info');
         $this->log("========================================", 'info');
         $this->log("文件：{$this->inputFile}", 'info');
         $this->log("推流地址：{$this->pushUrl}", 'info');
+        $this->log("推流速度：{$this->speed}x", 'info');
+        $this->log("自动重连：" . ($this->autoReconnect ? '是' : '否'), 'info');
         $this->log("========================================", 'info');
 
         $this->mp4Data = file_get_contents($this->inputFile);
@@ -70,18 +83,33 @@ class Mp4DirectPusher
             return false;
         }
 
+        $fileSize = filesize($this->inputFile);
+        $this->log("文件大小：" . $this->formatBytes($fileSize), 'info');
+
         $this->log("开始解析 MP4...", 'info');
         $this->parseMp4Boxes();
         $this->parseTracks();
         $this->log("MP4 解析完成", 'success');
         $this->log("视频：{$this->videoWidth}x{$this->videoHeight}", 'info');
         $this->log("音频：{$this->audioSampleRate}Hz, {$this->audioChannels} 通道", 'info');
+        $this->log("时长：{$this->duration} 秒", 'info');
 
-        return $this->doPush();
+        $result = $this->doPush();
+
+        if ($this->statsEnabled) {
+            $this->printFinalStats();
+        }
+
+        return $result;
     }
 
     private function doPush()
     {
+        $this->stats['start_time'] = microtime(true);
+        $this->stats['last_report_time'] = $this->stats['start_time'];
+        $this->stats['tags_sent'] = 0;
+        $this->stats['bytes_sent'] = 0;
+
         $retryCount = 0;
 
         while ($this->isRunning && $retryCount <= $this->maxRetries) {
@@ -100,7 +128,8 @@ class Mp4DirectPusher
 
                 if ($this->autoReconnect && $retryCount < $this->maxRetries) {
                     $retryCount++;
-                    $this->log("等待 {$this->retryDelay} 秒后重连...", 'warning');
+                    $this->stats['reconnect_count']++;
+                    $this->log("等待 {$this->retryDelay} 秒后进行第 {$retryCount} 次重连...", 'warning');
                     sleep($this->retryDelay);
                     continue;
                 } else {
@@ -119,11 +148,11 @@ class Mp4DirectPusher
         $port = $urlParts['port'] ?? 8501;
         $path = $urlParts['path'] ?? '/';
 
-        $this->log("连接服务器：{$host}:{$port}", 'info');
+        $this->log("连接 HTTP-FLV 服务器：{$host}:{$port}", 'info');
 
         $this->socket = @fsockopen($host, $port, $errno, $errstr, 10);
         if (!$this->socket) {
-            $this->log("连接失败：{$errstr} ({$errno})", 'error');
+            $this->log("Socket 连接失败：{$errstr} ({$errno})", 'error');
             return false;
         }
 
@@ -131,22 +160,36 @@ class Mp4DirectPusher
         stream_set_blocking($this->socket, true);
 
         $request = $this->buildHTTPRequest($host, $path);
+        $this->log("发送 HTTP 请求头", 'debug');
         fwrite($this->socket, $request);
 
         // 读取响应
         $response = '';
+        $headersEnded = false;
         while (!feof($this->socket)) {
             $line = fgets($this->socket);
+            if ($line === false) break;
             $response .= $line;
-            if (trim($line) === '') break;
+            if (trim($line) === '') {
+                $headersEnded = true;
+                break;
+            }
         }
 
-        if (!strpos($response, '200')) {
-            $this->log("服务器返回错误", 'error');
+        if (!$headersEnded) {
+            $this->log("读取服务器响应失败", 'error');
             return false;
         }
 
-        $this->log("连接成功", 'success');
+        $firstLine = strtok($response, "\r\n");
+        $this->log("服务器响应：{$firstLine}", 'debug');
+
+        if (!strpos($firstLine, '200')) {
+            $this->log("服务器返回非200状态：{$firstLine}", 'error');
+            return false;
+        }
+
+        $this->log("HTTP 连接成功", 'success');
         return true;
     }
 
@@ -653,13 +696,53 @@ class Mp4DirectPusher
             return $a['dtsMs'] - $b['dtsMs'];
         });
 
+        $this->log("共提取 " . count($allSamples) . " 个样本", 'info');
+
+        // 速率控制相关变量
+        $startRealTime = microtime(true);
+        $firstTimestamp = -1;
+        $sampleCount = 0;
+        $lastProgressTime = 0;
+
         foreach ($allSamples as $sample) {
+            $dtsMs = $sample['dtsMs'];
+
+            // 记录第一个时间戳
+            if ($firstTimestamp < 0) {
+                $firstTimestamp = $dtsMs;
+            }
+
+            // 速率控制
+            if ($this->speed > 0 && $dtsMs > 0) {
+                $adjustedTimestamp = $dtsMs - $firstTimestamp;
+                $elapsedReal = (microtime(true) - $startRealTime) * 1000;
+                $targetTimestamp = $adjustedTimestamp / $this->speed;
+
+                if ($targetTimestamp > $elapsedReal) {
+                    $sleepMs = $targetTimestamp - $elapsedReal;
+                    if ($sleepMs > 0 && $sleepMs < 5000) {
+                        usleep((int)($sleepMs * 1000));
+                    }
+                }
+            }
+
             if ($sample['type'] === 'video') {
                 $this->writeVideoSample($sample['data'], $sample['dtsMs'], $sample['ctsMs'] ?? 0, $sample['keyframe']);
             } else {
                 $this->writeAudioSample($sample['data'], $sample['dtsMs']);
             }
+
+            $sampleCount++;
+
+            // 定期输出进度
+            $currentTime = microtime(true);
+            if ($this->statsEnabled && $sampleCount % 100 == 0 && ($currentTime - $lastProgressTime) >= 1) {
+                $this->printProgress($dtsMs);
+                $lastProgressTime = $currentTime;
+            }
         }
+
+        $this->log("共处理 {$sampleCount} 个样本", 'info');
     }
 
     private function extractSamplesFromStbl(array $stbl, string $mdatData, int $mdatOffset, string $handlerType): array
@@ -894,6 +977,10 @@ class Mp4DirectPusher
 
         $fullTag = $tag . $data . pack('N', 11 + $dataSize);
         $this->sendFLVData($fullTag);
+
+        // 更新统计
+        $this->stats['tags_sent']++;
+        $this->stats['bytes_sent'] += strlen($fullTag);
     }
 
     private function writeMetaData(): void
@@ -958,14 +1045,84 @@ class Mp4DirectPusher
 
     private function log(string $message, string $level = 'info')
     {
+        if (!$this->verbose && $level == 'debug') {
+            return;
+        }
+
         $timestamp = date('Y-m-d H:i:s');
-        $levelMap = [
-            'info' => 'INFO',
-            'success' => 'SUCCESS',
-            'warning' => 'WARNING',
-            'error' => 'ERROR',
-        ];
-        $levelStr = $levelMap[$level] ?? 'INFO';
-        echo "[{$timestamp}] [{$levelStr}] {$message}\n";
+        $prefix = '';
+
+        switch ($level) {
+            case 'error':
+                $prefix = "\033[31m[ERROR]\033[0m";
+                break;
+            case 'warning':
+                $prefix = "\033[33m[WARN]\033[0m";
+                break;
+            case 'success':
+                $prefix = "\033[32m[SUCCESS]\033[0m";
+                break;
+            case 'debug':
+                $prefix = "\033[90m[DEBUG]\033[0m";
+                break;
+            default:
+                $prefix = "[INFO]";
+        }
+
+        echo "[{$timestamp}] {$prefix} {$message}\n";
+    }
+
+    private function printProgress($currentTimestamp) {
+        $elapsed = microtime(true) - $this->stats['start_time'];
+        $speed = $elapsed > 0 ? $this->stats['tags_sent'] / $elapsed : 0;
+        $bitrate = $elapsed > 0 ? ($this->stats['bytes_sent'] * 8 / $elapsed) / 1000 : 0;
+
+        $this->log(sprintf(
+            "[进度] 已发送: %d tags | 时间戳: %s | 速率: %.1f tags/s | 码率: %.1f kbps",
+            $this->stats['tags_sent'],
+            $this->formatTime($currentTimestamp),
+            $speed,
+            $bitrate
+        ), 'debug');
+    }
+
+    private function printFinalStats() {
+        $elapsed = microtime(true) - $this->stats['start_time'];
+        $avgSpeed = $elapsed > 0 ? $this->stats['tags_sent'] / $elapsed : 0;
+        $totalBitrate = $elapsed > 0 ? ($this->stats['bytes_sent'] * 8 / $elapsed) / 1000 : 0;
+
+        $this->log("========================================", 'info');
+        $this->log("推流统计", 'info');
+        $this->log("========================================", 'info');
+        $this->log("总耗时: " . $this->formatTime($elapsed * 1000), 'info');
+        $this->log("发送 Tag 数: " . number_format($this->stats['tags_sent']), 'info');
+        $this->log("发送字节数: " . $this->formatBytes($this->stats['bytes_sent']), 'info');
+        $this->log("平均速率: " . number_format($avgSpeed, 1) . " tags/s", 'info');
+        $this->log("平均码率: " . number_format($totalBitrate, 1) . " kbps", 'info');
+        $this->log("重连次数: " . $this->stats['reconnect_count'], 'info');
+        $this->log("========================================", 'info');
+    }
+
+    private function formatTime($ms) {
+        $seconds = floor($ms / 1000);
+        $hours = floor($seconds / 3600);
+        $minutes = floor(($seconds % 3600) / 60);
+        $secs = $seconds % 60;
+
+        if ($hours > 0) {
+            return sprintf("%02d:%02d:%02d", $hours, $minutes, $secs);
+        } else {
+            return sprintf("%02d:%02d", $minutes, $secs);
+        }
+    }
+
+    private function formatBytes($bytes) {
+        $units = ['B', 'KB', 'MB', 'GB'];
+        $i = 0;
+        while ($bytes >= 1024 && $i < count($units) - 1) {
+            $bytes /= 1024;
+            $i++;
+        }
+        return round($bytes, 2) . ' ' . $units[$i];
     }
 }
