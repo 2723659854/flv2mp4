@@ -329,7 +329,35 @@ class Mp4DirectPusher
     {
         $tkhd = $this->findBox([$trak], 'tkhd');
         if (!$tkhd) return;
-        $trackId = unpack('N', substr($tkhd['data'], 12, 4))[1];
+
+        $tkhdData = $tkhd['data'];
+        $trackId = unpack('N', substr($tkhdData, 12, 4))[1];
+
+        // ===== 新增：从 tkhd 提取可靠的宽高 =====
+        $version = ord($tkhdData[0]);
+        // 16.16 定点数在 tkhd 中的偏移（version 0 与 version 1 不同）
+        /** ----------------- 根据版本不同来获取真实的宽高 ------------------- */
+        if ($version == 0) {
+            $widthOffset  = 76;
+            $heightOffset = 80;
+        } else {
+            $widthOffset  = 88;
+            $heightOffset = 92;
+        }
+
+        $tkhdWidth  = 0;
+        $tkhdHeight = 0;
+        if (strlen($tkhdData) >= $heightOffset + 4) {
+            $tkhdWidth  = unpack('N', substr($tkhdData, $widthOffset, 4))[1] / 65536;
+            $tkhdHeight = unpack('N', substr($tkhdData, $heightOffset, 4))[1] / 65536;
+        }
+
+        if ($tkhdWidth > 0 && $tkhdHeight > 0) {
+            $this->videoWidth  = (int)round($tkhdWidth);
+            $this->videoHeight = (int)round($tkhdHeight);
+        }
+        /** ----------------- 根据版本不同来获取真实的宽高 ------------------- */
+
         $mdia = $this->findBox([$trak], 'mdia');
         if (!$mdia) return;
         $hdlr = $this->findBox([$mdia], 'hdlr');
@@ -338,7 +366,6 @@ class Mp4DirectPusher
 
         $minf = $this->findBox([$mdia], 'minf');
         if (!$minf) return;
-
         $stbl = $this->findBox([$minf], 'stbl');
         if (!$stbl) return;
         $stsd = $this->findBox([$stbl], 'stsd');
@@ -348,17 +375,29 @@ class Mp4DirectPusher
         if ($mdhd) {
             $timescale = unpack('N', substr($mdhd['data'], 12, 4))[1];
         }
+
         $stsdData = $stsd['data'];
         $pos = 8;
         while ($pos + 8 <= strlen($stsdData)) {
             $entrySize = unpack('N', substr($stsdData, $pos, 4))[1];
             $entryType = substr($stsdData, $pos + 4, 4);
+
             if ($handlerType === 'vide' && $entryType === 'avc1') {
-                $this->videoTrack = ['id' => $trackId, 'type' => 'video', 'codec' => 'avc1', 'timescale' => $timescale];
+                $this->videoTrack = [
+                    'id'        => $trackId,
+                    'type'      => 'video',
+                    'codec'     => 'avc1',
+                    'timescale' => $timescale
+                ];
                 $this->parseAvcCFromBox(substr($stsdData, $pos, $entrySize));
                 break;
             } elseif ($handlerType === 'soun' && $entryType === 'mp4a') {
-                $this->audioTrack = ['id' => $trackId, 'type' => 'audio', 'codec' => 'mp4a', 'timescale' => $timescale];
+                $this->audioTrack = [
+                    'id'        => $trackId,
+                    'type'      => 'audio',
+                    'codec'     => 'mp4a',
+                    'timescale' => $timescale
+                ];
                 $this->parseEsdsFromBox(substr($stsdData, $pos, $entrySize));
                 break;
             }
@@ -456,8 +495,8 @@ class Mp4DirectPusher
         $picHeightInMapUnitsMinus1 = $this->readUEG($sps, $pos);
         $pos = $this->skipUEG($sps, $pos);
 
-        $this->videoWidth = ($picWidthInMbsMinus1 + 1) * 16;
-        $this->videoHeight = ($picHeightInMapUnitsMinus1 + 1) * 16;
+        //$this->videoWidth = ($picWidthInMbsMinus1 + 1) * 16;
+        //$this->videoHeight = ($picHeightInMapUnitsMinus1 + 1) * 16;
     }
 
     private function readUEG(string $data, int &$pos): int

@@ -7,8 +7,8 @@ $pusher = new \Xiaosongshu\Flv2mp4\Manage\Mp4DirectPusher($mp4File, 'http://loca
 $pusher->run();
 
 
-$flvFile = __DIR__ . "/test.flv";
-// 创建推流器
+//$flvFile = __DIR__ . "/test.flv";
+//// 创建推流器
 //$pusher = new \Xiaosongshu\Flv2mp4\manage\FLVPusher($flvFile,'http://localhost:8501/live/d');
 //
 //// 启动推流
