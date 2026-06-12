@@ -182,7 +182,10 @@ class LiveFlvToMp4
         $this->hasAudio = false;
         $this->_pendingResolveSeekPoint = -1;
         $this->_tempBaseTime = 0;
-
+        $segmentDir = $this->_config['segmentDir'];
+        if (!is_dir($segmentDir)) {
+            mkdir($segmentDir, 0755, true);
+        }
         $this->setflvBase = [$this, 'setflvBasefrist'];
 
         $this->tagDemux = new TagDemux();
