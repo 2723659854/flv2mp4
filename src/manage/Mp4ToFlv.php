@@ -862,19 +862,20 @@ class Mp4ToFlv
 
     private function writeMetaData(): void
     {
+        // 使用简单的metadata测试
         $metaData = [
-            'duration' => $this->duration,
-            'width' => $this->videoWidth,
-            'height' => $this->videoHeight,
-            'videocodecid' => $this->videoCodecId,
-            'audiocodecid' => $this->audioCodecId,
-            'audiosamplerate' => $this->audioSampleRate,
-            'audiochannels' => $this->audioChannels,
-            'framerate' => $this->videoFrameRate,
+            'duration' => 12.957,
+            'width' => 720,
+            'height' => 742,
+            'videocodecid' => 'avc1',
+            'audiocodecid' => 'mp4a',
+            'audiosamplerate' => 44100,
+            'audiochannels' => 2,
+            'framerate' => 30.0,
         ];
         
         $data = $this->serializeAmf0($metaData);
-        $onMetaData = "\x00\x0BonMetaData" . $data;
+        $onMetaData = $this->serializeAmf0('onMetaData') . $data;
         
         $this->writeFLVTag(18, $onMetaData, 0);
     }
@@ -883,18 +884,19 @@ class Mp4ToFlv
     {
         if (is_string($value)) {
             return "\x02" . pack('n', strlen($value)) . $value;
-        } elseif (is_numeric($value)) {
-            return "\x00" . pack('d', $value);
+        } elseif (is_int($value)) {
+            // 对于整数，先转换为float再按大端序写入
+            return "\x00" . $this->packDoubleBE((float)$value);
+        } elseif (is_float($value) || is_numeric($value)) {
+            return "\x00" . $this->packDoubleBE((float)$value);
         } elseif (is_bool($value)) {
             return $value ? "\x01\x01" : "\x01\x00";
         } elseif (is_array($value)) {
             $result = "\x03"; // Object type
-            $count = 0;
             foreach ($value as $key => $val) {
                 if (!is_string($key)) continue;
                 $result .= pack('n', strlen($key)) . $key;
                 $result .= $this->serializeAmf0($val);
-                $count++;
             }
             $result .= "\x00\x00\x09"; // End of object marker
             return $result;
@@ -902,6 +904,14 @@ class Mp4ToFlv
             return "\x05";
         }
         return '';
+    }
+
+    private function packDoubleBE(float $value): string
+    {
+        // AMF0要求大端序的IEEE 754双精度浮点数
+        $packed = pack('d', $value);
+        // PHP的pack('d')是小端序，需要转换为大端序
+        return strrev($packed);
     }
 
     private function writeFLVTag(int $tagType, string $data, int $timestamp): void

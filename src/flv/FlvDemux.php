@@ -95,6 +95,7 @@ class FlvDemux
         if ($dataSize === null) $dataSize = strlen($arr) - $offset;
         $dataOffset = $offset;
         $objectEnd = false;
+        $value = null; // 初始化 $value
         $type = self::readUInt8($arr, $dataOffset);
         $dataOffset += 1;
         switch ($type) {
