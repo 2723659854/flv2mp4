@@ -8,6 +8,7 @@ use Xiaosongshu\Flv2mp4\Flv\FlvParse;
  * @purpose flv转hls最终版
  * @author yanglong
  * @time 2026-06-12 00:02:00
+ * @note 兼容vlc和hls.js，ffplay播放
  */
 class Flv2Hls
 {
@@ -196,8 +197,8 @@ class Flv2Hls
         $this->currentSegmentLastTime = $relativeTime;
 
         $cts = $avc['compositionTime'] ?? 0;
-        $dts = (int)(($relativeTime - $cts) * 90);
-        $pts = (int)($relativeTime * 90);
+        $dts = (int)($relativeTime * 90);
+        $pts = (int)(($relativeTime + $cts) * 90);
 
         if ($pts < $dts) {
             $dts = $pts;
