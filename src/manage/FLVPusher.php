@@ -50,6 +50,235 @@ class FLVPusher {
         'reconnect_count' => 0,
     ];
 
+    /**
+     * 修正版：先扫描所有 Tag 获取真实时长，再推送
+     */
+    private function pushStream($fileHandle) {
+        // 1. 读取 FLV Header
+        $flvHeader = fread($fileHandle, 9);
+        if (strlen($flvHeader) != 9) {
+            throw new \Exception("无效的 FLV 文件：无法读取 Header");
+        }
+        if (substr($flvHeader, 0, 3) !== 'FLV') {
+            throw new \Exception("不是有效的 FLV 文件");
+        }
+
+        // 2. 先快速扫描所有 Tag，找到最大时间戳
+        $scanHandle = fopen($this->filePath, 'rb');
+        fseek($scanHandle, 9); // 跳过 header
+        fread($scanHandle, 4); // 跳过 first PreviousTagSize
+
+        $maxTimestamp = 0;
+        while (!feof($scanHandle)) {
+            $tagHeader = fread($scanHandle, 11);
+            if (strlen($tagHeader) < 11) break;
+
+            $dataSize = $this->readUInt24(substr($tagHeader, 1, 3));
+            $timestamp = $this->readUInt24(substr($tagHeader, 4, 3));
+            $timestampExt = ord($tagHeader[7]);
+            $fullTimestamp = ($timestampExt << 24) | $timestamp;
+
+            if ($fullTimestamp > $maxTimestamp) {
+                $maxTimestamp = $fullTimestamp;
+            }
+
+            // 跳过 tag data + previous tag size
+            fseek($scanHandle, $dataSize + 4, SEEK_CUR);
+        }
+        fclose($scanHandle);
+
+        $realDuration = $maxTimestamp / 1000; // 转换为秒
+        $this->log("FLV 真实时长: {$realDuration} 秒 (最大时间戳: {$maxTimestamp}ms)", 'info');
+
+        // 回到文件开头，重新开始推送
+        fseek($fileHandle, 9);
+        fread($fileHandle, 4); // 跳过 first PreviousTagSize
+
+        // 发送 FLV Header
+        if ($this->useChunked) {
+            $this->sendChunk($flvHeader);
+        } else {
+            $this->writeAll($flvHeader);
+        }
+
+        // 发送 PreviousTagSize 0
+        $this->sendChunkOrWrite(pack('N', 0));
+
+        // 3. 循环读取和发送 Tags（遇到 onMetaData 时修正 duration）
+        $startRealTime = microtime(true);
+        $tagCount = 0;
+        $firstTimestamp = -1;
+
+        while ($this->isRunning && !feof($fileHandle)) {
+            $tagHeader = fread($fileHandle, 11);
+            if (strlen($tagHeader) < 11) break;
+
+            $tagType = ord($tagHeader[0]);
+            $dataSize = $this->readUInt24(substr($tagHeader, 1, 3));
+            $timestamp = $this->readUInt24(substr($tagHeader, 4, 3));
+            $timestampExt = ord($tagHeader[7]);
+            $fullTimestamp = ($timestampExt << 24) | $timestamp;
+
+            if ($dataSize <= 0 || $dataSize > 10 * 1024 * 1024) break;
+
+            $tagData = fread($fileHandle, $dataSize);
+            $prevTagSizeBinary = fread($fileHandle, 4);
+
+            // ★ 如果是 Script Tag (onMetaData)，修正 duration
+            if ($tagType == 18 && $tagCount == 0) {
+                $tagData = $this->fixMetaDataDuration($tagData, $realDuration);
+                // 重新计算 dataSize
+                $dataSize = strlen($tagData);
+                // 重新构建 tagHeader
+                $tagHeader = chr($tagType);
+                $tagHeader .= chr(($dataSize >> 16) & 0xFF) . chr(($dataSize >> 8) & 0xFF) . chr($dataSize & 0xFF);
+                $tagHeader .= chr(($timestamp >> 16) & 0xFF) . chr(($timestamp >> 8) & 0xFF) . chr($timestamp & 0xFF);
+                $tagHeader .= chr($timestampExt);
+                $tagHeader .= "\x00\x00\x00";
+            }
+
+            // 速率控制
+            if ($firstTimestamp < 0) $firstTimestamp = $fullTimestamp;
+            if ($this->speed > 0 && $fullTimestamp > 0) {
+                $adjustedTimestamp = $fullTimestamp - $firstTimestamp;
+                $elapsedReal = (microtime(true) - $startRealTime) * 1000;
+                $targetTimestamp = $adjustedTimestamp / $this->speed;
+                if ($targetTimestamp > $elapsedReal) {
+                    $sleepMs = $targetTimestamp - $elapsedReal;
+                    if ($sleepMs > 0 && $sleepMs < 5000) {
+                        usleep((int)($sleepMs * 1000));
+                    }
+                }
+            }
+
+            // 发送 Tag
+            $fullTag = $tagHeader . $tagData;
+            if ($this->useChunked) {
+                $this->sendChunk($fullTag);
+                $this->sendChunk($prevTagSizeBinary);
+            } else {
+                $this->writeAll($fullTag);
+                $this->writeAll($prevTagSizeBinary);
+            }
+
+            $this->stats['tags_sent']++;
+            $this->stats['bytes_sent'] += strlen($fullTag) + 4;
+            $tagCount++;
+
+            if (!$this->isConnected()) {
+                throw new \Exception("连接已断开");
+            }
+        }
+
+        if ($this->useChunked) {
+            fwrite($this->socket, "0\r\n\r\n");
+        }
+        return true;
+    }
+
+    /**
+     * 修正 onMetaData 中的 duration
+     */
+    private function fixMetaDataDuration(string $tagData, float $realDuration): string
+    {
+        // 解析 AMF0: 第一个是 "onMetaData" 字符串
+        // 格式: 0x02 + length(2) + "onMetaData" + ECMA Array(0x08) + ...
+
+        $pos = 0;
+        // 跳过 "onMetaData" 字符串
+        if (ord($tagData[0]) == 0x02) {
+            $strLen = unpack('n', substr($tagData, 1, 2))[1];
+            $pos = 3 + $strLen;
+        }
+
+        if ($pos >= strlen($tagData)) return $tagData;
+
+        // 应该是 ECMA Array (0x08)
+        if (ord($tagData[$pos]) == 0x08) {
+            $pos += 5; // 跳过 0x08 + arrayLength(4)
+
+            // 遍历 key-value，找到 "duration"
+            while ($pos + 3 < strlen($tagData)) {
+                $keyLen = unpack('n', substr($tagData, $pos, 2))[1];
+                $pos += 2;
+                if ($pos + $keyLen > strlen($tagData)) break;
+
+                $key = substr($tagData, $pos, $keyLen);
+                $pos += $keyLen;
+
+                if ($key === 'duration') {
+                    // duration 是 Number 类型 (0x00) + 8 字节 double
+                    if ($pos + 9 <= strlen($tagData) && ord($tagData[$pos]) == 0x00) {
+                        $pos++; // 跳过 0x00
+                        $newDuration = strrev(pack('d', $realDuration));
+                        $tagData = substr_replace($tagData, $newDuration, $pos, 8);
+                        $this->log("已修正 duration: {$realDuration} 秒", 'info');
+                        return $tagData;
+                    }
+                    break;
+                }
+
+                // 跳过值
+                $pos = $this->skipAmf0Value($tagData, $pos);
+            }
+        }
+
+        return $tagData;
+    }
+
+    private function skipAmf0Value(string $data, int $pos): int
+    {
+        if ($pos >= strlen($data)) return $pos;
+
+        $type = ord($data[$pos]);
+        $pos++;
+
+        switch ($type) {
+            case 0x00: // Number
+                $pos += 8;
+                break;
+            case 0x01: // Boolean
+                $pos += 1;
+                break;
+            case 0x02: // String
+                $len = unpack('n', substr($data, $pos, 2))[1];
+                $pos += 2 + $len;
+                break;
+            case 0x03: // Object
+                while ($pos + 3 <= strlen($data)) {
+                    $keyLen = unpack('n', substr($data, $pos, 2))[1];
+                    $pos += 2;
+                    if ($keyLen == 0) break;
+                    $pos += $keyLen;
+                    $pos = $this->skipAmf0Value($data, $pos);
+                }
+                $pos += 1; // 0x09 结束标记
+                break;
+            case 0x08: // ECMA Array
+                $pos += 4; // arrayLength
+                while ($pos + 3 <= strlen($data)) {
+                    $keyLen = unpack('n', substr($data, $pos, 2))[1];
+                    $pos += 2;
+                    if ($keyLen == 0) break;
+                    $pos += $keyLen;
+                    $pos = $this->skipAmf0Value($data, $pos);
+                }
+                $pos += 1;
+                break;
+            default:
+                break;
+        }
+        return $pos;
+    }
+
+    private function sendChunkOrWrite($data) {
+        if ($this->useChunked) {
+            $this->sendChunk($data);
+        } else {
+            $this->writeAll($data);
+        }
+    }
+
     public function __construct($filePath, $pushUrl, $speed = 1.0, $autoReconnect = true) {
         $this->filePath = $filePath;
         $this->pushUrl = $pushUrl;
@@ -214,202 +443,6 @@ class FLVPusher {
 
         $request .= "\r\n";
         return $request;
-    }
-
-    /**
-     * 修复版本：正确处理 FLV 文件解析和发送
-     */
-    private function pushStream($fileHandle) {
-        // 1. 读取 FLV Header (9 bytes)
-        $flvHeader = fread($fileHandle, 9);
-        if (strlen($flvHeader) != 9) {
-            throw new \Exception("无效的 FLV 文件：无法读取 Header");
-        }
-
-        // 验证 FLV 文件
-        if (substr($flvHeader, 0, 3) !== 'FLV') {
-            throw new \Exception("不是有效的 FLV 文件");
-        }
-
-        $version = ord($flvHeader[3]);
-        $typeFlags = ord($flvHeader[4]);
-        $hasAudio = ($typeFlags & 0x04) ? true : false;
-        $hasVideo = ($typeFlags & 0x01) ? true : false;
-        $dataOffset = $this->readInt32(substr($flvHeader, 5, 4));
-
-        $this->log(sprintf("FLV 版本: %d, Audio=%s, Video=%s, Header偏移: %d",
-            $version,
-            $hasAudio ? '是' : '否',
-            $hasVideo ? '是' : '否',
-            $dataOffset
-        ), 'info');
-
-        // 如果 dataOffset > 9，说明 Header 后面有额外数据
-        if ($dataOffset > 9) {
-            $extraData = fread($fileHandle, $dataOffset - 9);
-            $flvHeader .= $extraData;
-        }
-
-        // 发送 FLV Header
-        if ($this->useChunked) {
-            $this->sendChunk($flvHeader);
-        } else {
-            $this->writeAll($flvHeader);
-        }
-
-        // 2. 读取并发送第一个 Previous Tag Size (4 bytes, 总是 0)
-        $prevTagSize = fread($fileHandle, 4);
-        if (strlen($prevTagSize) != 4) {
-            throw new \Exception("读取 Previous Tag Size 失败");
-        }
-
-        if ($this->useChunked) {
-            $this->sendChunk($prevTagSize);
-        } else {
-            $this->writeAll($prevTagSize);
-        }
-
-        // 3. 循环读取和发送 Tags
-        $startRealTime = microtime(true);
-        $tagCount = 0;
-        $firstTimestamp = -1;
-        $lastProgressTime = 0;
-
-        while ($this->isRunning && !feof($fileHandle)) {
-            // 检查文件位置
-            $position = ftell($fileHandle);
-            $fileSize = filesize($this->filePath);
-
-            if ($position >= $fileSize - 4) { // 减去 PreviousTagSize 的4字节
-                $this->log("已到达文件末尾，推流完成", 'info');
-                break;
-            }
-
-            // 读取 Tag Header (11 bytes)
-            $tagHeader = fread($fileHandle, 11);
-            if (strlen($tagHeader) < 11) {
-                $this->log("读取 Tag Header 失败，文件可能已结束", 'warning');
-                break;
-            }
-
-            // 解析 Tag Header
-            $tagType = ord($tagHeader[0]);
-            $dataSize = $this->readUInt24(substr($tagHeader, 1, 3));
-            $timestamp = $this->readUInt24(substr($tagHeader, 4, 3));
-            $timestampExt = ord($tagHeader[7]);
-            $streamId = $this->readUInt24(substr($tagHeader, 8, 3));
-
-            // 计算完整时间戳
-            $fullTimestamp = ($timestampExt << 24) | $timestamp;
-
-            $tagTypeName = $this->getTagTypeName($tagType);
-
-            // 验证数据大小
-            if ($dataSize <= 0 || $dataSize > 10 * 1024 * 1024) { // 最大10MB
-                $this->log("异常的 Tag 数据大小: {$dataSize} 字节, TagType: {$tagTypeName}，跳过此Tag", 'warning');
-
-                // 尝试定位到下一个 Tag (跳过数据 + PreviousTagSize)
-                $seekOffset = $dataSize + 4;
-                if ($seekOffset > 0 && $seekOffset < 50 * 1024 * 1024) { // 50MB 限制
-                    $currentPos = ftell($fileHandle);
-                    if (fseek($fileHandle, $seekOffset, SEEK_CUR) === 0) {
-                        $newPos = ftell($fileHandle);
-                        $this->log("跳过异常Tag，从 {$currentPos} 移动到 {$newPos}", 'debug');
-                        continue;
-                    }
-                }
-                break;
-            }
-
-            // 检查剩余数据是否足够
-            $remainingData = $fileSize - $position - 11;
-            if ($dataSize + 4 > $remainingData) {
-                $this->log("Tag 数据大小 {$dataSize} 超出剩余文件大小 {$remainingData}", 'warning');
-                break;
-            }
-
-            // 读取 Tag Data
-            $tagData = fread($fileHandle, $dataSize);
-            if (strlen($tagData) != $dataSize) {
-                throw new \Exception(sprintf(
-                    "读取 Tag Data 失败: 期望 %d 字节，实际 %d 字节, TagType: %s, 文件位置: %d",
-                    $dataSize,
-                    strlen($tagData),
-                    $tagTypeName,
-                    $position
-                ));
-            }
-
-            // 读取 Previous Tag Size (4 bytes)
-            $prevTagSizeBinary = fread($fileHandle, 4);
-            if (strlen($prevTagSizeBinary) != 4 && !feof($fileHandle)) {
-                throw new \Exception("读取 Previous Tag Size 失败");
-            }
-
-            // 记录第一个时间戳
-            if ($firstTimestamp < 0) {
-                $firstTimestamp = $fullTimestamp;
-            }
-
-            // 构建完整的 Tag (Header + Data)
-            $fullTag = $tagHeader . $tagData;
-
-            // 速率控制
-            if ($this->speed > 0 && $fullTimestamp > 0) {
-                $adjustedTimestamp = $fullTimestamp - $firstTimestamp;
-                $elapsedReal = (microtime(true) - $startRealTime) * 1000;
-                $targetTimestamp = $adjustedTimestamp / $this->speed;
-
-                if ($targetTimestamp > $elapsedReal) {
-                    $sleepMs = $targetTimestamp - $elapsedReal;
-                    if ($sleepMs > 0 && $sleepMs < 5000) { // 最多等待5秒
-                        usleep((int)($sleepMs * 1000));
-                    }
-                }
-            }
-
-            // 发送 Tag 数据
-            if ($this->useChunked) {
-                $this->sendChunk($fullTag);
-            } else {
-                $this->writeAll($fullTag);
-            }
-
-            // 发送 Previous Tag Size
-            if ($this->useChunked) {
-                $this->sendChunk($prevTagSizeBinary);
-            } else {
-                $this->writeAll($prevTagSizeBinary);
-            }
-
-            // 更新统计
-            $this->stats['tags_sent']++;
-            $this->stats['bytes_sent'] += strlen($fullTag) + 4; // Tag + PreviousTagSize
-            $tagCount++;
-
-            $this->lastTimestamp = $fullTimestamp;
-
-            // 定期输出进度
-            $currentTime = microtime(true);
-            if ($this->statsEnabled && $tagCount % 100 == 0 && ($currentTime - $lastProgressTime) >= 1) {
-                $this->printProgress($fullTimestamp);
-                $lastProgressTime = $currentTime;
-            }
-
-            // 检查连接
-            if (!$this->isConnected()) {
-                throw new \Exception("连接已断开");
-            }
-        }
-
-        $this->log("共处理 {$tagCount} 个 Tag", 'info');
-
-        // 发送结束标记
-        if ($this->useChunked) {
-            fwrite($this->socket, "0\r\n\r\n");
-        }
-
-        return true;
     }
 
     private function getTagTypeName($type) {
