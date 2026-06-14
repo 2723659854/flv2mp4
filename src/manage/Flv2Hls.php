@@ -366,11 +366,9 @@ class Flv2Hls
         $profile = $this->audioObjectType - 1;
         if ($profile < 0) $profile = 1;
 
-        // 对于 HE-AAC/SBR，使用 extension sampling frequency index
+        // ADTS 头始终使用基础采样率索引
+        // HE-AAC/SBR 的扩展采样率信息在 AAC 数据内部，不在 ADTS 头中
         $freqIndex = $this->samplingFrequencyIndex;
-        if ($this->sbrPresent && $this->extensionSamplingIndex !== null) {
-            $freqIndex = $this->extensionSamplingIndex;
-        }
 
         // 确保采样率索引在有效范围内 (0-11)
         if ($freqIndex < 0 || $freqIndex > 11) {
