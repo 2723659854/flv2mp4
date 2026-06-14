@@ -64,11 +64,11 @@ class Mp4ToFlv
             $this->writeFLVHeader();
             $this->extractAndWriteMediaData();
 
-            echo "音频类型: " . $this->getAudioTypeName() . "\n";
-            echo "输出采样率: {$this->audioSampleRate} Hz\n";
-            echo "声道数: {$this->audioChannels}\n";
-            echo "AudioSpecificConfig (" . strlen($this->audioSpecificConfig) . " bytes): " . bin2hex($this->audioSpecificConfig) . "\n";
-            echo "是否是 HE-AAC: " . ($this->isHeAac ? '是' : '否') . "\n";
+//            echo "音频类型: " . $this->getAudioTypeName() . "\n";
+//            echo "输出采样率: {$this->audioSampleRate} Hz\n";
+//            echo "声道数: {$this->audioChannels}\n";
+//            echo "AudioSpecificConfig (" . strlen($this->audioSpecificConfig) . " bytes): " . bin2hex($this->audioSpecificConfig) . "\n";
+//            echo "是否是 HE-AAC: " . ($this->isHeAac ? '是' : '否') . "\n";
 
             return true;
         } finally {
@@ -173,6 +173,14 @@ class Mp4ToFlv
         if (!$this->videoTrack && !$this->audioTrack) {
             throw new \RuntimeException("未找到有效的视频或音频轨道");
         }
+//        if ($this->audioTrack) {
+//            echo "audioTrack 存在\n";
+//            echo "audioSpecificConfig: '" . bin2hex($this->audioSpecificConfig) . "' (" . strlen($this->audioSpecificConfig) . " bytes)\n";
+//            echo "audioObjectType: {$this->audioObjectType}\n";
+//            echo "audioSampleRate: {$this->audioSampleRate}\n";
+//        } else {
+//            echo "audioTrack 不存在!\n";
+//        }
     }
 
     private function parseTrack(array $trak): void
@@ -328,16 +336,11 @@ class Mp4ToFlv
         $len = strlen($data);
         if ($len < 2) return;
 
-        // ★ 只有顶层 esds FullBox 才有 version+flags ★
         $pos = $hasFullBoxHeader ? 4 : 0;
-
-        echo "[parseEsds] len={$len}, hasHeader=" . ($hasFullBoxHeader?'yes':'no') . ", hex=" . bin2hex(substr($data, 0, min(30, $len))) . "...\n";
 
         while ($pos + 2 <= $len) {
             $tag = ord($data[$pos]);
             $pos++;
-
-            echo "  tag=0x" . dechex($tag) . " at " . ($pos-1) . "\n";
 
             if ($pos >= $len) break;
 
@@ -349,36 +352,32 @@ class Mp4ToFlv
                 if (($byte & 0x80) == 0) break;
             }
 
-            echo "    length={$length}, dataPos={$pos}\n";
-
             if ($pos + $length > $len) break;
 
             if ($tag == 0x05) {
-                echo "    ★★★ 找到 0x05! ★★★\n";
                 $this->audioSpecificConfig = substr($data, $pos, $length);
-                echo "    config=" . bin2hex($this->audioSpecificConfig) . "\n";
                 $this->parseAudioSpecificConfig($this->audioSpecificConfig);
                 return;
             }
 
             if ($tag == 0x03) {
-                echo "    [ES_Descriptor, 递归-无header]\n";
-                // ★ ES_Descriptor 的内容递归时，不带 FullBox header ★
-                $this->parseEsds(substr($data, $pos, $length), false);
+                // ES_Descriptor: 跳过 ES_ID(2) + flags(1) = 3 bytes
+                $skipBytes = 3;
+                if ($length > $skipBytes) {
+                    $this->parseEsds(substr($data, $pos + $skipBytes, $length - $skipBytes), false);
+                }
             } elseif ($tag == 0x04) {
-                echo "    [DecoderConfig, 跳过13字节，递归-无header]\n";
-                // ★ DecoderConfigDescriptor 的内容递归时，不带 FullBox header ★
-                $headerSize = 13;
-                if ($length > $headerSize) {
-                    $this->parseEsds(substr($data, $pos + $headerSize, $length - $headerSize), false);
+                // DecoderConfigDescriptor: 跳过 objectTypeIndication(1) + streamType(1)
+                // + bufferSizeDB(3) + maxBitrate(4) + avgBitrate(4) = 13 bytes
+                $skipBytes = 13;
+                if ($length > $skipBytes) {
+                    $this->parseEsds(substr($data, $pos + $skipBytes, $length - $skipBytes), false);
                 }
             }
 
             $pos += $length;
         }
-        echo "[parseEsds] 结束\n";
     }
-
     private function parseAudioSpecificConfig(string $config): void
     {
         $len = strlen($config);
