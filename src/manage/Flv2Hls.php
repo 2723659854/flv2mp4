@@ -27,6 +27,13 @@ class Flv2Hls
     private string $spsPpsData = '';
     private ?string $audioSpecificConfig = null;
 
+    // HE-AAC/SBR 支持
+    private int $audioObjectType = 2;
+    private int $samplingFrequencyIndex = 4;
+    private int $channelConfiguration = 2;
+    private bool $sbrPresent = false;
+    private ?int $extensionSamplingIndex = null;
+
     private string $streamDir;
     private array $segmentDurations = [];
     private int $currentSegmentLastTime = 0;
@@ -214,6 +221,8 @@ class Flv2Hls
             $asc = substr($raw, 2);
             if (strlen($asc) >= 2) {
                 $this->audioSpecificConfig = substr($asc, 0, 2);
+                // 解析 AudioSpecificConfig，处理 HE-AAC/SBR
+                $this->parseAudioSpecificConfig($asc);
             }
             return;
         }
@@ -223,6 +232,22 @@ class Flv2Hls
 
         $aacRaw = substr($raw, 2);
         if ($aacRaw === '') return;
+
+        // ★★★ 检测并移除原始 ADTS 头，然后重新生成 ★★★
+        // 原始 FLV 中的 ADTS 头可能有错误的参数，必须重新生成
+        if (strlen($aacRaw) >= 7) {
+            $firstByte = ord($aacRaw[0]);
+            $secondByte = ord($aacRaw[1]);
+            // ADTS syncword: 12 bits = 0xFFF
+            if ($firstByte == 0xFF && ($secondByte & 0xF0) == 0xF0) {
+                // 移除原始 ADTS 头（7 字节）
+                $aacRaw = substr($aacRaw, 7);
+            }
+        }
+
+        // 始终重新生成 ADTS 头，确保参数正确
+        $adts = $this->createADTSHeader(strlen($aacRaw));
+        $payload = $adts . $aacRaw;
 
         // 获取时间戳 - 兼容不同的帧对象格式
         $timestamp = 0;
@@ -237,12 +262,8 @@ class Flv2Hls
         // 全局相对时间
         $relativeTime = $timestamp - $this->baseTimestamp;
 
-        // ===== 修复：缓存音频数据，在切片切换时一并写入 =====
         // 直接写入当前切片的音频数据
         $pts = (int)($relativeTime * 90);
-
-        $adts = $this->createADTSHeader(strlen($aacRaw));
-        $payload = $adts . $aacRaw;
 
         $pes = $this->createPES(0xC0, $payload, $pts, null);
 
@@ -314,22 +335,51 @@ class Flv2Hls
         return $result;
     }
 
-    private function createADTSHeader(int $aacLength): string
+    private function parseAudioSpecificConfig(string $asc): void
     {
-        $asc = $this->audioSpecificConfig;
+        if (strlen($asc) < 2) return;
         $b1 = ord($asc[0]);
         $b2 = ord($asc[1]);
+        $this->audioObjectType = ($b1 >> 3) & 0x1F;
+        $this->samplingFrequencyIndex = (($b1 & 0x07) << 1) | (($b2 >> 7) & 0x01);
+        $this->channelConfiguration = ($b2 >> 3) & 0x0F;
+        $this->sbrPresent = false;
+        $this->extensionSamplingIndex = null;
 
-        $audioObjectType = ($b1 >> 3) & 0x1F;
-        $freqIndex = (($b1 & 0x07) << 1) | (($b2 >> 7) & 0x01);
-        $channelConfig = ($b2 >> 3) & 0x0F;
+        // 处理 HE-AAC / SBR (audioObjectType == 5 或 29)
+        if ($this->audioObjectType == 5 || $this->audioObjectType == 29) {
+            $this->sbrPresent = true;
+            if (strlen($asc) >= 4) {
+                $extSamplingIndex = (ord($asc[2]) >> 3) & 0x0F;
+                $this->extensionSamplingIndex = $extSamplingIndex;
+            }
+        }
+    }
 
-        $profile = $audioObjectType - 1;
+    private function createADTSHeader(int $aacLength): string
+    {
+        $profile = $this->audioObjectType - 1;
         if ($profile < 0) $profile = 1;
+
+        // 对于 HE-AAC/SBR，使用 extension sampling frequency index
+        $freqIndex = $this->samplingFrequencyIndex;
+        if ($this->sbrPresent && $this->extensionSamplingIndex !== null) {
+            $freqIndex = $this->extensionSamplingIndex;
+        }
+
+        // 确保采样率索引在有效范围内 (0-11)
+        if ($freqIndex < 0 || $freqIndex > 11) {
+            $freqIndex = 4; // 默认 44100Hz
+        }
+
+        $channelConfig = $this->channelConfiguration;
+        if ($channelConfig < 0 || $channelConfig > 7) {
+            $channelConfig = 2; // 默认立体声
+        }
 
         $frameLength = $aacLength + 7;
 
-        // ===== 修复：确保 AAC 帧长度正确 =====
+        // 构建 ADTS 头部 (7 bytes)
         return pack('CCCCCCC',
             0xFF, 0xF1,
             (($profile & 0x03) << 6) | (($freqIndex & 0x0F) << 2) | (($channelConfig >> 2) & 0x01),
