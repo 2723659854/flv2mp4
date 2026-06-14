@@ -233,21 +233,26 @@ class Flv2Hls
         $aacRaw = substr($raw, 2);
         if ($aacRaw === '') return;
 
-        // ★★★ 检测并移除原始 ADTS 头，然后重新生成 ★★★
-        // 原始 FLV 中的 ADTS 头可能有错误的参数，必须重新生成
-        if (strlen($aacRaw) >= 7) {
+        // 检测 AAC 数据是否已经包含 ADTS 头
+        // 如果已有 ADTS 头，直接使用（保持原始正确参数）
+        $hasADTS = false;
+        if (strlen($aacRaw) >= 2) {
             $firstByte = ord($aacRaw[0]);
             $secondByte = ord($aacRaw[1]);
             // ADTS syncword: 12 bits = 0xFFF
             if ($firstByte == 0xFF && ($secondByte & 0xF0) == 0xF0) {
-                // 移除原始 ADTS 头（7 字节）
-                $aacRaw = substr($aacRaw, 7);
+                $hasADTS = true;
             }
         }
 
-        // 始终重新生成 ADTS 头，确保参数正确
-        $adts = $this->createADTSHeader(strlen($aacRaw));
-        $payload = $adts . $aacRaw;
+        if ($hasADTS) {
+            // 已有 ADTS 头，直接使用
+            $payload = $aacRaw;
+        } else {
+            // 没有 ADTS 头，需要添加
+            $adts = $this->createADTSHeader(strlen($aacRaw));
+            $payload = $adts . $aacRaw;
+        }
 
         // 获取时间戳 - 兼容不同的帧对象格式
         $timestamp = 0;
