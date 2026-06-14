@@ -156,6 +156,10 @@ class Flv2Hls
 
         // 计算 CTS/DTS/PTS
         $cts = $avc['compositionTime'] ?? 0;
+        // CTS 是 24 位有符号整数，需要符号扩展
+        if ($cts & 0x800000) {
+            $cts -= 0x1000000;
+        }
         $dts = (int)($relativeTime * 90);
         $pts = (int)(($relativeTime + $cts) * 90);
         if ($pts < $dts) {
