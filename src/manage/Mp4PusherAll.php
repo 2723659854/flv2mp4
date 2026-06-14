@@ -5,12 +5,11 @@ namespace Xiaosongshu\Flv2mp4\manage;
 /**
  * @purpose MP4 直接推流器（支持 HTTP-FLV 和 WebSocket-FLV）
  * @author yanglong
- * @time 2026年6月12日15:46:05
- * @version 1.1.0
+ * @time 2026年6月14日
+ * @version 1.2.0
  */
 class Mp4PusherAll
 {
-
     private $inputFile;
     private $mp4Data;
     private $boxTree;
@@ -26,14 +25,17 @@ class Mp4PusherAll
     private $audioSpecificConfig = '';
     private $audioSampleRate = 44100;
     private $audioChannels = 2;
-    private $audioProfile = 2;
+    private $audioObjectType = 2;
+    private $isHeAac = false;
 
     private $duration = 0;
+    private $maxVideoDtsMs = 0;
+    private $maxAudioDtsMs = 0;
     private $videoWidth = 0;
     private $videoHeight = 0;
     private $videoFrameRate = 30;
 
-    // === FlvPusher 属性 ===
+    // === 推流属性 ===
     private $pushUrl;
     private $speed = 1.0;
     private $autoReconnect = true;
@@ -46,12 +48,11 @@ class Mp4PusherAll
     private $socket;
     private $isRunning = true;
 
-    // ★ WebSocket 相关
+    // WebSocket 相关
     private $isWebSocket = false;
     private $wsKey = '';
     private $wsPath = '/';
 
-    // 统计信息
     private $stats = [
         'tags_sent' => 0,
         'bytes_sent' => 0,
@@ -60,13 +61,6 @@ class Mp4PusherAll
         'reconnect_count' => 0,
     ];
 
-    /**
-     * 初始化推流客户端
-     * @param string $inputFile
-     * @param string $pushUrl
-     * @param float $speed
-     * @param bool $autoReconnect
-     */
     public function __construct(string $inputFile, string $pushUrl, float $speed = 1.0, bool $autoReconnect = true)
     {
         $this->inputFile = $inputFile;
@@ -74,7 +68,6 @@ class Mp4PusherAll
         $this->speed = max(0.1, min(10.0, $speed));
         $this->autoReconnect = $autoReconnect;
 
-        // ★ 检测协议类型
         $urlParts = parse_url($pushUrl);
         $scheme = strtolower($urlParts['scheme'] ?? 'http');
         $this->isWebSocket = ($scheme === 'ws' || $scheme === 'wss');
@@ -86,18 +79,27 @@ class Mp4PusherAll
         if (!file_exists($inputFile)) {
             throw new \RuntimeException("MP4 文件不存在：{$inputFile}");
         }
+
+        if (function_exists('pcntl_signal')) {
+            pcntl_signal(SIGINT, [$this, 'handleSignal']);
+            pcntl_signal(SIGTERM, [$this, 'handleSignal']);
+        }
     }
 
-    /**
-     * 启动推流
-     * @return bool
-     */
+    public function handleSignal($signal)
+    {
+        $this->log("[信号] 收到退出信号，正在优雅关闭...", 'warning');
+        $this->isRunning = false;
+        $this->closeConnection();
+        exit(0);
+    }
+
     public function start(): bool
     {
         $protocolName = $this->isWebSocket ? 'WebSocket-FLV' : 'HTTP-FLV';
 
         $this->log("========================================", 'info');
-        $this->log("MP4 Direct Pusher v1.1.0", 'info');
+        $this->log("MP4 Direct Pusher v1.2.0", 'info');
         $this->log("========================================", 'info');
         $this->log("文件：{$this->inputFile}", 'info');
         $this->log("推流地址：{$this->pushUrl}", 'info');
@@ -112,7 +114,7 @@ class Mp4PusherAll
             return false;
         }
 
-        $fileSize = filesize($this->inputFile);
+        $fileSize = strlen($this->mp4Data);
         $this->log("文件大小：" . $this->formatBytes($fileSize), 'info');
 
         $this->log("开始解析 MP4...", 'info');
@@ -132,14 +134,9 @@ class Mp4PusherAll
         return $result;
     }
 
-    /**
-     * 向服务端推送数据
-     * @return bool
-     */
     private function doPush()
     {
         $this->stats['start_time'] = microtime(true);
-        $this->stats['last_report_time'] = $this->stats['start_time'];
         $this->stats['tags_sent'] = 0;
         $this->stats['bytes_sent'] = 0;
 
@@ -151,8 +148,12 @@ class Mp4PusherAll
                     throw new \Exception("连接服务器失败");
                 }
 
+                $this->hasWrittenVideoHeader = false;
+                $this->hasWrittenAudioHeader = false;
+
                 $this->pushStream();
                 $this->log("推流完成！", 'success');
+                $this->closeConnection();
                 return true;
 
             } catch (\Exception $e) {
@@ -174,14 +175,10 @@ class Mp4PusherAll
         return false;
     }
 
-    /**
-     * 连接服务器
-     * @return bool
-     */
     private function connect()
     {
         $urlParts = parse_url($this->pushUrl);
-        $host = $urlParts['host'];
+        $host = $urlParts['host'] ?? '127.0.0.1';
         $port = $urlParts['port'] ?? 8501;
 
         $protocolName = $this->isWebSocket ? 'WebSocket-FLV' : 'HTTP-FLV';
@@ -198,44 +195,26 @@ class Mp4PusherAll
 
         if ($this->isWebSocket) {
             return $this->webSocketHandshake($host, $port);
-        } else {
-            return $this->httpConnect($host);
         }
+        return $this->httpConnect($host);
     }
 
-    // ==================== HTTP-FLV 连接 ====================
+    // ==================== HTTP-FLV ====================
 
-    /**
-     * HTTP 连接
-     * @param string $host
-     * @return bool
-     */
     private function httpConnect(string $host): bool
     {
         $request = $this->buildHTTPRequest($host);
-        $this->log("发送 HTTP 请求头", 'debug');
         fwrite($this->socket, $request);
 
         $response = '';
-        $headersEnded = false;
         while (!feof($this->socket)) {
             $line = fgets($this->socket);
             if ($line === false) break;
             $response .= $line;
-            if (trim($line) === '') {
-                $headersEnded = true;
-                break;
-            }
-        }
-
-        if (!$headersEnded) {
-            $this->log("读取服务器响应失败", 'error');
-            return false;
+            if (trim($line) === '') break;
         }
 
         $firstLine = strtok($response, "\r\n");
-        $this->log("服务器响应：{$firstLine}", 'debug');
-
         if (!strpos($firstLine, '200')) {
             $this->log("服务器返回非200状态：{$firstLine}", 'error');
             return false;
@@ -245,15 +224,9 @@ class Mp4PusherAll
         return true;
     }
 
-    /**
-     * 构建 HTTP 请求头
-     * @param string $host
-     * @return string
-     */
     private function buildHTTPRequest(string $host): string
     {
-        $path = $this->wsPath;
-        $request = "POST {$path} HTTP/1.1\r\n";
+        $request = "POST {$this->wsPath} HTTP/1.1\r\n";
         $request .= "Host: {$host}\r\n";
         $request .= "Content-Type: video/x-flv\r\n";
         $request .= "Connection: keep-alive\r\n";
@@ -264,14 +237,8 @@ class Mp4PusherAll
         return $request;
     }
 
-    // ==================== WebSocket-FLV 连接 ====================
+    // ==================== WebSocket-FLV ====================
 
-    /**
-     * WebSocket 握手
-     * @param string $host
-     * @param int $port
-     * @return bool
-     */
     private function webSocketHandshake(string $host, int $port): bool
     {
         $this->wsKey = base64_encode(random_bytes(16));
@@ -279,40 +246,23 @@ class Mp4PusherAll
         $handshake = "GET {$this->wsPath} HTTP/1.1\r\n";
         $handshake .= "Host: {$host}:{$port}\r\n";
         $handshake .= "Connection: Upgrade\r\n";
-        $handshake .= "Pragma: no-cache\r\n";
-        $handshake .= "Cache-Control: no-cache\r\n";
-        $handshake .= "User-Agent: Mp4Pusher/1.1.0\r\n";
         $handshake .= "Upgrade: websocket\r\n";
-        $handshake .= "Origin: http://{$host}:{$port}\r\n";
         $handshake .= "Sec-WebSocket-Version: 13\r\n";
-        $handshake .= "Accept-Encoding: gzip, deflate, br\r\n";
-        $handshake .= "Accept-Language: zh-CN,zh;q=0.9\r\n";
         $handshake .= "Sec-WebSocket-Key: {$this->wsKey}\r\n";
-        $handshake .= "Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits\r\n";
         $handshake .= "\r\n";
 
-        $this->log("发送 WebSocket 握手请求", 'debug');
-        $result = fwrite($this->socket, $handshake);
-        if ($result === false) {
-            $this->log("发送握手请求失败", 'error');
-            return false;
-        }
+        fwrite($this->socket, $handshake);
 
-        // 读取握手响应
         $response = '';
-        $timeout = time() + 10;
-        while (time() < $timeout && !feof($this->socket)) {
+        while (!feof($this->socket)) {
             $line = fgets($this->socket);
             if ($line === false) break;
             $response .= $line;
             if (trim($line) === '') break;
         }
 
-        $this->log("握手响应: " . strtok($response, "\r\n"), 'debug');
-
-        // 验证握手响应
         if (!preg_match('#Sec-WebSocket-Accept:\s(.*)$#mUi', $response, $matches)) {
-            $this->log("握手失败：未找到 Sec-WebSocket-Accept 头", 'error');
+            $this->log("握手失败：未找到 Sec-WebSocket-Accept", 'error');
             return false;
         }
 
@@ -320,7 +270,7 @@ class Mp4PusherAll
         $expectedKey = base64_encode(sha1($this->wsKey . '258EAFA5-E914-47DA-95CA-C5AB0DC85B11', true));
 
         if ($responseKey !== $expectedKey) {
-            $this->log("握手失败：Sec-WebSocket-Accept 验证不通过", 'error');
+            $this->log("握手失败：Sec-WebSocket-Accept 不匹配", 'error');
             return false;
         }
 
@@ -328,34 +278,22 @@ class Mp4PusherAll
         return true;
     }
 
-    /**
-     * 发送 WebSocket 数据帧（Binary 类型）
-     * @param string $data
-     */
     private function sendWebSocketFrame(string $data): void
     {
         $len = strlen($data);
-        $frame = '';
+        $frame = chr(0x82); // FIN + Binary
 
-        // 第一个字节: FIN(1) + RSV(3) + Opcode(4) = 0x82 (Binary)
-        $frame .= chr(0x82);
-
-        // 第二个字节: MASK(1) + Payload length(7)
         if ($len < 126) {
             $frame .= chr(0x80 | $len);
         } elseif ($len < 65536) {
-            $frame .= chr(0x80 | 126);
-            $frame .= pack('n', $len);
+            $frame .= chr(0x80 | 126) . pack('n', $len);
         } else {
-            $frame .= chr(0x80 | 127);
-            $frame .= pack('J', $len);
+            $frame .= chr(0x80 | 127) . pack('J', $len);
         }
 
-        // 4字节随机掩码
         $mask = random_bytes(4);
         $frame .= $mask;
 
-        // 掩码处理
         for ($i = 0; $i < $len; $i++) {
             $frame .= chr(ord($data[$i]) ^ ord($mask[$i % 4]));
         }
@@ -363,13 +301,9 @@ class Mp4PusherAll
         fwrite($this->socket, $frame);
     }
 
-    /**
-     * 发送 WebSocket Close Frame
-     */
     private function sendCloseFrame(): void
     {
-        $frame = chr(0x88);  // FIN + Close
-        $frame .= chr(0x80); // MASK + length=0
+        $frame = chr(0x88) . chr(0x80);
         $mask = random_bytes(4);
         $frame .= $mask;
         fwrite($this->socket, $frame);
@@ -377,33 +311,21 @@ class Mp4PusherAll
 
     // ==================== 推流核心 ====================
 
-    /**
-     * 推送数据流
-     * @return void
-     */
     private function pushStream()
     {
-        // 发送 FLV Header
-        $this->sendFLVData($this->generateFlvHeader());
-        $this->sendFLVData(pack('N', 0));
-
-        // 写入 onMetaData 标签
+        $this->writeSocket($this->generateFlvHeader());
+        $this->writeSocket(pack('N', 0));
         $this->writeMetaData();
-
-        // 提取并推送媒体数据
         $this->extractAndPushMediaData();
 
-        // ★ 发送结束标记
         if ($this->isWebSocket) {
             $this->sendCloseFrame();
+        } elseif ($this->useChunked) {
+            fwrite($this->socket, "0\r\n\r\n");
         }
     }
 
-    /**
-     * 推送 FLV 数据（根据协议自动选择发送方式）
-     * @param string $data
-     */
-    private function sendFLVData(string $data): void
+    private function writeSocket(string $data): void
     {
         if ($this->isWebSocket) {
             $this->sendWebSocketFrame($data);
@@ -414,12 +336,9 @@ class Mp4PusherAll
         } else {
             fwrite($this->socket, $data);
         }
+        $this->stats['bytes_sent'] += strlen($data);
     }
 
-    /**
-     * 生成 FLV Header
-     * @return string
-     */
     private function generateFlvHeader(): string
     {
         $flags = 0;
@@ -428,7 +347,7 @@ class Mp4PusherAll
         return "FLV\x01" . chr($flags) . "\x00\x00\x00\x09";
     }
 
-    // ==================== MP4 解析（保持不变） ====================
+    // ==================== MP4 解析 ====================
 
     private function parseMp4Boxes(): void
     {
@@ -523,24 +442,16 @@ class Mp4PusherAll
         $trackId = unpack('N', substr($tkhdData, 12, 4))[1];
 
         $version = ord($tkhdData[0]);
-        if ($version == 0) {
-            $widthOffset  = 76;
-            $heightOffset = 80;
-        } else {
-            $widthOffset  = 88;
-            $heightOffset = 92;
-        }
+        $widthOffset  = ($version == 0) ? 76 : 88;
+        $heightOffset = ($version == 0) ? 80 : 92;
 
-        $tkhdWidth  = 0;
-        $tkhdHeight = 0;
         if (strlen($tkhdData) >= $heightOffset + 4) {
             $tkhdWidth  = unpack('N', substr($tkhdData, $widthOffset, 4))[1] / 65536;
             $tkhdHeight = unpack('N', substr($tkhdData, $heightOffset, 4))[1] / 65536;
-        }
-
-        if ($tkhdWidth > 0 && $tkhdHeight > 0) {
-            $this->videoWidth  = (int)round($tkhdWidth);
-            $this->videoHeight = (int)round($tkhdHeight);
+            if ($tkhdWidth > 0 && $tkhdHeight > 0) {
+                $this->videoWidth  = (int)round($tkhdWidth);
+                $this->videoHeight = (int)round($tkhdHeight);
+            }
         }
 
         $mdia = $this->findBox([$trak], 'mdia');
@@ -568,21 +479,11 @@ class Mp4PusherAll
             $entryType = substr($stsdData, $pos + 4, 4);
 
             if ($handlerType === 'vide' && $entryType === 'avc1') {
-                $this->videoTrack = [
-                    'id'        => $trackId,
-                    'type'      => 'video',
-                    'codec'     => 'avc1',
-                    'timescale' => $timescale
-                ];
+                $this->videoTrack = ['id' => $trackId, 'type' => 'video', 'codec' => 'avc1', 'timescale' => $timescale];
                 $this->parseAvcCFromBox(substr($stsdData, $pos, $entrySize));
                 break;
             } elseif ($handlerType === 'soun' && $entryType === 'mp4a') {
-                $this->audioTrack = [
-                    'id'        => $trackId,
-                    'type'      => 'audio',
-                    'codec'     => 'mp4a',
-                    'timescale' => $timescale
-                ];
+                $this->audioTrack = ['id' => $trackId, 'type' => 'audio', 'codec' => 'mp4a', 'timescale' => $timescale];
                 $this->parseEsdsFromBox(substr($stsdData, $pos, $entrySize));
                 break;
             }
@@ -593,12 +494,9 @@ class Mp4PusherAll
     private function parseAvcCFromBox(string $data): void
     {
         $pos = strpos($data, 'avcC');
-        if ($pos === false) return;
-        if ($pos < 4) return;
-
+        if ($pos === false || $pos < 4) return;
         $boxSize = unpack('N', substr($data, $pos - 4, 4))[1];
         $avcCData = substr($data, $pos + 4, $boxSize - 8);
-
         $this->parseAvcC($avcCData);
     }
 
@@ -631,19 +529,13 @@ class Mp4PusherAll
     private function parseSpsForDimensions(string $sps): void
     {
         if (strlen($sps) < 10) return;
-
         $pos = 0;
-        if (ord($sps[0]) & 0x80) {
-            $pos++;
-        }
-
+        if (ord($sps[0]) & 0x80) $pos++;
         $pos += 3;
         $pos++;
         $pos = $this->skipUEG($sps, $pos);
-
         $picOrderCntType = $this->readUEG($sps, $pos);
         $pos = $this->skipUEG($sps, $pos);
-
         if ($picOrderCntType == 0) {
             $pos = $this->skipUEG($sps, $pos);
             $pos = $this->skipUEG($sps, $pos);
@@ -658,46 +550,27 @@ class Mp4PusherAll
                 $pos = $this->skipSEG($sps, $pos);
             }
         }
-
         $pos = $this->skipUEG($sps, $pos);
         $pos++;
-
-        $picWidthInMbsMinus1 = $this->readUEG($sps, $pos);
-        $pos = $this->skipUEG($sps, $pos);
-
-        $picHeightInMapUnitsMinus1 = $this->readUEG($sps, $pos);
-        $pos = $this->skipUEG($sps, $pos);
+        // 不从这里取宽高，用 tkhd 的
     }
 
     private function readUEG(string $data, int &$pos): int
     {
-        $result = 0;
         $leadingZeroBits = 0;
-
-        while ($pos < strlen($data) && (ord($data[$pos]) & 0x80) == 0) {
-            $leadingZeroBits++;
-            $pos++;
-        }
-
+        while ($pos < strlen($data) && (ord($data[$pos]) & 0x80) == 0) { $leadingZeroBits++; $pos++; }
         if ($pos >= strlen($data)) return 0;
-
-        $result = ord($data[$pos]) & 0x7F;
-        $pos++;
-
+        $result = ord($data[$pos]) & 0x7F; $pos++;
         for ($i = 0; $i < $leadingZeroBits; $i++) {
             if ($pos >= strlen($data)) break;
-            $result = ($result << 7) | (ord($data[$pos]) & 0x7F);
-            $pos++;
+            $result = ($result << 7) | (ord($data[$pos]) & 0x7F); $pos++;
         }
-
         return $result - 1;
     }
 
     private function skipUEG(string $data, int $pos): int
     {
-        while ($pos < strlen($data) && (ord($data[$pos]) & 0x80) == 0) {
-            $pos++;
-        }
+        while ($pos < strlen($data) && (ord($data[$pos]) & 0x80) == 0) $pos++;
         if ($pos >= strlen($data)) return $pos;
         $pos++;
         return $pos;
@@ -705,149 +578,99 @@ class Mp4PusherAll
 
     private function skipSEG(string $data, int $pos): int
     {
-        while ($pos < strlen($data) && (ord($data[$pos]) & 0x80) == 0) {
-            $pos++;
-        }
-        if ($pos >= strlen($data)) return $pos;
-        $pos++;
-        return $pos;
+        return $this->skipUEG($data, $pos);
     }
 
+    // ★ 修复版 ESDS 解析
     private function parseEsdsFromBox(string $data): void
     {
         $pos = strpos($data, 'esds');
-        if ($pos === false) return;
-        if ($pos < 4) return;
-
+        if ($pos === false || $pos < 4) return;
         $boxSize = unpack('N', substr($data, $pos - 4, 4))[1];
         $esdsData = substr($data, $pos + 4, $boxSize - 8);
-
         $this->parseEsds($esdsData);
     }
 
-    private function parseEsds(string $data): void
+    private function parseEsds(string $data, bool $hasFullBoxHeader = true): void
     {
-        if (strlen($data) < 20) return;
-        $pos = 4;
+        $len = strlen($data);
+        if ($len < 2) return;
 
-        while ($pos < strlen($data)) {
-            if ($pos + 1 > strlen($data)) break;
+        $pos = $hasFullBoxHeader ? 4 : 0;
+
+        while ($pos + 2 <= $len) {
             $tag = ord($data[$pos]);
             $pos++;
 
-            if ($pos >= strlen($data)) break;
+            if ($pos >= $len) break;
+
             $length = 0;
-            while ($pos < strlen($data)) {
+            while ($pos < $len) {
                 $byte = ord($data[$pos]);
-                $length = ($length << 7) | ($byte & 0x7F);
                 $pos++;
+                $length = ($length << 7) | ($byte & 0x7F);
                 if (($byte & 0x80) == 0) break;
             }
 
-            if ($pos + $length > strlen($data)) break;
+            if ($pos + $length > $len) break;
 
-            $contentStart = $pos;
-
-            switch ($tag) {
-                case 0x03:
-                    $pos += 3;
-                    $remainingLength = $length - 3;
-                    if ($remainingLength > 0 && $pos + $remainingLength <= strlen($data)) {
-                        $subData = substr($data, $pos, $remainingLength);
-                        $this->parseEsdsNested($subData);
-                    }
-                    break;
-
-                case 0x04:
-                    $pos += 13;
-                    $remainingLength = $length - 13;
-                    if ($remainingLength > 0 && $pos + $remainingLength <= strlen($data)) {
-                        $subData = substr($data, $pos, $remainingLength);
-                        $this->parseEsdsNested($subData);
-                    }
-                    break;
-
-                case 0x05:
-                    $this->audioSpecificConfig = substr($data, $contentStart, $length);
-                    if ($length >= 2) {
-                        $config = unpack('n', $this->audioSpecificConfig)[1];
-                        $this->audioProfile = ($config >> 11) & 0x1F;
-                        $freqIndex = ($config >> 7) & 0x0F;
-                        $this->audioChannels = ($config >> 3) & 0x0F;
-                        $rates = [96000,88200,64000,48000,44100,32000,24000,22050,16000,12000,11025,8000,7350];
-                        $this->audioSampleRate = $rates[$freqIndex] ?? 44100;
-                    }
-                    return;
-
-                default:
-                    break;
+            if ($tag == 0x05) {
+                $this->audioSpecificConfig = substr($data, $pos, $length);
+                $this->parseAudioSpecificConfig($this->audioSpecificConfig);
+                return;
             }
 
-            $pos = $contentStart + $length;
+            if ($tag == 0x03) {
+                $skipBytes = 3;
+                if ($length > $skipBytes) {
+                    $this->parseEsds(substr($data, $pos + $skipBytes, $length - $skipBytes), false);
+                }
+            } elseif ($tag == 0x04) {
+                $skipBytes = 13;
+                if ($length > $skipBytes) {
+                    $this->parseEsds(substr($data, $pos + $skipBytes, $length - $skipBytes), false);
+                }
+            }
+
+            $pos += $length;
         }
     }
 
-    private function parseEsdsNested(string $data): void
+    // ★ 新增
+    private function parseAudioSpecificConfig(string $config): void
     {
-        $pos = 0;
-        while ($pos < strlen($data)) {
-            if ($pos + 1 > strlen($data)) break;
-            $tag = ord($data[$pos]);
-            $pos++;
+        $len = strlen($config);
+        if ($len < 2) return;
 
-            if ($pos >= strlen($data)) break;
-            $length = 0;
-            while ($pos < strlen($data)) {
-                $byte = ord($data[$pos]);
-                $length = ($length << 7) | ($byte & 0x7F);
-                $pos++;
-                if (($byte & 0x80) == 0) break;
-            }
+        $bytes = unpack('n', substr($config, 0, 2))[1];
+        $this->audioObjectType = ($bytes >> 11) & 0x1F;
+        $freqIndex = ($bytes >> 7) & 0x0F;
+        $channelConfig = ($bytes >> 3) & 0x0F;
 
-            if ($pos + $length > strlen($data)) break;
+        $rates = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350];
+        $baseRate = $rates[$freqIndex] ?? 44100;
 
-            $contentStart = $pos;
-
-            switch ($tag) {
-                case 0x03:
-                    $pos += 3;
-                    $remainingLength = $length - 3;
-                    if ($remainingLength > 0 && $pos + $remainingLength <= strlen($data)) {
-                        $subData = substr($data, $pos, $remainingLength);
-                        $this->parseEsdsNested($subData);
-                    }
-                    break;
-
-                case 0x04:
-                    $pos += 13;
-                    $remainingLength = $length - 13;
-                    if ($remainingLength > 0 && $pos + $remainingLength <= strlen($data)) {
-                        $subData = substr($data, $pos, $remainingLength);
-                        $this->parseEsdsNested($subData);
-                    }
-                    break;
-
-                case 0x05:
-                    $this->audioSpecificConfig = substr($data, $contentStart, $length);
-                    if ($length >= 2) {
-                        $config = unpack('n', $this->audioSpecificConfig)[1];
-                        $this->audioProfile = ($config >> 11) & 0x1F;
-                        $freqIndex = ($config >> 7) & 0x0F;
-                        $this->audioChannels = ($config >> 3) & 0x0F;
-                        $rates = [96000,88200,64000,48000,44100,32000,24000,22050,16000,12000,11025,8000,7350];
-                        $this->audioSampleRate = $rates[$freqIndex] ?? 44100;
-                    }
-                    return;
-
-                default:
-                    break;
-            }
-
-            $pos = $contentStart + $length;
+        switch ($this->audioObjectType) {
+            case 2:
+                $this->audioSampleRate = $baseRate;
+                $this->audioChannels = $channelConfig;
+                $this->isHeAac = false;
+                break;
+            case 5:
+            case 29:
+                $this->audioSampleRate = $baseRate * 2;
+                $this->audioChannels = ($this->audioObjectType == 29) ? 2 : $channelConfig;
+                $this->isHeAac = true;
+                break;
+            default:
+                $this->audioSampleRate = $baseRate;
+                $this->audioChannels = $channelConfig;
+                $this->isHeAac = false;
+                break;
         }
     }
 
-    // ==================== 媒体数据提取与推送 ====================
+    // ==================== 媒体数据提取 ====================
 
     private function extractAndPushMediaData(): void
     {
@@ -857,7 +680,6 @@ class Mp4PusherAll
         if (!$moov) return;
 
         $allSamples = [];
-
         $traks = $this->findAllBoxes([$moov], 'trak');
         foreach ($traks as $trak) {
             $mdia = $this->findBox([$trak], 'mdia');
@@ -868,18 +690,17 @@ class Mp4PusherAll
             $stbl = $this->findBox([$mdia], 'stbl');
             if (!$stbl) continue;
 
-            $samples = $this->extractSamplesFromStbl($stbl, $mdat['data'], $mdat['offset'], $handlerType);
+            $samples = $this->extractSamplesFromStbl($stbl, $handlerType);
             foreach ($samples as &$s) {
                 $s['type'] = ($handlerType === 'vide') ? 'video' : 'audio';
             }
+            unset($s);
             $allSamples = array_merge($allSamples, $samples);
         }
 
         usort($allSamples, function($a, $b) {
             return $a['dtsMs'] - $b['dtsMs'];
         });
-
-        $this->log("共提取 " . count($allSamples) . " 个样本", 'info');
 
         $startRealTime = microtime(true);
         $firstTimestamp = -1;
@@ -889,15 +710,12 @@ class Mp4PusherAll
         foreach ($allSamples as $sample) {
             $dtsMs = $sample['dtsMs'];
 
-            if ($firstTimestamp < 0) {
-                $firstTimestamp = $dtsMs;
-            }
+            if ($firstTimestamp < 0) $firstTimestamp = $dtsMs;
 
             if ($this->speed > 0 && $dtsMs > 0) {
                 $adjustedTimestamp = $dtsMs - $firstTimestamp;
                 $elapsedReal = (microtime(true) - $startRealTime) * 1000;
                 $targetTimestamp = $adjustedTimestamp / $this->speed;
-
                 if ($targetTimestamp > $elapsedReal) {
                     $sleepMs = $targetTimestamp - $elapsedReal;
                     if ($sleepMs > 0 && $sleepMs < 5000) {
@@ -913,18 +731,14 @@ class Mp4PusherAll
             }
 
             $sampleCount++;
-
-            $currentTime = microtime(true);
-            if ($this->statsEnabled && $sampleCount % 100 == 0 && ($currentTime - $lastProgressTime) >= 1) {
+            if ($this->statsEnabled && $sampleCount % 100 == 0 && (microtime(true) - $lastProgressTime) >= 1) {
                 $this->printProgress($dtsMs);
-                $lastProgressTime = $currentTime;
+                $lastProgressTime = microtime(true);
             }
         }
-
-        $this->log("共处理 {$sampleCount} 个样本", 'info');
     }
 
-    private function extractSamplesFromStbl(array $stbl, string $mdatData, int $mdatOffset, string $handlerType): array
+    private function extractSamplesFromStbl(array $stbl, string $handlerType): array
     {
         $stsz = $this->findBox([$stbl], 'stsz');
         $stco = $this->findBox([$stbl], 'stco');
@@ -938,58 +752,39 @@ class Mp4PusherAll
         $timescale = ($handlerType === 'vide') ? ($this->videoTrack['timescale'] ?? 90000) : ($this->audioTrack['timescale'] ?? 90000);
 
         $stszData = $stsz['data'];
-        $stszOffset = 4;
-
-        $sampleSize = unpack('N', substr($stszData, $stszOffset, 4))[1];
-        $sampleCount = unpack('N', substr($stszData, $stszOffset + 4, 4))[1];
+        $sampleSize = unpack('N', substr($stszData, 4, 4))[1];
+        $sampleCount = unpack('N', substr($stszData, 8, 4))[1];
         $sampleSizes = [];
         if ($sampleSize == 0) {
             for ($i = 0; $i < $sampleCount; $i++) {
-                $sampleSizes[] = unpack('N', substr($stszData, $stszOffset + 8 + $i * 4, 4))[1];
+                $sampleSizes[] = unpack('N', substr($stszData, 12 + $i * 4, 4))[1];
             }
         } else {
             $sampleSizes = array_fill(0, $sampleCount, $sampleSize);
         }
 
         $stscData = $stsc['data'];
-        $stscOffset = 0;
-
-        if (strlen($stscData) >= 8 && unpack('N', substr($stscData, 0, 4))[1] == 0) {
-            $stscOffset = 4;
-        }
-
-        $stscEntries = unpack('N', substr($stscData, $stscOffset, 4))[1];
+        $stscEntries = unpack('N', substr($stscData, 4, 4))[1];
         $chunkMap = [];
-        $pos = $stscOffset + 4;
         for ($i = 0; $i < $stscEntries; $i++) {
-            $firstChunk = unpack('N', substr($stscData, $pos, 4))[1];
-            $samplesPerChunk = unpack('N', substr($stscData, $pos+4, 4))[1];
-            $descIndex = unpack('N', substr($stscData, $pos+8, 4))[1];
-            $pos += 12;
-            $chunkMap[$firstChunk] = ['samples' => $samplesPerChunk, 'desc' => $descIndex];
+            $firstChunk = unpack('N', substr($stscData, 8 + $i * 12, 4))[1];
+            $samplesPerChunk = unpack('N', substr($stscData, 12 + $i * 12, 4))[1];
+            $chunkMap[$firstChunk] = $samplesPerChunk;
         }
 
         $stcoData = $stco['data'];
-        $stcoOffset = 0;
-
-        if (strlen($stcoData) >= 8 && unpack('N', substr($stcoData, 0, 4))[1] == 0) {
-            $stcoOffset = 4;
-        }
-
-        $chunkCount = unpack('N', substr($stcoData, $stcoOffset, 4))[1];
+        $chunkCount = unpack('N', substr($stcoData, 4, 4))[1];
         $chunkOffsets = [];
         for ($i = 0; $i < $chunkCount; $i++) {
-            $chunkOffsets[] = unpack('N', substr($stcoData, $stcoOffset + 4 + $i * 4, 4))[1];
+            $chunkOffsets[] = unpack('N', substr($stcoData, 8 + $i * 4, 4))[1];
         }
 
         $chunkSamples = [];
         for ($chunk = 0; $chunk < $chunkCount; $chunk++) {
             $chunkNum = $chunk + 1;
-            $samples = 0;
-            foreach ($chunkMap as $firstChunk => $map) {
-                if ($chunkNum >= $firstChunk) {
-                    $samples = $map['samples'];
-                }
+            $samples = 1;
+            foreach ($chunkMap as $firstChunk => $spc) {
+                if ($chunkNum >= $firstChunk) $samples = $spc;
             }
             $chunkSamples[] = $samples;
         }
@@ -1012,11 +807,9 @@ class Mp4PusherAll
         $pos = 8;
         for ($i = 0; $i < $sttsEntries; $i++) {
             $count = unpack('N', substr($sttsData, $pos, 4))[1];
-            $delta = unpack('N', substr($sttsData, $pos+4, 4))[1];
+            $delta = unpack('N', substr($sttsData, $pos + 4, 4))[1];
             $pos += 8;
-            for ($j = 0; $j < $count; $j++) {
-                $timeDeltas[] = $delta;
-            }
+            for ($j = 0; $j < $count; $j++) $timeDeltas[] = $delta;
         }
 
         $ctOffsets = [];
@@ -1026,11 +819,9 @@ class Mp4PusherAll
             $pos = 8;
             for ($i = 0; $i < $cttsEntries; $i++) {
                 $count = unpack('N', substr($cttsData, $pos, 4))[1];
-                $offset = unpack('N', substr($cttsData, $pos+4, 4))[1];
+                $offset = unpack('N', substr($cttsData, $pos + 4, 4))[1];
                 $pos += 8;
-                for ($j = 0; $j < $count; $j++) {
-                    $ctOffsets[] = $offset;
-                }
+                for ($j = 0; $j < $count; $j++) $ctOffsets[] = $offset;
             }
         }
 
@@ -1039,7 +830,7 @@ class Mp4PusherAll
             $stssData = $stss['data'];
             $entries = unpack('N', substr($stssData, 4, 4))[1];
             for ($i = 0; $i < $entries; $i++) {
-                $keyframeSet[unpack('N', substr($stssData, 8 + $i*4, 4))[1] - 1] = true;
+                $keyframeSet[unpack('N', substr($stssData, 8 + $i * 4, 4))[1] - 1] = true;
             }
         }
 
@@ -1051,40 +842,36 @@ class Mp4PusherAll
             $rawData = substr($this->mp4Data, $offset, $sampleSizes[$i]);
 
             $ctsTicks = $ctOffsets[$i] ?? 0;
-            $dtsMs = round($dtsTicks * 1000 / $timescale);
-            $ctsMs = round($ctsTicks * 1000 / $timescale);
+            $dtsMs = (int)round($dtsTicks * 1000 / $timescale);
+            $ctsMs = (int)round($ctsTicks * 1000 / $timescale);
             $isKeyframe = isset($keyframeSet[$i]);
 
-            $samples[] = [
-                'data' => $rawData,
-                'dtsMs' => $dtsMs,
-                'ctsMs' => $ctsMs,
-                'keyframe' => $isKeyframe
-            ];
-
+            $samples[] = ['data' => $rawData, 'dtsMs' => $dtsMs, 'ctsMs' => $ctsMs, 'keyframe' => $isKeyframe];
             $dtsTicks += $timeDeltas[$i] ?? 0;
         }
         return $samples;
     }
 
+    // ==================== FLV Tag ====================
+
     private function writeVideoSample(string $data, int $dtsMs, int $ctsMs, bool $isKeyFrame): void
     {
+        if ($dtsMs > $this->maxVideoDtsMs) $this->maxVideoDtsMs = $dtsMs;
         if (!$this->hasWrittenVideoHeader && !empty($this->sps)) {
             $this->writeAVCSequenceHeader();
         }
 
         $codecId = 7;
         $frameType = $isKeyFrame ? 1 : 2;
-
         $videoData = chr(($frameType << 4) | $codecId) . "\x01" .
-            chr(($ctsMs >> 16) & 0xFF) . chr(($ctsMs >> 8) & 0xFF) . chr($ctsMs & 0xFF) .
-            $data;
+            chr(($ctsMs >> 16) & 0xFF) . chr(($ctsMs >> 8) & 0xFF) . chr($ctsMs & 0xFF) . $data;
 
         $this->writeFLVTag(9, $videoData, $dtsMs);
     }
 
     private function writeAudioSample(string $data, int $dtsMs): void
     {
+        if ($dtsMs > $this->maxAudioDtsMs) $this->maxAudioDtsMs = $dtsMs;
         if (!$this->hasWrittenAudioHeader && !empty($this->audioSpecificConfig)) {
             $this->writeAACSequenceHeader();
         }
@@ -1101,16 +888,13 @@ class Mp4PusherAll
 
     private function writeAVCSequenceHeader(): void
     {
-        $configVersion = "\x01";
-        $profile = $this->sps[1] ?? "\x42";
-        $compat  = $this->sps[2] ?? "\x00";
-        $level   = $this->sps[3] ?? "\x1F";
-        $lengthMinusOne = "\xFF";
-        $spsNum = "\xE1";
-        $spsLen = pack('n', strlen($this->sps));
-        $ppsNum = "\x01";
-        $ppsLen = pack('n', strlen($this->pps));
-        $record = $configVersion . $profile . $compat . $level . $lengthMinusOne . $spsNum . $spsLen . $this->sps . $ppsNum . $ppsLen . $this->pps;
+        $record = "\x01" .
+            ($this->sps[1] ?? "\x42") .
+            ($this->sps[2] ?? "\x00") .
+            ($this->sps[3] ?? "\x1F") .
+            "\xFF" .
+            "\xE1" . pack('n', strlen($this->sps)) . $this->sps .
+            "\x01" . pack('n', strlen($this->pps)) . $this->pps;
 
         $videoData = "\x17\x00\x00\x00\x00" . $record;
         $this->writeFLVTag(9, $videoData, 0);
@@ -1124,6 +908,7 @@ class Mp4PusherAll
         $soundSize = 1;
         $soundType = ($this->audioChannels == 2) ? 1 : 0;
         $audioHeader = ($soundFormat << 4) | ($soundRate << 2) | ($soundSize << 1) | $soundType;
+        // ★ 使用完整的 AudioSpecificConfig
         $audioData = chr($audioHeader) . "\x00" . $this->audioSpecificConfig;
         $this->writeFLVTag(8, $audioData, 0);
         $this->hasWrittenAudioHeader = true;
@@ -1132,7 +917,7 @@ class Mp4PusherAll
     private function getSoundRate(): int
     {
         switch ($this->audioSampleRate) {
-            case 5500:  return 0;
+            case 5512:  return 0;
             case 11025: return 1;
             case 22050: return 2;
             case 44100: return 3;
@@ -1154,29 +939,30 @@ class Mp4PusherAll
         $tag .= chr($tsHigh);
         $tag .= "\x00\x00\x00";
 
-        $fullTag = $tag . $data . pack('N', 11 + $dataSize);
-        $this->sendFLVData($fullTag);
+        // ★ 分三次发送，与 Mp4ToFlv 保持一致
+        $this->writeSocket($tag);
+        $this->writeSocket($data);
+        $this->writeSocket(pack('N', 11 + $dataSize));
 
         $this->stats['tags_sent']++;
-        $this->stats['bytes_sent'] += strlen($fullTag);
     }
 
     private function writeMetaData(): void
     {
+        $duration = max($this->maxVideoDtsMs, $this->maxAudioDtsMs) / 1000;
         $metaData = [
-            'duration' => $this->duration,
-            'width' => $this->videoWidth,
-            'height' => $this->videoHeight,
+            'duration' => $duration,
+            'width' => (float)($this->videoWidth ?: 720),
+            'height' => (float)($this->videoHeight ?: 480),
             'videocodecid' => 'avc1',
             'audiocodecid' => 'mp4a',
-            'audiosamplerate' => $this->audioSampleRate,
-            'audiochannels' => $this->audioChannels,
-            'framerate' => $this->videoFrameRate,
+            'audiosamplerate' => (float)($this->audioSampleRate ?: 44100),
+            'audiochannels' => (float)($this->audioChannels ?: 2),
+            'framerate' => (float)($this->videoFrameRate ?: 30.0),
         ];
 
         $data = $this->serializeAmf0($metaData);
         $onMetaData = $this->serializeAmf0('onMetaData') . $data;
-
         $this->writeFLVTag(18, $onMetaData, 0);
     }
 
@@ -1184,8 +970,6 @@ class Mp4PusherAll
     {
         if (is_string($value)) {
             return "\x02" . pack('n', strlen($value)) . $value;
-        } elseif (is_int($value)) {
-            return "\x00" . $this->packDoubleBE((float)$value);
         } elseif (is_float($value) || is_numeric($value)) {
             return "\x00" . $this->packDoubleBE((float)$value);
         } elseif (is_bool($value)) {
@@ -1199,8 +983,6 @@ class Mp4PusherAll
             }
             $result .= "\x00\x00\x09";
             return $result;
-        } elseif ($value === null) {
-            return "\x05";
         }
         return '';
     }
@@ -1236,7 +1018,8 @@ class Mp4PusherAll
         echo "[{$timestamp}] {$prefix} {$message}\n";
     }
 
-    private function printProgress($currentTimestamp) {
+    private function printProgress($currentTimestamp)
+    {
         $elapsed = microtime(true) - $this->stats['start_time'];
         $speed = $elapsed > 0 ? $this->stats['tags_sent'] / $elapsed : 0;
         $bitrate = $elapsed > 0 ? ($this->stats['bytes_sent'] * 8 / $elapsed) / 1000 : 0;
@@ -1250,7 +1033,8 @@ class Mp4PusherAll
         ), 'debug');
     }
 
-    private function printFinalStats() {
+    private function printFinalStats()
+    {
         $elapsed = microtime(true) - $this->stats['start_time'];
         $avgSpeed = $elapsed > 0 ? $this->stats['tags_sent'] / $elapsed : 0;
         $totalBitrate = $elapsed > 0 ? ($this->stats['bytes_sent'] * 8 / $elapsed) / 1000 : 0;
@@ -1258,7 +1042,7 @@ class Mp4PusherAll
         $this->log("========================================", 'info');
         $this->log("推流统计", 'info');
         $this->log("========================================", 'info');
-        $this->log("总耗时: " . $this->formatTime($elapsed * 1000), 'info');
+        $this->log("总耗时: " . round($elapsed, 1) . " 秒", 'info');
         $this->log("发送 Tag 数: " . number_format($this->stats['tags_sent']), 'info');
         $this->log("发送字节数: " . $this->formatBytes($this->stats['bytes_sent']), 'info');
         $this->log("平均速率: " . number_format($avgSpeed, 1) . " tags/s", 'info');
@@ -1267,7 +1051,8 @@ class Mp4PusherAll
         $this->log("========================================", 'info');
     }
 
-    private function formatTime($ms) {
+    private function formatTime($ms)
+    {
         $seconds = floor($ms / 1000);
         $hours = floor($seconds / 3600);
         $minutes = floor(($seconds % 3600) / 60);
@@ -1277,7 +1062,8 @@ class Mp4PusherAll
             : sprintf("%02d:%02d", $minutes, $secs);
     }
 
-    private function formatBytes($bytes) {
+    private function formatBytes($bytes)
+    {
         $units = ['B', 'KB', 'MB', 'GB'];
         $i = 0;
         while ($bytes >= 1024 && $i < count($units) - 1) {
