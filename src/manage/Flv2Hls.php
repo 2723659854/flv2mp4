@@ -506,6 +506,7 @@ class Flv2Hls
     private function closeSegment(int $endTime = 0): void
     {
         if ($this->tsHandle) {
+            fflush($this->tsHandle);
             fclose($this->tsHandle);
             $this->tsHandle = null;
 
