@@ -30,6 +30,8 @@ class Mp4ToFlv
     private $audioProfile = 2;
 
     private $duration = 0;
+    private $maxVideoDtsMs = 0;
+    private $maxAudioDtsMs = 0;
     private $videoWidth = 0;
     private $videoHeight = 0;
     private $videoFrameRate = 30;
@@ -740,6 +742,11 @@ class Mp4ToFlv
     /* ========== FLV 写入 ========== */
     private function writeVideoSample(string $data, int $dtsMs, int $ctsMs, bool $isKeyFrame): void
     {
+        // 跟踪最大视频时间戳
+        if ($dtsMs > $this->maxVideoDtsMs) {
+            $this->maxVideoDtsMs = $dtsMs;
+        }
+
         // 确保 AVC Sequence Header 在第一个视频帧之前被写入
         if (!$this->hasWrittenVideoHeader && !empty($this->sps)) {
             $this->writeAVCSequenceHeader();
@@ -789,6 +796,11 @@ class Mp4ToFlv
 
     private function writeAudioSample(string $data, int $dtsMs): void
     {
+        // 跟踪最大音频时间戳
+        if ($dtsMs > $this->maxAudioDtsMs) {
+            $this->maxAudioDtsMs = $dtsMs;
+        }
+
         if (!$this->hasWrittenAudioHeader && !empty($this->audioSpecificConfig)) {
             $this->writeAACSequenceHeader();
         }
@@ -862,16 +874,17 @@ class Mp4ToFlv
 
     private function writeMetaData(): void
     {
-        // 使用简单的metadata测试
+        // 使用实际最大时间戳计算时长
+        $duration = max($this->maxVideoDtsMs, $this->maxAudioDtsMs) / 1000;
         $metaData = [
-            'duration' => 12.957,
-            'width' => 720,
-            'height' => 742,
+            'duration' => $duration,
+            'width' => $this->videoWidth ?: 720,
+            'height' => $this->videoHeight ?: 480,
             'videocodecid' => 'avc1',
             'audiocodecid' => 'mp4a',
-            'audiosamplerate' => 44100,
-            'audiochannels' => 2,
-            'framerate' => 30.0,
+            'audiosamplerate' => $this->audioSampleRate ?: 44100,
+            'audiochannels' => $this->audioChannels ?: 2,
+            'framerate' => $this->videoFrameRate ?: 30.0,
         ];
         
         $data = $this->serializeAmf0($metaData);
