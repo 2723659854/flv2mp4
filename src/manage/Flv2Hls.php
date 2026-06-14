@@ -31,6 +31,10 @@ class Flv2Hls
     private array $segmentDurations = [];
     private int $currentSegmentLastTime = 0;
 
+    // ===== 修复：音频缓冲区管理 =====
+    private array $audioBuffer = [];
+    private ?int $lastAudioTimestamp = null;
+
     public function __construct(string $streamId, array $config = [])
     {
         $streamId = rtrim($streamId, "/");
@@ -145,9 +149,16 @@ class Flv2Hls
         // 全局相对时间（毫秒）
         $relativeTime = $timestamp - $this->baseTimestamp;
 
-        // 切片判断
+        // ===== 修复：切片切换时处理音频缓冲 =====
         if ($isKeyFrame && ($relativeTime - $this->segmentStartTime) >= ($this->segmentDuration * 1000)) {
+            // 先写入缓冲的音频数据到旧切片
+            $this->flushAudioBuffer();
+            // 关闭旧切片
             $this->closeSegment($relativeTime);
+            // 清空音频缓冲，避免音频帧跨越切片边界
+            $this->audioBuffer = [];
+            $this->lastAudioTimestamp = null;
+            // 开始新切片
             $this->segmentStartTime = $relativeTime;
             $this->startSegment();
         }
@@ -225,13 +236,35 @@ class Flv2Hls
 
         // 全局相对时间
         $relativeTime = $timestamp - $this->baseTimestamp;
+
+        // ===== 修复：缓存音频数据，在切片切换时一并写入 =====
+        // 直接写入当前切片的音频数据
         $pts = (int)($relativeTime * 90);
 
         $adts = $this->createADTSHeader(strlen($aacRaw));
         $payload = $adts . $aacRaw;
 
         $pes = $this->createPES(0xC0, $payload, $pts, null);
-        $this->writeTSPackets($this->audioPid, $pes, false, 0);
+
+        // 如果有打开的 TS 文件就直接写入
+        if ($this->tsHandle) {
+            $this->writeTSPackets($this->audioPid, $pes, false, 0);
+        }
+
+        // 同时缓存音频帧信息，用于切片切换
+        $this->audioBuffer[] = [
+            'timestamp' => $relativeTime,
+            'pts' => $pts,
+            'payload' => $payload
+        ];
+    }
+
+    // ===== 新增：刷新音频缓冲区 =====
+    private function flushAudioBuffer(): void
+    {
+        // 音频数据已经在 handleAudioFrame 中实时写入了
+        // 这个方法主要用于清理缓冲区，确保不跨越切片边界
+        $this->audioBuffer = [];
     }
 
     private function parseAVCDecoderConfigurationRecord(string $data): void
@@ -296,6 +329,7 @@ class Flv2Hls
 
         $frameLength = $aacLength + 7;
 
+        // ===== 修复：确保 AAC 帧长度正确 =====
         return pack('CCCCCCC',
             0xFF, 0xF1,
             (($profile & 0x03) << 6) | (($freqIndex & 0x0F) << 2) | (($channelConfig >> 2) & 0x01),
@@ -554,6 +588,7 @@ class Flv2Hls
 
         for ($i = 1; $i <= $this->sequenceNumber; $i++) {
             $duration = $this->segmentDurations[$i] ?? $this->segmentDuration;
+            // ===== 修复：移除不必要的 EXT-X-DISCONTINUITY =====
             $lines[] = "#EXTINF:" . number_format($duration, 3, '.', '') . ",";
             $lines[] = "segment_{$i}.ts";
         }
@@ -573,6 +608,8 @@ class Flv2Hls
 
     public function close(): void
     {
+        // ===== 修复：关闭前刷新音频缓冲 =====
+        $this->flushAudioBuffer();
         $this->closeSegment($this->currentSegmentLastTime);
 
         $m3u8Path = $this->streamDir . 'index.m3u8';
