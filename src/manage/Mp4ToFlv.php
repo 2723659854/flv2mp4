@@ -2,6 +2,12 @@
 
 namespace Xiaosongshu\Flv2mp4\Manage;
 
+/**
+ * @purpose 将mp4转码为flv
+ * @author yanglong
+ * @time 2026年6月15日11:43:17
+ * @note 本工具可以准确的将mp4转码为flv
+ */
 class Mp4ToFlv
 {
     private $inputFile;

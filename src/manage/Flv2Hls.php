@@ -8,7 +8,7 @@ use Xiaosongshu\Flv2mp4\Flv\FlvParse;
  * FLV转HLS切片
  * @author yanglong
  * @time 2026-06-12 00:02:00
- * @note 当前代码，每一个切片都时长正确，但是hls.js播放会报错
+ * @note 本工具转码后兼容hls.js，vlc，ffplay等播放器
  */
 class Flv2Hls
 {

@@ -6,6 +6,7 @@ namespace Xiaosongshu\Flv2mp4\manage;
  * @purpose HLS转FLV工具（修复版）
  * @author yanglong
  * @time 2026年6月3日
+ * @note 本工具对于标准的h264 + aac编码的切片可以合成正确的flv,如果合成的flv有错误一般是切片本身有问题或者格式不兼容。
  */
 class Hls2Flv
 {
