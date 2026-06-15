@@ -33,7 +33,7 @@ class Client
      * @param int $segmentPackets 每个切片包含的包数量（默认30）
      * @return string|void
      */
-    public static function run(string $inputFile, string $outputDir, int $segmentPackets = 30)
+    protected static function run(string $inputFile, string $outputDir, int $segmentPackets = 30)
     {
         if (!file_exists($inputFile)) {
             throw new \RuntimeException("flv not exist!");
@@ -155,7 +155,7 @@ class Client
      * @param int $segmentPackets 每个切片包含的包数量（默认30）
      * @return array 返回生成的文件信息
      */
-    public static function runSeparate(string $inputFile, string $outputDir, int $segmentPackets = 30)
+    protected static function runSeparate(string $inputFile, string $outputDir, int $segmentPackets = 30)
     {
         if (!file_exists($inputFile)) {
             throw new \RuntimeException("flv not exist!");
