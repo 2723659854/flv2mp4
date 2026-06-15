@@ -20,6 +20,9 @@ class Hls2Flv
     private $pesBuffers = [];
     private $videoFrames = [];  // 缓存视频帧，按DTS排序
     private $audioFrames = [];  // 缓存音频帧，按PTS排序
+    private $videoBuffer = '';  // 视频PES数据缓冲区
+    private $videoBufferDts = null;  // 缓冲区数据的DTS
+    private $videoBufferPts = null;  // 缓冲区数据的PTS
     private $lastVideoTimestamp = 0;
     private $lastAudioTimestamp = 0;
     private $videoBaseTimestamp = null;
@@ -263,10 +266,36 @@ class Hls2Flv
     {
         if (empty($payload)) return;
 
-        $nalus = $this->extractNalusFromAnnexB($payload);
-        if (empty($nalus)) return;
+        // 更新缓冲区的时间戳（使用第一个非空时间戳）
+        if ($this->videoBufferDts === null && $dts !== null) {
+            $this->videoBufferDts = $dts;
+        }
+        if ($this->videoBufferPts === null && $pts !== null) {
+            $this->videoBufferPts = $pts;
+        }
 
-        foreach ($nalus as $nalu) {
+        // 将当前PES数据追加到缓冲区
+        $this->videoBuffer .= $payload;
+
+        // 尝试从缓冲区中提取完整的访问单元
+        $this->extractCompleteAccessUnits();
+    }
+
+    /**
+     * 从缓冲区中提取完整的访问单元
+     * 访问单元必须至少包含一个slice NALU（类型1-5）
+     */
+    private function extractCompleteAccessUnits(): void
+    {
+        if (empty($this->videoBuffer)) return;
+
+        // 提取NALU及其在原始数据中的位置信息
+        $naluInfos = $this->extractNalusWithPositions($this->videoBuffer);
+        if (empty($naluInfos)) return;
+
+        // 先处理SPS/PPS（这些是序列参数，不应该放在访问单元中）
+        foreach ($naluInfos as $info) {
+            $nalu = $info['nalu'];
             if (strlen($nalu) < 1) continue;
             $naluType = ord($nalu[0]) & 0x1F;
 
@@ -286,29 +315,183 @@ class Hls2Flv
             $this->writeAVCSequenceHeader();
         }
 
-        if ($this->hasWrittenHeader) {
-            $isKeyFrame = false;
-            foreach ($nalus as $nalu) {
-                if (strlen($nalu) < 1) continue;
-                $naluType = ord($nalu[0]) & 0x1F;
-                if ($naluType === 5) {
-                    $isKeyFrame = true;
-                    break;
+        // 寻找完整的访问单元
+        // 访问单元结构：[AUD] [SEI] [slice(s)]
+        // 遇到AUD(9)或IDR slice(5)表示新的访问单元开始
+        // 一个访问单元包含从当前开始标记到下一个开始标记之前的所有NALU
+        $accessUnits = [];
+        $currentAU = [];
+        $currentAUHasSlice = false;
+        $auStartOffset = 0;
+        $firstAU = true;
+
+        foreach ($naluInfos as $idx => $info) {
+            $nalu = $info['nalu'];
+            $naluOffset = $info['offset'];
+            if (strlen($nalu) < 1) continue;
+            $naluType = ord($nalu[0]) & 0x1F;
+
+            // 跳过SPS/PPS，它们不应该出现在访问单元中
+            if ($naluType === 7 || $naluType === 8) {
+                // 更新起始偏移
+                $auStartOffset = $naluOffset + $info['startCodeLen'] + strlen($nalu);
+                continue;
+            }
+
+            // AUD(9)或IDR slice(5)表示新的访问单元开始
+            // 如果当前已有未完成的访问单元，先保存它
+            if (($naluType === 9 || $naluType === 5) && !$firstAU && !empty($currentAU)) {
+                if ($currentAUHasSlice) {
+                    $accessUnits[] = $currentAU;
                 }
+                $currentAU = [];
+                $currentAUHasSlice = false;
+                // 记录新AU的起始位置
+                $auStartOffset = $naluOffset;
             }
+            $firstAU = false;
 
-            if ($dts === null) {
-                $dts = $pts;
+            // 添加当前NALU到访问单元
+            $currentAU[] = $nalu;
+
+            // slice类型: 1-5 (P/B/I/SI/SP slice)
+            if ($naluType >= 1 && $naluType <= 5) {
+                $currentAUHasSlice = true;
             }
-
-            // 缓存帧数据，按DTS排序
-            $this->videoFrames[] = [
-                'nalus' => $nalus,
-                'isKeyFrame' => $isKeyFrame,
-                'dts' => $dts,
-                'pts' => $pts
-            ];
         }
+
+        // 添加最后一个访问单元（如果包含slice）
+        if ($currentAUHasSlice && !empty($currentAU)) {
+            $accessUnits[] = $currentAU;
+        }
+
+        // 输出所有完整的访问单元
+        foreach ($accessUnits as $au) {
+            $this->outputAccessUnit($au);
+        }
+
+        // 更新缓冲区：保留未输出的数据（如果有）
+        if (!empty($accessUnits)) {
+            // 找到最后一个输出的AU结束位置
+            $lastAuEndOffset = 0;
+            foreach ($naluInfos as $info) {
+                $lastAuEndOffset = $info['offset'] + $info['startCodeLen'] + strlen($info['nalu']);
+            }
+            // 如果还有未处理的数据，保留到缓冲区
+            if ($lastAuEndOffset < strlen($this->videoBuffer)) {
+                $this->videoBuffer = substr($this->videoBuffer, $lastAuEndOffset);
+            } else {
+                $this->videoBuffer = '';
+                $this->videoBufferDts = null;
+                $this->videoBufferPts = null;
+            }
+        }
+        // 否则保留缓冲区中的数据（纯辅助数据）与下一个PES包合并
+    }
+
+    /**
+     * 从AnnexB格式提取NALU及其位置信息
+     * @param string $data
+     * @return array
+     */
+    private function extractNalusWithPositions(string $data): array
+    {
+        $naluInfos = [];
+        $offset = 0;
+        $len = strlen($data);
+
+        while ($offset < $len) {
+            // 查找起始码
+            $pos4 = strpos($data, "\x00\x00\x00\x01", $offset);
+            $pos3 = strpos($data, "\x00\x00\x01", $offset);
+            
+            // 选择最早出现的起始码
+            if ($pos4 !== false && $pos3 !== false) {
+                $pos = min($pos4, $pos3);
+                $startCodeLen = ($pos === $pos4) ? 4 : 3;
+            } elseif ($pos4 !== false) {
+                $pos = $pos4;
+                $startCodeLen = 4;
+            } elseif ($pos3 !== false) {
+                $pos = $pos3;
+                $startCodeLen = 3;
+            } else {
+                // 没有找到起始码，检查是否还有剩余数据
+                if ($offset < $len) {
+                    $remaining = substr($data, $offset);
+                    if (strlen($remaining) > 0) {
+                        // 没有起始码的数据，可能是截断的NALU，保留到下次处理
+                        break;
+                    }
+                }
+                break;
+            }
+
+            // 查找下一个起始码位置
+            $nextPos4 = strpos($data, "\x00\x00\x00\x01", $pos + $startCodeLen);
+            $nextPos3 = strpos($data, "\x00\x00\x01", $pos + $startCodeLen);
+            
+            if ($nextPos4 !== false && $nextPos3 !== false) {
+                $nextPos = min($nextPos4, $nextPos3);
+            } elseif ($nextPos4 !== false) {
+                $nextPos = $nextPos4;
+            } elseif ($nextPos3 !== false) {
+                $nextPos = $nextPos3;
+            } else {
+                $nextPos = $len;
+            }
+
+            $naluStart = $pos + $startCodeLen;
+            $naluEnd = $nextPos;
+
+            if ($naluStart < $naluEnd) {
+                $naluInfos[] = [
+                    'nalu' => substr($data, $naluStart, $naluEnd - $naluStart),
+                    'offset' => $pos,
+                    'startCodeLen' => $startCodeLen
+                ];
+            }
+
+            $offset = $nextPos;
+        }
+
+        return $naluInfos;
+    }
+
+    /**
+     * 输出一个完整的访问单元
+     * @param array $nalus
+     */
+    private function outputAccessUnit(array $nalus): void
+    {
+        if (empty($nalus) || !$this->hasWrittenHeader) return;
+
+        $isKeyFrame = false;
+        foreach ($nalus as $nalu) {
+            if (strlen($nalu) < 1) continue;
+            $naluType = ord($nalu[0]) & 0x1F;
+            if ($naluType === 5) {
+                $isKeyFrame = true;
+                break;
+            }
+        }
+
+        $dts = $this->videoBufferDts;
+        $pts = $this->videoBufferPts;
+        if ($dts === null) {
+            $dts = $pts;
+        }
+        if ($pts === null) {
+            $pts = $dts;
+        }
+
+        // 缓存帧数据，按DTS排序
+        $this->videoFrames[] = [
+            'nalus' => $nalus,
+            'isKeyFrame' => $isKeyFrame,
+            'dts' => $dts,
+            'pts' => $pts
+        ];
     }
 
     /**
@@ -432,6 +615,31 @@ class Hls2Flv
      */
     private function flushFrames(): void
     {
+        // 处理缓冲区中剩余的数据
+        if (!empty($this->videoBuffer)) {
+            $nalus = $this->extractNalusFromAnnexB($this->videoBuffer);
+            if (!empty($nalus)) {
+                // 检查是否包含slice
+                $hasSlice = false;
+                foreach ($nalus as $nalu) {
+                    if (strlen($nalu) >= 1) {
+                        $naluType = ord($nalu[0]) & 0x1F;
+                        if ($naluType >= 1 && $naluType <= 5) {
+                            $hasSlice = true;
+                            break;
+                        }
+                    }
+                }
+                if ($hasSlice) {
+                    $this->outputAccessUnit($nalus);
+                }
+                // 如果不包含slice，直接丢弃这些纯辅助数据
+            }
+            $this->videoBuffer = '';
+            $this->videoBufferDts = null;
+            $this->videoBufferPts = null;
+        }
+
         // 按DTS排序视频帧
         usort($this->videoFrames, function($a, $b) {
             return $a['dts'] - $b['dts'];
