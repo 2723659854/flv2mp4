@@ -121,6 +121,12 @@ class Client
         }
 
         if ($initSegment && !empty($segments)) {
+            // 计算实际的 duration 并更新初始化片段
+            $actualDuration = self::calculateDurationFromSegments($segments, $initSegment);
+            if ($actualDuration > 0) {
+                $initSegment = self::updateInitSegmentDuration($initSegment, $actualDuration);
+            }
+
             $fullBinary = $initSegment . implode('', $segments);
             $mp4Name = date("Y_m_d_H_i_s") . "_" . uniqid() . '.mp4';
             file_put_contents("$outputDir/$mp4Name", $fullBinary);
@@ -373,5 +379,232 @@ class Client
         }catch (\Exception $e){
             throw new \RuntimeException("error:" . $e->getMessage());
         }
+    }
+
+    /**
+     * 从媒体片段中计算实际时长（毫秒）
+     * @param array $segments 媒体片段数组
+     * @param string $initSegment 初始化片段
+     * @return int 时长（毫秒）
+     */
+    protected static function calculateDurationFromSegments(array $segments, string $initSegment): int
+    {
+        $maxEndTime = 0;
+        $timescale = 1000; // 默认 timescale
+
+        // 从初始化片段中获取 timescale
+        // mvhd box 结构: size(4) + 'mvhd'(4) + content
+        $mvhdPos = strpos($initSegment, 'mvhd');
+        if ($mvhdPos !== false) {
+            $mvhdContentStart = $mvhdPos + 4;
+            if ($mvhdContentStart + 16 <= strlen($initSegment)) {
+                $mvhdVersion = ord(substr($initSegment, $mvhdContentStart, 1));
+                if ($mvhdVersion == 0) {
+                    // version 0: timescale at offset 12 (relative to content start)
+                    $timescaleOffset = $mvhdContentStart + 12;
+                } else {
+                    // version 1: timescale at offset 20 (relative to content start)
+                    $timescaleOffset = $mvhdContentStart + 20;
+                }
+                if ($timescaleOffset + 4 <= strlen($initSegment)) {
+                    $timescale = unpack('N', substr($initSegment, $timescaleOffset, 4))[1];
+                }
+            }
+        }
+
+        // 从每个媒体片段中提取最大时间
+        foreach ($segments as $segment) {
+            $segmentEndTime = self::extractSegmentEndTime($segment, $timescale);
+            if ($segmentEndTime > $maxEndTime) {
+                $maxEndTime = $segmentEndTime;
+            }
+        }
+
+        // 转换为毫秒
+        return (int)($maxEndTime * 1000 / $timescale);
+    }
+
+    /**
+     * 从单个媒体片段中提取结束时间
+     * @param string $segment 媒体片段数据
+     * @param int $timescale 时间尺度
+     * @return float 结束时间（timescale 单位）
+     */
+    protected static function extractSegmentEndTime(string $segment, int $timescale): float
+    {
+        $maxEndTime = 0;
+
+        // 查找 moof box
+        $moofPos = strpos($segment, 'moof');
+        if ($moofPos === false) {
+            return 0;
+        }
+
+        // 查找 traf box
+        $trafPos = strpos($segment, 'traf', $moofPos);
+        if ($trafPos === false) {
+            return 0;
+        }
+
+        // 查找 tfdt box
+        // tfdt box 结构: size(4) + 'tfdt'(4) + content
+        // content: version+flags(4) + baseMediaDecodeTime(4 or 8)
+        $tfdtPos = strpos($segment, 'tfdt', $trafPos);
+        if ($tfdtPos === false) {
+            return 0;
+        }
+
+        // 解析 tfdt box 获取 baseMediaDecodeTime
+        $tfdtContentStart = $tfdtPos + 4;
+        if ($tfdtContentStart + 8 <= strlen($segment)) {
+            $tfdtVersion = ord(substr($segment, $tfdtContentStart, 1));
+            if ($tfdtVersion == 0) {
+                // version 0: baseMediaDecodeTime at offset 4 (relative to content start)
+                $baseMediaDecodeTime = unpack('N', substr($segment, $tfdtContentStart + 4, 4))[1];
+            } else {
+                // version 1: baseMediaDecodeTime at offset 4 (relative to content start), 8 bytes
+                $baseMediaDecodeTime = unpack('J', substr($segment, $tfdtContentStart + 4, 8))[1];
+            }
+        } else {
+            $baseMediaDecodeTime = 0;
+        }
+
+        // 查找 trun box
+        // trun box 结构: size(4) + 'trun'(4) + content
+        // content: version+flags(4) + sampleCount(4) + [dataOffset(4)] + samples...
+        $trunPos = strpos($segment, 'trun', $trafPos);
+        if ($trunPos === false) {
+            return $baseMediaDecodeTime;
+        }
+
+        // 解析 trun box 获取样本数量和总时长
+        $trunContentStart = $trunPos + 4;
+        if ($trunContentStart + 8 <= strlen($segment)) {
+            $trunFlags = unpack('N', substr($segment, $trunContentStart, 4))[1];
+            $sampleCount = unpack('N', substr($segment, $trunContentStart + 4, 4))[1];
+
+            // 计算 trun 数据偏移 (relative to content start)
+            $dataOffset = 8;
+            // 检查是否有 data-offset-present (flag 0x000001)
+            if ($trunFlags & 0x000001) {
+                $dataOffset += 4;
+            }
+
+            // 计算所有样本的时长总和
+            $totalDuration = 0;
+            // 检查是否有 sample-duration-present (flag 0x000100)
+            if ($trunFlags & 0x000100) {
+                for ($i = 0; $i < $sampleCount; $i++) {
+                    $sampleDataOffset = $trunContentStart + $dataOffset;
+                    if ($sampleDataOffset + 4 > strlen($segment)) {
+                        break;
+                    }
+                    $sampleDuration = unpack('N', substr($segment, $sampleDataOffset, 4))[1];
+                    $totalDuration += $sampleDuration;
+                    // 每个 sample 至少有 duration(4) + size(4) + flags(4) + cts(4) = 16 字节
+                    $dataOffset += 16;
+                }
+            }
+
+            $maxEndTime = $baseMediaDecodeTime + $totalDuration;
+        }
+
+        return $maxEndTime;
+    }
+
+    /**
+     * 更新初始化片段中的 duration 字段
+     * @param string $initData 初始化片段数据
+     * @param int $duration 时长（毫秒）
+     * @return string 更新后的初始化片段
+     */
+    protected static function updateInitSegmentDuration(string $initData, int $duration): string
+    {
+        // 更新 mvhd 中的 duration
+        // mvhd box 结构: size(4) + 'mvhd'(4) + content
+        // content 结构 (version 0):
+        //   version+flags(4) + creation_time(4) + modification_time(4) + timescale(4) + duration(4) + ...
+        // content 结构 (version 1):
+        //   version+flags(4) + creation_time(8) + modification_time(8) + timescale(4) + duration(8) + ...
+        $mvhdPos = strpos($initData, 'mvhd');
+        if ($mvhdPos === false) {
+            return $initData;
+        }
+
+        // box 内容开始位置 = 'mvhd' 位置 + 4
+        $mvhdContentStart = $mvhdPos + 4;
+        if ($mvhdContentStart + 4 > strlen($initData)) {
+            return $initData;
+        }
+
+        $mvhdVersion = ord(substr($initData, $mvhdContentStart, 1));
+
+        if ($mvhdVersion == 0) {
+            // version 0: timescale at offset 12, duration at offset 16 (relative to content start)
+            $timescaleOffset = $mvhdContentStart + 12;
+            $durationOffset = $mvhdContentStart + 16;
+            $durationLength = 4;
+        } else {
+            // version 1: timescale at offset 20, duration at offset 24 (relative to content start)
+            $timescaleOffset = $mvhdContentStart + 20;
+            $durationOffset = $mvhdContentStart + 24;
+            $durationLength = 8;
+        }
+
+        if ($timescaleOffset + 4 > strlen($initData) || $durationOffset + $durationLength > strlen($initData)) {
+            return $initData;
+        }
+
+        $mvhdTimescale = unpack('N', substr($initData, $timescaleOffset, 4))[1];
+        $mvhdDurationInTimescale = (int)($duration * $mvhdTimescale / 1000);
+
+        if ($durationLength == 4) {
+            $durationBytes = pack('N', $mvhdDurationInTimescale);
+        } else {
+            $durationBytes = pack('J', $mvhdDurationInTimescale);
+        }
+        $initData = substr_replace($initData, $durationBytes, $durationOffset, $durationLength);
+
+        // 更新所有 tkhd 中的 duration
+        // tkhd box 结构: size(4) + 'tkhd'(4) + content
+        // content 结构 (version 0):
+        //   version+flags(4) + creation_time(4) + modification_time(4) + track_id(4) + reserved(4) + duration(4) + ...
+        // content 结构 (version 1):
+        //   version+flags(4) + creation_time(8) + modification_time(8) + track_id(4) + reserved(4) + duration(8) + ...
+        $trakPos = 0;
+        while (($trakPos = strpos($initData, 'trak', $trakPos)) !== false) {
+            $tkhdPos = strpos($initData, 'tkhd', $trakPos);
+            if ($tkhdPos !== false) {
+                $tkhdContentStart = $tkhdPos + 4;
+                if ($tkhdContentStart + 4 > strlen($initData)) {
+                    $trakPos = $trakPos + 4;
+                    continue;
+                }
+
+                $tkhdVersion = ord(substr($initData, $tkhdContentStart, 1));
+
+                if ($tkhdVersion == 0) {
+                    // version 0: duration at offset 20 (relative to content start)
+                    $tkhdDurationOffset = $tkhdContentStart + 20;
+                    $durationLength = 4;
+                } else {
+                    // version 1: duration at offset 28 (relative to content start)
+                    $tkhdDurationOffset = $tkhdContentStart + 28;
+                    $durationLength = 8;
+                }
+
+                if ($tkhdDurationOffset + $durationLength <= strlen($initData)) {
+                    if ($durationLength == 4) {
+                        $durationBytes = pack('N', $mvhdDurationInTimescale);
+                    } else {
+                        $durationBytes = pack('J', $mvhdDurationInTimescale);
+                    }
+                    $initData = substr_replace($initData, $durationBytes, $tkhdDurationOffset, $durationLength);
+                }
+            }
+            $trakPos = $trakPos + 4;
+        }
+
+        return $initData;
     }
 }
