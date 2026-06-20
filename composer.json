@@ -1,9 +1,16 @@
 {
   "name": "xiaosongshu/flv2mp4",
-  "description": "A tool for transcoding flv files to mp4 using PHP",
+  "description": "A pure PHP media processing toolkit for bidirectional conversion between FLV, MP4, and HLS. Includes live stream relay gateway, file server, and push clients (HTTP-FLV, WebSocket-FLV, RTMP).",
   "keywords": [
     "flv",
     "mp4",
+    "hls",
+    "transcoding",
+    "live-streaming",
+    "rtmp",
+    "http-flv",
+    "websocket-flv",
+    "gateway",
     "php"
   ],
   "type": "library",
