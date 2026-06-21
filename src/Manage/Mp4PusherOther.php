@@ -1,6 +1,6 @@
 <?php
 
-namespace Xiaosongshu\Flv2mp4\manage;
+namespace Xiaosongshu\Flv2mp4\Manage;
 
 
 /**

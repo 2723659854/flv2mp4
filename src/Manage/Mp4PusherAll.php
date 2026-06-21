@@ -2,7 +2,13 @@
 
 namespace Xiaosongshu\Flv2mp4\Manage;
 
-class Mp4Pusher
+/**
+ * @purpose MP4 直接推流器（支持 HTTP-FLV 和 WebSocket-FLV）
+ * @author yanglong
+ * @time 2026年6月14日
+ * @version 1.2.0
+ */
+class Mp4PusherAll
 {
     private $inputFile;
     private $mp4Data;
@@ -29,7 +35,7 @@ class Mp4Pusher
     private $videoHeight = 0;
     private $videoFrameRate = 30;
 
-    // === FlvPusher 属性 ===
+    // === 推流属性 ===
     private $pushUrl;
     private $speed = 1.0;
     private $autoReconnect = true;
@@ -41,6 +47,11 @@ class Mp4Pusher
 
     private $socket;
     private $isRunning = true;
+
+    // WebSocket 相关
+    private $isWebSocket = false;
+    private $wsKey = '';
+    private $wsPath = '/';
 
     private $stats = [
         'tags_sent' => 0,
@@ -56,6 +67,14 @@ class Mp4Pusher
         $this->pushUrl = $pushUrl;
         $this->speed = max(0.1, min(10.0, $speed));
         $this->autoReconnect = $autoReconnect;
+
+        $urlParts = parse_url($pushUrl);
+        $scheme = strtolower($urlParts['scheme'] ?? 'http');
+        $this->isWebSocket = ($scheme === 'ws' || $scheme === 'wss');
+        $this->wsPath = $urlParts['path'] ?? '/';
+        if (!empty($urlParts['query'])) {
+            $this->wsPath .= '?' . $urlParts['query'];
+        }
 
         if (!file_exists($inputFile)) {
             throw new \RuntimeException("MP4 文件不存在：{$inputFile}");
@@ -77,11 +96,14 @@ class Mp4Pusher
 
     public function start(): bool
     {
+        $protocolName = $this->isWebSocket ? 'WebSocket-FLV' : 'HTTP-FLV';
+
         $this->log("========================================", 'info');
-        $this->log("MP4 Direct Pusher v1.0.2", 'info');
+        $this->log("MP4 Direct Pusher v1.2.0", 'info');
         $this->log("========================================", 'info');
         $this->log("文件：{$this->inputFile}", 'info');
         $this->log("推流地址：{$this->pushUrl}", 'info');
+        $this->log("协议：{$protocolName}", 'info');
         $this->log("推流速度：{$this->speed}x", 'info');
         $this->log("自动重连：" . ($this->autoReconnect ? '是' : '否'), 'info');
         $this->log("========================================", 'info');
@@ -126,7 +148,6 @@ class Mp4Pusher
                     throw new \Exception("连接服务器失败");
                 }
 
-                // 重连时重置状态
                 $this->hasWrittenVideoHeader = false;
                 $this->hasWrittenAudioHeader = false;
 
@@ -159,9 +180,9 @@ class Mp4Pusher
         $urlParts = parse_url($this->pushUrl);
         $host = $urlParts['host'] ?? '127.0.0.1';
         $port = $urlParts['port'] ?? 8501;
-        $path = $urlParts['path'] ?? '/';
 
-        $this->log("连接 HTTP-FLV 服务器：{$host}:{$port}", 'info');
+        $protocolName = $this->isWebSocket ? 'WebSocket-FLV' : 'HTTP-FLV';
+        $this->log("连接 {$protocolName} 服务器：{$host}:{$port}", 'info');
 
         $this->socket = @fsockopen($host, $port, $errno, $errstr, 10);
         if (!$this->socket) {
@@ -172,7 +193,17 @@ class Mp4Pusher
         stream_set_timeout($this->socket, 30);
         stream_set_blocking($this->socket, true);
 
-        $request = $this->buildHTTPRequest($host, $path);
+        if ($this->isWebSocket) {
+            return $this->webSocketHandshake($host, $port);
+        }
+        return $this->httpConnect($host);
+    }
+
+    // ==================== HTTP-FLV ====================
+
+    private function httpConnect(string $host): bool
+    {
+        $request = $this->buildHTTPRequest($host);
         fwrite($this->socket, $request);
 
         $response = '';
@@ -193,9 +224,9 @@ class Mp4Pusher
         return true;
     }
 
-    private function buildHTTPRequest($host, $path)
+    private function buildHTTPRequest(string $host): string
     {
-        $request = "POST {$path} HTTP/1.1\r\n";
+        $request = "POST {$this->wsPath} HTTP/1.1\r\n";
         $request .= "Host: {$host}\r\n";
         $request .= "Content-Type: video/x-flv\r\n";
         $request .= "Connection: keep-alive\r\n";
@@ -206,38 +237,104 @@ class Mp4Pusher
         return $request;
     }
 
+    // ==================== WebSocket-FLV ====================
+
+    private function webSocketHandshake(string $host, int $port): bool
+    {
+        $this->wsKey = base64_encode(random_bytes(16));
+
+        $handshake = "GET {$this->wsPath} HTTP/1.1\r\n";
+        $handshake .= "Host: {$host}:{$port}\r\n";
+        $handshake .= "Connection: Upgrade\r\n";
+        $handshake .= "Upgrade: websocket\r\n";
+        $handshake .= "Sec-WebSocket-Version: 13\r\n";
+        $handshake .= "Sec-WebSocket-Key: {$this->wsKey}\r\n";
+        $handshake .= "\r\n";
+
+        fwrite($this->socket, $handshake);
+
+        $response = '';
+        while (!feof($this->socket)) {
+            $line = fgets($this->socket);
+            if ($line === false) break;
+            $response .= $line;
+            if (trim($line) === '') break;
+        }
+
+        if (!preg_match('#Sec-WebSocket-Accept:\s(.*)$#mUi', $response, $matches)) {
+            $this->log("握手失败：未找到 Sec-WebSocket-Accept", 'error');
+            return false;
+        }
+
+        $responseKey = trim($matches[1]);
+        $expectedKey = base64_encode(sha1($this->wsKey . '258EAFA5-E914-47DA-95CA-C5AB0DC85B11', true));
+
+        if ($responseKey !== $expectedKey) {
+            $this->log("握手失败：Sec-WebSocket-Accept 不匹配", 'error');
+            return false;
+        }
+
+        $this->log("WebSocket 握手成功", 'success');
+        return true;
+    }
+
+    private function sendWebSocketFrame(string $data): void
+    {
+        $len = strlen($data);
+        $frame = chr(0x82); // FIN + Binary
+
+        if ($len < 126) {
+            $frame .= chr(0x80 | $len);
+        } elseif ($len < 65536) {
+            $frame .= chr(0x80 | 126) . pack('n', $len);
+        } else {
+            $frame .= chr(0x80 | 127) . pack('J', $len);
+        }
+
+        $mask = random_bytes(4);
+        $frame .= $mask;
+
+        for ($i = 0; $i < $len; $i++) {
+            $frame .= chr(ord($data[$i]) ^ ord($mask[$i % 4]));
+        }
+
+        fwrite($this->socket, $frame);
+    }
+
+    private function sendCloseFrame(): void
+    {
+        $frame = chr(0x88) . chr(0x80);
+        $mask = random_bytes(4);
+        $frame .= $mask;
+        fwrite($this->socket, $frame);
+    }
+
+    // ==================== 推流核心 ====================
+
     private function pushStream()
     {
-        // 1. FLV Header
         $this->writeSocket($this->generateFlvHeader());
-        // 2. PreviousTagSize 0
         $this->writeSocket(pack('N', 0));
-        // 3. Metadata
         $this->writeMetaData();
-        // 4. 媒体数据
         $this->extractAndPushMediaData();
-        // 5. chunked 结束标记
-        if ($this->useChunked) {
+
+        if ($this->isWebSocket) {
+            $this->sendCloseFrame();
+        } elseif ($this->useChunked) {
             fwrite($this->socket, "0\r\n\r\n");
         }
     }
 
     private function writeSocket(string $data): void
     {
-        if ($this->useChunked) {
+        if ($this->isWebSocket) {
+            $this->sendWebSocketFrame($data);
+        } elseif ($this->useChunked) {
             fwrite($this->socket, dechex(strlen($data)) . "\r\n");
             fwrite($this->socket, $data);
             fwrite($this->socket, "\r\n");
         } else {
-            $len = strlen($data);
-            $written = 0;
-            while ($written < $len) {
-                $result = fwrite($this->socket, substr($data, $written));
-                if ($result === false || $result === 0) {
-                    throw new \Exception("写入Socket失败");
-                }
-                $written += $result;
-            }
+            fwrite($this->socket, $data);
         }
         $this->stats['bytes_sent'] += strlen($data);
     }
@@ -250,7 +347,7 @@ class Mp4Pusher
         return "FLV\x01" . chr($flags) . "\x00\x00\x00\x09";
     }
 
-    // ==================== MP4 解析（与 Mp4ToFlv 完全一致） ====================
+    // ==================== MP4 解析 ====================
 
     private function parseMp4Boxes(): void
     {
@@ -345,11 +442,8 @@ class Mp4Pusher
         $trackId = unpack('N', substr($tkhdData, 12, 4))[1];
 
         $version = ord($tkhdData[0]);
-        if ($version == 0) {
-            $widthOffset = 76; $heightOffset = 80;
-        } else {
-            $widthOffset = 88; $heightOffset = 92;
-        }
+        $widthOffset  = ($version == 0) ? 76 : 88;
+        $heightOffset = ($version == 0) ? 80 : 92;
 
         if (strlen($tkhdData) >= $heightOffset + 4) {
             $tkhdWidth  = unpack('N', substr($tkhdData, $widthOffset, 4))[1] / 65536;
@@ -458,9 +552,7 @@ class Mp4Pusher
         }
         $pos = $this->skipUEG($sps, $pos);
         $pos++;
-        $picWidthInMbsMinus1 = $this->readUEG($sps, $pos);
-        $pos = $this->skipUEG($sps, $pos);
-        $picHeightInMapUnitsMinus1 = $this->readUEG($sps, $pos);
+        // 不从这里取宽高，用 tkhd 的
     }
 
     private function readUEG(string $data, int &$pos): int
@@ -489,6 +581,7 @@ class Mp4Pusher
         return $this->skipUEG($data, $pos);
     }
 
+    // ★ 修复版 ESDS 解析
     private function parseEsdsFromBox(string $data): void
     {
         $pos = strpos($data, 'esds');
@@ -498,7 +591,6 @@ class Mp4Pusher
         $this->parseEsds($esdsData);
     }
 
-    // ★ 修复版 parseEsds
     private function parseEsds(string $data, bool $hasFullBoxHeader = true): void
     {
         $len = strlen($data);
@@ -544,7 +636,7 @@ class Mp4Pusher
         }
     }
 
-    // ★ 新增：完整解析 AudioSpecificConfig
+    // ★ 新增
     private function parseAudioSpecificConfig(string $config): void
     {
         $len = strlen($config);
@@ -639,10 +731,9 @@ class Mp4Pusher
             }
 
             $sampleCount++;
-            $currentTime = microtime(true);
-            if ($this->statsEnabled && $sampleCount % 100 == 0 && ($currentTime - $lastProgressTime) >= 1) {
+            if ($this->statsEnabled && $sampleCount % 100 == 0 && (microtime(true) - $lastProgressTime) >= 1) {
                 $this->printProgress($dtsMs);
-                $lastProgressTime = $currentTime;
+                $lastProgressTime = microtime(true);
             }
         }
     }
@@ -761,7 +852,7 @@ class Mp4Pusher
         return $samples;
     }
 
-    // ==================== FLV Tag 构建 ====================
+    // ==================== FLV Tag ====================
 
     private function writeVideoSample(string $data, int $dtsMs, int $ctsMs, bool $isKeyFrame): void
     {
@@ -817,7 +908,6 @@ class Mp4Pusher
         $soundSize = 1;
         $soundType = ($this->audioChannels == 2) ? 1 : 0;
         $audioHeader = ($soundFormat << 4) | ($soundRate << 2) | ($soundSize << 1) | $soundType;
-
         // ★ 使用完整的 AudioSpecificConfig
         $audioData = chr($audioHeader) . "\x00" . $this->audioSpecificConfig;
         $this->writeFLVTag(8, $audioData, 0);
@@ -849,6 +939,7 @@ class Mp4Pusher
         $tag .= chr($tsHigh);
         $tag .= "\x00\x00\x00";
 
+        // ★ 分三次发送，与 Mp4ToFlv 保持一致
         $this->writeSocket($tag);
         $this->writeSocket($data);
         $this->writeSocket(pack('N', 11 + $dataSize));
@@ -927,7 +1018,8 @@ class Mp4Pusher
         echo "[{$timestamp}] {$prefix} {$message}\n";
     }
 
-    private function printProgress($currentTimestamp) {
+    private function printProgress($currentTimestamp)
+    {
         $elapsed = microtime(true) - $this->stats['start_time'];
         $speed = $elapsed > 0 ? $this->stats['tags_sent'] / $elapsed : 0;
         $bitrate = $elapsed > 0 ? ($this->stats['bytes_sent'] * 8 / $elapsed) / 1000 : 0;
@@ -941,7 +1033,8 @@ class Mp4Pusher
         ), 'debug');
     }
 
-    private function printFinalStats() {
+    private function printFinalStats()
+    {
         $elapsed = microtime(true) - $this->stats['start_time'];
         $avgSpeed = $elapsed > 0 ? $this->stats['tags_sent'] / $elapsed : 0;
         $totalBitrate = $elapsed > 0 ? ($this->stats['bytes_sent'] * 8 / $elapsed) / 1000 : 0;
@@ -949,7 +1042,7 @@ class Mp4Pusher
         $this->log("========================================", 'info');
         $this->log("推流统计", 'info');
         $this->log("========================================", 'info');
-        $this->log("总耗时: " . $this->formatTime($elapsed * 1000), 'info');
+        $this->log("总耗时: " . round($elapsed, 1) . " 秒", 'info');
         $this->log("发送 Tag 数: " . number_format($this->stats['tags_sent']), 'info');
         $this->log("发送字节数: " . $this->formatBytes($this->stats['bytes_sent']), 'info');
         $this->log("平均速率: " . number_format($avgSpeed, 1) . " tags/s", 'info');
@@ -958,7 +1051,8 @@ class Mp4Pusher
         $this->log("========================================", 'info');
     }
 
-    private function formatTime($ms) {
+    private function formatTime($ms)
+    {
         $seconds = floor($ms / 1000);
         $hours = floor($seconds / 3600);
         $minutes = floor(($seconds % 3600) / 60);
@@ -968,7 +1062,8 @@ class Mp4Pusher
             : sprintf("%02d:%02d", $minutes, $secs);
     }
 
-    private function formatBytes($bytes) {
+    private function formatBytes($bytes)
+    {
         $units = ['B', 'KB', 'MB', 'GB'];
         $i = 0;
         while ($bytes >= 1024 && $i < count($units) - 1) {

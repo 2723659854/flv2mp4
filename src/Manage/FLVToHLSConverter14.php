@@ -1,6 +1,6 @@
 <?php
 
-namespace MediaServer\HLS;
+namespace Xiaosongshu\Flv2mp4\Manage;
 
 use MediaServer\Flv\Flv;
 use MediaServer\MediaReader\AudioFrame;

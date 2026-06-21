@@ -3,8 +3,9 @@
 namespace Xiaosongshu\Flv2mp4;
 
 use Xiaosongshu\Flv2mp4\Manage\Flv2Fmp4;
-use Xiaosongshu\Flv2mp4\manage\Flv2Hls;
-use Xiaosongshu\Flv2mp4\manage\Hls2Flv;
+use Xiaosongshu\Flv2mp4\Manage\Flv2Hls;
+use Xiaosongshu\Flv2mp4\Manage\Hls2Flv;
+use Xiaosongshu\Flv2mp4\Manage\Mp4ToFlv;
 
 /**
  * @purpose flv文件转码mp4客户端
@@ -372,7 +373,7 @@ class Client
     public static function runMp42Flv(string $mp4File, string $flvFile)
     {
         try{
-            $converter = new \Xiaosongshu\Flv2mp4\manage\Mp4ToFlv($mp4File, $flvFile);
+            $converter = new Mp4ToFlv($mp4File, $flvFile);
             if ($converter->run()){
                 return $flvFile;
             }
