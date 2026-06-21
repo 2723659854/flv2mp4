@@ -38,9 +38,9 @@ class Flv2Hls
     private array $segmentDurations = [];
     private int $currentSegmentLastTime = 0;
 
-    // ===== 修复：音频缓冲区管理 =====
-    private array $audioBuffer = [];
-    private ?int $lastAudioTimestamp = null;
+    // ===== 音频帧计数器（用于精确计算 PTS） =====
+    private int $audioFrameCount = 0;
+    private ?int $audioBasePts = null;
 
     public function __construct(string $streamId, array $config = [])
     {
@@ -156,15 +156,13 @@ class Flv2Hls
         // 全局相对时间（毫秒）
         $relativeTime = $timestamp - $this->baseTimestamp;
 
-        // ===== 修复：切片切换时处理音频缓冲 =====
+        // 切片切换
         if ($isKeyFrame && ($relativeTime - $this->segmentStartTime) >= ($this->segmentDuration * 1000)) {
-            // 先写入缓冲的音频数据到旧切片
-            $this->flushAudioBuffer();
             // 关闭旧切片
             $this->closeSegment($relativeTime);
-            // 清空音频缓冲，避免音频帧跨越切片边界
-            $this->audioBuffer = [];
-            $this->lastAudioTimestamp = null;
+            // 重置音频帧计数器，新切片从当前时间开始计数
+            $this->audioFrameCount = 0;
+            $this->audioBasePts = (int)($relativeTime * 90);
             // 开始新切片
             $this->segmentStartTime = $relativeTime;
             $this->startSegment();
@@ -220,7 +218,7 @@ class Flv2Hls
         if ($aacPacketType == 0) {
             $asc = substr($raw, 2);
             if (strlen($asc) >= 2) {
-                $this->audioSpecificConfig = substr($asc, 0, 2);
+                $this->audioSpecificConfig = $asc;
                 // 解析 AudioSpecificConfig，处理 HE-AAC/SBR
                 $this->parseAudioSpecificConfig($asc);
             }
@@ -233,26 +231,24 @@ class Flv2Hls
         $aacRaw = substr($raw, 2);
         if ($aacRaw === '') return;
 
-        // 检测 AAC 数据是否已经包含 ADTS 头
-        // 如果已有 ADTS 头，直接使用（保持原始正确参数）
-        $hasADTS = false;
+        // 检测并剥离源流中可能已有的 ADTS 头，确保使用我们自己生成的正确 ADTS 头
         if (strlen($aacRaw) >= 2) {
             $firstByte = ord($aacRaw[0]);
             $secondByte = ord($aacRaw[1]);
             // ADTS syncword: 12 bits = 0xFFF
             if ($firstByte == 0xFF && ($secondByte & 0xF0) == 0xF0) {
-                $hasADTS = true;
+                // 解析 ADTS 头长度并剥离
+                $crcPresent = (ord($aacRaw[1]) & 0x01) == 0;
+                $adtsLen = $crcPresent ? 9 : 7;
+                if (strlen($aacRaw) > $adtsLen) {
+                    $aacRaw = substr($aacRaw, $adtsLen);
+                }
             }
         }
 
-        if ($hasADTS) {
-            // 已有 ADTS 头，直接使用
-            $payload = $aacRaw;
-        } else {
-            // 没有 ADTS 头，需要添加
-            $adts = $this->createADTSHeader(strlen($aacRaw));
-            $payload = $adts . $aacRaw;
-        }
+        // 生成正确的 ADTS 头
+        $adts = $this->createADTSHeader(strlen($aacRaw));
+        $payload = $adts . $aacRaw;
 
         // 获取时间戳 - 兼容不同的帧对象格式
         $timestamp = 0;
@@ -267,30 +263,24 @@ class Flv2Hls
         // 全局相对时间
         $relativeTime = $timestamp - $this->baseTimestamp;
 
-        // 直接写入当前切片的音频数据
-        $pts = (int)($relativeTime * 90);
+        // 使用音频帧计数器计算 PTS，避免依赖不稳定的 FLV 时间戳
+        $sampleRates = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350];
+        $sampleRate = $sampleRates[$this->samplingFrequencyIndex] ?? 44100;
+        // AAC 每帧固定 1024 采样点，90kHz 时钟下的帧持续时间
+        $frameDuration = (int)((1024 * 90000) / $sampleRate);
+
+        if ($this->audioBasePts === null) {
+            $this->audioBasePts = (int)($relativeTime * 90);
+        }
+        $pts = $this->audioBasePts + ($this->audioFrameCount * $frameDuration);
+        $this->audioFrameCount++;
 
         $pes = $this->createPES(0xC0, $payload, $pts, null);
 
-        // 如果有打开的 TS 文件就直接写入
+        // 直接写入当前打开的 TS 文件
         if ($this->tsHandle) {
             $this->writeTSPackets($this->audioPid, $pes, false, 0);
         }
-
-        // 同时缓存音频帧信息，用于切片切换
-        $this->audioBuffer[] = [
-            'timestamp' => $relativeTime,
-            'pts' => $pts,
-            'payload' => $payload
-        ];
-    }
-
-    // ===== 新增：刷新音频缓冲区 =====
-    private function flushAudioBuffer(): void
-    {
-        // 音频数据已经在 handleAudioFrame 中实时写入了
-        // 这个方法主要用于清理缓冲区，确保不跨越切片边界
-        $this->audioBuffer = [];
     }
 
     private function parseAVCDecoderConfigurationRecord(string $data): void
@@ -343,34 +333,76 @@ class Flv2Hls
     private function parseAudioSpecificConfig(string $asc): void
     {
         if (strlen($asc) < 2) return;
-        $b1 = ord($asc[0]);
-        $b2 = ord($asc[1]);
-        $this->audioObjectType = ($b1 >> 3) & 0x1F;
-        $this->samplingFrequencyIndex = (($b1 & 0x07) << 1) | (($b2 >> 7) & 0x01);
-        $this->channelConfiguration = ($b2 >> 3) & 0x0F;
+
+        // 将字节流转为位字符串，便于按位解析
+        $bits = '';
+        for ($i = 0; $i < strlen($asc); $i++) {
+            $byte = ord($asc[$i]);
+            for ($j = 7; $j >= 0; $j--) {
+                $bits .= (($byte >> $j) & 0x01) ? '1' : '0';
+            }
+        }
+
+        $pos = 0;
+        $totalBits = strlen($bits);
+
+        // audioObjectType: 5 bits
+        $audioObjectType = (int)bindec(substr($bits, $pos, 5));
+        $pos += 5;
+
         $this->sbrPresent = false;
         $this->extensionSamplingIndex = null;
 
-        // 处理 HE-AAC / SBR (audioObjectType == 5 或 29)
-        if ($this->audioObjectType == 5 || $this->audioObjectType == 29) {
+        // 处理 HE-AAC / SBR / PS 扩展 (audioObjectType == 5 或 29)
+        // 当 audioObjectType 为 5 或 29 时，前 5 bits 是 extensionAudioObjectType，
+        // 真正的 audioObjectType 在后面重新读取
+        if ($audioObjectType == 5 || $audioObjectType == 29) {
             $this->sbrPresent = true;
-            if (strlen($asc) >= 4) {
-                $extSamplingIndex = (ord($asc[2]) >> 3) & 0x0F;
-                $this->extensionSamplingIndex = $extSamplingIndex;
+
+            // extensionSamplingFrequencyIndex: 4 bits
+            if ($pos + 4 > $totalBits) return;
+            $this->extensionSamplingIndex = (int)bindec(substr($bits, $pos, 4));
+            $pos += 4;
+
+            // 如果 extensionSamplingFrequencyIndex == 0x0F，跳过 24 bits 的扩展采样率值
+            if ($this->extensionSamplingIndex == 0x0F) {
+                $pos += 24;
+                if ($pos > $totalBits) return;
             }
+
+            // 读取真正的 audioObjectType: 5 bits
+            if ($pos + 5 > $totalBits) return;
+            $this->audioObjectType = (int)bindec(substr($bits, $pos, 5));
+            $pos += 5;
+        } else {
+            $this->audioObjectType = $audioObjectType;
         }
+
+        // samplingFrequencyIndex: 4 bits（核心采样率，HE-AAC 中为 half-rate）
+        if ($pos + 4 > $totalBits) return;
+        $this->samplingFrequencyIndex = (int)bindec(substr($bits, $pos, 4));
+        $pos += 4;
+
+        // 如果 samplingFrequencyIndex == 0x0F，跳过 24 bits
+        if ($this->samplingFrequencyIndex == 0x0F) {
+            $pos += 24;
+            if ($pos > $totalBits) return;
+        }
+
+        // channelConfiguration: 4 bits
+        if ($pos + 4 > $totalBits) return;
+        $this->channelConfiguration = (int)bindec(substr($bits, $pos, 4));
     }
 
     private function createADTSHeader(int $aacLength): string
     {
-        $profile = $this->audioObjectType - 1;
-        if ($profile < 0) $profile = 1;
+        // ADTS profile: 0=Main, 1=LC, 2=SSR, 3=LTP
+        // 所有 AAC 封装在 ADTS 中统一使用 profile=1 (LC)
+        // HE-AAC/SBR 的扩展信息在 AAC 数据内部，不在 ADTS 头中
+        $profile = 1;
 
-        // ADTS 头始终使用基础采样率索引
-        // HE-AAC/SBR 的扩展采样率信息在 AAC 数据内部，不在 ADTS 头中
+        // 使用核心采样率索引（parseAudioSpecificConfig 已正确解析为核心采样率）
         $freqIndex = $this->samplingFrequencyIndex;
-
-        // 确保采样率索引在有效范围内 (0-11)
         if ($freqIndex < 0 || $freqIndex > 11) {
             $freqIndex = 4; // 默认 44100Hz
         }
@@ -548,9 +580,12 @@ class Flv2Hls
                 $stuffing = $payloadSpace - $remaining;
 
                 if ($adaptationField === '') {
-                    $adaptationField = chr($stuffing - 1) . chr(0x00);
-                    if ($stuffing > 2) {
+                    if ($stuffing >= 2) {
+                        $adaptationField = chr($stuffing - 1) . chr(0x00);
                         $adaptationField .= str_repeat("\xFF", $stuffing - 2);
+                    } else {
+                        // stuffing == 1, adaptation field is just the length byte (0)
+                        $adaptationField = chr(0);
                     }
                 } else {
                     $newLen = min(255, ord($adaptationField[0]) + $stuffing);
@@ -661,8 +696,6 @@ class Flv2Hls
 
     public function close(): void
     {
-        // ===== 修复：关闭前刷新音频缓冲 =====
-        $this->flushAudioBuffer();
         $this->closeSegment($this->currentSegmentLastTime);
 
         $m3u8Path = $this->streamDir . 'index.m3u8';
