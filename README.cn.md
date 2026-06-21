@@ -4,19 +4,20 @@
   <a href="./README.md"><strong>🇬🇧 English</strong></a>
 </p>
 
-纯 PHP 8.1+ 实现的轻量级媒体处理工具包，**零外部依赖**（无需 FFmpeg），支持 FLV 与 MP4/HLS 双向转换及直播流转发。
+纯 PHP 8.1+ 实现的轻量级媒体处理工具包，**零外部依赖**（无需 FFmpeg），支持 FLV 与 MP4/HLS 双向转换及直播流转发，媒体数据推流，拉流，有助于实现集成到自动化。
 
 ## 🎯 核心功能
 
-| 功能 | 方向 | 说明 |
-|------|------|------|
-| 转码封装 | FLV → MP4 | 生成标准 MP4 或分离的 fMP4 切片 |
-| 切片分发 | FLV → HLS | 生成 M3U8 + TS 切片，兼容 hls.js/VLC 等播放器 |
-| 逆向还原 | HLS → FLV | HLS 切片合并还原为 FLV |
-| 格式互转 | MP4 → FLV | MP4 文件转码为 FLV |
-| 直播网关 | FLV Gateway | 高性能多级转发，支持高并发 |
-| 文件服务 | File Gateway | 轻量级 HTTP 文件服务器 |
-| 推流客户端 | FLV / MP4 / RTMP | 静态文件伪直播推流至 RTMP 服务器 |
+| 功能    | 方向 | 说明                                   |
+|-------|------|--------------------------------------|
+| 转码封装  | FLV → MP4 | 生成标准 MP4 或分离的 fMP4 切片                |
+| 切片分发  | FLV → HLS | 生成 M3U8 + TS 切片，兼容 hls.js/VLC 等播放器   |
+| 逆向还原  | HLS → FLV | HLS 切片合并还原为 FLV                      |
+| 格式互转  | MP4 → FLV | MP4 文件转码为 FLV                        |
+| 直播网关  | FLV Gateway | 高性能多级转发，支持高并发                        |
+| 文件服务  | File Gateway | 轻量级 HTTP 文件服务器                       |
+| 推流客户端 | FLV / MP4 / RTMP | 静态文件伪直播推流至 RTMP 服务器                  |
+| 拉流客户端 | FLV / RTMP | 使用ws-flv/http-flv/rtmp协议拉流保存为flv静态文件 |
 
 ## 环境依赖
 
@@ -215,6 +216,13 @@ ffmpeg -re -i test.flv -c:v libx264 -c:a aac -f flv rtmp://server/live/stream
 
 # OBS Studio 推流
 # 图形化界面，支持 RTMP / FLV 推流，配置简单，功能强大
+```
+
+### PHP 拉流测试工具
+```bash
+php puller.php http://127.0.0.1:8501/live/stream.flv output.flv 0 --no-reconnect
+php puller.php ws://127.0.0.1:8501/live/stream.flv output.flv 0 --no-reconnect
+php puller.php rtmp://127.0.0.1:1935/live/stream output.flv 0 --no-reconnect
 ```
 
 ## 🧪 测试与播放
