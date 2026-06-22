@@ -216,7 +216,7 @@ class PurePhpHlsGenerator
                         $outputData = '';
                         $outputSpsPps = '';
                         foreach ($encoded as $nal) {
-                            $nalType = (ord($nal[0]) >> 1) & 0x3F;
+                            $nalType = ord($nal[0]) & 0x1F;
                             if ($nalType === 7 || $nalType === 8) {
                                 $outputSpsPps .= "\x00\x00\x00\x01" . $this->escapeNAL($nal);
                             } else {
