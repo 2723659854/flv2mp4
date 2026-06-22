@@ -192,6 +192,46 @@ class PurePhpHlsGenerator
             $outputData = $avcData;
             $outputSpsPps = $this->spsPpsData[$name];
 
+            if ($this->srcInitialized && ($profile['width'] != $this->srcWidth || $profile['height'] != $this->srcHeight)) {
+                if ($isKeyFrame) {
+                    $nalUnits = $this->extractNalUnitsFromAVCC($avcData);
+                    if (!empty($nalUnits)) {
+                        $decoded = $this->decoder->decode($nalUnits);
+                        if ($decoded && isset($decoded['data'])) {
+                            $this->lastDecodedFrame = $decoded['data'];
+                        }
+                    }
+                }
+                
+                if (isset($this->lastDecodedFrame)) {
+                    $scaledYuv = $this->scaler->scaleYUV420P(
+                        $this->lastDecodedFrame,
+                        $this->srcWidth,
+                        $this->srcHeight,
+                        $profile['width'],
+                        $profile['height']
+                    );
+
+                    $this->encoder->setResolution($profile['width'], $profile['height']);
+                    $this->encoder->setBitrate($profile['bitrate']);
+                    $this->encoder->setFps($profile['fps']);
+
+                    $encoded = $this->encoder->encodeFrame($scaledYuv, $isKeyFrame);
+
+                    $outputData = '';
+                    $outputSpsPps = '';
+                    foreach ($encoded as $nal) {
+                        $nalType = ord($nal[0]) & 0x1F;
+                        if ($nalType === 7 || $nalType === 8) {
+                            $outputSpsPps .= "\x00\x00\x00\x01" . $this->escapeNAL($nal);
+                        } else {
+                            $nalSize = strlen($nal);
+                            $outputData .= pack('N', $nalSize) . $nal;
+                        }
+                    }
+                }
+            }
+
             $annexb = $this->avccToAnnexB($outputData);
 
             if ($isKeyFrame && $outputSpsPps !== '') {
