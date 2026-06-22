@@ -193,12 +193,30 @@ class PurePhpHlsGenerator
             $outputSpsPps = $this->spsPpsData[$name];
 
             if ($this->srcInitialized && ($profile['width'] != $this->srcWidth || $profile['height'] != $this->srcHeight)) {
+                static $debugCount = 0;
+                $debugCount++;
+                
+                if ($debugCount <= 5) {
+                    echo "Re-encoding triggered: src={$this->srcWidth}x{$this->srcHeight}, target={$profile['width']}x{$profile['height']}, isKeyFrame=$isKeyFrame\n";
+                }
+                
                 if ($isKeyFrame) {
                     $nalUnits = $this->extractNalUnitsFromAVCC($avcData);
                     if (!empty($nalUnits)) {
                         $decoded = $this->decoder->decode($nalUnits);
                         if ($decoded && isset($decoded['data'])) {
                             $this->lastDecodedFrame = $decoded['data'];
+                            if ($debugCount <= 5) {
+                                echo "Decoded frame: " . strlen($decoded['data']) . " bytes\n";
+                            }
+                        } else {
+                            if ($debugCount <= 5) {
+                                echo "Decode failed\n";
+                            }
+                        }
+                    } else {
+                        if ($debugCount <= 5) {
+                            echo "No NAL units extracted\n";
                         }
                     }
                 }
@@ -228,6 +246,19 @@ class PurePhpHlsGenerator
                             $nalSize = strlen($nal);
                             $outputData .= pack('N', $nalSize) . $nal;
                         }
+                    }
+                    
+                    if ($debugCount <= 5) {
+                        echo "Encoded: " . count($encoded) . " NAL units, SPS/PPS=" . strlen($outputSpsPps) . " bytes, data=" . strlen($outputData) . " bytes\n";
+                        foreach ($encoded as $nal) {
+                            $nalType = ord($nal[0]) & 0x1F;
+                            $types = [7 => 'SPS', 8 => 'PPS', 1 => 'SLICE', 2 => 'SLICE'];
+                            echo "  NAL type: " . ($types[$nalType] ?? $nalType) . ", length: " . strlen($nal) . ", hex: " . bin2hex(substr($nal, 0, 20)) . "\n";
+                        }
+                    }
+                } else {
+                    if ($debugCount <= 5) {
+                        echo "No decoded frame available\n";
                     }
                 }
             }

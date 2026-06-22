@@ -199,23 +199,17 @@ class H264Encoder
     {
         $bits = '';
         
-        $sliceType = 2;
-        $bits .= $this->ue($sliceType);
-        
         $bits .= $this->ue(0);
         
-        $bits .= $this->u($this->frameNum, 8);
+        $bits .= $this->ue(2);
         
-        $bits .= $this->ue(0);
-        $bits .= '0';
+        $bits .= $this->u(0, 4);
+        
+        $bits .= $this->u($this->frameNum, 4);
+        
         $bits .= '0';
         
         $bits .= $this->se($this->qp - 26);
-        
-        $bits .= $this->ue(0);
-        
-        $bits .= $this->se(0);
-        $bits .= $this->se(0);
         
         $mbWidth  = (int)ceil($this->width / 16);
         $mbHeight = (int)ceil($this->height / 16);
@@ -246,7 +240,11 @@ class H264Encoder
             $bits .= '0';
         }
         
-        return $this->bitsToBytes($bits);
+        $sliceData = $this->bitsToBytes($bits);
+        
+        $nalHeader = "\x65";
+        
+        return $nalHeader . $sliceData;
     }
 
     private function encodeIntraMB(int $mbX, int $mbY, string $yPlane, string $uPlane, string $vPlane): string
