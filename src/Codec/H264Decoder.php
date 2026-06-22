@@ -103,22 +103,24 @@ class H264Decoder
 
         $pos += $this->ueLength($bits, $pos);
 
-        $chromaFormatIdc = $this->ueToVal($bits, $pos);
-        $pos += $this->ueLength($bits, $pos);
+        if ($profileIdc >= 100) {
+            $chromaFormatIdc = $this->ueToVal($bits, $pos);
+            $pos += $this->ueLength($bits, $pos);
 
-        if ($chromaFormatIdc == 3) {
+            if ($chromaFormatIdc == 3) {
+                $pos += 1;
+            }
+
+            $bitDepthLumaMinus8 = $this->ueToVal($bits, $pos);
+            $pos += $this->ueLength($bits, $pos);
+
+            $bitDepthChromaMinus8 = $this->ueToVal($bits, $pos);
+            $pos += $this->ueLength($bits, $pos);
+
+            $pos += 1;
+
             $pos += 1;
         }
-
-        $bitDepthLumaMinus8 = $this->ueToVal($bits, $pos);
-        $pos += $this->ueLength($bits, $pos);
-
-        $bitDepthChromaMinus8 = $this->ueToVal($bits, $pos);
-        $pos += $this->ueLength($bits, $pos);
-
-        $pos += 1;
-
-        $pos += 1;
 
         $log2MaxFrameNumMinus4 = $this->ueToVal($bits, $pos);
         $pos += $this->ueLength($bits, $pos);
