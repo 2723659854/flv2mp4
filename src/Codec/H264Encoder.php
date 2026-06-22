@@ -4,16 +4,16 @@ namespace Xiaosongshu\Flv2mp4\Codec;
 
 class H264Encoder
 {
-    public $width = 640;
-    public $height = 360;
-    public $fps = 30;
-    public $bitrate = 500000;
-    public $qp = 28;
+    private int $width = 640;
+    private int $height = 360;
+    private int $fps = 30;
+    private int $bitrate = 500000;
+    private int $qp = 28;
 
-    public $frameNum = 0;
-    public $idrPicId = 0;
+    private int $frameNum = 0;
+    private int $idrPicId = 0;
 
-    private $quantMatrix = [];
+    private array $quantMatrix = [];
 
     public function __construct()
     {
@@ -73,7 +73,7 @@ class H264Encoder
             $this->idrPicId = 0;
         }
 
-        $sliceData = $this->encodeSliceIntra($yuvData, $isKeyframe);
+        $sliceData = $this->encodeSlice($yuvData, $isKeyframe);
         $nalUnits[] = $sliceData;
 
         $this->frameNum++;
@@ -85,518 +85,489 @@ class H264Encoder
     public function generateSPS(): string
     {
         $profileIdc = 66;
-        $constraintSet0 = 0;
-        $constraintSet1 = 0;
-        $constraintSet2 = 0;
         $levelIdc = 30;
-        $seqParameterSetId = 0;
-        $log2MaxFrameNumMinus4 = 4;
-        $picOrderCntType = 2;
-        $numRefFrames = 1;
-        $gapsInFrameNumValueAllowedFlag = 0;
-        
+
         $picWidthInMbs = (int)ceil($this->width / 16);
-        $picWidthInMbsMinus1 = $picWidthInMbs - 1;
-        $picHeightInMapUnits = (int)ceil($this->height / 16);
-        $picHeightInMapUnitsMinus1 = $picHeightInMapUnits - 1;
-        $frameMbsOnlyFlag = 1;
-        $direct8x8InferenceFlag = 1;
-        $frameCroppingFlag = 0;
-        $vuiParametersPresentFlag = 0;
+        $picHeightInMbs = (int)ceil($this->height / 16);
 
         $bits = '';
         $bits .= $this->u($profileIdc, 8);
-        $bits .= $this->u($constraintSet0, 1);
-        $bits .= $this->u($constraintSet1, 1);
-        $bits .= $this->u($constraintSet2, 1);
-        $bits .= $this->u(0, 1);
-        $bits .= $this->u(0, 1);
-        $bits .= $this->u(0, 1);
-        $bits .= $this->u(0, 2);
+        $bits .= '1'; // constraint_set0
+        $bits .= '0';
+        $bits .= '0';
+        $bits .= '0';
+        $bits .= '0';
+        $bits .= '0';
+        $bits .= '00'; // reserved
         $bits .= $this->u($levelIdc, 8);
-        $bits .= $this->ue($seqParameterSetId);
-        $bits .= $this->ue($log2MaxFrameNumMinus4);
-        $bits .= $this->ue($picOrderCntType);
-        
-        $bits .= $this->ue($numRefFrames);
-        $bits .= $this->u($gapsInFrameNumValueAllowedFlag, 1);
-        $bits .= $this->ue($picWidthInMbsMinus1);
-        $bits .= $this->ue($picHeightInMapUnitsMinus1);
-        $bits .= $this->u($frameMbsOnlyFlag, 1);
-        
-        if (!$frameMbsOnlyFlag) {
-            $bits .= $this->u(0, 1);
-        }
-        
-        $bits .= $this->u($direct8x8InferenceFlag, 1);
-        $bits .= $this->u($frameCroppingFlag, 1);
-        
-        if ($frameCroppingFlag) {
-            $bits .= $this->ue(0);
-            $bits .= $this->ue(0);
-            $bits .= $this->ue(0);
-            $bits .= $this->ue(0);
-        }
-        
-        $bits .= $this->u($vuiParametersPresentFlag, 1);
-        
+        $bits .= $this->ue(0); // sps_id
+        $bits .= $this->ue(4); // log2_max_frame_num
+        $bits .= $this->ue(2); // pic_order_cnt_type
+        $bits .= $this->ue(0); // max_num_ref_frames
+        $bits .= '0'; // gaps_in_frame_num
+        $bits .= $this->ue($picWidthInMbs - 1);
+        $bits .= $this->ue($picHeightInMbs - 1);
+        $bits .= '1'; // frame_mbs_only
+        $bits .= '1'; // direct_8x8_inference
+        $bits .= '0'; // cropping
+        $bits .= '0'; // vui
+
         $bits .= '1';
-        while (strlen($bits) % 8 != 0) {
-            $bits .= '0';
-        }
-        
-        $rbsp = $this->bitsToBytes($bits);
-        return $this->rbspToNal($rbsp, 7);
+        while (strlen($bits) % 8 != 0) $bits .= '0';
+
+        return $this->rbspToNal($this->bitsToBytes($bits), 7);
     }
 
     public function generatePPS(): string
     {
-        $picParameterSetId = 0;
-        $seqParameterSetId = 0;
-        $entropyCodingModeFlag = 0;
-        $picOrderPresentFlag = 0;
-        $numSliceGroupsMinus1 = 0;
-        $numRefIdxL0DefaultActiveMinus1 = 0;
-        $numRefIdxL1DefaultActiveMinus1 = 0;
-        $weightedPredFlag = 0;
-        $weightedBipredIdc = 0;
-        $picInitQpMinus26 = $this->qp - 26;
-        $picInitQsMinus26 = 0;
-        $chromaQpIndexOffset = 0;
-        $deblockingFilterControlPresentFlag = 0;
-        $constrainedIntraPredFlag = 0;
-        $redundantPicCntPresentFlag = 0;
-
         $bits = '';
-        $bits .= $this->ue($picParameterSetId);
-        $bits .= $this->ue($seqParameterSetId);
-        $bits .= $this->u($entropyCodingModeFlag, 1);
-        $bits .= $this->u($picOrderPresentFlag, 1);
-        $bits .= $this->ue($numSliceGroupsMinus1);
-        $bits .= $this->ue($numRefIdxL0DefaultActiveMinus1);
-        $bits .= $this->ue($numRefIdxL1DefaultActiveMinus1);
-        $bits .= $this->u($weightedPredFlag, 1);
-        $bits .= $this->u($weightedBipredIdc, 2);
-        $bits .= $this->se($picInitQpMinus26);
-        $bits .= $this->se($picInitQsMinus26);
-        $bits .= $this->se($chromaQpIndexOffset);
-        $bits .= $this->u($deblockingFilterControlPresentFlag, 1);
-        if ($deblockingFilterControlPresentFlag) {
-            $bits .= $this->u(1, 1);
-            $bits .= $this->se(0);
-            $bits .= $this->se(0);
-        }
-        $bits .= $this->u($constrainedIntraPredFlag, 1);
-        $bits .= $this->u($redundantPicCntPresentFlag, 1);
-        
+        $bits .= $this->ue(0); // pps_id
+        $bits .= $this->ue(0); // sps_id
+        $bits .= '0'; // cavlc
+        $bits .= '0'; // pic_order_present
+        $bits .= $this->ue(0); // num_slice_groups
+        $bits .= $this->ue(0); // num_ref_idx_l0
+        $bits .= $this->ue(0); // num_ref_idx_l1
+        $bits .= '0'; // weighted_pred
+        $bits .= '00'; // weighted_bipred
+        $bits .= $this->se($this->qp - 26); // pic_init_qp
+        $bits .= $this->se(0); // pic_init_qs
+        $bits .= $this->se(0); // chroma_qp_offset
+        $bits .= '0'; // deblocking
+        $bits .= '0'; // constrained_intra
+        $bits .= '0'; // redundant_pic_cnt
+
         $bits .= '1';
-        while (strlen($bits) % 8 != 0) {
-            $bits .= '0';
-        }
-        
-        $rbsp = $this->bitsToBytes($bits);
-        return $this->rbspToNal($rbsp, 8);
+        while (strlen($bits) % 8 != 0) $bits .= '0';
+
+        return $this->rbspToNal($this->bitsToBytes($bits), 8);
     }
 
-    private function encodeSliceIntra(string $yuvData, bool $isKeyframe = false): string
+    private function encodeSlice(string $yuvData, bool $isKeyframe): string
     {
         $bits = '';
-        
-        $bits .= $this->ue(0);
-        
-        $bits .= $this->ue($isKeyframe ? 7 : 3);
-        
-        $bits .= $this->ue(0);
-        
+        $bits .= $this->ue(0); // first_mb
+        $bits .= $this->ue($isKeyframe ? 7 : 2); // slice_type
+        $bits .= $this->ue(0); // pps_id
         $bits .= $this->u($this->frameNum, 8);
-        
+
         if ($isKeyframe) {
             $bits .= $this->ue($this->idrPicId);
-            $bits .= $this->u(0, 1);
-            $bits .= $this->u(0, 1);
+            $bits .= '0'; // no_output
+            $bits .= '0'; // long_term
         }
-        
-        $bits .= $this->se($this->qp - 26);
-        
-        $mbWidth  = (int)ceil($this->width / 16);
+
+        $bits .= $this->se(0); // slice_qp_delta
+
+        if ($isKeyframe) {
+            $bits .= $this->ue(1); // disable_deblocking
+            $bits .= $this->se(0);
+            $bits .= $this->se(0);
+        }
+
+        $mbWidth = (int)ceil($this->width / 16);
         $mbHeight = (int)ceil($this->height / 16);
-        
+
         $ySize = $this->width * $this->height;
-        $uvSize = $ySize / 4;
+        $uvSize = (int)($ySize / 4);
         $yPlane = substr($yuvData, 0, $ySize);
         $uPlane = substr($yuvData, $ySize, $uvSize);
         $vPlane = substr($yuvData, $ySize + $uvSize, $uvSize);
-        
+
         for ($mbY = 0; $mbY < $mbHeight; $mbY++) {
             for ($mbX = 0; $mbX < $mbWidth; $mbX++) {
-                $bits .= $this->ue(2);
-
-                for ($subMb = 0; $subMb < 16; $subMb++) {
-                    $bits .= $this->ue(0);
-                }
-
-                $mbData = $this->encodeIntraMB($mbX, $mbY, $yPlane, $uPlane, $vPlane, $isKeyframe);
-                $bits .= $mbData;
+                $bits .= $this->encodeMacroblock($mbX, $mbY, $yPlane, $uPlane, $vPlane);
             }
         }
-        
+
         $bits .= '1';
-        while (strlen($bits) % 8 != 0) {
-            $bits .= '0';
-        }
-        
-        $rbsp = $this->bitsToBytes($bits);
-        $nalType = $isKeyframe ? 5 : 1;
-        return $this->rbspToNal($rbsp, $nalType);
+        while (strlen($bits) % 8 != 0) $bits .= '0';
+
+        return $this->rbspToNal($this->bitsToBytes($bits), $isKeyframe ? 5 : 1);
     }
 
-    private function encodeIntraMB(int $mbX, int $mbY, string $yPlane, string $uPlane, string $vPlane, bool $isKeyframe): string
+    private function encodeMacroblock(int $mbX, int $mbY, string $yPlane, string $uPlane, string $vPlane): string
     {
         $bits = '';
-        
-        for ($blockY = 0; $blockY < 4; $blockY++) {
-            for ($blockX = 0; $blockX < 4; $blockX++) {
-                $blockBits = $this->encodeIntraBlock($mbX, $mbY, $blockX, $blockY, $yPlane, 0, $isKeyframe);
-                $bits .= $blockBits;
+
+        // mb_type: I_16x16 = 1
+        $bits .= $this->ue(1);
+
+        // intra16x16_pred_mode: DC = 2
+        $bits .= $this->ue(2);
+
+        // coded_block_pattern: luma AC + chroma DC + chroma AC
+        // 简化：全部编码
+        $bits .= $this->u(0, 2); // luma AC cbp (0=all present)
+        $bits .= $this->u(0, 2); // chroma cbp
+
+        // mb_qp_delta
+        $bits .= $this->se(0);
+
+        // ===== Luma DC =====
+        $dcLuma = [];
+        for ($by = 0; $by < 4; $by++) {
+            for ($bx = 0; $bx < 4; $bx++) {
+                $block = $this->getBlock($mbX, $mbY, $bx, $by, $yPlane, false);
+                $residual = $this->subtract($block, $this->predict($mbX, $mbY, $bx, $by, $yPlane, false));
+                $dct = $this->dct($residual);
+                $dcLuma[$by][$bx] = $dct[0][0];
             }
         }
-        
-        $blockBits = $this->encodeIntraBlock($mbX, $mbY, 0, 0, $uPlane, 1, $isKeyframe);
-        $bits .= $blockBits;
-        
-        $blockBits = $this->encodeIntraBlock($mbX, $mbY, 0, 0, $vPlane, 1, $isKeyframe);
-        $bits .= $blockBits;
-        
+
+        $dcHadamard = $this->hadamard($dcLuma);
+        $dcQ = $this->quantize($dcHadamard, 0, true);
+        $bits .= $this->encodeCavlc($this->zigzag($dcQ), 0);
+
+        // ===== Luma AC =====
+        for ($by = 0; $by < 4; $by++) {
+            for ($bx = 0; $bx < 4; $bx++) {
+                $block = $this->getBlock($mbX, $mbY, $bx, $by, $yPlane, false);
+                $residual = $this->subtract($block, $this->predict($mbX, $mbY, $bx, $by, $yPlane, false));
+                $dct = $this->dct($residual);
+                $dct[0][0] = 0; // already in DC
+                $acQ = $this->quantize($dct, 0, false);
+                $bits .= $this->encodeCavlc($this->zigzag($acQ), 1);
+            }
+        }
+
+        // ===== Chroma DC (U and V) =====
+        foreach ([$uPlane, $vPlane] as $chromaPlane) {
+            $dcChroma = [];
+            for ($by = 0; $by < 2; $by++) {
+                for ($bx = 0; $bx < 2; $bx++) {
+                    $block = $this->getBlock($mbX, $mbY, $bx, $by, $chromaPlane, true);
+                    $residual = $this->subtract($block, $this->predict($mbX, $mbY, $bx, $by, $chromaPlane, true));
+                    $dct = $this->dct($residual);
+                    $dcChroma[$by][$bx] = $dct[0][0];
+                }
+            }
+
+            // 2x2 Hadamard
+            $dcQ[0][0] = (int)round(($dcChroma[0][0] + $dcChroma[0][1] + $dcChroma[1][0] + $dcChroma[1][1]) / 2);
+            $dcQ[0][1] = (int)round(($dcChroma[0][0] - $dcChroma[0][1] + $dcChroma[1][0] - $dcChroma[1][1]) / 2);
+            $dcQ[1][0] = (int)round(($dcChroma[0][0] + $dcChroma[0][1] - $dcChroma[1][0] - $dcChroma[1][1]) / 2);
+            $dcQ[1][1] = (int)round(($dcChroma[0][0] - $dcChroma[0][1] - $dcChroma[1][0] + $dcChroma[1][1]) / 2);
+
+            // quantize as 4x4 DC
+            $dcQQuant = $this->quantize($dcQ, 1, true);
+            $bits .= $this->encodeCavlc($this->zigzag($dcQQuant), 0);
+
+            // Chroma AC
+            for ($by = 0; $by < 2; $by++) {
+                for ($bx = 0; $bx < 2; $bx++) {
+                    $block = $this->getBlock($mbX, $mbY, $bx, $by, $chromaPlane, true);
+                    $residual = $this->subtract($block, $this->predict($mbX, $mbY, $bx, $by, $chromaPlane, true));
+                    $dct = $this->dct($residual);
+                    $dct[0][0] = 0;
+                    $acQ = $this->quantize($dct, 1, false);
+                    $bits .= $this->encodeCavlc($this->zigzag($acQ), 1);
+                }
+            }
+        }
+
         return $bits;
     }
 
-    private function encodeIntraBlock(int $mbX, int $mbY, int $blockX, int $blockY, string $plane, int $chroma, bool $isKeyframe): string
+    private function getBlock(int $mbX, int $mbY, int $bx, int $by, string $plane, bool $chroma): array
     {
-        $bits = '';
-        
         $step = $chroma ? 8 : 16;
-        $width = $chroma ? $this->width / 2 : $this->width;
-        
+        $pw = $chroma ? (int)($this->width / 2) : $this->width;
         $pixels = [];
         for ($y = 0; $y < 4; $y++) {
             for ($x = 0; $x < 4; $x++) {
-                $pixelY = $mbY * $step + $blockY * 4 + $y;
-                $pixelX = $mbX * $step + $blockX * 4 + $x;
-                $idx = $pixelY * $width + $pixelX;
-                $pixels[$y][$x] = ord($plane[$idx] ?? chr(128)) - 128;
+                $px = $mbX * $step + $bx * 4 + $x;
+                $py = $mbY * $step + $by * 4 + $y;
+                $idx = max(0, min(strlen($plane) - 1, $py * $pw + $px));
+                $pixels[$y][$x] = ord($plane[$idx]) - 128;
             }
         }
-        
-        $predicted = $this->intraPredict($mbX, $mbY, $blockX, $blockY, $plane, $chroma);
-        
-        $residual = [];
-        for ($y = 0; $y < 4; $y++) {
-            for ($x = 0; $x < 4; $x++) {
-                $residual[$y][$x] = $pixels[$y][$x] - $predicted[$y][$x];
-            }
-        }
-        
-        $dct = $this->dct4x4($residual);
-        
-        $quantized = $this->quantize4x4($dct, $chroma);
-        
-        $zigzag = $this->zigzag4x4($quantized);
-        
-        $bits .= $this->encodeCoefficients($zigzag);
-        
-        return $bits;
+        return $pixels;
     }
 
-    private function intraPredict(int $mbX, int $mbY, int $blockX, int $blockY, string $plane, int $chroma): array
+    private function predict(int $mbX, int $mbY, int $bx, int $by, string $plane, bool $chroma): array
     {
         $step = $chroma ? 8 : 16;
-        $width = $chroma ? $this->width / 2 : $this->width;
-        
-        $predicted = array_fill(0, 4, array_fill(0, 4, 0));
-        
-        $leftAvailable = ($mbX > 0) || ($blockX > 0);
-        $topAvailable = ($mbY > 0) || ($blockY > 0);
-        
-        $leftPixels = [];
-        $topPixels = [];
-        
-        if ($leftAvailable) {
-            $refX = $mbX * $step + ($blockX - 1) * 4 + 3;
-            for ($y = 0; $y < 4; $y++) {
-                $refY = $mbY * $step + $blockY * 4 + $y;
-                $idx = $refY * $width + $refX;
-                $leftPixels[$y] = ord($plane[$idx] ?? chr(128)) - 128;
-            }
-        }
-        
-        if ($topAvailable) {
-            $refY = $mbY * $step + ($blockY - 1) * 4 + 3;
+        $pw = $chroma ? (int)($this->width / 2) : $this->width;
+        $pred = array_fill(0, 4, array_fill(0, 4, 0));
+
+        $sum = 0;
+        $cnt = 0;
+
+        // Top
+        if ($by > 0 || $mbY > 0) {
+            $refY = $mbY * $step + ($by > 0 ? ($by - 1) * 4 + 3 : -1);
+            if ($by == 0) $refY = ($mbY - 1) * $step + 3 * 4 + 3;
             for ($x = 0; $x < 4; $x++) {
-                $refX = $mbX * $step + $blockX * 4 + $x;
-                $idx = $refY * $width + $refX;
-                $topPixels[$x] = ord($plane[$idx] ?? chr(128)) - 128;
-            }
-        }
-        
-        if ($leftAvailable && $topAvailable) {
-            $avg = (array_sum($leftPixels) + array_sum($topPixels)) / 8;
-            for ($y = 0; $y < 4; $y++) {
-                for ($x = 0; $x < 4; $x++) {
-                    $predicted[$y][$x] = (int)round($avg);
-                }
-            }
-        } elseif ($leftAvailable) {
-            $avg = array_sum($leftPixels) / 4;
-            for ($y = 0; $y < 4; $y++) {
-                for ($x = 0; $x < 4; $x++) {
-                    $predicted[$y][$x] = (int)round($avg);
-                }
-            }
-        } elseif ($topAvailable) {
-            $avg = array_sum($topPixels) / 4;
-            for ($y = 0; $y < 4; $y++) {
-                for ($x = 0; $x < 4; $x++) {
-                    $predicted[$y][$x] = (int)round($avg);
+                $refX = $mbX * $step + $bx * 4 + $x;
+                if ($refY >= 0 && $refX < $pw) {
+                    $sum += ord($plane[$refY * $pw + $refX] ?? chr(128)) - 128;
+                    $cnt++;
                 }
             }
         }
-        
-        return $predicted;
+
+        // Left
+        if ($bx > 0 || $mbX > 0) {
+            $refX = $mbX * $step + ($bx > 0 ? ($bx - 1) * 4 + 3 : -1);
+            if ($bx == 0) $refX = ($mbX - 1) * $step + 3 * 4 + 3;
+            for ($y = 0; $y < 4; $y++) {
+                $refY = $mbY * $step + $by * 4 + $y;
+                if ($refX >= 0 && $refY * $pw + $refX < strlen($plane)) {
+                    $sum += ord($plane[$refY * $pw + $refX] ?? chr(128)) - 128;
+                    $cnt++;
+                }
+            }
+        }
+
+        if ($cnt > 0) {
+            $avg = (int)round($sum / $cnt);
+            for ($y = 0; $y < 4; $y++)
+                for ($x = 0; $x < 4; $x++)
+                    $pred[$y][$x] = $avg;
+        }
+
+        return $pred;
     }
 
-    private function dct4x4(array $block): array
+    private function subtract(array $a, array $b): array
     {
-        $result = [];
-        $temp = [];
-        
-        for ($y = 0; $y < 4; $y++) {
-            $s0 = $block[$y][0] + $block[$y][2];
-            $s1 = $block[$y][1] + $block[$y][3];
-            $s2 = $block[$y][1] - $block[$y][3];
-            $s3 = $block[$y][0] - $block[$y][2];
-            
-            $temp[$y][0] = (int)(($s0 + $s1) * 0.5);
-            $temp[$y][1] = (int)((($s3 + $s2) * 0.7071) * 0.5);
-            $temp[$y][2] = (int)(($s0 - $s1) * 0.5);
-            $temp[$y][3] = (int)((($s3 - $s2) * 0.7071) * 0.5);
-        }
-        
-        for ($x = 0; $x < 4; $x++) {
-            $s0 = $temp[0][$x] + $temp[2][$x];
-            $s1 = $temp[1][$x] + $temp[3][$x];
-            $s2 = $temp[1][$x] - $temp[3][$x];
-            $s3 = $temp[0][$x] - $temp[2][$x];
-            
-            $result[0][$x] = (int)(($s0 + $s1) * 0.5);
-            $result[1][$x] = (int)((($s3 + $s2) * 0.7071) * 0.5);
-            $result[2][$x] = (int)(($s0 - $s1) * 0.5);
-            $result[3][$x] = (int)((($s3 - $s2) * 0.7071) * 0.5);
-        }
-        
-        return $result;
+        $r = [];
+        for ($y = 0; $y < 4; $y++)
+            for ($x = 0; $x < 4; $x++)
+                $r[$y][$x] = $a[$y][$x] - $b[$y][$x];
+        return $r;
     }
 
-    private function quantize4x4(array $block, int $chroma): array
+    private function dct(array $block): array
     {
-        $result = [];
-        $scale = 1 << (int)floor($this->qp / 6);
-        $qpRem = $this->qp % 6;
-        
+        $t = [];
+        for ($i = 0; $i < 4; $i++) {
+            $a = $block[$i][0] + $block[$i][3];
+            $b = $block[$i][1] + $block[$i][2];
+            $c = $block[$i][1] - $block[$i][2];
+            $d = $block[$i][0] - $block[$i][3];
+            $t[$i][0] = $a + $b;
+            $t[$i][1] = (int)round(($d + $c) * 0.707);
+            $t[$i][2] = $a - $b;
+            $t[$i][3] = (int)round(($d - $c) * 0.707);
+        }
+
+        $r = [];
+        for ($i = 0; $i < 4; $i++) {
+            $a = $t[0][$i] + $t[3][$i];
+            $b = $t[1][$i] + $t[2][$i];
+            $c = $t[1][$i] - $t[2][$i];
+            $d = $t[0][$i] - $t[3][$i];
+            $r[0][$i] = (int)round(($a + $b) * 0.5);
+            $r[1][$i] = (int)round(($d + $c) * 0.354);
+            $r[2][$i] = (int)round(($a - $b) * 0.5);
+            $r[3][$i] = (int)round(($d - $c) * 0.354);
+        }
+
+        return $r;
+    }
+
+    private function hadamard(array $block): array
+    {
+        $t = [];
+        for ($i = 0; $i < 4; $i++) {
+            $a = $block[$i][0] + $block[$i][3];
+            $b = $block[$i][1] + $block[$i][2];
+            $c = $block[$i][1] - $block[$i][2];
+            $d = $block[$i][0] - $block[$i][3];
+            $t[$i][0] = $a + $b;
+            $t[$i][1] = $c + $d;
+            $t[$i][2] = $a - $b;
+            $t[$i][3] = $c - $d;
+        }
+
+        $r = [];
+        for ($i = 0; $i < 4; $i++) {
+            $a = $t[0][$i] + $t[3][$i];
+            $b = $t[1][$i] + $t[2][$i];
+            $c = $t[1][$i] - $t[2][$i];
+            $d = $t[0][$i] - $t[3][$i];
+            $r[0][$i] = (int)round(($a + $b) * 0.5);
+            $r[1][$i] = (int)round(($c + $d) * 0.5);
+            $r[2][$i] = (int)round(($a - $b) * 0.5);
+            $r[3][$i] = (int)round(($c - $d) * 0.5);
+        }
+
+        return $r;
+    }
+
+    private function quantize(array $block, int $chroma, bool $isDC): array
+    {
+        $r = [];
+        $mf = 1 << (int)($this->qp / 6);
+        $rem = $this->qp % 6;
+
         for ($y = 0; $y < 4; $y++) {
             for ($x = 0; $x < 4; $x++) {
-                $qIdx = $y * 4 + $x;
-                $qStep = $this->quantMatrix[$chroma][$qIdx] * $scale;
-                
-                if ($qpRem > 0) {
-                    $qStep = (int)round($qStep * pow(1.122, $qpRem));
-                }
-                
-                $result[$y][$x] = (int)round($block[$y][$x] / $qStep);
+                $qm = $this->quantMatrix[$chroma][$y * 4 + $x];
+                $q = $qm * $mf;
+                if ($rem) $q = (int)round($q * pow(1.122, $rem));
+                if ($isDC && $x == 0 && $y == 0) $q = (int)round($q * 0.25);
+                if ($q == 0) $q = 1;
+                $r[$y][$x] = (int)round($block[$y][$x] / $q);
             }
         }
-        
-        return $result;
+        return $r;
     }
 
-    private function zigzag4x4(array $block): array
+    private function zigzag(array $block): array
     {
-        $zigzagOrder = [
-            [0, 0], [0, 1], [1, 0], [2, 0], [1, 1], [0, 2], [0, 3], [1, 2],
-            [2, 1], [3, 0], [3, 1], [2, 2], [1, 3], [2, 3], [3, 2], [3, 3]
-        ];
-        
-        $result = [];
-        foreach ($zigzagOrder as $pos) {
-            $result[] = $block[$pos[0]][$pos[1]];
-        }
-        
-        return $result;
+        $order = [[0,0],[0,1],[1,0],[2,0],[1,1],[0,2],[0,3],[1,2],
+            [2,1],[3,0],[3,1],[2,2],[1,3],[2,3],[3,2],[3,3]];
+        $r = [];
+        foreach ($order as $p) $r[] = $block[$p[0]][$p[1]];
+        return $r;
     }
 
-    private function encodeCoefficients(array $coeffs): string
+    private function encodeCavlc(array $coeffs, int $nC): string
     {
-        $bits = '';
-        
-        $nonZeroCount = 0;
-        foreach ($coeffs as $coeff) {
-            if ($coeff != 0) {
-                $nonZeroCount++;
-            }
+        $last = -1;
+        $tc = 0;
+        for ($i = 0; $i < 16; $i++) {
+            if ($coeffs[$i] != 0) { $tc++; $last = $i; }
         }
-        
-        if ($nonZeroCount == 0) {
-            $bits .= '1';
-            return $bits;
+
+        if ($tc == 0) return '1';
+
+        // Trailing ones
+        $t1 = 0;
+        for ($i = $last; $i >= max(0, $last - 2); $i--) {
+            if (abs($coeffs[$i]) == 1) $t1++;
+            else break;
         }
-        
-        $trailingOnes = 0;
-        $lastNonZeroIdx = 15;
-        for ($i = 15; $i >= 0; $i--) {
-            if ($coeffs[$i] != 0) {
-                $lastNonZeroIdx = $i;
-                break;
-            }
-        }
-        
-        for ($i = $lastNonZeroIdx; $i >= max(0, $lastNonZeroIdx - 2); $i--) {
-            if (abs($coeffs[$i]) == 1) {
-                $trailingOnes++;
-            } else {
-                break;
-            }
-        }
-        
-        $remaining = $nonZeroCount - $trailingOnes;
-        
-        if ($remaining <= 10) {
-            $coeffToken = ($remaining - 1) * 4 + $trailingOnes;
+
+        // coeff_token (simplified UE for TC>4)
+        $coeffToken = $tc < 5 ? $this->coeffTokenBits($tc, $t1) : $this->ue(39 + $tc);
+        if (is_string($coeffToken)) {
+            $bits = $coeffToken;
         } else {
-            $coeffToken = 39 + $remaining;
+            $bits = $this->ue($coeffToken);
         }
-        
-        $bits .= $this->ue($coeffToken);
-        
-        for ($i = $lastNonZeroIdx; $i >= max(0, $lastNonZeroIdx - $trailingOnes + 1); $i--) {
-            if ($coeffs[$i] == -1) {
-                $bits .= '1';
-            } else {
-                $bits .= '0';
+
+        // Signs
+        for ($i = $last; $i > $last - $t1; $i--) {
+            $bits .= $coeffs[$i] > 0 ? '0' : '1';
+        }
+
+        // Levels
+        $levels = [];
+        for ($i = $last - $t1; $i >= 0; $i--) {
+            if ($coeffs[$i] != 0) $levels[] = abs($coeffs[$i]);
+        }
+
+        foreach ($levels as $idx => $level) {
+            if ($idx == 0 && $t1 < 3) $level = max(1, $level - 2);
+            $bits .= $this->levelBits($level);
+            $bits .= $coeffs[$last - $t1 - $idx] > 0 ? '0' : '1';
+        }
+
+        // Total zeros
+        $tz = $last + 1 - $tc;
+        if ($tz > 0) {
+            $bits .= $this->totalZerosBits($tc, $tz);
+        }
+
+        // Run before
+        $zl = $tz;
+        for ($i = $last; $i > 0 && $zl > 0; $i--) {
+            $rb = 0;
+            while ($i - 1 - $rb >= 0 && $coeffs[$i - 1 - $rb] == 0 && $rb < $zl) $rb++;
+            if ($rb > 0) {
+                $bits .= $this->runBeforeBits($rb, $zl);
+                $zl -= $rb;
+                $i -= $rb;
             }
         }
-        
-        for ($i = $lastNonZeroIdx - $trailingOnes; $i >= 0; $i--) {
-            if ($coeffs[$i] != 0) {
-                $level = abs($coeffs[$i]);
-                $levelPrefix = 0;
-                
-                while ($level > (1 << ($levelPrefix + 1)) + 1) {
-                    $levelPrefix++;
-                }
-                
-                $bits .= str_repeat('1', $levelPrefix) . '0';
-                
-                $suffixBits = $levelPrefix;
-                if ($suffixBits > 0) {
-                    $levelSuffix = $level - (1 << $levelPrefix);
-                    $bits .= str_pad(decbin($levelSuffix), $suffixBits, '0', STR_PAD_LEFT);
-                }
-                
-                if ($coeffs[$i] < 0) {
-                    $bits .= '1';
-                } else {
-                    $bits .= '0';
-                }
-            }
-        }
-        
-        $totalZeros = $lastNonZeroIdx + 1 - $nonZeroCount;
-        
-        if ($lastNonZeroIdx < 15) {
-            $bits .= $this->ue($totalZeros);
-            
-            $remaining = $nonZeroCount;
-            $zeroRun = 0;
-            
-            for ($i = 0; $i <= $totalZeros; $i++) {
-                if ($remaining > 0) {
-                    if ($i < $totalZeros) {
-                        $runBefore = 0;
-                        while ($i + $runBefore < $totalZeros && 
-                               $coeffs[$totalZeros - $i - $runBefore - 1] == 0) {
-                            $runBefore++;
-                        }
-                        $bits .= $this->ue($runBefore);
-                        $i += $runBefore;
-                    }
-                    $remaining--;
-                }
-            }
-        }
-        
+
         return $bits;
     }
 
-    private function ue(int $value): string
+    private function coeffTokenBits(int $tc, int $t1): string
     {
-        if ($value == 0) return '1';
-        
-        $codeNum = $value + 1;
-        $binary = decbin($codeNum);
-        $leadingZeroBits = strlen($binary) - 1;
-        
-        return str_repeat('0', $leadingZeroBits) . '1' . substr($binary, 1);
+        $table = [
+            1 => [0 => '01', 1 => '000101'],
+            2 => [0 => '00000111', 1 => '00000100', 2 => '000011'],
+            3 => [0 => '00000110', 1 => '000101', 2 => '00000101', 3 => '000001111'],
+            4 => [0 => '000011', 1 => '0000101', 2 => '00001011', 3 => '00001101'],
+        ];
+        return $table[$tc][$t1] ?? '1';
     }
 
-    private function se(int $value): string
+    private function levelBits(int $level): string
     {
-        if ($value <= 0) {
-            $codeNum = -$value * 2;
-        } else {
-            $codeNum = $value * 2 - 1;
+        if ($level < 14) {
+            $prefix = (int)floor(log($level + 1, 2));
+            return str_repeat('1', $prefix) . '0' . str_pad(decbin($level - (1 << $prefix) + 1), $prefix, '0', STR_PAD_LEFT);
         }
-        return $this->ue($codeNum);
+        return str_repeat('1', 14) . '0' . str_pad(decbin($level - 14), 4, '0', STR_PAD_LEFT);
     }
 
-    private function u(int $value, int $n): string
+    private function totalZerosBits(int $tc, int $tz): string
     {
-        return str_pad(decbin($value), $n, '0', STR_PAD_LEFT);
+        $table = [
+            1 => [1=>'011',2=>'010',3=>'0011',4=>'0010',5=>'00011',6=>'00010',7=>'000011',8=>'000010',9=>'0000011',10=>'0000010',11=>'00000011',12=>'00000010',13=>'000000011',14=>'000000010',15=>'000000001'],
+            2 => [1=>'111',2=>'110',3=>'101',4=>'100',5=>'011',6=>'00101',7=>'00100',8=>'000111',9=>'000110',10=>'000101',11=>'000100',12=>'000011',13=>'0000011',14=>'0000010',15=>'00000011'],
+            3 => [1=>'0101',2=>'111',3=>'110',4=>'0100',5=>'0011',6=>'101',7=>'100',8=>'011',9=>'00101',10=>'00100',11=>'00011',12=>'00010',13=>'000011',14=>'000010',15=>'0000011'],
+        ];
+
+        if (isset($table[$tc][$tz])) return $table[$tc][$tz];
+        return $this->ue($tz);
+    }
+
+    private function runBeforeBits(int $rb, int $zl): string
+    {
+        if ($zl == 0) return '';
+        if ($rb == 0) return '1';
+        if ($rb == 1) return '01';
+        if ($rb == 2) return '001';
+        if ($rb <= 6) return str_repeat('0', $rb) . '1';
+        return str_repeat('0', 7) . '1';
+    }
+
+    private function ue(int $v): string
+    {
+        if ($v == 0) return '1';
+        $bin = decbin($v + 1);
+        return str_repeat('0', strlen($bin) - 1) . $bin;
+    }
+
+    private function se(int $v): string
+    {
+        return $this->ue($v <= 0 ? -$v * 2 : $v * 2 - 1);
+    }
+
+    private function u(int $v, int $n): string
+    {
+        return str_pad(decbin($v), $n, '0', STR_PAD_LEFT);
     }
 
     private function bitsToBytes(string $bits): string
     {
         $bytes = '';
-        $len = strlen($bits);
-        for ($i = 0; $i < $len; $i += 8) {
-            $byte = substr($bits, $i, 8);
-            if (strlen($byte) < 8) {
-                $byte = str_pad($byte, 8, '0');
-            }
-            $bytes .= chr(bindec($byte));
+        for ($i = 0; $i < strlen($bits); $i += 8) {
+            $bytes .= chr(bindec(str_pad(substr($bits, $i, 8), 8, '0')));
         }
         return $bytes;
     }
 
-    private function rbspToNal(string $rbsp, int $nalType): string
+    private function rbspToNal(string $rbsp, int $type): string
     {
-        $nalRefIdc = ($nalType == 1) ? 2 : 3;
-        $nalHeader = chr(($nalRefIdc << 5) | $nalType);
+        $ref = in_array($type, [1, 2, 5]) ? ($type == 5 ? 3 : 2) : 3;
+        $header = chr(($ref << 5) | $type);
         $escaped = '';
-        $zeros = 0;
-        
+        $z = 0;
         for ($i = 0; $i < strlen($rbsp); $i++) {
             $b = ord($rbsp[$i]);
-            if ($zeros >= 2 && $b <= 3) {
-                $escaped .= chr(0x03);
-                $zeros = 0;
-            }
+            if ($z >= 2 && $b <= 3) { $escaped .= chr(0x03); $z = 0; }
             $escaped .= chr($b);
-            if ($b == 0) {
-                $zeros++;
-            } else {
-                $zeros = 0;
-            }
+            $z = ($b == 0) ? $z + 1 : 0;
         }
-        
-        return $nalHeader . $escaped;
+        return $header . $escaped;
     }
 }
