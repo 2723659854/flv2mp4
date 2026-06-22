@@ -250,11 +250,27 @@ php puller.php rtmp://127.0.0.1:1935/live/stream output.flv 0 --no-reconnect
 - 严格类型声明（`declare(strict_types=1)`）
 - 推荐搭配 [PHPStan](https://phpstan.org/) Level 8 进行静态分析
 
-## ⚠️ 免责声明
+## 开源协议
 
-- 本工具仅供技术交流与学习使用
-- 法律风险、商业纠纷或版权问题由使用者自行承担
-- 请遵守当地法律法规，合理使用
+本项目基于 [Apache License 2.0](http://www.apache.org/licenses/LICENSE-2.0) 开源。
+
+你可以自由地使用、修改、分发本项目的代码，包括商业用途，具体条款请参阅 [LICENSE](LICENSE) 文件。
+
+### 第三方开源组件
+
+本项目使用了以下开源组件，各组件均遵循其各自的许可证：
+
+| 组件 | 许可证 | 版权归属 |
+| :--- | :--- | :--- |
+| SabreAMF | [BSD 3-Clause](https://opensource.org/licenses/BSD-3-Clause) | Copyright (C) 2006-2009 Rooftop Solutions |
+
+各组件的完整版权声明和免责条款请参阅 [NOTICE](NOTICE) 文件。
+
+### 免责声明
+
+本项目的代码按“现状”（AS IS）提供，不提供任何明示或暗示的担保，包括但不限于适销性、特定用途适用性和非侵权性的担保。在任何情况下，作者均不对因使用本软件而产生的任何直接、间接、偶然、特殊、惩罚性或后果性损害承担责任，即使已被告知可能发生此类损害。
+
+详细免责条款请参阅 [LICENSE](LICENSE) 文件。
 
 ## 📧 联系方式
 

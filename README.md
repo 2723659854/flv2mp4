@@ -250,11 +250,27 @@ This project is a companion tool for [xiaosongshu/rtmp_server](https://github.co
 - Strict type declarations (`declare(strict_types=1)`)
 - Recommended to use with [PHPStan](https://phpstan.org/) Level 8 for static analysis
 
-## ⚠️ Disclaimer
+## Open Source License
 
-- This tool is intended for technical exchange and learning purposes only
-- Legal risks, commercial disputes, or copyright issues are the sole responsibility of the user
-- Please comply with local laws and regulations and use responsibly
+This project is open-sourced under [Apache License 2.0](http://www.apache.org/licenses/LICENSE-2.0).
+
+You are free to use, modify, and distribute the code for any purpose, including commercial use, subject to the terms and conditions of the Apache License 2.0. For details, please refer to the [LICENSE](LICENSE) file.
+
+### Third-Party Open Source Components
+
+This project uses the following open source components, each governed by its own license:
+
+| Component | License | Copyright |
+| :--- | :--- | :--- |
+| SabreAMF | [BSD 3-Clause](https://opensource.org/licenses/BSD-3-Clause) | Copyright (C) 2006-2009 Rooftop Solutions |
+
+For complete copyright notices and disclaimers, please refer to the [NOTICE](NOTICE) file.
+
+### Disclaimer
+
+THIS SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+For detailed disclaimer terms, please refer to the [LICENSE](LICENSE) file.
 
 ## 📧 Contact
 
