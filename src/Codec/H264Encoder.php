@@ -203,7 +203,7 @@ class H264Encoder
         
         $bits .= $this->ue(2);
         
-        $bits .= $this->u(0, 4);
+        $bits .= $this->ue(0);
         
         $bits .= $this->u($this->frameNum, 4);
         
@@ -536,13 +536,11 @@ class H264Encoder
     private function ue(int $value): string
     {
         if ($value == 0) return '1';
-        $codeNum = $value + 1;
-        $leadingZeroBits = 0;
-        $temp = $codeNum;
-        while (($temp >>= 1) > 0) {
-            $leadingZeroBits++;
-        }
-        return str_repeat('0', $leadingZeroBits) . '1' . substr(decbin($codeNum), 1);
+        
+        $binary = decbin($value);
+        $leadingZeroBits = strlen($binary) - 1;
+        
+        return str_repeat('0', $leadingZeroBits) . '1' . substr($binary, 1);
     }
 
     private function se(int $value): string
