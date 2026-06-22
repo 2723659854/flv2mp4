@@ -193,30 +193,12 @@ class PurePhpHlsGenerator
             $outputSpsPps = $this->spsPpsData[$name];
 
             if ($this->srcInitialized && ($profile['width'] != $this->srcWidth || $profile['height'] != $this->srcHeight)) {
-                static $debugCount = 0;
-                $debugCount++;
-                
-                if ($debugCount <= 5) {
-                    echo "Re-encoding triggered: src={$this->srcWidth}x{$this->srcHeight}, target={$profile['width']}x{$profile['height']}, isKeyFrame=$isKeyFrame\n";
-                }
-                
                 if ($isKeyFrame) {
                     $nalUnits = $this->extractNalUnitsFromAVCC($avcData);
                     if (!empty($nalUnits)) {
                         $decoded = $this->decoder->decode($nalUnits);
                         if ($decoded && isset($decoded['data'])) {
                             $this->lastDecodedFrame = $decoded['data'];
-                            if ($debugCount <= 5) {
-                                echo "Decoded frame: " . strlen($decoded['data']) . " bytes\n";
-                            }
-                        } else {
-                            if ($debugCount <= 5) {
-                                echo "Decode failed\n";
-                            }
-                        }
-                    } else {
-                        if ($debugCount <= 5) {
-                            echo "No NAL units extracted\n";
                         }
                     }
                 }
@@ -241,37 +223,53 @@ class PurePhpHlsGenerator
                     foreach ($encoded as $nal) {
                         $nalType = ord($nal[0]) & 0x1F;
                         if ($nalType === 7 || $nalType === 8) {
-                            $outputSpsPps .= "\x00\x00\x00\x01" . $this->escapeNAL($nal);
+                            $outputSpsPps .= "\x00\x00\x00\x01" . $nal;
                         } else {
                             $nalSize = strlen($nal);
                             $outputData .= pack('N', $nalSize) . $nal;
                         }
-                    }
-                    
-                    if ($debugCount <= 5) {
-                        echo "Encoded: " . count($encoded) . " NAL units, SPS/PPS=" . strlen($outputSpsPps) . " bytes, data=" . strlen($outputData) . " bytes\n";
-                        foreach ($encoded as $nal) {
-                            $nalType = ord($nal[0]) & 0x1F;
-                            $types = [7 => 'SPS', 8 => 'PPS', 1 => 'SLICE', 2 => 'SLICE'];
-                            echo "  NAL type: " . ($types[$nalType] ?? $nalType) . ", length: " . strlen($nal) . ", hex: " . bin2hex(substr($nal, 0, 20)) . "\n";
-                        }
-                    }
-                } else {
-                    if ($debugCount <= 5) {
-                        echo "No decoded frame available\n";
                     }
                 }
             }
 
             $annexb = $this->avccToAnnexB($outputData);
 
-            if ($isKeyFrame && $outputSpsPps !== '') {
-                $annexb = $outputSpsPps . $annexb;
+            if ($isKeyFrame) {
+                if ($outputSpsPps !== '') {
+                    $annexb = $outputSpsPps . $annexb;
+                } elseif ($this->spsPpsData[$name] !== '') {
+                    $annexb = $this->spsPpsData[$name] . $annexb;
+                }
             }
 
             $pes = $this->createPES(0xE0, $annexb, $pts, ($pts != $dts) ? $dts : null);
             $this->writeTSPackets($name, $this->videoPid, $pes, true, $dts);
         }
+    }
+
+    private function buildSpsPpsForProfile(array $profile): string
+    {
+        $width = $profile['width'];
+        $height = $profile['height'];
+        
+        $picWidthInMbs = (int)ceil($width / 16);
+        $picWidthInMbsMinus1 = $picWidthInMbs - 1;
+        $picHeightInMapUnits = (int)ceil($height / 16);
+        $picHeightInMapUnitsMinus1 = $picHeightInMapUnits - 1;
+        
+        $sps = pack('C*',
+            0x67,
+            0x42, 0x00, 0x1E,
+            0x92, $picWidthInMbsMinus1 >> 4, (($picWidthInMbsMinus1 & 0xF) << 4) | ($picHeightInMapUnitsMinus1 >> 4),
+            (($picHeightInMapUnitsMinus1 & 0xF) << 4) | 0x1,
+            0x85, 0x80, 0x80, 0x9D
+        );
+        
+        $pps = pack('C*',
+            0x68, 0xCE, 0x38, 0x80
+        );
+        
+        return "\x00\x00\x00\x01" . $sps . "\x00\x00\x00\x01" . $pps;
     }
 
     private function handleAudioFrame($tag): void
@@ -391,19 +389,19 @@ class PurePhpHlsGenerator
     {
         if (strlen($nalData) <= 1) return $nalData;
         
-        $escaped = $nalData[0];
-        
-        $rbsp = substr($nalData, 1);
-        $len = strlen($rbsp);
+        $escaped = '';
+        $len = strlen($nalData);
         $i = 0;
+        
         while ($i < $len) {
-            if ($i + 2 < $len && $rbsp[$i] === "\x00" && $rbsp[$i + 1] === "\x00" &&
-                ($rbsp[$i + 2] === "\x00" || $rbsp[$i + 2] === "\x01" || $rbsp[$i + 2] === "\x02" || $rbsp[$i + 2] === "\x03")
-            ) {
-                $escaped .= "\x00\x00\x03" . $rbsp[$i + 2];
+            if ($i + 2 < $len && 
+                $nalData[$i] === "\x00" && 
+                $nalData[$i + 1] === "\x00" && 
+                (ord($nalData[$i + 2]) <= 0x03)) {
+                $escaped .= "\x00\x00\x03" . $nalData[$i + 2];
                 $i += 3;
             } else {
-                $escaped .= $rbsp[$i];
+                $escaped .= $nalData[$i];
                 $i++;
             }
         }

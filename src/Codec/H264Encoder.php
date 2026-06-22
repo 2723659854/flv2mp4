@@ -11,6 +11,7 @@ class H264Encoder
     public $qp = 28;
 
     public $frameNum = 0;
+    public $idrPicId = 0;
 
     private $quantMatrix = [];
 
@@ -69,12 +70,14 @@ class H264Encoder
             $nalUnits[] = $this->generateSPS();
             $nalUnits[] = $this->generatePPS();
             $this->frameNum = 0;
+            $this->idrPicId = 0;
         }
 
-        $sliceData = $this->encodeSliceIntra($yuvData);
+        $sliceData = $this->encodeSliceIntra($yuvData, $isKeyframe);
         $nalUnits[] = $sliceData;
 
         $this->frameNum++;
+        $this->idrPicId++;
 
         return $nalUnits;
     }
@@ -88,8 +91,7 @@ class H264Encoder
         $levelIdc = 30;
         $seqParameterSetId = 0;
         $log2MaxFrameNumMinus4 = 4;
-        $picOrderCntType = 0;
-        $log2MaxPicOrderCntLsbMinus4 = 4;
+        $picOrderCntType = 2;
         $numRefFrames = 1;
         $gapsInFrameNumValueAllowedFlag = 0;
         
@@ -107,15 +109,14 @@ class H264Encoder
         $bits .= $this->u($constraintSet0, 1);
         $bits .= $this->u($constraintSet1, 1);
         $bits .= $this->u($constraintSet2, 1);
-        $bits .= $this->u(0, 5);
+        $bits .= $this->u(0, 1);
+        $bits .= $this->u(0, 1);
+        $bits .= $this->u(0, 1);
+        $bits .= $this->u(0, 2);
         $bits .= $this->u($levelIdc, 8);
         $bits .= $this->ue($seqParameterSetId);
         $bits .= $this->ue($log2MaxFrameNumMinus4);
         $bits .= $this->ue($picOrderCntType);
-        
-        if ($picOrderCntType == 0) {
-            $bits .= $this->ue($log2MaxPicOrderCntLsbMinus4);
-        }
         
         $bits .= $this->ue($numRefFrames);
         $bits .= $this->u($gapsInFrameNumValueAllowedFlag, 1);
@@ -139,12 +140,13 @@ class H264Encoder
         
         $bits .= $this->u($vuiParametersPresentFlag, 1);
         
+        $bits .= '1';
         while (strlen($bits) % 8 != 0) {
             $bits .= '0';
         }
         
-        $sps = "\x67" . $this->bitsToBytes($bits);
-        return $sps;
+        $rbsp = $this->bitsToBytes($bits);
+        return $this->rbspToNal($rbsp, 7);
     }
 
     public function generatePPS(): string
@@ -153,6 +155,7 @@ class H264Encoder
         $seqParameterSetId = 0;
         $entropyCodingModeFlag = 0;
         $picOrderPresentFlag = 0;
+        $numSliceGroupsMinus1 = 0;
         $numRefIdxL0DefaultActiveMinus1 = 0;
         $numRefIdxL1DefaultActiveMinus1 = 0;
         $weightedPredFlag = 0;
@@ -169,6 +172,7 @@ class H264Encoder
         $bits .= $this->ue($seqParameterSetId);
         $bits .= $this->u($entropyCodingModeFlag, 1);
         $bits .= $this->u($picOrderPresentFlag, 1);
+        $bits .= $this->ue($numSliceGroupsMinus1);
         $bits .= $this->ue($numRefIdxL0DefaultActiveMinus1);
         $bits .= $this->ue($numRefIdxL1DefaultActiveMinus1);
         $bits .= $this->u($weightedPredFlag, 1);
@@ -177,37 +181,40 @@ class H264Encoder
         $bits .= $this->se($picInitQsMinus26);
         $bits .= $this->se($chromaQpIndexOffset);
         $bits .= $this->u($deblockingFilterControlPresentFlag, 1);
-        
         if ($deblockingFilterControlPresentFlag) {
             $bits .= $this->u(1, 1);
             $bits .= $this->se(0);
             $bits .= $this->se(0);
         }
-        
         $bits .= $this->u($constrainedIntraPredFlag, 1);
         $bits .= $this->u($redundantPicCntPresentFlag, 1);
         
+        $bits .= '1';
         while (strlen($bits) % 8 != 0) {
             $bits .= '0';
         }
         
-        $pps = "\x68" . $this->bitsToBytes($bits);
-        return $pps;
+        $rbsp = $this->bitsToBytes($bits);
+        return $this->rbspToNal($rbsp, 8);
     }
 
-    private function encodeSliceIntra(string $yuvData): string
+    private function encodeSliceIntra(string $yuvData, bool $isKeyframe = false): string
     {
         $bits = '';
         
         $bits .= $this->ue(0);
         
-        $bits .= $this->ue(2);
+        $bits .= $this->ue($isKeyframe ? 7 : 3);
         
         $bits .= $this->ue(0);
         
-        $bits .= $this->u($this->frameNum, 4);
+        $bits .= $this->u($this->frameNum, 8);
         
-        $bits .= '0';
+        if ($isKeyframe) {
+            $bits .= $this->ue($this->idrPicId);
+            $bits .= $this->u(0, 1);
+            $bits .= $this->u(0, 1);
+        }
         
         $bits .= $this->se($this->qp - 26);
         
@@ -228,10 +235,8 @@ class H264Encoder
                     $bits .= $this->ue(0);
                 }
 
-                $mbData = $this->encodeIntraMB($mbX, $mbY, $yPlane, $uPlane, $vPlane);
+                $mbData = $this->encodeIntraMB($mbX, $mbY, $yPlane, $uPlane, $vPlane, $isKeyframe);
                 $bits .= $mbData;
-
-                $bits .= '00';
             }
         }
         
@@ -240,34 +245,32 @@ class H264Encoder
             $bits .= '0';
         }
         
-        $sliceData = $this->bitsToBytes($bits);
-        
-        $nalHeader = "\x65";
-        
-        return $nalHeader . $sliceData;
+        $rbsp = $this->bitsToBytes($bits);
+        $nalType = $isKeyframe ? 5 : 1;
+        return $this->rbspToNal($rbsp, $nalType);
     }
 
-    private function encodeIntraMB(int $mbX, int $mbY, string $yPlane, string $uPlane, string $vPlane): string
+    private function encodeIntraMB(int $mbX, int $mbY, string $yPlane, string $uPlane, string $vPlane, bool $isKeyframe): string
     {
         $bits = '';
         
         for ($blockY = 0; $blockY < 4; $blockY++) {
             for ($blockX = 0; $blockX < 4; $blockX++) {
-                $blockBits = $this->encodeIntraBlock($mbX, $mbY, $blockX, $blockY, $yPlane, 0);
+                $blockBits = $this->encodeIntraBlock($mbX, $mbY, $blockX, $blockY, $yPlane, 0, $isKeyframe);
                 $bits .= $blockBits;
             }
         }
         
-        $blockBits = $this->encodeIntraBlock($mbX, $mbY, 0, 0, $uPlane, 1);
+        $blockBits = $this->encodeIntraBlock($mbX, $mbY, 0, 0, $uPlane, 1, $isKeyframe);
         $bits .= $blockBits;
         
-        $blockBits = $this->encodeIntraBlock($mbX, $mbY, 0, 0, $vPlane, 1);
+        $blockBits = $this->encodeIntraBlock($mbX, $mbY, 0, 0, $vPlane, 1, $isKeyframe);
         $bits .= $blockBits;
         
         return $bits;
     }
 
-    private function encodeIntraBlock(int $mbX, int $mbY, int $blockX, int $blockY, string $plane, int $chroma): string
+    private function encodeIntraBlock(int $mbX, int $mbY, int $blockX, int $blockY, string $plane, int $chroma, bool $isKeyframe): string
     {
         $bits = '';
         
@@ -537,7 +540,8 @@ class H264Encoder
     {
         if ($value == 0) return '1';
         
-        $binary = decbin($value);
+        $codeNum = $value + 1;
+        $binary = decbin($codeNum);
         $leadingZeroBits = strlen($binary) - 1;
         
         return str_repeat('0', $leadingZeroBits) . '1' . substr($binary, 1);
@@ -570,5 +574,29 @@ class H264Encoder
             $bytes .= chr(bindec($byte));
         }
         return $bytes;
+    }
+
+    private function rbspToNal(string $rbsp, int $nalType): string
+    {
+        $nalRefIdc = ($nalType == 1) ? 2 : 3;
+        $nalHeader = chr(($nalRefIdc << 5) | $nalType);
+        $escaped = '';
+        $zeros = 0;
+        
+        for ($i = 0; $i < strlen($rbsp); $i++) {
+            $b = ord($rbsp[$i]);
+            if ($zeros >= 2 && $b <= 3) {
+                $escaped .= chr(0x03);
+                $zeros = 0;
+            }
+            $escaped .= chr($b);
+            if ($b == 0) {
+                $zeros++;
+            } else {
+                $zeros = 0;
+            }
+        }
+        
+        return $nalHeader . $escaped;
     }
 }
