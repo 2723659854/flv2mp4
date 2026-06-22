@@ -4,12 +4,12 @@ namespace Xiaosongshu\Flv2mp4\Codec;
 
 class H264Encoder
 {
-    private int $width = 640;
-    private int $height = 360;
-    private int $fps = 30;
-    private int $bitrate = 500000;
-    
-    private int $frameNum = 0;
+    public $width = 640;
+    public $height = 360;
+    public $fps = 30;
+    public $bitrate = 500000;
+
+    public $frameNum = 0;
 
     public function __construct() {}
 
@@ -49,93 +49,73 @@ class H264Encoder
 
     public function generateSPS(): string
     {
-        return "\x27\x42\x40\x1e\x96\x54\x05\x01\x78\x00";
+        return "\x67\x42\xc0\x1e\xdc\x0a\x02\xff\x96\x10\x00\x00\x00\x30\x01\x00\x00\x00\x30\x3c\x0f\x16\x2f\x8";
     }
 
     public function generatePPS(): string
     {
-        return "\x28\xcb\x40";
+        return "\x68\xce\x0f\x2c\x80";
     }
 
     private function encodeSlice(string $yuvData, bool $isKeyframe): string
     {
-        $nalType = $isKeyframe ? 5 : 1;
-        $refIdc = $isKeyframe ? 3 : 0;
-        $nalHeader = chr((($refIdc & 0x03) << 5) | ($nalType & 0x1F));
-
         $bits = '';
-
+        
+        $bits .= '01100101';
+        
         $bits .= $this->ue(0);
-
-        $bits .= $this->ue(2);
-
+        
+        $bits .= $this->ue(7);
+        
         $bits .= $this->ue(0);
-
-        $bits .= $this->u($this->frameNum % 32, 5);
-
+        
+        $bits .= $this->u($this->frameNum, 4);
+        
+        if ($isKeyframe) {
+            $bits .= $this->ue(0);
+            $bits .= '0';
+            $bits .= '0';
+        }
+        
+        $bits .= $this->se(-18);
+        
         $bits .= $this->ue(0);
-        $bits .= '0';
-        $bits .= '0';
-
+        
         $bits .= $this->se(0);
-
-        $bits .= '0';
-
-        $mbWidth = (int)ceil($this->width / 16);
+        $bits .= $this->se(0);
+        
+        $mbWidth  = (int)ceil($this->width / 16);
         $mbHeight = (int)ceil($this->height / 16);
-        $mbCount = $mbWidth * $mbHeight;
-
-        $yPlaneSize = $this->width * $this->height;
-        $uvSize = (int)($this->width * $this->height / 4);
-        $yPlane = substr($yuvData, 0, $yPlaneSize);
-        $uPlane = substr($yuvData, $yPlaneSize, $uvSize);
-        $vPlane = substr($yuvData, $yPlaneSize + $uvSize, $uvSize);
-
-        for ($i = 0; $i < $mbCount; $i++) {
-            $mbX = $i % $mbWidth;
-            $mbY = (int)($i / $mbWidth);
-
-            $bits .= $this->ue(25);
-
-            while (strlen($bits) % 8 != 0) {
-                $bits .= '0';
-            }
-
-            for ($y = 0; $y < 16; $y++) {
-                for ($x = 0; $x < 16; $x++) {
-                    $pixelY = $mbY * 16 + $y;
-                    $pixelX = $mbX * 16 + $x;
-                    $idx = $pixelY * $this->width + $pixelX;
-                    $val = ($idx < strlen($yPlane)) ? ord($yPlane[$idx]) : 128;
-                    $bits .= $this->u($val, 8);
+        
+        for ($mbY = 0; $mbY < $mbHeight; $mbY++) {
+            for ($mbX = 0; $mbX < $mbWidth; $mbX++) {
+                if ($mbY == 0) {
+                    $bits .= $this->ue(3);
+                } else {
+                    $bits .= $this->ue(1);
                 }
-            }
 
-            $uvWidth = (int)($this->width / 2);
-
-            for ($y = 0; $y < 8; $y++) {
-                for ($x = 0; $x < 8; $x++) {
-                    $pixelY = $mbY * 8 + $y;
-                    $pixelX = $mbX * 8 + $x;
-                    $idx = $pixelY * $uvWidth + $pixelX;
-                    $val = ($idx < strlen($uPlane)) ? ord($uPlane[$idx]) : 128;
-                    $bits .= $this->u($val, 8);
+                for ($subMb = 0; $subMb < 16; $subMb++) {
+                    $subX = $subMb % 4;
+                    if ($subX == 3) {
+                        $bits .= $this->ue(3);
+                    } else {
+                        $bits .= $this->ue(0);
+                    }
                 }
-            }
 
-            for ($y = 0; $y < 8; $y++) {
-                for ($x = 0; $x < 8; $x++) {
-                    $pixelY = $mbY * 8 + $y;
-                    $pixelX = $mbX * 8 + $x;
-                    $idx = $pixelY * $uvWidth + $pixelX;
-                    $val = ($idx < strlen($vPlane)) ? ord($vPlane[$idx]) : 128;
-                    $bits .= $this->u($val, 8);
-                }
+                $bits .= $this->ue(0);
+
+                $bits .= '00';
             }
         }
-
-        $sliceData = $this->bitsToBytes($bits);
-        return $nalHeader . $sliceData;
+        
+        $bits .= '1';
+        while (strlen($bits) % 8 != 0) {
+            $bits .= '0';
+        }
+        
+        return $this->bitsToBytes($bits);
     }
 
     private function ue(int $value): string

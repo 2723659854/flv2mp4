@@ -44,6 +44,7 @@ class PurePhpHlsGenerator
     private int $srcHeight = 0;
     private bool $srcInitialized = false;
     private array $generatedSpsPps = [];
+    private array $lastDts = [];
 
     const VIDEO_FRAME_TYPE_KEY_FRAME = 1;
     const AVC_PACKET_TYPE_SEQUENCE_HEADER = 0;
@@ -78,6 +79,7 @@ class PurePhpHlsGenerator
             $this->currentSegmentLastTimes[$name] = 0;
             $this->audioFrameCounts[$name] = 0;
             $this->audioBasePts[$name] = null;
+            $this->lastDts[$name] = -1;
 
             $this->ensureInitialPlaylist($name);
         }
@@ -171,10 +173,10 @@ class PurePhpHlsGenerator
         if ($cts & 0x800000) {
             $cts -= 0x1000000;
         }
-        $dts = (int)($relativeTime * 90);
+        $dtsBase = (int)($relativeTime * 90);
         $pts = (int)(($relativeTime + $cts) * 90);
-        if ($pts < $dts) {
-            $pts = $dts;
+        if ($pts < $dtsBase) {
+            $pts = $dtsBase;
         }
 
         $avcData = $avc['data'];
@@ -182,6 +184,12 @@ class PurePhpHlsGenerator
         foreach ($this->profiles as $name => $profile) {
             $writer = &$this->segmentWriters[$name];
             if (!is_resource($writer['handle'])) continue;
+
+            $dts = $dtsBase;
+            if (isset($this->lastDts[$name]) && $dts <= $this->lastDts[$name]) {
+                $dts = $this->lastDts[$name] + 1;
+            }
+            $this->lastDts[$name] = $dts;
 
             $outputData = $avcData;
             $outputSpsPps = $this->spsPpsData[$name];
