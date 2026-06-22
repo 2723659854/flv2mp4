@@ -49,12 +49,111 @@ class H264Encoder
 
     public function generateSPS(): string
     {
-        return "\x67\x42\xc0\x1e\xdc\x0a\x02\xff\x96\x10\x00\x00\x00\x30\x01\x00\x00\x00\x30\x3c\x0f\x16\x2f\x8";
+        $profileIdc = 66;
+        $constraintSet0 = 0;
+        $constraintSet1 = 0;
+        $constraintSet2 = 0;
+        $levelIdc = 30;
+        $seqParameterSetId = 0;
+        $log2MaxFrameNumMinus4 = 4;
+        $picOrderCntType = 0;
+        $log2MaxPicOrderCntLsbMinus4 = 4;
+        $numRefFrames = 1;
+        $gapsInFrameNumValueAllowedFlag = 0;
+        
+        $picWidthInMbs = (int)ceil($this->width / 16);
+        $picWidthInMbsMinus1 = $picWidthInMbs - 1;
+        $picHeightInMapUnits = (int)ceil($this->height / 16);
+        $picHeightInMapUnitsMinus1 = $picHeightInMapUnits - 1;
+        $frameMbsOnlyFlag = 1;
+        $direct8x8InferenceFlag = 1;
+        $frameCroppingFlag = 0;
+        $vuiParametersPresentFlag = 0;
+
+        $bits = '';
+        $bits .= $this->u($profileIdc, 8);
+        $bits .= $this->u($constraintSet0, 1);
+        $bits .= $this->u($constraintSet1, 1);
+        $bits .= $this->u($constraintSet2, 1);
+        $bits .= $this->u(0, 5);
+        $bits .= $this->u($levelIdc, 8);
+        $bits .= $this->ue($seqParameterSetId);
+        $bits .= $this->ue($log2MaxFrameNumMinus4);
+        $bits .= $this->ue($picOrderCntType);
+        
+        if ($picOrderCntType == 0) {
+            $bits .= $this->ue($log2MaxPicOrderCntLsbMinus4);
+        }
+        
+        $bits .= $this->ue($numRefFrames);
+        $bits .= $this->u($gapsInFrameNumValueAllowedFlag, 1);
+        $bits .= $this->ue($picWidthInMbsMinus1);
+        $bits .= $this->ue($picHeightInMapUnitsMinus1);
+        $bits .= $this->u($frameMbsOnlyFlag, 1);
+        
+        if (!$frameMbsOnlyFlag) {
+            $bits .= $this->u(0, 1);
+        }
+        
+        $bits .= $this->u($direct8x8InferenceFlag, 1);
+        $bits .= $this->u($frameCroppingFlag, 1);
+        
+        if ($frameCroppingFlag) {
+            $bits .= $this->ue(0);
+            $bits .= $this->ue(0);
+            $bits .= $this->ue(0);
+            $bits .= $this->ue(0);
+        }
+        
+        $bits .= $this->u($vuiParametersPresentFlag, 1);
+        
+        while (strlen($bits) % 8 != 0) {
+            $bits .= '0';
+        }
+        
+        $sps = "\x67" . $this->bitsToBytes($bits);
+        return $sps;
     }
 
     public function generatePPS(): string
     {
-        return "\x68\xce\x0f\x2c\x80";
+        $picParameterSetId = 0;
+        $seqParameterSetId = 0;
+        $entropyCodingModeFlag = 0;
+        $picOrderPresentFlag = 0;
+        $numRefIdxL0DefaultActiveMinus1 = 0;
+        $numRefIdxL1DefaultActiveMinus1 = 0;
+        $weightedPredFlag = 0;
+        $weightedBipredIdc = 0;
+        $picInitQpMinus26 = -6;
+        $picInitQsMinus26 = 0;
+        $chromaQpIndexOffset = 0;
+        $deblockingFilterControlPresentFlag = 0;
+        $constrainedIntraPredFlag = 0;
+        $redundantPicCntPresentFlag = 0;
+
+        $bits = '';
+        $bits .= $this->ue($picParameterSetId);
+        $bits .= $this->ue($seqParameterSetId);
+        $bits .= $this->u($entropyCodingModeFlag, 1);
+        $bits .= $this->u($picOrderPresentFlag, 1);
+        $bits .= $this->ue($numRefIdxL0DefaultActiveMinus1);
+        $bits .= $this->ue($numRefIdxL1DefaultActiveMinus1);
+        $bits .= $this->u($weightedPredFlag, 1);
+        $bits .= $this->u($weightedBipredIdc, 2);
+        $bits .= $this->se($picInitQpMinus26);
+        $bits .= $this->se($picInitQsMinus26);
+        $bits .= $this->se($chromaQpIndexOffset);
+        $bits .= $this->u($deblockingFilterControlPresentFlag, 1);
+        $bits .= $this->u($constrainedIntraPredFlag, 1);
+        $bits .= $this->u($redundantPicCntPresentFlag, 1);
+        
+        while (strlen($bits) % 8 != 0) {
+            $bits .= '0';
+        }
+        
+        $pps = "\x68" . $this->bitsToBytes($bits);
+        return $pps;
     }
 
     private function encodeSlice(string $yuvData, bool $isKeyframe): string

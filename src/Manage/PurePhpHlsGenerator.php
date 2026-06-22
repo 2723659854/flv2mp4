@@ -44,6 +44,7 @@ class PurePhpHlsGenerator
     private int $srcHeight = 0;
     private bool $srcInitialized = false;
     private array $generatedSpsPps = [];
+    private array $videoFrameCounts = [];
     private array $lastDts = [];
 
     const VIDEO_FRAME_TYPE_KEY_FRAME = 1;
@@ -79,6 +80,7 @@ class PurePhpHlsGenerator
             $this->currentSegmentLastTimes[$name] = 0;
             $this->audioFrameCounts[$name] = 0;
             $this->audioBasePts[$name] = null;
+            $this->videoFrameCounts[$name] = 0;
             $this->lastDts[$name] = -1;
 
             $this->ensureInitialPlaylist($name);
@@ -161,6 +163,7 @@ class PurePhpHlsGenerator
                 $this->closeSegment($name, $relativeTime);
                 $this->audioFrameCounts[$name] = 0;
                 $this->audioBasePts[$name] = (int)($relativeTime * 90);
+                $this->lastDts[$name] = -1;
                 $this->segmentStartTimes[$name] = $relativeTime;
                 $this->startSegment($name);
             }
@@ -173,11 +176,6 @@ class PurePhpHlsGenerator
         if ($cts & 0x800000) {
             $cts -= 0x1000000;
         }
-        $dtsBase = (int)($relativeTime * 90);
-        $pts = (int)(($relativeTime + $cts) * 90);
-        if ($pts < $dtsBase) {
-            $pts = $dtsBase;
-        }
 
         $avcData = $avc['data'];
 
@@ -185,73 +183,23 @@ class PurePhpHlsGenerator
             $writer = &$this->segmentWriters[$name];
             if (!is_resource($writer['handle'])) continue;
 
-            $dts = $dtsBase;
-            if (isset($this->lastDts[$name]) && $dts <= $this->lastDts[$name]) {
-                $dts = $this->lastDts[$name] + 1;
+            $dts = (int)($relativeTime * 90);
+            $pts = (int)(($relativeTime + $cts) * 90);
+            if ($pts < $dts) {
+                $pts = $dts;
             }
-            $this->lastDts[$name] = $dts;
 
             $outputData = $avcData;
             $outputSpsPps = $this->spsPpsData[$name];
 
-            if ($this->srcInitialized && ($profile['width'] != $this->srcWidth || $profile['height'] != $this->srcHeight)) {
-                    echo "Re-encoding frame at relative time {$relativeTime}\n";
-                    if ($isKeyFrame) {
-                        $nalUnits = $this->extractNalUnitsFromAVCC($avcData);
-                        if (!empty($nalUnits)) {
-                            $decoded = $this->decoder->decode($nalUnits);
-                            if ($decoded && isset($decoded['data'])) {
-                                $this->lastDecodedFrame = $decoded['data'];
-                            }
-                        }
-                    }
-                    
-                    if (isset($this->lastDecodedFrame)) {
-                        $scaledYuv = $this->scaler->scaleYUV420P(
-                            $this->lastDecodedFrame,
-                            $this->srcWidth,
-                            $this->srcHeight,
-                            $profile['width'],
-                            $profile['height']
-                        );
+            $annexb = $this->avccToAnnexB($outputData);
 
-                        $this->encoder->setResolution($profile['width'], $profile['height']);
-                        $this->encoder->setBitrate($profile['bitrate']);
-                        $this->encoder->setFps($profile['fps']);
-
-                        $encoded = $this->encoder->encodeFrame($scaledYuv, true);
-
-                        $outputData = '';
-                        $outputSpsPps = '';
-                        foreach ($encoded as $nal) {
-                            $nalType = ord($nal[0]) & 0x1F;
-                            if ($nalType === 7 || $nalType === 8) {
-                                $outputSpsPps .= "\x00\x00\x00\x01" . $this->escapeNAL($nal);
-                            } else {
-                                $nalSize = strlen($nal);
-                                $outputData .= pack('N', $nalSize) . $nal;
-                            }
-                        }
-                    }
-
-                    $annexb = $this->avccToAnnexB($outputData);
-
-                    if ($isKeyFrame && $outputSpsPps !== '') {
-                        $annexb = $outputSpsPps . $annexb;
-                    }
-
-                    $pes = $this->createPES(0xE0, $annexb, $pts, ($pts != $dts) ? $dts : null);
-                    $this->writeTSPackets($name, $this->videoPid, $pes, true, $dts);
-            } else {
-                $annexb = $this->avccToAnnexB($outputData);
-
-                if ($isKeyFrame && $outputSpsPps !== '') {
-                    $annexb = $outputSpsPps . $annexb;
-                }
-
-                $pes = $this->createPES(0xE0, $annexb, $pts, ($pts != $dts) ? $dts : null);
-                $this->writeTSPackets($name, $this->videoPid, $pes, true, $dts);
+            if ($isKeyFrame && $outputSpsPps !== '') {
+                $annexb = $outputSpsPps . $annexb;
             }
+
+            $pes = $this->createPES(0xE0, $annexb, $pts, ($pts != $dts) ? $dts : null);
+            $this->writeTSPackets($name, $this->videoPid, $pes, true, $dts);
         }
     }
 
@@ -708,11 +656,7 @@ class PurePhpHlsGenerator
         $this->writePAT($profile);
         $this->writePMT($profile);
 
-//        if ($this->spsPpsData[$profile] !== '') {
-//            $startPcr = (int)($this->segmentStartTimes[$profile] * 90);
-//            $spsPpsPes = $this->createPES(0xE0, $this->spsPpsData[$profile], $startPcr, $startPcr);
-//            $this->writeTSPackets($profile, $this->videoPid, $spsPpsPes, true, $startPcr);
-//        }
+        $this->audioFrameCounts[$profile] = 0;
     }
 
     private function closeSegment(string $profile, int $endTime = 0): void
