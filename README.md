@@ -256,14 +256,6 @@ This project is open-sourced under [Apache License 2.0](http://www.apache.org/li
 
 You are free to use, modify, and distribute the code for any purpose, including commercial use, subject to the terms and conditions of the Apache License 2.0. For details, please refer to the [LICENSE](LICENSE) file.
 
-### Third-Party Open Source Components
-
-This project uses the following open source components, each governed by its own license:
-
-| Component | License | Copyright |
-| :--- | :--- | :--- |
-| SabreAMF | [BSD 3-Clause](https://opensource.org/licenses/BSD-3-Clause) | Copyright (C) 2006-2009 Rooftop Solutions |
-
 For complete copyright notices and disclaimers, please refer to the [NOTICE](NOTICE) file.
 
 ### Disclaimer
