@@ -5,6 +5,13 @@ namespace Xiaosongshu\Flv2mp4\Flv;
 use Xiaosongshu\Flv2mp4\SabreAMF\RtmpPullerClient;
 use Xiaosongshu\Flv2mp4\SabreAMF\RtmpPushFlvClient;
 
+/**
+ * @purpose 直播转发工具
+ * @author yanglong
+ * @time 2026年6月30日18:26:10
+ * @note 支持rtm/ws-flv/http-flv拉流，rtmp推流
+ * @comment ws-flv推流暂时没有实现
+ */
 class FlvForwardClient
 {
     protected string $pullUrl;
