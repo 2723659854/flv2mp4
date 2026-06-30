@@ -16,6 +16,9 @@ class FlvForwardClient
     protected $upstreamClient = null;
     protected string $upstreamProtocol = '';
     protected bool $upstreamConnected = false;
+    protected bool $upstreamChunked = false;
+    protected string $upstreamBuffer = '';
+    protected string $upstreamChunkBuffer = '';
 
     protected array $downstreamClients = [];
     protected array $downstreamStats = [];
@@ -242,6 +245,16 @@ class FlvForwardClient
                     throw new \RuntimeException("上游返回非200状态码");
                 }
 
+                $this->upstreamChunked = (stripos($headerStr, "Transfer-Encoding: chunked") !== false);
+
+                if (strlen($bodyData) > 0) {
+                    if ($this->upstreamChunked) {
+                        $this->upstreamChunkBuffer = $bodyData;
+                    } else {
+                        $this->upstreamBuffer = $bodyData;
+                    }
+                }
+
                 stream_set_blocking($this->upstreamClient, false);
                 return;
             }
@@ -320,6 +333,8 @@ class FlvForwardClient
         $this->videoSequenceTag = '';
         $this->audioSequenceTag = '';
         $this->initDataReady = false;
+        $this->upstreamBuffer = '';
+        $this->upstreamChunkBuffer = '';
 
         while ($this->isRunning) {
             $data = $this->readUpstreamData();
@@ -333,70 +348,74 @@ class FlvForwardClient
 
             $this->stats['bytes_received'] += strlen($data);
 
-            if (strlen($data) >= 15) {
-                $tagType = ord($data[0]);
-                $dataSize = (ord($data[1]) << 16) | (ord($data[2]) << 8) | ord($data[3]);
-                $timestamp = (ord($data[4]) << 16) | (ord($data[5]) << 8) | ord($data[6]);
-                $timestampExt = ord($data[7]);
-                $fullTimestamp = ($timestampExt << 24) | $timestamp;
-                $payload = substr($data, 11, $dataSize);
+            if ($this->upstreamProtocol === 'http') {
+                $this->processUpstreamData($data);
+            } else {
+                if (strlen($data) >= 15) {
+                    $tagType = ord($data[0]);
+                    $dataSize = (ord($data[1]) << 16) | (ord($data[2]) << 8) | ord($data[3]);
+                    $timestamp = (ord($data[4]) << 16) | (ord($data[5]) << 8) | ord($data[6]);
+                    $timestampExt = ord($data[7]);
+                    $fullTimestamp = ($timestampExt << 24) | $timestamp;
+                    $payload = substr($data, 11, $dataSize);
 
-                $this->stats['tags_received']++;
+                    $this->stats['tags_received']++;
 
-                switch ($tagType) {
-                    case self::AUDIO_TAG:
-                        $this->stats['audio_tags']++;
-                        if (!$this->initDataReady) {
-                            $soundFormat = (ord($payload[0]) >> 4) & 0x0F;
-                            if ($soundFormat === self::SOUND_FORMAT_AAC) {
-                                $aacPacketType = ord($payload[1]);
-                                if ($aacPacketType === self::AAC_PACKET_TYPE_SEQUENCE_HEADER) {
+                    switch ($tagType) {
+                        case self::AUDIO_TAG:
+                            $this->stats['audio_tags']++;
+                            if (!$this->initDataReady) {
+                                $soundFormat = (ord($payload[0]) >> 4) & 0x0F;
+                                if ($soundFormat === self::SOUND_FORMAT_AAC) {
+                                    $aacPacketType = ord($payload[1]);
+                                    if ($aacPacketType === self::AAC_PACKET_TYPE_SEQUENCE_HEADER) {
+                                        $this->audioSequenceTag = $data;
+                                        $this->log("收到音频序列头", 'debug');
+                                    }
+                                } else {
                                     $this->audioSequenceTag = $data;
-                                    $this->log("收到音频序列头", 'debug');
-                                }
-                            } else {
-                                $this->audioSequenceTag = $data;
-                            }
-                        }
-                        break;
-                    case self::VIDEO_TAG:
-                        $this->stats['video_tags']++;
-                        if (!$this->initDataReady) {
-                            $frameType = (ord($payload[0]) >> 4) & 0x0F;
-                            $codecId = ord($payload[0]) & 0x0F;
-                            if ($codecId === self::VIDEO_CODEC_ID_AVC && $frameType === self::VIDEO_FRAME_TYPE_KEY_FRAME) {
-                                $avcPacketType = ord($payload[1]);
-                                if ($avcPacketType === self::AVC_PACKET_TYPE_SEQUENCE_HEADER) {
-                                    $this->videoSequenceTag = $data;
-                                    $this->log("收到视频序列头", 'debug');
                                 }
                             }
-                        }
-                        break;
-                    case self::SCRIPT_TAG:
-                        if (!$this->initDataReady) {
-                            $this->metaDataTag = $data;
-                            $this->log("收到元数据", 'debug');
-                        }
-                        break;
-                }
-
-                if (!$this->initDataReady && $this->videoSequenceTag && $this->audioSequenceTag) {
-                    $this->initDataReady = true;
-                    $this->log("初始化数据就绪，准备转发", 'success');
-
-                    foreach ($this->downstreamClients as $idx => &$downstream) {
-                        if ($downstream['connected']) {
-                            if ($this->metaDataTag) {
-                                $this->sendRtmpData($downstream['client'], $this->metaDataTag);
+                            break;
+                        case self::VIDEO_TAG:
+                            $this->stats['video_tags']++;
+                            if (!$this->initDataReady) {
+                                $frameType = (ord($payload[0]) >> 4) & 0x0F;
+                                $codecId = ord($payload[0]) & 0x0F;
+                                if ($codecId === self::VIDEO_CODEC_ID_AVC && $frameType === self::VIDEO_FRAME_TYPE_KEY_FRAME) {
+                                    $avcPacketType = ord($payload[1]);
+                                    if ($avcPacketType === self::AVC_PACKET_TYPE_SEQUENCE_HEADER) {
+                                        $this->videoSequenceTag = $data;
+                                        $this->log("收到视频序列头", 'debug');
+                                    }
+                                }
                             }
-                            $this->sendRtmpData($downstream['client'], $this->videoSequenceTag);
-                            $this->sendRtmpData($downstream['client'], $this->audioSequenceTag);
+                            break;
+                        case self::SCRIPT_TAG:
+                            if (!$this->initDataReady) {
+                                $this->metaDataTag = $data;
+                                $this->log("收到元数据", 'debug');
+                            }
+                            break;
+                    }
+
+                    if (!$this->initDataReady && $this->videoSequenceTag && $this->audioSequenceTag) {
+                        $this->initDataReady = true;
+                        $this->log("初始化数据就绪，准备转发", 'success');
+
+                        foreach ($this->downstreamClients as $idx => &$downstream) {
+                            if ($downstream['connected']) {
+                                if ($this->metaDataTag) {
+                                    $this->sendRtmpData($downstream['client'], $this->metaDataTag);
+                                }
+                                $this->sendRtmpData($downstream['client'], $this->videoSequenceTag);
+                                $this->sendRtmpData($downstream['client'], $this->audioSequenceTag);
+                            }
                         }
                     }
-                }
 
-                $this->sendToAllDownstreams($data);
+                    $this->sendToAllDownstreams($data);
+                }
             }
 
             $this->checkStats();
@@ -408,6 +427,90 @@ class FlvForwardClient
                     break;
                 }
             }
+        }
+    }
+
+    protected function processUpstreamData(string $data): void
+    {
+        if ($this->upstreamChunked) {
+            $this->upstreamChunkBuffer .= $data;
+            $decoded = $this->decodeChunked($this->upstreamChunkBuffer);
+            if ($decoded !== null) {
+                $this->upstreamBuffer .= $decoded;
+            }
+        } else {
+            $this->upstreamBuffer .= $data;
+        }
+
+        $this->processFlvBuffer();
+    }
+
+    protected function processFlvBuffer(): void
+    {
+        while (strlen($this->upstreamBuffer) >= 15) {
+            $tagType = ord($this->upstreamBuffer[0]);
+            $dataSize = (ord($this->upstreamBuffer[1]) << 16) | (ord($this->upstreamBuffer[2]) << 8) | ord($this->upstreamBuffer[3]);
+            $totalSize = 11 + $dataSize + 4;
+
+            if (strlen($this->upstreamBuffer) < $totalSize) {
+                break;
+            }
+
+            $tag = substr($this->upstreamBuffer, 0, $totalSize);
+            $this->upstreamBuffer = substr($this->upstreamBuffer, $totalSize);
+
+            $this->stats['tags_received']++;
+            if ($tagType === self::AUDIO_TAG) {
+                $this->stats['audio_tags']++;
+            } elseif ($tagType === self::VIDEO_TAG) {
+                $this->stats['video_tags']++;
+            }
+
+            if (!$this->initDataReady) {
+                if ($tagType === self::SCRIPT_TAG && !$this->metaDataTag) {
+                    $this->metaDataTag = $tag;
+                    $this->log("收到MetaData", 'debug');
+                } elseif ($tagType === self::VIDEO_TAG && !$this->videoSequenceTag) {
+                    $payload = substr($tag, 11, $dataSize);
+                    if (strlen($payload) >= 2) {
+                        $firstByte = ord($payload[0]);
+                        $frameType = ($firstByte >> 4) & 0x0F;
+                        $codecId = $firstByte & 0x0F;
+                        if ($codecId === self::VIDEO_CODEC_ID_AVC && strlen($payload) >= 5) {
+                            $avcPacketType = ord($payload[1]);
+                            if ($avcPacketType === self::AVC_PACKET_TYPE_SEQUENCE_HEADER) {
+                                $this->videoSequenceTag = $tag;
+                                $this->log("收到视频序列头", 'debug');
+                            }
+                        }
+                    }
+                } elseif ($tagType === self::AUDIO_TAG && !$this->audioSequenceTag) {
+                    $payload = substr($tag, 11, $dataSize);
+                    if (strlen($payload) >= 2) {
+                        $firstByte = ord($payload[0]);
+                        $soundFormat = ($firstByte >> 4) & 0x0F;
+                        if ($soundFormat === self::SOUND_FORMAT_AAC) {
+                            $aacPacketType = ord($payload[1]);
+                            if ($aacPacketType === self::AAC_PACKET_TYPE_SEQUENCE_HEADER) {
+                                $this->audioSequenceTag = $tag;
+                                $this->log("收到音频序列头", 'debug');
+                            }
+                        }
+                    }
+                }
+
+                if ($this->videoSequenceTag && $this->audioSequenceTag) {
+                    $this->initDataReady = true;
+                    $this->log("初始化数据就绪，准备转发", 'success');
+                    if ($this->metaDataTag) {
+                        $this->sendToAllDownstreams($this->metaDataTag);
+                    }
+                    $this->sendToAllDownstreams($this->videoSequenceTag);
+                    $this->sendToAllDownstreams($this->audioSequenceTag);
+                }
+            }
+
+            $this->sendToAllDownstreams($tag);
         }
     }
 
@@ -477,10 +580,62 @@ class FlvForwardClient
     {
         if (!$this->isStreamValid($this->upstreamClient)) return null;
 
-        $data = @fread($this->upstreamClient, 8192);
-        if ($data === false || $data === '') return null;
+        $data = @fread($this->upstreamClient, 65536);
+        if ($data === false) {
+            $info = stream_get_meta_data($this->upstreamClient);
+            if (!empty($info['eof'])) {
+                throw new \RuntimeException("HTTP上游连接已关闭");
+            }
+            return null;
+        }
+
+        if ($data === '') {
+            $info = stream_get_meta_data($this->upstreamClient);
+            if (!empty($info['eof'])) {
+                throw new \RuntimeException("HTTP上游连接已关闭");
+            }
+            return null;
+        }
 
         return $data;
+    }
+
+    protected function decodeChunked(string &$buf): ?string
+    {
+        $decoded = '';
+        while (true) {
+            $pos = strpos($buf, "\r\n");
+            if ($pos === false) break;
+
+            $sizeHex = trim(substr($buf, 0, $pos));
+            if ($sizeHex === '') {
+                $buf = substr($buf, $pos + 2);
+                continue;
+            }
+
+            if (!ctype_xdigit($sizeHex)) {
+                $buf = substr($buf, $pos + 2);
+                continue;
+            }
+
+            $size = hexdec($sizeHex);
+            if ($size === 0) {
+                $buf = '';
+                return $decoded;
+            }
+
+            $start = $pos + 2;
+            $end = $start + $size + 2;
+
+            if (strlen($buf) < $end) {
+                break;
+            }
+
+            $decoded .= substr($buf, $start, $size);
+            $buf = substr($buf, $end);
+        }
+
+        return $decoded === '' ? null : $decoded;
     }
 
     protected function sendToAllDownstreams(string $data): void
