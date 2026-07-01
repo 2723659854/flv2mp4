@@ -711,8 +711,8 @@ class FlvForwardClient
             $this->initDataReady = true;
             $this->log("初始化数据就绪，开始转发普通帧", 'success');
         } elseif (!$hasVideo && !$hasAudio) {
-            $this->initDataReady = true;
-            $this->log("无音视频序列头，开始转发", 'debug');
+            $this->initDataReady = false;
+            $this->log("无音视频序列头，等待中", 'debug');
         }
     }
 
