@@ -225,6 +225,11 @@ php puller.php ws://127.0.0.1:8501/live/stream.flv output.flv 0 --no-reconnect
 php puller.php rtmp://127.0.0.1:1935/live/stream output.flv 0 --no-reconnect
 ```
 
+### PHP 直播转发工具
+```bash
+php forward.php http://127.0.0.1:8501/a/b.flv "rtmp://127.0.0.1:1935/c/d,ws://127.0.0.1:8501/c/e,http://127.0.0.1:8501/c/f" 
+```
+
 ## 🧪 测试与播放
 
 | 输出格式 | 推荐播放器 | 参考文件 |
@@ -244,7 +249,7 @@ php puller.php rtmp://127.0.0.1:1935/live/stream output.flv 0 --no-reconnect
 
 ## 🔧 技术背景
 
-本项目为 [xiaosongshu/rtmp_server](https://github.com/2723659854/rtmp-server) 的配套工具，提供直播流的录制与回放能力。
+本项目为 [xiaosongshu/rtmp_server](https://github.com/2723659854/rtmp-server) 的配套工具，提供直播流的录制与回放能力。本工具所有提供的能力示例详细见`rtmp_server`项目。
 
 - 纯 PHP 8.1+ 实现，**无 FFmpeg 依赖**
 - 严格类型声明（`declare(strict_types=1)`）

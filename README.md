@@ -224,6 +224,10 @@ php puller.php http://127.0.0.1:8501/live/stream.flv output.flv 0 --no-reconnect
 php puller.php ws://127.0.0.1:8501/live/stream.flv output.flv 0 --no-reconnect
 php puller.php rtmp://127.0.0.1:1935/live/stream output.flv 0 --no-reconnect
 ```
+### Live Stream Forwarding Guide
+```bash
+php forward.php http://127.0.0.1:8501/a/b.flv "rtmp://127.0.0.1:1935/c/d,ws://127.0.0.1:8501/c/e,http://127.0.0.1:8501/c/f" 
+```
 
 ## 🧪 Testing and Playback
 
@@ -244,7 +248,7 @@ php puller.php rtmp://127.0.0.1:1935/live/stream output.flv 0 --no-reconnect
 
 ## 🔧 Technical Background
 
-This project is a companion tool for [xiaosongshu/rtmp_server](https://github.com/2723659854/rtmp-server), providing live stream recording and playback capabilities.
+This project is a companion tool for [xiaosongshu/rtmp_server](https://github.com/2723659854/rtmp-server), providing live stream recording and playback capabilities.For detailed examples of the capabilities provided by this tool, please refer to the `rtmp_server` project.
 
 - Pure PHP 8.1+ implementation, **no FFmpeg dependency**
 - Strict type declarations (`declare(strict_types=1)`)

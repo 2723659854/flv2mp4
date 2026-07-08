@@ -1,6 +1,6 @@
 <?php
 
-require_once __DIR__."/vendor/autoload.php";
+require_once __DIR__ . "/vendor/autoload.php";
 use Xiaosongshu\Flv2mp4\Flv\FlvForwardClient;
 ini_set('memory_limit', '2048M');
 // RTMP 拉流 -> RTMP 推流
