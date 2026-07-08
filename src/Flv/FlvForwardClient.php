@@ -4,13 +4,13 @@ namespace Xiaosongshu\Flv2mp4\Flv;
 
 use Xiaosongshu\Flv2mp4\SabreAMF\RtmpPullerClient;
 use Xiaosongshu\Flv2mp4\SabreAMF\RtmpPushFlvClient;
+use Xiaosongshu\Flv2mp4\Flv\FlvSinglePusher;
 
 /**
-     * @purpose 直播转发工具
-     * @author yanglong
-     * @time 2026年6月30日18:26:10
-     * @note 支持rtmp/ws-flv/http-flv拉流，rtmp/ws-flv/http-flv推流
-     */
+ * @purpose 直播转播工具
+ * @author yanglong
+ * @note 支持rtmp/http-flv/ws-flv协议
+ */
 class FlvForwardClient
 {
     protected string $pullUrl;
@@ -28,6 +28,9 @@ class FlvForwardClient
 
     protected array $downstreamClients = [];
     protected array $downstreamStats = [];
+
+    protected string $flvHeader = '';
+    protected string $initData = '';
 
     protected int $retryCount = 0;
     protected int $maxRetries = 5;
@@ -52,12 +55,6 @@ class FlvForwardClient
     protected string $videoSequenceTag = '';
     protected string $audioSequenceTag = '';
     protected bool $initDataReady = false;
-    protected bool $flvHeaderSkipped = false;
-
-    protected bool $flvHeaderSent = false;
-    protected bool $metaDataSent = false;
-    protected bool $videoSequenceSent = false;
-    protected bool $audioSequenceSent = false;
 
     const SCRIPT_TAG = 18;
     const AUDIO_TAG = 8;
@@ -258,8 +255,10 @@ class FlvForwardClient
                 }
 
                 $this->upstreamChunked = (stripos($headerStr, "Transfer-Encoding: chunked") !== false);
+                $this->log("HTTP header chunked: " . ($this->upstreamChunked ? 'yes' : 'no'), 'debug');
 
                 if (strlen($bodyData) > 0) {
+                    $this->log("bodyData first 32 bytes: " . bin2hex(substr($bodyData, 0, 32)), 'debug');
                     if ($this->upstreamChunked) {
                         $this->upstreamChunkBuffer = $bodyData;
                     } else {
@@ -291,207 +290,75 @@ class FlvForwardClient
         $urlParts = parse_url($url);
         $scheme = strtolower($urlParts['scheme'] ?? 'http');
 
-        try {
-            switch ($scheme) {
-                case 'rtmp':
-                case 'rtmps':
-                    $this->connectRtmpDownstream($idx, $url);
-                    break;
-                case 'http':
-                case 'https':
-                    $this->connectHttpFlvDownstream($idx, $url, $urlParts);
-                    break;
-                case 'ws':
-                case 'wss':
-                    $this->connectWsFlvDownstream($idx, $url, $urlParts);
-                    break;
-                default:
-                    $this->log("下游协议不支持: {$scheme}", 'error');
-                    return;
-            }
-        } catch (\Exception $e) {
-            $this->log("下游连接失败: {$url} - {$e->getMessage()}", 'error');
-        }
-    }
+        $connected = false;
+        $client = null;
 
-    protected function connectRtmpDownstream(int $idx, string $url): void
-    {
-        $rtmpClient = new RtmpPushFlvClient('', $url);
+        switch ($scheme) {
+            case 'rtmp':
+            case 'rtmps':
+                try {
+                    $client = new RtmpPushFlvClient('', $url);
 
-        $reflection = new \ReflectionClass($rtmpClient);
-        $connectMethod = $reflection->getMethod('connect');
-        $connectMethod->setAccessible(true);
+                    $reflection = new \ReflectionClass($client);
+                    $connectMethod = $reflection->getMethod('connect');
+                    $connectMethod->setAccessible(true);
 
-        $host = $reflection->getProperty('host');
-        $host->setAccessible(true);
-        $app = $reflection->getProperty('app');
-        $app->setAccessible(true);
-        $port = $reflection->getProperty('port');
-        $port->setAccessible(true);
+                    $hostProp = $reflection->getProperty('host');
+                    $hostProp->setAccessible(true);
+                    $appProp = $reflection->getProperty('app');
+                    $appProp->setAccessible(true);
+                    $portProp = $reflection->getProperty('port');
+                    $portProp->setAccessible(true);
 
-        $connectMethod->invoke($rtmpClient, $host->getValue($rtmpClient), $app->getValue($rtmpClient), $port->getValue($rtmpClient));
+                    $connectMethod->invoke($client, $hostProp->getValue($client), $appProp->getValue($client), $portProp->getValue($client));
 
-        $fcPublishMethod = $reflection->getMethod('fcPublish');
-        $fcPublishMethod->setAccessible(true);
-        $streamKey = $reflection->getProperty('streamKey');
-        $streamKey->setAccessible(true);
-        $fcPublishMethod->invoke($rtmpClient, $streamKey->getValue($rtmpClient));
+                    $fcPublishMethod = $reflection->getMethod('fcPublish');
+                    $fcPublishMethod->setAccessible(true);
+                    $streamKeyProp = $reflection->getProperty('streamKey');
+                    $streamKeyProp->setAccessible(true);
+                    $fcPublishMethod->invoke($client, $streamKeyProp->getValue($client));
 
-        $publishMethod = $reflection->getMethod('publish');
-        $publishMethod->setAccessible(true);
-        $publishMethod->invoke($rtmpClient, $streamKey->getValue($rtmpClient), 'live');
+                    $publishMethod = $reflection->getMethod('publish');
+                    $publishMethod->setAccessible(true);
+                    $publishMethod->invoke($client, $streamKeyProp->getValue($client), 'live');
 
-        $this->downstreamClients[$idx] = [
-            'url' => $url,
-            'client' => $rtmpClient,
-            'protocol' => 'rtmp',
-            'connected' => true,
-        ];
-
-        $this->downstreamStats[$idx] = [
-            'tags_sent' => 0,
-            'bytes_sent' => 0,
-        ];
-
-        $this->log("下游RTMP连接成功: {$url}", 'success');
-    }
-
-    protected function connectHttpFlvDownstream(int $idx, string $url, array $urlParts): void
-    {
-        $host = $urlParts['host'] ?? '127.0.0.1';
-        $port = $urlParts['port'] ?? ($urlParts['scheme'] === 'https' ? 443 : 8501);
-        $path = $urlParts['path'] ?? '/';
-        if (!empty($urlParts['query'])) {
-            $path .= '?' . $urlParts['query'];
-        }
-
-        $ssl = ($urlParts['scheme'] === 'https');
-        $proto = $ssl ? 'ssl' : 'tcp';
-        $socket = @stream_socket_client("{$proto}://{$host}:{$port}", $errno, $errstr, 10);
-        if (!$socket) {
-            throw new \RuntimeException("无法连接到 {$host}:{$port} - {$errstr}");
-        }
-
-        stream_set_timeout($socket, 30);
-        stream_set_blocking($socket, true);
-
-        $request = "POST {$path} HTTP/1.1\r\n";
-        $request .= "Host: {$host}\r\n";
-        $request .= "Content-Type: video/x-flv\r\n";
-        $request .= "Connection: keep-alive\r\n";
-        $request .= "Transfer-Encoding: chunked\r\n";
-        $request .= "\r\n";
-
-        fwrite($socket, $request);
-
-        $response = '';
-        $headersEnded = false;
-        while (!feof($socket)) {
-            $line = fgets($socket);
-            if ($line === false) break;
-            $response .= $line;
-            if (trim($line) === '') {
-                $headersEnded = true;
+                    $connected = true;
+                    $this->log("下游RTMP连接成功: {$url}", 'success');
+                } catch (\Exception $e) {
+                    $this->log("下游RTMP连接失败: {$url} - {$e->getMessage()}", 'error');
+                }
                 break;
-            }
-        }
 
-        if (!$headersEnded) {
-            $this->safeCloseStream($socket);
-            throw new \RuntimeException("读取服务器响应失败");
-        }
-
-        $firstLine = strtok($response, "\r\n");
-        if (strpos($firstLine, '200') === false) {
-            $this->safeCloseStream($socket);
-            throw new \RuntimeException("服务器返回非200状态: {$firstLine}");
+            case 'ws':
+            case 'wss':
+            case 'http':
+            case 'https':
+                try {
+                    $client = new FlvSinglePusher('', $url);
+                    $connected = $client->connect();
+                    if ($connected) {
+                        $protocolName = ($scheme === 'ws' || $scheme === 'wss') ? 'WS-FLV' : 'HTTP-FLV';
+                        $this->log("下游{$protocolName}连接成功: {$url}", 'success');
+                    } else {
+                        $this->log("下游连接失败: {$url}", 'error');
+                    }
+                } catch (\Exception $e) {
+                    $this->log("下游连接失败: {$url} - {$e->getMessage()}", 'error');
+                }
+                break;
         }
 
         $this->downstreamClients[$idx] = [
             'url' => $url,
-            'client' => $socket,
-            'protocol' => 'http',
-            'connected' => true,
-            'useChunked' => true,
+            'client' => $client,
+            'protocol' => $scheme,
+            'connected' => $connected,
         ];
 
         $this->downstreamStats[$idx] = [
             'tags_sent' => 0,
             'bytes_sent' => 0,
         ];
-
-        $this->log("下游HTTP-FLV连接成功: {$url}", 'success');
-    }
-
-    protected function connectWsFlvDownstream(int $idx, string $url, array $urlParts): void
-    {
-        $host = $urlParts['host'] ?? '127.0.0.1';
-        $port = $urlParts['port'] ?? ($urlParts['scheme'] === 'wss' ? 443 : 8501);
-        $path = $urlParts['path'] ?? '/';
-        if (!empty($urlParts['query'])) {
-            $path .= '?' . $urlParts['query'];
-        }
-
-        $ssl = ($urlParts['scheme'] === 'wss');
-        $proto = $ssl ? 'ssl' : 'tcp';
-        $socket = @stream_socket_client("{$proto}://{$host}:{$port}", $errno, $errstr, 10);
-        if (!$socket) {
-            throw new \RuntimeException("无法连接到 {$host}:{$port} - {$errstr}");
-        }
-
-        stream_set_timeout($socket, 30);
-        stream_set_blocking($socket, true);
-
-        $wsKey = base64_encode(random_bytes(16));
-        $handshake = "GET {$path} HTTP/1.1\r\n";
-        $handshake .= "Host: {$host}:{$port}\r\n";
-        $handshake .= "Connection: Upgrade\r\n";
-        $handshake .= "Pragma: no-cache\r\n";
-        $handshake .= "Cache-Control: no-cache\r\n";
-        $handshake .= "Upgrade: websocket\r\n";
-        $handshake .= "Origin: http://{$host}:{$port}\r\n";
-        $handshake .= "Sec-WebSocket-Version: 13\r\n";
-        $handshake .= "Sec-WebSocket-Key: {$wsKey}\r\n";
-        $handshake .= "\r\n";
-
-        fwrite($socket, $handshake);
-
-        $response = '';
-        $timeout = time() + 10;
-        while (time() < $timeout && !feof($socket)) {
-            $line = fgets($socket);
-            if ($line === false) break;
-            $response .= $line;
-            if (trim($line) === '') break;
-        }
-
-        if (!preg_match('#Sec-WebSocket-Accept:\s(.*)$#mUi', $response, $matches)) {
-            $this->safeCloseStream($socket);
-            throw new \RuntimeException("WebSocket握手失败：未找到 Sec-WebSocket-Accept 头");
-        }
-
-        $responseKey = trim($matches[1]);
-        $expectedKey = base64_encode(sha1($wsKey . '258EAFA5-E914-47DA-95CA-C5AB0DC85B11', true));
-
-        if ($responseKey !== $expectedKey) {
-            $this->safeCloseStream($socket);
-            throw new \RuntimeException("WebSocket握手失败：Sec-WebSocket-Accept 验证不通过");
-        }
-
-        $this->downstreamClients[$idx] = [
-            'url' => $url,
-            'client' => $socket,
-            'protocol' => 'ws',
-            'connected' => true,
-            'wsKey' => $wsKey,
-        ];
-
-        $this->downstreamStats[$idx] = [
-            'tags_sent' => 0,
-            'bytes_sent' => 0,
-        ];
-
-        $this->log("下游WebSocket-FLV连接成功: {$url}", 'success');
     }
 
     protected function forwardData(): void
@@ -500,13 +367,12 @@ class FlvForwardClient
         $this->videoSequenceTag = '';
         $this->audioSequenceTag = '';
         $this->initDataReady = false;
-        $this->flvHeaderSkipped = false;
-        $this->flvHeaderSent = false;
-        $this->metaDataSent = false;
-        $this->videoSequenceSent = false;
-        $this->audioSequenceSent = false;
-        $this->upstreamBuffer = '';
-        $this->upstreamChunkBuffer = '';
+
+        $this->log("forwardData: upstreamBuffer size=" . strlen($this->upstreamBuffer) . ", upstreamChunkBuffer size=" . strlen($this->upstreamChunkBuffer), 'debug');
+
+        if ($this->upstreamProtocol === 'http' && strlen($this->upstreamBuffer) > 0) {
+            $this->processFlvBuffer();
+        }
 
         while ($this->isRunning) {
             $data = $this->readUpstreamData();
@@ -514,6 +380,7 @@ class FlvForwardClient
                 if ($this->upstreamProtocol === 'rtmp') {
                     break;
                 }
+                $this->flushAllDownstreams();
                 usleep(10000);
                 continue;
             }
@@ -523,14 +390,6 @@ class FlvForwardClient
             if ($this->upstreamProtocol === 'http') {
                 $this->processUpstreamData($data);
             } else {
-                if (!$this->flvHeaderSkipped && strlen($data) >= 13) {
-                    if (substr($data, 0, 3) === 'FLV') {
-                        $data = substr($data, 13);
-                        $this->flvHeaderSkipped = true;
-                        $this->log("已跳过FLV Header", 'debug');
-                    }
-                }
-
                 if (strlen($data) >= 15) {
                     $tagType = ord($data[0]);
                     $dataSize = (ord($data[1]) << 16) | (ord($data[2]) << 8) | ord($data[3]);
@@ -538,6 +397,9 @@ class FlvForwardClient
                     $timestampExt = ord($data[7]);
                     $fullTimestamp = ($timestampExt << 24) | $timestamp;
                     $payload = substr($data, 11, $dataSize);
+
+                    $preTagLen = 11 + $dataSize;
+                    $fullFlvTag = $data . pack('N', $preTagLen);
 
                     $this->stats['tags_received']++;
 
@@ -549,13 +411,11 @@ class FlvForwardClient
                                 if ($soundFormat === self::SOUND_FORMAT_AAC) {
                                     $aacPacketType = ord($payload[1]);
                                     if ($aacPacketType === self::AAC_PACKET_TYPE_SEQUENCE_HEADER) {
-                                        $this->audioSequenceTag = $data;
+                                        $this->audioSequenceTag = $fullFlvTag;
                                         $this->log("收到音频序列头", 'debug');
-                                        $this->sendAudioSequence();
                                     }
                                 } else {
-                                    $this->audioSequenceTag = $data;
-                                    $this->sendAudioSequence();
+                                    $this->audioSequenceTag = $fullFlvTag;
                                 }
                             }
                             break;
@@ -567,27 +427,66 @@ class FlvForwardClient
                                 if ($codecId === self::VIDEO_CODEC_ID_AVC && $frameType === self::VIDEO_FRAME_TYPE_KEY_FRAME) {
                                     $avcPacketType = ord($payload[1]);
                                     if ($avcPacketType === self::AVC_PACKET_TYPE_SEQUENCE_HEADER) {
-                                        $this->videoSequenceTag = $data;
+                                        $this->videoSequenceTag = $fullFlvTag;
                                         $this->log("收到视频序列头", 'debug');
-                                        $this->sendVideoSequence();
                                     }
                                 }
                             }
                             break;
                         case self::SCRIPT_TAG:
                             if (!$this->initDataReady) {
-                                $this->metaDataTag = $data;
+                                $this->metaDataTag = $fullFlvTag;
                                 $this->log("收到元数据", 'debug');
-                                $this->sendMetaData();
                             }
                             break;
                     }
 
-                    $this->checkInitDataReady();
+                    if (!$this->initDataReady && $this->videoSequenceTag && $this->audioSequenceTag) {
+                        $this->initDataReady = true;
+                        $this->log("初始化数据就绪，准备转发", 'success');
 
-                    if ($this->initDataReady) {
-                        $this->sendToAllDownstreams($data);
+                        foreach ($this->downstreamClients as $idx => &$downstream) {
+                            if ($downstream['connected'] && $downstream['protocol'] !== 'rtmp' && $downstream['protocol'] !== 'rtmps') {
+                                $typeFlags = 0;
+                                if ($this->audioSequenceTag) {
+                                    $typeFlags |= 0x04;
+                                }
+                                if ($this->videoSequenceTag) {
+                                    $typeFlags |= 0x01;
+                                }
+                                $flvHeader = "FLV\x01" . chr($typeFlags) . pack('N', 9);
+                                $downstream['client']->write($flvHeader);
+                                $downstream['client']->write(pack('N', 0));
+                                if ($this->metaDataTag) {
+                                    $downstream['client']->write($this->metaDataTag);
+                                }
+                                if ($this->videoSequenceTag) {
+                                    $downstream['client']->write($this->videoSequenceTag);
+                                }
+                                if ($this->audioSequenceTag) {
+                                    $downstream['client']->write($this->audioSequenceTag);
+                                }
+                                $downstream['client']->flush();
+                                
+                                $initSize = 13 + 4;
+                                if ($this->metaDataTag) $initSize += strlen($this->metaDataTag);
+                                if ($this->videoSequenceTag) $initSize += strlen($this->videoSequenceTag);
+                                if ($this->audioSequenceTag) $initSize += strlen($this->audioSequenceTag);
+                                $this->downstreamStats[$idx]['bytes_sent'] += $initSize;
+                                $this->stats['bytes_sent'] += $initSize;
+                                
+                                $this->log("发送初始化数据成功: " . $downstream['url'], 'success');
+                            } elseif ($downstream['connected']) {
+                                if ($this->metaDataTag) {
+                                    $this->sendRtmpData($downstream['client'], $this->metaDataTag);
+                                }
+                                $this->sendRtmpData($downstream['client'], $this->videoSequenceTag);
+                                $this->sendRtmpData($downstream['client'], $this->audioSequenceTag);
+                            }
+                        }
                     }
+
+                    $this->sendToAllDownstreams($fullFlvTag);
                 }
             }
 
@@ -603,142 +502,60 @@ class FlvForwardClient
         }
     }
 
-    protected function sendFlvHeader(): void
-    {
-        if ($this->flvHeaderSent) return;
-
-        $typeFlags = 0;
-        if ($this->videoSequenceTag) $typeFlags |= 0x01;
-        if ($this->audioSequenceTag) $typeFlags |= 0x04;
-        $flvHeader = 'FLV' . chr(1) . chr($typeFlags) . pack('N', 9);
-        $prevTagSize0 = pack('N', 0);
-
-        foreach ($this->downstreamClients as $idx => &$downstream) {
-            if ($downstream['connected'] && ($downstream['protocol'] === 'http' || $downstream['protocol'] === 'ws')) {
-                if ($downstream['protocol'] === 'http') {
-                    $this->sendHttpFlvData($downstream['client'], $flvHeader, $downstream['useChunked']);
-                    $this->sendHttpFlvData($downstream['client'], $prevTagSize0, $downstream['useChunked']);
-                } else {
-                    $this->sendWsFlvData($downstream['client'], $flvHeader);
-                    $this->sendWsFlvData($downstream['client'], $prevTagSize0);
-                }
-            }
-        }
-        $this->flvHeaderSent = true;
-        $this->log("发送FLV Header", 'debug');
-    }
-
-    protected function sendMetaData(): void
-    {
-        if ($this->metaDataSent || !$this->metaDataTag) return;
-
-        $this->sendFlvHeader();
-        foreach ($this->downstreamClients as $idx => &$downstream) {
-            if ($downstream['connected']) {
-                switch ($downstream['protocol']) {
-                    case 'http':
-                        $this->sendHttpFlvData($downstream['client'], $this->metaDataTag, $downstream['useChunked']);
-                        break;
-                    case 'ws':
-                        $this->sendWsFlvData($downstream['client'], $this->metaDataTag);
-                        break;
-                    case 'rtmp':
-                        $this->sendRtmpData($downstream['client'], $this->metaDataTag);
-                        break;
-                }
-            }
-        }
-        $this->metaDataSent = true;
-        $this->log("发送元数据", 'debug');
-    }
-
-    protected function sendVideoSequence(): void
-    {
-        if ($this->videoSequenceSent || !$this->videoSequenceTag) return;
-
-        $this->sendFlvHeader();
-        foreach ($this->downstreamClients as $idx => &$downstream) {
-            if ($downstream['connected']) {
-                switch ($downstream['protocol']) {
-                    case 'http':
-                        $this->sendHttpFlvData($downstream['client'], $this->videoSequenceTag, $downstream['useChunked']);
-                        break;
-                    case 'ws':
-                        $this->sendWsFlvData($downstream['client'], $this->videoSequenceTag);
-                        break;
-                    case 'rtmp':
-                        $this->sendRtmpData($downstream['client'], $this->videoSequenceTag);
-                        break;
-                }
-            }
-        }
-        $this->videoSequenceSent = true;
-        $this->log("发送视频序列头", 'debug');
-    }
-
-    protected function sendAudioSequence(): void
-    {
-        if ($this->audioSequenceSent || !$this->audioSequenceTag) return;
-
-        $this->sendFlvHeader();
-        foreach ($this->downstreamClients as $idx => &$downstream) {
-            if ($downstream['connected']) {
-                switch ($downstream['protocol']) {
-                    case 'http':
-                        $this->sendHttpFlvData($downstream['client'], $this->audioSequenceTag, $downstream['useChunked']);
-                        break;
-                    case 'ws':
-                        $this->sendWsFlvData($downstream['client'], $this->audioSequenceTag);
-                        break;
-                    case 'rtmp':
-                        $this->sendRtmpData($downstream['client'], $this->audioSequenceTag);
-                        break;
-                }
-            }
-        }
-        $this->audioSequenceSent = true;
-        $this->log("发送音频序列头", 'debug');
-    }
-
-    protected function checkInitDataReady(): void
-    {
-        if ($this->initDataReady) return;
-
-        $hasVideo = $this->videoSequenceTag !== '';
-        $hasAudio = $this->audioSequenceTag !== '';
-
-        if ($hasVideo && $hasAudio) {
-            $this->initDataReady = true;
-            $this->log("初始化数据就绪，开始转发普通帧", 'success');
-        } elseif (!$hasVideo && !$hasAudio) {
-            $this->initDataReady = false;
-            $this->log("无音视频序列头，等待中", 'debug');
-        }
-    }
-
     protected function processUpstreamData(string $data): void
     {
+        //$this->log("processUpstreamData: received " . strlen($data) . " bytes, chunked: " . ($this->upstreamChunked ? 'yes' : 'no'), 'debug');
+
         if ($this->upstreamChunked) {
             $this->upstreamChunkBuffer .= $data;
             $decoded = $this->decodeChunked($this->upstreamChunkBuffer);
             if ($decoded !== null) {
+                //$this->log("decodeChunked: decoded " . strlen($decoded) . " bytes", 'debug');
                 $this->upstreamBuffer .= $decoded;
             }
         } else {
             $this->upstreamBuffer .= $data;
         }
 
+        //$this->log("upstreamBuffer size: " . strlen($this->upstreamBuffer), 'debug');
+
         $this->processFlvBuffer();
+    }
+
+    protected function buildInitData(): string
+    {
+        $typeFlags = 0;
+        if ($this->audioSequenceTag) {
+            $typeFlags |= 0x04;
+        }
+        if ($this->videoSequenceTag) {
+            $typeFlags |= 0x01;
+        }
+        $flvHeader = "FLV\x01" . chr($typeFlags) . pack('N', 9);
+        
+        $initData = $flvHeader;
+        $initData .= pack('N', 0);
+        if ($this->metaDataTag) {
+            var_dump("有meta包",bin2hex($this->metaDataTag));
+            $initData .= $this->metaDataTag;
+        }
+        if ($this->videoSequenceTag) {
+            var_dump("有avc序列帧",bin2hex($this->videoSequenceTag));
+            $initData .= $this->videoSequenceTag;
+        }
+        if ($this->audioSequenceTag) {
+            var_dump("有AAC序列帧",bin2hex($this->audioSequenceTag));
+            $initData .= $this->audioSequenceTag;
+        }
+        return $initData;
     }
 
     protected function processFlvBuffer(): void
     {
-        if (!$this->flvHeaderSkipped && strlen($this->upstreamBuffer) >= 13) {
-            if (substr($this->upstreamBuffer, 0, 3) === 'FLV') {
-                $this->upstreamBuffer = substr($this->upstreamBuffer, 13);
-                $this->flvHeaderSkipped = true;
-                $this->log("已跳过FLV Header", 'debug');
-            }
+        if (!$this->flvHeader && strlen($this->upstreamBuffer) >= 13) {
+            $this->flvHeader = substr($this->upstreamBuffer, 0, 13);
+            $this->upstreamBuffer = substr($this->upstreamBuffer, 13);
+            $this->log("收到FLV头: " . bin2hex($this->flvHeader), 'debug');
         }
 
         while (strlen($this->upstreamBuffer) >= 15) {
@@ -764,7 +581,6 @@ class FlvForwardClient
                 if ($tagType === self::SCRIPT_TAG && !$this->metaDataTag) {
                     $this->metaDataTag = $tag;
                     $this->log("收到MetaData", 'debug');
-                    $this->sendMetaData();
                 } elseif ($tagType === self::VIDEO_TAG && !$this->videoSequenceTag) {
                     $payload = substr($tag, 11, $dataSize);
                     if (strlen($payload) >= 2) {
@@ -776,7 +592,6 @@ class FlvForwardClient
                             if ($avcPacketType === self::AVC_PACKET_TYPE_SEQUENCE_HEADER) {
                                 $this->videoSequenceTag = $tag;
                                 $this->log("收到视频序列头", 'debug');
-                                $this->sendVideoSequence();
                             }
                         }
                     }
@@ -790,15 +605,52 @@ class FlvForwardClient
                             if ($aacPacketType === self::AAC_PACKET_TYPE_SEQUENCE_HEADER) {
                                 $this->audioSequenceTag = $tag;
                                 $this->log("收到音频序列头", 'debug');
-                                $this->sendAudioSequence();
                             }
                         }
                     }
                 }
 
-                $this->checkInitDataReady();
+                if ($this->videoSequenceTag && $this->audioSequenceTag) {
+                    $this->initDataReady = true;
+                    $this->log("初始化数据就绪，准备转发", 'success');
 
-                if (!$this->initDataReady) {
+                    foreach ($this->downstreamClients as $idx => &$downstream) {
+                        if ($downstream['connected'] && $downstream['protocol'] !== 'rtmp' && $downstream['protocol'] !== 'rtmps') {
+                            $typeFlags = 0;
+                            if ($this->audioSequenceTag) {
+                                $typeFlags |= 0x04;
+                            }
+                            if ($this->videoSequenceTag) {
+                                $typeFlags |= 0x01;
+                            }
+                            $flvHeader = "FLV\x01" . chr($typeFlags) . pack('N', 9);
+                            $downstream['client']->write($flvHeader);
+                            $downstream['client']->write(pack('N', 0));
+                            if ($this->metaDataTag) {
+                                $downstream['client']->write($this->metaDataTag);
+                            }
+                            if ($this->videoSequenceTag) {
+                                $downstream['client']->write($this->videoSequenceTag);
+                            }
+                            if ($this->audioSequenceTag) {
+                                $downstream['client']->write($this->audioSequenceTag);
+                            }
+                            $downstream['client']->flush();
+                            
+                            $initSize = 13 + 4;
+                            if ($this->metaDataTag) $initSize += strlen($this->metaDataTag);
+                            if ($this->videoSequenceTag) $initSize += strlen($this->videoSequenceTag);
+                            if ($this->audioSequenceTag) $initSize += strlen($this->audioSequenceTag);
+                            $this->downstreamStats[$idx]['bytes_sent'] += $initSize;
+                            $this->stats['bytes_sent'] += $initSize;
+                            
+                            $this->log("发送初始化数据成功: " . $downstream['url'], 'success');
+                        } elseif ($downstream['connected']) {
+                            if ($this->metaDataTag)   $this->sendRtmpData($downstream['client'], $this->metaDataTag);
+                            if ($this->videoSequenceTag) $this->sendRtmpData($downstream['client'], $this->videoSequenceTag);
+                            if ($this->audioSequenceTag) $this->sendRtmpData($downstream['client'], $this->audioSequenceTag);
+                        }
+                    }
                     continue;
                 }
             }
@@ -933,108 +785,29 @@ class FlvForwardClient
 
     protected function sendToAllDownstreams(string $data): void
     {
+        $dataLen = strlen($data);
         foreach ($this->downstreamClients as $idx => &$downstream) {
             if ($downstream['connected']) {
-                try {
-                    switch ($downstream['protocol']) {
-                        case 'rtmp':
-                            $this->sendRtmpData($downstream['client'], $data);
-                            break;
-                        case 'http':
-                            if (!$this->sendHttpFlvData($downstream['client'], $data, $downstream['useChunked'])) {
-                                throw new \RuntimeException("HTTP-FLV写入失败");
-                            }
-                            break;
-                        case 'ws':
-                            if (!$this->sendWsFlvData($downstream['client'], $data)) {
-                                throw new \RuntimeException("WebSocket-FLV写入失败");
-                            }
-                            break;
-                    }
-                    $this->downstreamStats[$idx]['tags_sent']++;
-                    $this->downstreamStats[$idx]['bytes_sent'] += strlen($data);
-                    $this->stats['tags_sent']++;
-                    $this->stats['bytes_sent'] += strlen($data);
-                } catch (\Exception $e) {
-                    $this->log("下游发送失败: {$downstream['url']} - {$e->getMessage()}", 'error');
-                    $downstream['connected'] = false;
-                    $this->safeCloseStream($downstream['client']);
+                if ($downstream['protocol'] === 'rtmp' || $downstream['protocol'] === 'rtmps') {
+                    $this->sendRtmpData($downstream['client'], $data);
+                } else {
+                    $downstream['client']->write($data);
                 }
+                $this->downstreamStats[$idx]['tags_sent']++;
+                $this->stats['tags_sent']++;
+                $this->downstreamStats[$idx]['bytes_sent'] += $dataLen;
+                $this->stats['bytes_sent'] += $dataLen;
             }
         }
     }
 
-    protected function sendHttpFlvData($socket, string $data, bool $useChunked): bool
+    protected function flushAllDownstreams(): void
     {
-        if (!$this->isStreamValid($socket)) {
-            return false;
-        }
-
-        if ($useChunked) {
-            $chunkSize = dechex(strlen($data));
-            $chunk = $chunkSize . "\r\n" . $data . "\r\n";
-            return $this->writeAll($socket, $chunk);
-        } else {
-            return $this->writeAll($socket, $data);
-        }
-    }
-
-    protected function sendWsFlvData($socket, string $data): bool
-    {
-        if (!$this->isStreamValid($socket)) {
-            return false;
-        }
-
-        $len = strlen($data);
-        $frame = '';
-
-        $frame .= chr(0x82);
-
-        if ($len < 126) {
-            $frame .= chr(0x80 | $len);
-        } elseif ($len < 65536) {
-            $frame .= chr(0x80 | 126);
-            $frame .= pack('n', $len);
-        } else {
-            $frame .= chr(0x80 | 127);
-            $frame .= pack('J', $len);
-        }
-
-        $mask = random_bytes(4);
-        $frame .= $mask;
-
-        for ($i = 0; $i < $len; $i++) {
-            $frame .= chr(ord($data[$i]) ^ ord($mask[$i % 4]));
-        }
-
-        return $this->writeAll($socket, $frame);
-    }
-
-    protected function writeAll($socket, string $data): bool
-    {
-        $len = strlen($data);
-        $written = 0;
-
-        while ($written < $len) {
-            $result = @fwrite($socket, substr($data, $written));
-            if ($result === false) {
-                return false;
+        foreach ($this->downstreamClients as $idx => &$downstream) {
+            if ($downstream['connected'] && ($downstream['protocol'] !== 'rtmp' && $downstream['protocol'] !== 'rtmps')) {
+                $downstream['client']->flush();
             }
-            $written += $result;
         }
-        return true;
-    }
-
-    protected function sendWsCloseFrame($socket): void
-    {
-        if (!$this->isStreamValid($socket)) {
-            return;
-        }
-        $frame = chr(0x88);
-        $frame .= chr(0x80);
-        $mask = random_bytes(4);
-        $frame .= $mask;
-        @fwrite($socket, $frame);
     }
 
     protected function sendRtmpData($rtmpClient, string $data): void
@@ -1092,17 +865,14 @@ class FlvForwardClient
         }
 
         foreach ($this->downstreamClients as $downstream) {
-            if ($downstream['connected']) {
-                if ($downstream['protocol'] === 'rtmp') {
+            if ($downstream['connected'] && $downstream['client']) {
+                if ($downstream['protocol'] === 'rtmp' || $downstream['protocol'] === 'rtmps') {
                     $reflection = new \ReflectionClass($downstream['client']);
                     $closeMethod = $reflection->getMethod('close');
                     $closeMethod->setAccessible(true);
                     $closeMethod->invoke($downstream['client']);
                 } else {
-                    if ($downstream['protocol'] === 'ws') {
-                        $this->sendWsCloseFrame($downstream['client']);
-                    }
-                    $this->safeCloseStream($downstream['client']);
+                    $downstream['client']->close();
                 }
             }
         }
