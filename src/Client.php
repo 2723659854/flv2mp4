@@ -4,7 +4,6 @@ namespace Xiaosongshu\Flv2mp4;
 
 use Xiaosongshu\Flv2mp4\Manage\Flv2Fmp4;
 use Xiaosongshu\Flv2mp4\Manage\Flv2Hls;
-use Xiaosongshu\Flv2mp4\Manage\FlvToMp4All;
 use Xiaosongshu\Flv2mp4\Manage\Hls2Flv;
 use Xiaosongshu\Flv2mp4\Manage\Mp4ToFlv;
 use Xiaosongshu\Flv2mp4\Manage\FlvToMp4;
@@ -22,21 +21,9 @@ class Client
      * @param string $inputFile 需要转换的flv文件
      * @param string $outputDir 存储mp4的目录
      * @param int $segmentPackets 每个切片包含的包数量（默认30）
-     * @return string|null
-     */
-    public static function runFlv2mp4(string $inputFile, string $outputDir, int $segmentPackets = 30)
-    {
-        return self::run($inputFile, $outputDir, $segmentPackets);
-    }
-
-    /**
-     * 静态flv转MP4入口函数，音视频混合切片，并生成合并的mp4文件
-     * @param string $inputFile 需要转换的flv文件
-     * @param string $outputDir 存储mp4的目录
-     * @param int $segmentPackets 每个切片包含的包数量（默认30）
      * @return string|void
      */
-    protected static function run(string $inputFile, string $outputDir, int $segmentPackets = 30)
+    protected static function runFlv2mp4Mixed(string $inputFile, string $outputDir, int $segmentPackets = 30)
     {
         if (!file_exists($inputFile)) {
             throw new \RuntimeException("flv not exist!");
@@ -139,17 +126,6 @@ class Client
         }
     }
 
-    /**
-     * 静态flv转MP4入口函数，音视频分开切片，适用于高级自定义播放场景
-     * @param string $inputFile 需要转换的flv文件
-     * @param string $outputDir 存储切片的目录
-     * @param int $segmentPackets 每个切片包含的包数量（默认30）
-     * @return array 返回生成的文件信息
-     */
-    public static function runFlv2mp4Separate(string $inputFile, string $outputDir, int $segmentPackets = 30)
-    {
-        return self::runSeparate($inputFile, $outputDir, $segmentPackets);
-    }
 
     /**
      * flv转MP4生成分开的音视频切片（用于浏览器播放）
@@ -158,7 +134,7 @@ class Client
      * @param int $segmentPackets 每个切片包含的包数量（默认30）
      * @return array 返回生成的文件信息
      */
-    protected static function runSeparate(string $inputFile, string $outputDir, int $segmentPackets = 30)
+    protected static function runFlv2mp4Separate(string $inputFile, string $outputDir, int $segmentPackets = 30)
     {
         if (!file_exists($inputFile)) {
             throw new \RuntimeException("flv not exist!");
