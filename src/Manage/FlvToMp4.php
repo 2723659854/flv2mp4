@@ -723,6 +723,52 @@ class FlvToMp4
         return $this->audioSamples;
     }
 
+    private function calculateVideoFrameRate(): float
+    {
+        $samples = $this->getSortedVideoSamples();
+        $count = count($samples);
+
+        if ($count < 2) {
+            return $this->videoFrameRate > 0 && $this->videoFrameRate <= 120 ? $this->videoFrameRate : 30;
+        }
+
+        $totalInterval = 0;
+        $intervals = 0;
+
+        for ($i = 1; $i < $count; $i++) {
+            $interval = $samples[$i]['timestamp'] - $samples[$i - 1]['timestamp'];
+            if ($interval > 0) {
+                $totalInterval += $interval;
+                $intervals++;
+            }
+        }
+
+        if ($intervals == 0) {
+            return $this->videoFrameRate > 0 && $this->videoFrameRate <= 120 ? $this->videoFrameRate : 30;
+        }
+
+        $avgIntervalMs = $totalInterval / $intervals;
+        $fps = 1000 / $avgIntervalMs;
+
+        if ($fps <= 0 || $fps > 120) {
+            return $this->videoFrameRate > 0 && $this->videoFrameRate <= 120 ? $this->videoFrameRate : 30;
+        }
+
+        if ($this->videoFrameRate > 0 && $this->videoFrameRate <= 120) {
+            $diff = abs($fps - $this->videoFrameRate) / $this->videoFrameRate;
+            if ($diff < 0.1) {
+                return $this->videoFrameRate;
+            }
+        }
+
+        $roundedFps = round($fps);
+        if ($roundedFps >= 1 && $roundedFps <= 120) {
+            return $roundedFps;
+        }
+
+        return $fps;
+    }
+
     private function buildVideoStts(): string
     {
         $samples = $this->getSortedVideoSamples();
@@ -734,7 +780,9 @@ class FlvToMp4
 
         $data = pack('N', 0);
 
-        $delta = (int)($this->videoTimescale / 30);
+        $fps = $this->calculateVideoFrameRate();
+
+        $delta = (int)($this->videoTimescale / $fps);
         if ($delta <= 0) $delta = 3000;
 
         $data .= pack('N', 1);

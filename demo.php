@@ -25,8 +25,8 @@ ini_set('memory_limit', '512M');
 //}
 
 echo "\n === 示例6: 转换flv为mp4 === \n";
-$flvFile = __DIR__ . "/test.flv";
-$mp4FromFlv = __DIR__ . "/123456.mp4";
+$flvFile = __DIR__ . "/index.flv";
+$mp4FromFlv = __DIR__ . "/index.mp4";
 try {
     if (file_exists($flvFile)) {
         $res4 = \Xiaosongshu\Flv2mp4\Client::runFlvFile2Mp4($flvFile, $mp4FromFlv);
