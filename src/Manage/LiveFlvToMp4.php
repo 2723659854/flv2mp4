@@ -290,16 +290,18 @@ class LiveFlvToMp4
      */
     public function onMdiaSegment($track, $value)
     {
-        // 混合切片输出（始终生成）
-        if ($this->onMediaSegment) {
-            call_user_func($this->onMediaSegment, $value['data']);
-        }
+        // 混合切片输出（仅在非分离模式下生成）
+        if (!$this->separateTracks) {
+            if ($this->onMediaSegment) {
+                call_user_func($this->onMediaSegment, $value['data']);
+            }
 
-        // 如果是文件输出模式，使用缓冲区累积混合切片
-        if (isset($this->_config['segmentDir']) && !empty($this->_config['segmentDir'])) {
-            $this->mixedBuffer[] = $value['data'];
-            if (count($this->mixedBuffer) >= $this->mixedBufferSize) {
-                $this->flushMixedBuffer();
+            // 如果是文件输出模式，使用缓冲区累积混合切片
+            if (isset($this->_config['segmentDir']) && !empty($this->_config['segmentDir'])) {
+                $this->mixedBuffer[] = $value['data'];
+                if (count($this->mixedBuffer) >= $this->mixedBufferSize) {
+                    $this->flushMixedBuffer();
+                }
             }
         }
 
@@ -439,7 +441,9 @@ class LiveFlvToMp4
      */
     protected function flushMediaBuffer()
     {
-        $this->flushMixedBuffer();
+        if (!$this->separateTracks) {
+            $this->flushMixedBuffer();
+        }
         $this->flushAudioBuffer();
         $this->flushVideoBuffer();
     }
@@ -492,8 +496,8 @@ class LiveFlvToMp4
         }
         $this->ftyp_moov = MP4::generateInitSegment($this->metas);
 
-        // 自动保存初始化分片到 segmentDir (init.mp4)
-        if (isset($this->_config['segmentDir']) && !empty($this->_config['segmentDir']) && $this->ftyp_moov) {
+        // 自动保存初始化分片到 segmentDir (init.mp4) - 仅在非分离模式下生成
+        if (!$this->separateTracks && isset($this->_config['segmentDir']) && !empty($this->_config['segmentDir']) && $this->ftyp_moov) {
             $segmentDir = $this->_config['segmentDir'];
             if (!is_dir($segmentDir)) {
                 mkdir($segmentDir, 0755, true);
@@ -502,7 +506,7 @@ class LiveFlvToMp4
             file_put_contents($initFile, $this->ftyp_moov);
         }
 
-        if ($this->onInitSegment && $this->loadmetadata == false) {
+        if (!$this->separateTracks && $this->onInitSegment && $this->loadmetadata == false) {
             call_user_func($this->onInitSegment, $this->ftyp_moov);
             $this->loadmetadata = true;
         }
@@ -1063,6 +1067,19 @@ class LiveFlvToMp4
         // 如果目录不存在，返回失败
         if (!is_dir($segmentDir)) {
             return false;
+        }
+
+        // 分离模式：直接生成 meta.json，不处理混合切片相关逻辑
+        if ($this->separateTracks) {
+            try {
+                $this->generateMetaJson($segmentDir, 0);
+                if ($this->onMediaInfo) {
+                    call_user_func($this->onMediaInfo, null, ['segmentDir' => $segmentDir]);
+                }
+                return true;
+            } catch (\Exception $e) {
+                return false;
+            }
         }
 
         $initFile = rtrim($segmentDir, '/') . "/init.mp4";
