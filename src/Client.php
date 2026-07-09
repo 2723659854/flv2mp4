@@ -4,8 +4,10 @@ namespace Xiaosongshu\Flv2mp4;
 
 use Xiaosongshu\Flv2mp4\Manage\Flv2Fmp4;
 use Xiaosongshu\Flv2mp4\Manage\Flv2Hls;
+use Xiaosongshu\Flv2mp4\Manage\FlvToMp4All;
 use Xiaosongshu\Flv2mp4\Manage\Hls2Flv;
 use Xiaosongshu\Flv2mp4\Manage\Mp4ToFlv;
+use Xiaosongshu\Flv2mp4\Manage\FlvToMp4;
 
 /**
  * @purpose flv文件转码mp4客户端
@@ -376,6 +378,24 @@ class Client
             $converter = new Mp4ToFlv($mp4File, $flvFile);
             if ($converter->run()){
                 return $flvFile;
+            }
+        }catch (\Exception $e){
+            throw new \RuntimeException("error:" . $e->getMessage());
+        }
+    }
+
+    /**
+     * 将flv转码为mp4文件
+     * @param string $flvFile 原始flv静态文件
+     * @param string $mp4File 输出的mp4静态文件
+     * @return string|void 返回转码成功的mp4文件
+     */
+    public static function runFlvFile2Mp4(string $flvFile, string $mp4File)
+    {
+        try{
+            $converter = new FlvToMp4($flvFile, $mp4File);
+            if ($converter->run()){
+                return $mp4File;
             }
         }catch (\Exception $e){
             throw new \RuntimeException("error:" . $e->getMessage());

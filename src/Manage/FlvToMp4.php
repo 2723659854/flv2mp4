@@ -2,6 +2,11 @@
 
 namespace Xiaosongshu\Flv2mp4\Manage;
 
+/**
+ * @purpose 标准flv文件转码mp4文件操作类
+ * @author yanglong
+ * @time 2026年7月9日12:41:59
+ */
 class FlvToMp4
 {
     private $inputFile;
@@ -29,6 +34,10 @@ class FlvToMp4
     private $duration = 0;
     private $videoTimescale = 90000;
     private $audioTimescale = 44100;
+    private $videoBaseTimestamp = 0;
+    private $audioBaseTimestamp = 0;
+    private $videoSampleIndex = 0;
+    private $audioSampleIndex = 0;
 
     public function __construct(string $inputFile, string $outputFile)
     {
@@ -56,36 +65,32 @@ class FlvToMp4
             throw new \RuntimeException("未找到有效的视频或音频轨道");
         }
 
-        $this->normalizeSamples();
+        usort($this->videoSamples, function($a, $b) {
+            if ($a['timestamp'] != $b['timestamp']) {
+                return $a['timestamp'] - $b['timestamp'];
+            }
+            return $a['index'] - $b['index'];
+        });
+
+        $prevTimestamp = -1;
+        foreach ($this->videoSamples as &$sample) {
+            if ($sample['timestamp'] <= $prevTimestamp) {
+                $sample['timestamp'] = $prevTimestamp + 1;
+            }
+            $prevTimestamp = $sample['timestamp'];
+        }
+        unset($sample);
+
+        usort($this->audioSamples, function($a, $b) {
+            if ($a['timestamp'] != $b['timestamp']) {
+                return $a['timestamp'] - $b['timestamp'];
+            }
+            return $a['index'] - $b['index'];
+        });
 
         $this->buildMp4();
 
         return true;
-    }
-
-    private function normalizeSamples(): void
-    {
-        if (!empty($this->videoSamples)) {
-            $prevTimestamp = -1;
-            foreach ($this->videoSamples as &$sample) {
-                if ($sample['timestamp'] <= $prevTimestamp) {
-                    $sample['timestamp'] = $prevTimestamp + 1;
-                }
-                $prevTimestamp = $sample['timestamp'];
-            }
-            unset($sample);
-        }
-
-        if (!empty($this->audioSamples)) {
-            $prevTimestamp = -1;
-            foreach ($this->audioSamples as &$sample) {
-                if ($sample['timestamp'] <= $prevTimestamp) {
-                    $sample['timestamp'] = $prevTimestamp + 1;
-                }
-                $prevTimestamp = $sample['timestamp'];
-            }
-            unset($sample);
-        }
     }
 
     private function parseFlv(): void
@@ -158,7 +163,8 @@ class FlvToMp4
                 $audioData = substr($data, 2);
                 $this->audioSamples[] = [
                     'data' => $audioData,
-                    'timestamp' => $timestamp
+                    'timestamp' => $timestamp,
+                    'index' => $this->audioSampleIndex++
                 ];
             }
         }
@@ -185,7 +191,8 @@ class FlvToMp4
                     'data' => $videoData,
                     'timestamp' => $timestamp,
                     'cts' => $cts,
-                    'keyframe' => $isKeyframe
+                    'keyframe' => $isKeyframe,
+                    'index' => $this->videoSampleIndex++
                 ];
             }
         }
@@ -438,24 +445,31 @@ class FlvToMp4
         $this->calculateDuration();
 
         $ftyp = $this->buildFtyp();
-        $moov = $this->buildMoov();
+        $mdat = $this->buildMdat();
 
         $ftypSize = strlen($ftyp);
-        $moovSize = strlen($moov);
-        $mdatHeaderSize = 8;
-        $mdatBaseOffset = $ftypSize + $moovSize + $mdatHeaderSize;
+        $moovSize = 0;
 
         $videoTotalSize = 0;
-        foreach ($this->videoSamples as $sample) {
+        foreach ($this->getSortedVideoSamples() as $sample) {
             $videoTotalSize += strlen($sample['data']);
         }
 
-        $stcoVideoBase = $mdatBaseOffset;
-        $stcoAudioBase = $mdatBaseOffset + $videoTotalSize;
+        $stcoVideoBase = $ftypSize + 10000;
+        $stcoAudioBase = $stcoVideoBase + $videoTotalSize;
 
         $moov = $this->buildMoov($stcoVideoBase, $stcoAudioBase);
 
-        file_put_contents($this->outputFile, $ftyp . $moov . $this->buildMdat());
+        $moovSize = strlen($moov);
+        $mdatHeaderSize = 8;
+        $actualStcoVideoBase = $ftypSize + $moovSize + $mdatHeaderSize;
+        $actualStcoAudioBase = $actualStcoVideoBase + $videoTotalSize;
+
+        if ($stcoVideoBase != $actualStcoVideoBase) {
+            $moov = $this->buildMoov($actualStcoVideoBase, $actualStcoAudioBase);
+        }
+
+        file_put_contents($this->outputFile, $ftyp . $moov . $mdat);
     }
 
     private function calculateDuration(): void
@@ -463,9 +477,8 @@ class FlvToMp4
         $maxVideoDts = 0;
         $maxAudioDts = 0;
 
-        foreach ($this->videoSamples as $sample) {
-            $dts = $sample['timestamp'] + $sample['cts'];
-            if ($dts > $maxVideoDts) $maxVideoDts = $dts;
+        foreach ($this->getSortedVideoSamples() as $sample) {
+            if ($sample['timestamp'] > $maxVideoDts) $maxVideoDts = $sample['timestamp'];
         }
 
         foreach ($this->audioSamples as $sample) {
@@ -520,6 +533,22 @@ class FlvToMp4
         return $this->box('mvhd', $data);
     }
 
+    private function buildElst(int $mediaTime, int $duration): string
+    {
+        $data = pack('N', 0);
+        $data .= pack('N', 1);
+        $data .= pack('N', $duration);
+        $data .= pack('N', $mediaTime);
+        $data .= pack('N', 0x00010000);
+        return $this->box('elst', $data);
+    }
+
+    private function buildEdts(int $mediaTime, int $duration): string
+    {
+        $elst = $this->buildElst($mediaTime, $duration);
+        return $this->box('edts', $elst);
+    }
+
     private function buildVideoTrak(int $stcoBase = 0): string
     {
         $trackId = 1;
@@ -533,7 +562,16 @@ class FlvToMp4
 
         $mdia = $this->box('mdia', $mdhd, $hdlr, $minf);
 
-        return $this->box('trak', $tkhd, $mdia);
+        $mediaTime = 0;
+        if ($numSamples > 0) {
+            $samples = $this->getSortedVideoSamples();
+            $firstSample = $samples[0];
+            $mediaTime = (int)($firstSample['timestamp'] * $this->videoTimescale / 1000);
+        }
+
+        $edts = $this->buildEdts($mediaTime, $duration);
+
+        return $this->box('trak', $tkhd, $edts, $mdia);
     }
 
     private function buildAudioTrak(int $stcoBase = 0): string
@@ -616,11 +654,7 @@ class FlvToMp4
             $xmhd = $this->box('smhd', $smhd);
         }
 
-        $drefData = pack('C*',
-            0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x01,
-            0x00,0x00,0x00,0x0C,0x75,0x72,0x6C,0x20,
-            0x00,0x00,0x00,0x01
-        );
+        $drefData = pack('N*', 0, 1) . pack('N', 12) . "url " . pack('N', 1);
         $dref = $this->box('dref', $drefData);
         $dinf = $this->box('dinf', $dref);
 
@@ -632,18 +666,20 @@ class FlvToMp4
     private function buildStbl(string $type, int $stcoBase = 0): string
     {
         if ($type === 'video') {
+            $samples = $this->getSortedVideoSamples();
             $stsd = $this->buildVideoStsd();
             $stts = $this->buildVideoStts();
             $ctts = $this->buildCtts();
-            $stsc = $this->buildStsc($this->videoSamples);
-            $stsz = $this->buildStsz($this->videoSamples);
+            $stsc = $this->buildStsc($samples);
+            $stsz = $this->buildStsz($samples);
             $stco = $this->buildVideoStco($stcoBase);
             return $this->box('stbl', $stsd, $stts, $ctts, $stsc, $stsz, $stco);
         } else {
+            $samples = $this->getSortedAudioSamples();
             $stsd = $this->buildAudioStsd();
             $stts = $this->buildAudioStts();
-            $stsc = $this->buildStsc($this->audioSamples);
-            $stsz = $this->buildStsz($this->audioSamples);
+            $stsc = $this->buildStsc($samples);
+            $stsz = $this->buildStsz($samples);
             $stco = $this->buildAudioStco($stcoBase);
             return $this->box('stbl', $stsd, $stts, $stsc, $stsz, $stco);
         }
@@ -694,9 +730,19 @@ class FlvToMp4
         return $this->box('stsd', $stsdPrefix, $mp4aBox);
     }
 
+    private function getSortedVideoSamples(): array
+    {
+        return $this->videoSamples;
+    }
+
+    private function getSortedAudioSamples(): array
+    {
+        return $this->audioSamples;
+    }
+
     private function buildVideoStts(): string
     {
-        $samples = $this->videoSamples;
+        $samples = $this->getSortedVideoSamples();
         $count = count($samples);
 
         if ($count === 0) {
@@ -705,12 +751,18 @@ class FlvToMp4
 
         $data = pack('N', 0);
 
+        $baseTimestamp = PHP_INT_MAX;
+        foreach ($samples as $sample) {
+            if ($sample['timestamp'] < $baseTimestamp) {
+                $baseTimestamp = $sample['timestamp'];
+            }
+        }
+
         $entries = [];
-        $baseDts = (int)($samples[0]['timestamp'] * $this->videoTimescale / 1000);
-        $currentDts = $baseDts;
+        $currentDts = 0;
 
         foreach ($samples as $sample) {
-            $targetDts = (int)($sample['timestamp'] * $this->videoTimescale / 1000);
+            $targetDts = (int)(($sample['timestamp'] - $baseTimestamp) * $this->videoTimescale / 1000);
             $delta = $targetDts - $currentDts;
             if ($delta <= 0) $delta = 1;
             $entries[] = ['count' => 1, 'delta' => $delta];
@@ -729,7 +781,7 @@ class FlvToMp4
 
     private function buildAudioStts(): string
     {
-        $samples = $this->audioSamples;
+        $samples = $this->getSortedAudioSamples();
         $count = count($samples);
 
         if ($count === 0) {
@@ -738,11 +790,20 @@ class FlvToMp4
 
         $data = pack('N', 0);
 
+        $baseTimestamp = PHP_INT_MAX;
+        foreach ($samples as $sample) {
+            if ($sample['timestamp'] < $baseTimestamp) {
+                $baseTimestamp = $sample['timestamp'];
+            }
+        }
+
+        $this->audioBaseTimestamp = $baseTimestamp;
+
         $entries = [];
         $currentDts = 0;
 
         foreach ($samples as $sample) {
-            $targetDts = (int)($sample['timestamp'] * $this->audioTimescale / 1000);
+            $targetDts = (int)(($sample['timestamp'] - $baseTimestamp) * $this->audioTimescale / 1000);
             $delta = $targetDts - $currentDts;
             if ($delta <= 0) $delta = 1;
             $entries[] = ['count' => 1, 'delta' => $delta];
@@ -761,7 +822,7 @@ class FlvToMp4
 
     private function buildCtts(): string
     {
-        $samples = $this->videoSamples;
+        $samples = $this->getSortedVideoSamples();
         $count = count($samples);
 
         if ($count === 0) {
@@ -789,10 +850,13 @@ class FlvToMp4
         }
 
         $data = pack('N', 0);
-        $data .= pack('N', 1);
-        $data .= pack('N', 1);
         $data .= pack('N', $count);
-        $data .= pack('N', 1);
+
+        for ($i = 0; $i < $count; $i++) {
+            $data .= pack('N', $i + 1);
+            $data .= pack('N', 1);
+            $data .= pack('N', 1);
+        }
 
         return $this->box('stsc', $data);
     }
@@ -814,25 +878,35 @@ class FlvToMp4
 
     private function buildVideoStco(int $baseOffset = 0): string
     {
+        $samples = $this->getSortedVideoSamples();
+        $count = count($samples);
+
         $data = pack('N', 0);
-        if (empty($this->videoSamples)) {
-            $data .= pack('N', 0);
-        } else {
-            $data .= pack('N', 1);
-            $data .= pack('N', $baseOffset);
+        $data .= pack('N', $count);
+
+        $offset = $baseOffset;
+        foreach ($samples as $sample) {
+            $data .= pack('N', $offset);
+            $offset += strlen($sample['data']);
         }
+
         return $this->box('stco', $data);
     }
 
     private function buildAudioStco(int $baseOffset = 0): string
     {
+        $samples = $this->getSortedAudioSamples();
+        $count = count($samples);
+
         $data = pack('N', 0);
-        if (empty($this->audioSamples)) {
-            $data .= pack('N', 0);
-        } else {
-            $data .= pack('N', 1);
-            $data .= pack('N', $baseOffset);
+        $data .= pack('N', $count);
+
+        $offset = $baseOffset;
+        foreach ($samples as $sample) {
+            $data .= pack('N', $offset);
+            $offset += strlen($sample['data']);
         }
+
         return $this->box('stco', $data);
     }
 
@@ -840,11 +914,11 @@ class FlvToMp4
     {
         $mdatData = '';
 
-        foreach ($this->videoSamples as $sample) {
+        foreach ($this->getSortedVideoSamples() as $sample) {
             $mdatData .= $sample['data'];
         }
 
-        foreach ($this->audioSamples as $sample) {
+        foreach ($this->getSortedAudioSamples() as $sample) {
             $mdatData .= $sample['data'];
         }
 
