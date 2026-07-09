@@ -81,6 +81,14 @@ class FlvToMp4
         }
         unset($sample);
 
+        if (!empty($this->videoSamples)) {
+            $baseTs = $this->videoSamples[0]['timestamp'];
+            foreach ($this->videoSamples as &$sample) {
+                $sample['timestamp'] -= $baseTs;
+            }
+            unset($sample);
+        }
+
         usort($this->audioSamples, function($a, $b) {
             if ($a['timestamp'] != $b['timestamp']) {
                 return $a['timestamp'] - $b['timestamp'];
@@ -533,22 +541,6 @@ class FlvToMp4
         return $this->box('mvhd', $data);
     }
 
-    private function buildElst(int $mediaTime, int $duration): string
-    {
-        $data = pack('N', 0);
-        $data .= pack('N', 1);
-        $data .= pack('N', $duration);
-        $data .= pack('N', $mediaTime);
-        $data .= pack('N', 0x00010000);
-        return $this->box('elst', $data);
-    }
-
-    private function buildEdts(int $mediaTime, int $duration): string
-    {
-        $elst = $this->buildElst($mediaTime, $duration);
-        return $this->box('edts', $elst);
-    }
-
     private function buildVideoTrak(int $stcoBase = 0): string
     {
         $trackId = 1;
@@ -562,16 +554,7 @@ class FlvToMp4
 
         $mdia = $this->box('mdia', $mdhd, $hdlr, $minf);
 
-        $mediaTime = 0;
-        if ($numSamples > 0) {
-            $samples = $this->getSortedVideoSamples();
-            $firstSample = $samples[0];
-            $mediaTime = (int)($firstSample['timestamp'] * $this->videoTimescale / 1000);
-        }
-
-        $edts = $this->buildEdts($mediaTime, $duration);
-
-        return $this->box('trak', $tkhd, $edts, $mdia);
+        return $this->box('trak', $tkhd, $mdia);
     }
 
     private function buildAudioTrak(int $stcoBase = 0): string
@@ -751,30 +734,12 @@ class FlvToMp4
 
         $data = pack('N', 0);
 
-        $baseTimestamp = PHP_INT_MAX;
-        foreach ($samples as $sample) {
-            if ($sample['timestamp'] < $baseTimestamp) {
-                $baseTimestamp = $sample['timestamp'];
-            }
-        }
+        $delta = (int)($this->videoTimescale / 30);
+        if ($delta <= 0) $delta = 3000;
 
-        $entries = [];
-        $currentDts = 0;
-
-        foreach ($samples as $sample) {
-            $targetDts = (int)(($sample['timestamp'] - $baseTimestamp) * $this->videoTimescale / 1000);
-            $delta = $targetDts - $currentDts;
-            if ($delta <= 0) $delta = 1;
-            $entries[] = ['count' => 1, 'delta' => $delta];
-            $currentDts += $delta;
-        }
-
-        $data .= pack('N', count($entries));
-
-        foreach ($entries as $entry) {
-            $data .= pack('N', $entry['count']);
-            $data .= pack('N', $entry['delta']);
-        }
+        $data .= pack('N', 1);
+        $data .= pack('N', $count);
+        $data .= pack('N', $delta);
 
         return $this->box('stts', $data);
     }
