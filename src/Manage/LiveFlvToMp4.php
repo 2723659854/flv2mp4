@@ -1031,17 +1031,16 @@ class LiveFlvToMp4
     }
 
     /**
-     * 合成完整的 MP4 文件
-     * 在关闭播放器时调用此方法，将所有分片合成为完整的 MP4 文件
-     * @param string|null $outputFile 输出文件路径（可选，默认为 streamPath_full.mp4）
-     * @param bool $deleteSegments 是否删除分片文件（默认 true）
-     * @return string|false 返回合成后的文件路径，失败返回 false
+     * 完成直播转码，刷新缓冲区并更新元数据
+     * 在关闭播放器时调用此方法，处理剩余数据并更新元信息，不再合并分片为大文件
+     * @param string|null $outputFile 输出文件路径（已废弃，不再使用）
+     * @param bool $deleteSegments 是否删除分片文件（已废弃，不再使用）
+     * @return bool 成功返回 true，失败返回 false
      */
     public function finalize($outputFile = null, $deleteSegments = true)
     {
         // 处理剩余的 FLV 数据缓冲区
         if (strlen($this->flvBuffer) > 0) {
-
             $this->processBuffer(0);
         }
 
@@ -1066,15 +1065,7 @@ class LiveFlvToMp4
             return false;
         }
 
-        // 构建输出文件路径
-        if ($outputFile === null) {
-            $baseName = basename($this->streamPath);
-            $outputFile = rtrim($segmentDir, '/') . "/{$baseName}_full.mp4";
-        }
-
-        // 查找所有分片文件
         $initFile = rtrim($segmentDir, '/') . "/init.mp4";
-        $segmentPattern = rtrim($segmentDir, '/') . "/segment_*.m4s";
 
         // 检查初始化文件是否存在
         if (!file_exists($initFile)) {
@@ -1082,10 +1073,8 @@ class LiveFlvToMp4
         }
 
         // 获取所有分片文件并排序
+        $segmentPattern = rtrim($segmentDir, '/') . "/segment_*.m4s";
         $segmentFiles = glob($segmentPattern);
-        if (empty($segmentFiles)) {
-            return false;
-        }
 
         // 按分片索引排序
         usort($segmentFiles, function($a, $b) {
@@ -1098,68 +1087,32 @@ class LiveFlvToMp4
         });
 
         try {
-            // 创建输出文件
-            $outputHandle = fopen($outputFile, 'wb');
-            if (!$outputHandle) {
-                return false;
-            }
-
             // 读取初始化文件（用于获取原始元数据）
             $initData = file_get_contents($initFile);
 
             // 计算实际时长
             $duration = $this->calculateDurationFromSegments($segmentFiles);
 
-            // 调试信息
-            //error_log("finalize: duration = $duration ms, metas count = " . count($this->metas));
-            foreach ($this->metas as $i => $meta) {
-                //error_log("  meta[$i]: timescale = " . ($meta['timescale'] ?? 'N/A') . ", duration = " . ($meta['duration'] ?? 'N/A'));
-            }
-
             // 如果计算出了有效时长，更新 metas 中的 duration 并重新生成 init.mp4
             if ($duration > 0 && count($this->metas) > 0) {
-                // 更新所有轨道的 duration
                 foreach ($this->metas as &$meta) {
                     if (isset($meta['timescale'])) {
                         $meta['duration'] = (int)($duration * $meta['timescale'] / 1000);
                     }
                 }
-                // 重新生成包含正确时长的 init.mp4
                 $initData = MP4::generateInitSegment($this->metas);
+                file_put_contents($initFile, $initData);
             }
-
-            fwrite($outputHandle, $initData);
-            $totalSize = strlen($initData);
-
-            // 写入所有分片文件
-            foreach ($segmentFiles as $segmentFile) {
-                $segmentData = file_get_contents($segmentFile);
-                fwrite($outputHandle, $segmentData);
-                $totalSize += strlen($segmentData);
-
-                // 如果需要删除分片文件
-                if ($deleteSegments) {
-                    unlink($segmentFile);
-                }
-            }
-
-            // 关闭输出文件
-            fclose($outputHandle);
 
             // 生成 meta.json
             $this->generateMetaJson($segmentDir, $duration);
 
-            // 删除初始化文件
-            if ($deleteSegments && file_exists($initFile)) {
-                unlink($initFile);
-            }
-
             // 触发回调
             if ($this->onMediaInfo) {
-                call_user_func($this->onMediaInfo, null, ['mergedFile' => $outputFile, 'size' => $totalSize]);
+                call_user_func($this->onMediaInfo, null, ['segmentDir' => $segmentDir, 'duration' => $duration]);
             }
 
-            return $outputFile;
+            return true;
         } catch (\Exception $e) {
             return false;
         }
