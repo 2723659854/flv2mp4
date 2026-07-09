@@ -404,35 +404,33 @@ class FlvToMp4
         $config = $this->audioSpecificConfig;
         $configSize = strlen($config);
 
-        $tag3 = pack('C', 0x03);
-        if ($configSize < 128) {
-            $tag3 .= chr(5 + $configSize);
-        } else {
-            $tag3 .= chr(0x80 | (((5 + $configSize) >> 7) & 0x7F)) . chr((5 + $configSize) & 0x7F);
+        $tag5 = "\x05" . $this->writeDescriptorLength($configSize) . $config;
+
+        $tag4Content = "\x40" . chr($this->audioObjectType) . "\x00\x00\x00" .
+            "\x00\x00\x00\x00\x00\x00\x00\x00" . $tag5;
+        $tag4 = "\x04" . $this->writeDescriptorLength(strlen($tag4Content)) . $tag4Content;
+
+        $tag3Content = "\x00\x01\x00" . $tag4;
+        $tag3 = "\x03" . $this->writeDescriptorLength(strlen($tag3Content)) . $tag3Content;
+
+        return pack('N', 0) . $tag3;
+    }
+
+    private function writeDescriptorLength(int $length): string
+    {
+        if ($length < 128) {
+            return chr($length);
         }
-        $tag3 .= "\x00\x01\x00";
-
-        $tag4 = pack('C', 0x04);
-        $tag4Len = 13 + $configSize;
-        if ($tag4Len < 128) {
-            $tag4 .= chr($tag4Len);
-        } else {
-            $tag4 .= chr(0x80 | (($tag4Len >> 7) & 0x7F)) . chr($tag4Len & 0x7F);
+        $result = '';
+        while ($length > 0) {
+            $byte = $length & 0x7F;
+            $length >>= 7;
+            if ($result !== '') {
+                $byte |= 0x80;
+            }
+            $result = chr($byte) . $result;
         }
-        $tag4 .= "\x40" . chr($this->audioObjectType) . "\x00\x00\x00";
-        $tag4 .= "\x00\x00\x00\x00\x00\x00\x00\x00";
-
-        $tag5 = pack('C', 0x05);
-        if ($configSize < 128) {
-            $tag5 .= chr($configSize);
-        } else {
-            $tag5 .= chr(0x80 | (($configSize >> 7) & 0x7F)) . chr($configSize & 0x7F);
-        }
-        $tag5 .= $config;
-
-        $esdsData = $tag3 . $tag4 . $tag5;
-
-        return pack('N', 0) . $esdsData;
+        return $result;
     }
 
     private function buildMp4(): void
@@ -708,8 +706,8 @@ class FlvToMp4
         $data = pack('N', 0);
 
         $entries = [];
-        $currentDts = 0;
         $baseDts = (int)($samples[0]['timestamp'] * $this->videoTimescale / 1000);
+        $currentDts = $baseDts;
 
         foreach ($samples as $sample) {
             $targetDts = (int)($sample['timestamp'] * $this->videoTimescale / 1000);
@@ -816,33 +814,25 @@ class FlvToMp4
 
     private function buildVideoStco(int $baseOffset = 0): string
     {
-        $count = count($this->videoSamples);
-
         $data = pack('N', 0);
-        $data .= pack('N', $count);
-
-        $offset = $baseOffset;
-        foreach ($this->videoSamples as $sample) {
-            $data .= pack('N', $offset);
-            $offset += strlen($sample['data']);
+        if (empty($this->videoSamples)) {
+            $data .= pack('N', 0);
+        } else {
+            $data .= pack('N', 1);
+            $data .= pack('N', $baseOffset);
         }
-
         return $this->box('stco', $data);
     }
 
     private function buildAudioStco(int $baseOffset = 0): string
     {
-        $count = count($this->audioSamples);
-
         $data = pack('N', 0);
-        $data .= pack('N', $count);
-
-        $offset = $baseOffset;
-        foreach ($this->audioSamples as $sample) {
-            $data .= pack('N', $offset);
-            $offset += strlen($sample['data']);
+        if (empty($this->audioSamples)) {
+            $data .= pack('N', 0);
+        } else {
+            $data .= pack('N', 1);
+            $data .= pack('N', $baseOffset);
         }
-
         return $this->box('stco', $data);
     }
 
