@@ -15,7 +15,7 @@ $file = __DIR__ . "/test.flv";
 echo "=== 示例1: flv静态文件切片fMP4并合并为mp4文件 ===\n";
 $outputDir1 = __DIR__ . "/output_merge";
 try{
-    $res = \Xiaosongshu\Flv2mp4\Client::runFlv2mp4($file, $outputDir1);
+    $res = \Xiaosongshu\Flv2mp4\Client::runFlv2Fmp4Mixed($file, $outputDir1);
     echo "\n转换完成: " . $res . "\n\n";
 }catch (\Exception $e){
     echo "错误: " . $e->getMessage() . "\n\n";
@@ -25,7 +25,7 @@ try{
 echo "=== 示例2: 生成分开的音视频切片 ===\n";
 $outputDir2 = __DIR__ . "/output_separate";
 try{
-    $res = \Xiaosongshu\Flv2mp4\Client::runFlv2mp4Separate($file, $outputDir2);
+    $res = \Xiaosongshu\Flv2mp4\Client::runFlv2Fmp4Separate($file, $outputDir2);
     echo "\n转换完成！生成的文件:\n";
     echo "  音频初始化: " . ($res['audioInit'] ?? '无') . "\n";
     echo "  视频初始化: " . ($res['videoInit'] ?? '无') . "\n";
@@ -65,6 +65,20 @@ try {
         echo "\n mp4转flv完成: {$res3}\n\n";
     } else {
         echo "跳过: 测试文件不存在 {$mp4File}\n\n";
+    }
+} catch (\Exception $e) {
+    echo "错误: " . $e->getMessage() . "\n\n";
+}
+
+echo "\n === 示例6: 转换flv为mp4 === \n";
+$flvFile = __DIR__ . "/index.flv";
+$mp4FromFlv = __DIR__ . "/index.mp4";
+try {
+    if (file_exists($flvFile)) {
+        $res4 = \Xiaosongshu\Flv2mp4\Client::runFlv2Mp4($flvFile, $mp4FromFlv);
+        echo "\n flv转mp4完成: {$res4}\n\n";
+    } else {
+        echo "跳过: 测试文件不存在 {$flvFile}\n\n";
     }
 } catch (\Exception $e) {
     echo "错误: " . $e->getMessage() . "\n\n";

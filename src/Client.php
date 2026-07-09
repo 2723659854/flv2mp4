@@ -17,13 +17,13 @@ class Client
 {
 
     /**
-     * 静态flv转MP4入口函数，音视频混合切片，并生成合并的mp4文件
+     * 静态flv转fMP4入口函数，音视频混合切片，并生成合并的mp4文件
      * @param string $inputFile 需要转换的flv文件
      * @param string $outputDir 存储mp4的目录
      * @param int $segmentPackets 每个切片包含的包数量（默认30）
      * @return string|void
      */
-    protected static function runFlv2mp4Mixed(string $inputFile, string $outputDir, int $segmentPackets = 30)
+    public static function runFlv2Fmp4Mixed(string $inputFile, string $outputDir, int $segmentPackets = 30)
     {
         if (!file_exists($inputFile)) {
             throw new \RuntimeException("flv not exist!");
@@ -128,13 +128,13 @@ class Client
 
 
     /**
-     * flv转MP4生成分开的音视频切片（用于浏览器播放）
+     * flv转fMP4生成分开的音视频切片（用于浏览器播放）
      * @param string $inputFile 需要转换的flv文件
      * @param string $outputDir 存储切片的目录
      * @param int $segmentPackets 每个切片包含的包数量（默认30）
      * @return array 返回生成的文件信息
      */
-    protected static function runFlv2mp4Separate(string $inputFile, string $outputDir, int $segmentPackets = 30)
+    public static function runFlv2Fmp4Separate(string $inputFile, string $outputDir, int $segmentPackets = 30)
     {
         if (!file_exists($inputFile)) {
             throw new \RuntimeException("flv not exist!");
@@ -318,7 +318,7 @@ class Client
         if(!self::isFlvFile($inputFile)){
             throw new \RuntimeException("only support flv file!");
         }
-        $streamId = "a/b";
+        $streamId = md5(basename($inputFile));
         $hls = new Flv2Hls($streamId,['segmentDuration'=>4,'outputDir'=>$outputDir."/".$streamId."/"]);
         $back = ['index'=>$hls->getIndex(),'outputDir'=>$hls->getStreamDir()];
         $hls->run($inputFile);
@@ -366,7 +366,7 @@ class Client
      * @param string $mp4File 输出的mp4静态文件
      * @return string|void 返回转码成功的mp4文件
      */
-    public static function runFlvFile2Mp4(string $flvFile, string $mp4File)
+    public static function runFlv2Mp4(string $flvFile, string $mp4File)
     {
         try{
             $converter = new FlvToMp4($flvFile, $mp4File);
