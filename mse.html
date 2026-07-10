@@ -449,7 +449,7 @@
         return `${window.location.protocol}//${window.location.host}`;
     }
     function getDefaultHlsSource() {
-        return getDynamicBaseUrl() + '/mp4/a/b/output_merge/index.m3u8';
+        return getDynamicBaseUrl() + '/mp4/output_merge/index.m3u8';
     }
 
     const video = document.getElementById('video');
@@ -904,7 +904,7 @@
     initHLS(defaultUrl);
 
     function switchToMerge() {
-        const mergeUrl = getDynamicBaseUrl() + '/mp4/a/b/output_merge/index.m3u8';
+        const mergeUrl = getDynamicBaseUrl() + '/mp4/output_merge/index.m3u8';
         streamUrlInput.value = mergeUrl;
         detectBadge.textContent = '📥 混合切片';
         detectHint.textContent = '音视频混合切片模式';
@@ -913,7 +913,7 @@
     }
 
     function switchToSeparate() {
-        const separateUrl = getDynamicBaseUrl() + '/mp4/a/b/output_separate/index.m3u8';
+        const separateUrl = getDynamicBaseUrl() + '/mp4/output_separate/index.m3u8';
         streamUrlInput.value = separateUrl;
         detectBadge.textContent = '🎧 分离切片';
         detectHint.textContent = '音视频分离切片模式';
