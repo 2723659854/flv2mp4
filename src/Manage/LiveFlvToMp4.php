@@ -131,23 +131,63 @@ class LiveFlvToMp4
     /**
      * 混合切片缓冲区（用于累积多个包，减少分片数量）
      */
-    protected $mixedBuffer = [];
     protected $mixedBufferIndex = 0;
-    protected $mixedBufferSize = 30; // 默认每个混合切片包含 30 个包
+    protected $mixedBufferSize = 30;
+    protected $mixedTmpFile = null;
+    protected $mixedTmpFilePath = '';
 
     /**
      * 音频切片缓冲区（用于累积多个包，减少分片数量）
      */
-    protected $audioBuffer = [];
     protected $audioBufferIndex = 0;
-    protected $audioBufferSize = 30; // 默认每个音频切片包含 30 个包
+    protected $audioBufferSize = 30;
+    protected $audioTmpFile = null;
+    protected $audioTmpFilePath = '';
 
     /**
      * 视频切片缓冲区（用于累积多个包，减少分片数量）
      */
-    protected $videoBuffer = [];
     protected $videoBufferIndex = 0;
-    protected $videoBufferSize = 30; // 默认每个视频切片包含 30 个包
+    protected $videoBufferSize = 30;
+    protected $videoTmpFile = null;
+    protected $videoTmpFilePath = '';
+
+    /**
+     * 时间+关键帧切片相关属性
+     */
+    protected $targetSegmentDuration = 4000;
+    protected $maxSegmentDuration = 8000;
+
+    /**
+     * 混合切片跟踪属性
+     */
+    protected $mixedSegmentStartDts = -1;
+    protected $mixedReadyToCut = false;
+    protected $mixedSegmentFirstVideoDts = -1;
+    protected $mixedSegmentLastVideoDts = -1;
+
+    /**
+     * 音频切片跟踪属性（分离模式）
+     */
+    protected $audioSegmentStartDts = -1;
+    protected $audioReadyToCut = false;
+    protected $audioSegmentFirstDts = -1;
+    protected $audioSegmentLastDts = -1;
+
+    /**
+     * 视频切片跟踪属性（分离模式）
+     */
+    protected $videoSegmentStartDts = -1;
+    protected $videoReadyToCut = false;
+    protected $videoSegmentFirstDts = -1;
+    protected $videoSegmentLastDts = -1;
+
+    /**
+     * 分片时长记录（用于m3u8生成）
+     */
+    protected $mixedSegmentDurations = [];
+    protected $audioSegmentDurations = [];
+    protected $videoSegmentDurations = [];
 
     /**
      * 构造函数
@@ -157,9 +197,8 @@ class LiveFlvToMp4
      *                       - maxSegmentSize: 单个分片最大字节数（默认 10MB）
      *                       - segmentDir: 分片文件存储目录
      *                       - separateTracks: 是否生成分开的音视频切片（默认 false）
-     *                       - mixedBufferSize: 混合切片缓冲区大小（默认 30）
-     *                       - audioBufferSize: 音频切片缓冲区大小（默认 30）
-     *                       - videoBufferSize: 视频切片缓冲区大小（默认 30）
+     *                       - targetSegmentDuration: 目标切片时长（毫秒，默认 4000）
+     *                       - maxSegmentDuration: 最大切片时长/安全阀（毫秒，默认 8000）
      */
     public function __construct($config = [])
     {
@@ -169,11 +208,15 @@ class LiveFlvToMp4
         $this->streamPath = isset($config['streamPath']) ? $config['streamPath'] : '';
         $this->maxSegmentSize = isset($config['maxSegmentSize']) ? $config['maxSegmentSize'] : $this->maxSegmentSize;
         $this->separateTracks = isset($config['separateTracks']) ? $config['separateTracks'] : false;
-        $this->mixedBufferSize = isset($config['mixedBufferSize']) ? $config['mixedBufferSize'] : $this->mixedBufferSize;
-        $this->audioBufferSize = isset($config['audioBufferSize']) ? $config['audioBufferSize'] : $this->audioBufferSize;
-        $this->videoBufferSize = isset($config['videoBufferSize']) ? $config['videoBufferSize'] : $this->videoBufferSize;
+        $this->targetSegmentDuration = isset($config['targetSegmentDuration']) ? $config['targetSegmentDuration'] : $this->targetSegmentDuration;
+        $this->maxSegmentDuration = isset($config['maxSegmentDuration']) ? $config['maxSegmentDuration'] : $this->maxSegmentDuration;
 
         $this->loadmetadata = false;
+        $this->openMixedTmpFile();
+        if ($this->separateTracks) {
+            $this->openAudioTmpFile();
+            $this->openVideoTmpFile();
+        }
         $this->ftyp_moov = null;
         $this->metaSuccRun = false;
         $this->metas = [];
@@ -290,38 +333,148 @@ class LiveFlvToMp4
      */
     public function onMdiaSegment($track, $value)
     {
-        // 混合切片输出（仅在非分离模式下生成）
+        $info = $value['info'] ?? null;
+        $isKeyframe = false;
+        $chunkEndDts = 0;
+
+        if ($info && $track == 'video') {
+            $isKeyframe = $info->firstSample && $info->firstSample->isSyncPoint;
+            $chunkEndDts = $info->endDts;
+        }
+
         if (!$this->separateTracks) {
             if ($this->onMediaSegment) {
                 call_user_func($this->onMediaSegment, $value['data']);
             }
 
-            // 如果是文件输出模式，使用缓冲区累积混合切片
             if (isset($this->_config['segmentDir']) && !empty($this->_config['segmentDir'])) {
-                $this->mixedBuffer[] = $value['data'];
-                if (count($this->mixedBuffer) >= $this->mixedBufferSize) {
+                $shouldFlush = false;
+
+                if ($info) {
+                    $currentEndDts = $info->originalEndDts;
+
+                    if ($this->mixedSegmentStartDts < 0) {
+                        $this->mixedSegmentStartDts = $info->originalBeginDts;
+                    }
+
+                    if ($track == 'video') {
+                        if ($this->mixedReadyToCut && $isKeyframe) {
+                            $shouldFlush = true;
+                            $this->mixedReadyToCut = false;
+                        } else {
+                            $duration = $currentEndDts - $this->mixedSegmentStartDts;
+                            if ($duration >= $this->maxSegmentDuration) {
+                                $shouldFlush = true;
+                                $this->mixedReadyToCut = false;
+                            } elseif ($duration >= $this->targetSegmentDuration) {
+                                $this->mixedReadyToCut = true;
+                            }
+                        }
+                    } else {
+                        $duration = $currentEndDts - $this->mixedSegmentStartDts;
+                        if ($duration >= $this->maxSegmentDuration) {
+                            $this->mixedReadyToCut = true;
+                        } elseif ($duration >= $this->targetSegmentDuration) {
+                            $this->mixedReadyToCut = true;
+                        }
+                    }
+                }
+
+                if ($shouldFlush) {
                     $this->flushMixedBuffer();
+                    if ($info) {
+                        $this->mixedSegmentStartDts = $info->originalBeginDts;
+                    }
+                }
+
+                if ($this->mixedTmpFile) {
+                    fwrite($this->mixedTmpFile, $value['data']);
+                }
+                if ($info && $track == 'video') {
+                    if ($this->mixedSegmentFirstVideoDts < 0) {
+                        $this->mixedSegmentFirstVideoDts = $info->originalBeginDts;
+                    }
+                    $this->mixedSegmentLastVideoDts = $info->originalEndDts;
                 }
             }
         }
 
-        // 分开输出音视频切片（如果配置了）
         if ($this->separateTracks) {
             if ($track == 'audio') {
-                $this->audioSegmentIndex++;
-                $this->audioBuffer[] = $value['data'];
-                if (count($this->audioBuffer) >= $this->audioBufferSize) {
-                    $this->flushAudioBuffer();
+                $currentEndDts = 0;
+                if ($info) {
+                    $currentEndDts = $info->originalEndDts;
                 }
+
+                if ($this->audioSegmentStartDts < 0) {
+                    $this->audioSegmentStartDts = $info ? $info->originalBeginDts : 0;
+                }
+
+                $shouldFlush = false;
+                if ($info) {
+                    $duration = $currentEndDts - $this->audioSegmentStartDts;
+                    if ($duration >= $this->targetSegmentDuration) {
+                        $shouldFlush = true;
+                    }
+                }
+
+                if ($shouldFlush) {
+                    $this->flushAudioBuffer();
+                    $this->audioSegmentStartDts = $info ? $info->originalBeginDts : 0;
+                }
+
+                if ($this->audioTmpFile) {
+                    fwrite($this->audioTmpFile, $value['data']);
+                }
+                $this->audioSegmentIndex++;
+                if ($info) {
+                    if ($this->audioSegmentFirstDts < 0) {
+                        $this->audioSegmentFirstDts = $info->originalBeginDts;
+                    }
+                    $this->audioSegmentLastDts = $info->originalEndDts;
+                }
+
                 if ($this->onAudioSegment) {
                     call_user_func($this->onAudioSegment, $value['data'], $value);
                 }
             } elseif ($track == 'video') {
-                $this->videoSegmentIndex++;
-                $this->videoBuffer[] = $value['data'];
-                if (count($this->videoBuffer) >= $this->videoBufferSize) {
-                    $this->flushVideoBuffer();
+                $currentEndDts = $info ? $info->originalEndDts : 0;
+
+                if ($this->videoSegmentStartDts < 0) {
+                    $this->videoSegmentStartDts = $info ? $info->originalBeginDts : 0;
                 }
+
+                $shouldFlush = false;
+
+                if ($this->videoReadyToCut && $isKeyframe) {
+                    $shouldFlush = true;
+                    $this->videoReadyToCut = false;
+                } else {
+                    $duration = $currentEndDts - $this->videoSegmentStartDts;
+                    if ($duration >= $this->maxSegmentDuration) {
+                        $shouldFlush = true;
+                        $this->videoReadyToCut = false;
+                    } elseif ($duration >= $this->targetSegmentDuration) {
+                        $this->videoReadyToCut = true;
+                    }
+                }
+
+                if ($shouldFlush) {
+                    $this->flushVideoBuffer();
+                    $this->videoSegmentStartDts = $info ? $info->originalBeginDts : 0;
+                }
+
+                if ($this->videoTmpFile) {
+                    fwrite($this->videoTmpFile, $value['data']);
+                }
+                $this->videoSegmentIndex++;
+                if ($info) {
+                    if ($this->videoSegmentFirstDts < 0) {
+                        $this->videoSegmentFirstDts = $info->originalBeginDts;
+                    }
+                    $this->videoSegmentLastDts = $info->originalEndDts;
+                }
+
                 if ($this->onVideoSegment) {
                     call_user_func($this->onVideoSegment, $value['data'], $value);
                 }
@@ -338,19 +491,64 @@ class LiveFlvToMp4
     }
 
     /**
+     * 打开混合切片临时文件
+     */
+    protected function openMixedTmpFile()
+    {
+        if ($this->mixedTmpFile) {
+            fclose($this->mixedTmpFile);
+        }
+        $segmentDir = $this->_config['segmentDir'] ?? '';
+        if (!empty($segmentDir)) {
+            $this->mixedTmpFilePath = rtrim($segmentDir, '/') . "/segment_" . ($this->mixedBufferIndex + 1) . ".m4s.tmp";
+            $this->mixedTmpFile = fopen($this->mixedTmpFilePath, 'wb');
+        }
+    }
+
+    /**
      * 刷新混合切片缓冲区
      */
     protected function flushMixedBuffer()
     {
-        if (empty($this->mixedBuffer)) {
+        if (!$this->mixedTmpFile) {
             return;
         }
+
+        fclose($this->mixedTmpFile);
+        $this->mixedTmpFile = null;
+
+        $segmentDuration = 0;
+        if ($this->mixedSegmentFirstVideoDts >= 0 && $this->mixedSegmentLastVideoDts >= 0) {
+            $segmentDuration = $this->mixedSegmentLastVideoDts - $this->mixedSegmentFirstVideoDts;
+        }
+
         $this->mixedBufferIndex++;
-        $segmentData = implode('', $this->mixedBuffer);
         $segmentDir = $this->_config['segmentDir'];
-        $filename = rtrim($segmentDir, '/') . "/segment_{$this->mixedBufferIndex}.m4s";
-        file_put_contents($filename, $segmentData);
-        $this->mixedBuffer = [];
+        $finalPath = rtrim($segmentDir, '/') . "/segment_{$this->mixedBufferIndex}.m4s";
+        @unlink($finalPath);
+        rename($this->mixedTmpFilePath, $finalPath);
+
+        $this->mixedSegmentDurations[$this->mixedBufferIndex] = $segmentDuration;
+        $this->mixedSegmentFirstVideoDts = -1;
+        $this->mixedSegmentLastVideoDts = -1;
+
+        $this->openMixedTmpFile();
+        $this->updateMixedM3u8();
+    }
+
+    /**
+     * 打开音频切片临时文件
+     */
+    protected function openAudioTmpFile()
+    {
+        if ($this->audioTmpFile) {
+            fclose($this->audioTmpFile);
+        }
+        $segmentDir = $this->_config['segmentDir'] ?? '';
+        if (!empty($segmentDir)) {
+            $this->audioTmpFilePath = rtrim($segmentDir, '/') . "/audio_" . ($this->audioBufferIndex + 1) . ".m4s.tmp";
+            $this->audioTmpFile = fopen($this->audioTmpFilePath, 'wb');
+        }
     }
 
     /**
@@ -358,15 +556,45 @@ class LiveFlvToMp4
      */
     protected function flushAudioBuffer()
     {
-        if (empty($this->audioBuffer)) {
+        if (!$this->audioTmpFile) {
             return;
         }
+
+        fclose($this->audioTmpFile);
+        $this->audioTmpFile = null;
+
+        $segmentDuration = 0;
+        if ($this->audioSegmentFirstDts >= 0 && $this->audioSegmentLastDts >= 0) {
+            $segmentDuration = $this->audioSegmentLastDts - $this->audioSegmentFirstDts;
+        }
+
         $this->audioBufferIndex++;
-        $segmentData = implode('', $this->audioBuffer);
         $segmentDir = $this->_config['segmentDir'];
-        $filename = rtrim($segmentDir, '/') . "/audio_{$this->audioBufferIndex}.m4s";
-        file_put_contents($filename, $segmentData);
-        $this->audioBuffer = [];
+        $finalPath = rtrim($segmentDir, '/') . "/audio_{$this->audioBufferIndex}.m4s";
+        @unlink($finalPath);
+        rename($this->audioTmpFilePath, $finalPath);
+
+        $this->audioSegmentDurations[$this->audioBufferIndex] = $segmentDuration;
+        $this->audioSegmentFirstDts = -1;
+        $this->audioSegmentLastDts = -1;
+
+        $this->openAudioTmpFile();
+        $this->updateAudioM3u8();
+    }
+
+    /**
+     * 打开视频切片临时文件
+     */
+    protected function openVideoTmpFile()
+    {
+        if ($this->videoTmpFile) {
+            fclose($this->videoTmpFile);
+        }
+        $segmentDir = $this->_config['segmentDir'] ?? '';
+        if (!empty($segmentDir)) {
+            $this->videoTmpFilePath = rtrim($segmentDir, '/') . "/video_" . ($this->videoBufferIndex + 1) . ".m4s.tmp";
+            $this->videoTmpFile = fopen($this->videoTmpFilePath, 'wb');
+        }
     }
 
     /**
@@ -374,15 +602,30 @@ class LiveFlvToMp4
      */
     protected function flushVideoBuffer()
     {
-        if (empty($this->videoBuffer)) {
+        if (!$this->videoTmpFile) {
             return;
         }
+
+        fclose($this->videoTmpFile);
+        $this->videoTmpFile = null;
+
+        $segmentDuration = 0;
+        if ($this->videoSegmentFirstDts >= 0 && $this->videoSegmentLastDts >= 0) {
+            $segmentDuration = $this->videoSegmentLastDts - $this->videoSegmentFirstDts;
+        }
+
         $this->videoBufferIndex++;
-        $segmentData = implode('', $this->videoBuffer);
         $segmentDir = $this->_config['segmentDir'];
-        $filename = rtrim($segmentDir, '/') . "/video_{$this->videoBufferIndex}.m4s";
-        file_put_contents($filename, $segmentData);
-        $this->videoBuffer = [];
+        $finalPath = rtrim($segmentDir, '/') . "/video_{$this->videoBufferIndex}.m4s";
+        @unlink($finalPath);
+        rename($this->videoTmpFilePath, $finalPath);
+
+        $this->videoSegmentDurations[$this->videoBufferIndex] = $segmentDuration;
+        $this->videoSegmentFirstDts = -1;
+        $this->videoSegmentLastDts = -1;
+
+        $this->openVideoTmpFile();
+        $this->updateVideoM3u8();
     }
 
     /**
@@ -728,18 +971,55 @@ class LiveFlvToMp4
             fclose($this->currentSegmentFile);
             $this->currentSegmentFile = null;
         }
+
+        if ($this->mixedTmpFile) {
+            fclose($this->mixedTmpFile);
+            $this->mixedTmpFile = null;
+            @unlink($this->mixedTmpFilePath);
+            $this->mixedTmpFilePath = '';
+        }
+
+        if ($this->audioTmpFile) {
+            fclose($this->audioTmpFile);
+            $this->audioTmpFile = null;
+            @unlink($this->audioTmpFilePath);
+            $this->audioTmpFilePath = '';
+        }
+
+        if ($this->videoTmpFile) {
+            fclose($this->videoTmpFile);
+            $this->videoTmpFile = null;
+            @unlink($this->videoTmpFilePath);
+            $this->videoTmpFilePath = '';
+        }
+
         $this->segmentIndex = 0;
         $this->currentSegmentSize = 0;
         $this->totalReceivedBytes = 0;
         $this->flvBuffer = '';
         $this->audioSegmentIndex = 0;
         $this->videoSegmentIndex = 0;
-        $this->mixedBuffer = [];
         $this->mixedBufferIndex = 0;
-        $this->audioBuffer = [];
         $this->audioBufferIndex = 0;
-        $this->videoBuffer = [];
         $this->videoBufferIndex = 0;
+
+        $this->mixedSegmentStartDts = -1;
+        $this->mixedReadyToCut = false;
+        $this->mixedSegmentFirstVideoDts = -1;
+        $this->mixedSegmentLastVideoDts = -1;
+        $this->mixedSegmentDurations = [];
+
+        $this->audioSegmentStartDts = -1;
+        $this->audioReadyToCut = false;
+        $this->audioSegmentFirstDts = -1;
+        $this->audioSegmentLastDts = -1;
+        $this->audioSegmentDurations = [];
+
+        $this->videoSegmentStartDts = -1;
+        $this->videoReadyToCut = false;
+        $this->videoSegmentFirstDts = -1;
+        $this->videoSegmentLastDts = -1;
+        $this->videoSegmentDurations = [];
     }
 
     /**
@@ -1035,6 +1315,312 @@ class LiveFlvToMp4
     }
 
     /**
+     * 生成混合模式的fMP4 m3u8索引文件
+     * @param string $segmentDir 输出目录
+     * @param int $segmentCount 切片数量
+     * @param float $targetDuration 目标切片时长（秒）
+     * @param int $totalDuration 总时长（毫秒）
+     * @return string m3u8文件路径
+     */
+    protected function generateMixedM3u8(string $segmentDir, int $segmentCount, float $targetDuration = 3.0, int $totalDuration = 0): string
+    {
+        $lines = [];
+        $lines[] = "#EXTM3U";
+        $lines[] = "#EXT-X-VERSION:7";
+        $lines[] = "#EXT-X-TARGETDURATION:" . (int)ceil($targetDuration);
+        $lines[] = "#EXT-X-MEDIA-SEQUENCE:1";
+        $lines[] = "#EXT-X-INDEPENDENT-SEGMENTS";
+        $lines[] = "#EXT-X-MAP:URI=\"init.mp4\"";
+
+        $segmentDuration = $targetDuration;
+        if ($totalDuration > 0 && $totalDuration < 3600000) {
+            $segmentDuration = $totalDuration / 1000 / max(1, $segmentCount);
+        }
+
+        for ($i = 1; $i <= $segmentCount; $i++) {
+            $duration = ($i == $segmentCount && $totalDuration > 0 && $totalDuration < 3600000) ?
+                ($totalDuration / 1000) - ($segmentDuration * ($segmentCount - 1)) :
+                $segmentDuration;
+            $duration = max(0.001, round($duration, 3));
+            $lines[] = "#EXTINF:" . $duration . ",";
+            $lines[] = "segment_{$i}.m4s";
+        }
+
+        $lines[] = "#EXT-X-ENDLIST";
+
+        $m3u8Content = implode("\n", $lines) . "\n";
+        $m3u8Path = rtrim($segmentDir, '/') . "/index.m3u8";
+        file_put_contents($m3u8Path, $m3u8Content);
+
+        return $m3u8Path;
+    }
+
+    /**
+     * 生成分离模式的音频m3u8索引文件
+     * @param string $segmentDir 输出目录
+     * @param int $segmentCount 切片数量
+     * @param float $targetDuration 目标切片时长（秒）
+     * @param int $totalDuration 总时长（毫秒）
+     * @return string m3u8文件路径
+     */
+    protected function generateAudioM3u8(string $segmentDir, int $segmentCount, float $targetDuration = 3.0, int $totalDuration = 0): string
+    {
+        $lines = [];
+        $lines[] = "#EXTM3U";
+        $lines[] = "#EXT-X-VERSION:7";
+        $lines[] = "#EXT-X-TARGETDURATION:" . (int)ceil($targetDuration);
+        $lines[] = "#EXT-X-MEDIA-SEQUENCE:1";
+        $lines[] = "#EXT-X-INDEPENDENT-SEGMENTS";
+        $lines[] = "#EXT-X-MAP:URI=\"audio_init.mp4\"";
+
+        $segmentDuration = $targetDuration;
+        if ($totalDuration > 0 && $totalDuration < 3600000) {
+            $segmentDuration = $totalDuration / 1000 / max(1, $segmentCount);
+        }
+
+        for ($i = 1; $i <= $segmentCount; $i++) {
+            $duration = ($i == $segmentCount && $totalDuration > 0 && $totalDuration < 3600000) ?
+                ($totalDuration / 1000) - ($segmentDuration * ($segmentCount - 1)) :
+                $segmentDuration;
+            $duration = max(0.001, round($duration, 3));
+            $lines[] = "#EXTINF:" . $duration . ",";
+            $lines[] = "audio_{$i}.m4s";
+        }
+
+        $lines[] = "#EXT-X-ENDLIST";
+
+        $m3u8Content = implode("\n", $lines) . "\n";
+        $m3u8Path = rtrim($segmentDir, '/') . "/audio.m3u8";
+        file_put_contents($m3u8Path, $m3u8Content);
+
+        return $m3u8Path;
+    }
+
+    /**
+     * 生成分离模式的视频m3u8索引文件
+     * @param string $segmentDir 输出目录
+     * @param int $segmentCount 切片数量
+     * @param float $targetDuration 目标切片时长（秒）
+     * @param int $totalDuration 总时长（毫秒）
+     * @return string m3u8文件路径
+     */
+    protected function generateVideoM3u8(string $segmentDir, int $segmentCount, float $targetDuration = 3.0, int $totalDuration = 0): string
+    {
+        $lines = [];
+        $lines[] = "#EXTM3U";
+        $lines[] = "#EXT-X-VERSION:7";
+        $lines[] = "#EXT-X-TARGETDURATION:" . (int)ceil($targetDuration);
+        $lines[] = "#EXT-X-MEDIA-SEQUENCE:1";
+        $lines[] = "#EXT-X-INDEPENDENT-SEGMENTS";
+        $lines[] = "#EXT-X-MAP:URI=\"video_init.mp4\"";
+
+        $segmentDuration = $targetDuration;
+        if ($totalDuration > 0 && $totalDuration < 3600000) {
+            $segmentDuration = $totalDuration / 1000 / max(1, $segmentCount);
+        }
+
+        for ($i = 1; $i <= $segmentCount; $i++) {
+            $duration = ($i == $segmentCount && $totalDuration > 0 && $totalDuration < 3600000) ?
+                ($totalDuration / 1000) - ($segmentDuration * ($segmentCount - 1)) :
+                $segmentDuration;
+            $duration = max(0.001, round($duration, 3));
+            $lines[] = "#EXTINF:" . $duration . ",";
+            $lines[] = "video_{$i}.m4s";
+        }
+
+        $lines[] = "#EXT-X-ENDLIST";
+
+        $m3u8Content = implode("\n", $lines) . "\n";
+        $m3u8Path = rtrim($segmentDir, '/') . "/video.m3u8";
+        file_put_contents($m3u8Path, $m3u8Content);
+
+        return $m3u8Path;
+    }
+
+    /**
+     * 生成分离模式的主m3u8索引文件（引用音视频子索引）
+     * @param string $segmentDir 输出目录
+     * @param bool $hasAudio 是否有音频
+     * @param bool $hasVideo 是否有视频
+     * @return string m3u8文件路径
+     */
+    protected function generateMasterM3u8(string $segmentDir, bool $hasAudio, bool $hasVideo): string
+    {
+        $lines = [];
+        $lines[] = "#EXTM3U";
+        $lines[] = "#EXT-X-VERSION:7";
+
+        $audioId = 1;
+
+        if ($hasAudio) {
+            $lines[] = "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"Audio\",DEFAULT=YES,AUTOSELECT=YES,URI=\"audio.m3u8\"";
+            $audioId = "audio";
+        }
+
+        if ($hasVideo) {
+            $lines[] = "#EXT-X-STREAM-INF:BANDWIDTH=2000000,AUDIO=\"$audioId\"";
+            $lines[] = "video.m3u8";
+        } elseif ($hasAudio) {
+            $lines[] = "#EXT-X-STREAM-INF:BANDWIDTH=128000,AUDIO=\"$audioId\"";
+            $lines[] = "audio.m3u8";
+        }
+
+        $m3u8Content = implode("\n", $lines) . "\n";
+        $m3u8Path = rtrim($segmentDir, '/') . "/index.m3u8";
+        file_put_contents($m3u8Path, $m3u8Content);
+
+        return $m3u8Path;
+    }
+
+    /**
+     * 计算直播切片的实际时长（秒）
+     * @param int $segmentCount 当前切片数量
+     * @return float 平均切片时长
+     */
+    protected function calculateLiveSegmentDuration(int $segmentCount): float
+    {
+        if ($segmentCount == 0) {
+            return 3.0;
+        }
+
+        if ($this->_firstPacketTimestamp >= 0 && $this->_lastPacketTimestamp >= 0) {
+            $totalDurationMs = $this->_lastPacketTimestamp - $this->_firstPacketTimestamp;
+            if ($totalDurationMs > 0) {
+                return $totalDurationMs / 1000 / $segmentCount;
+            }
+        }
+
+        return 3.0;
+    }
+
+    /**
+     * 更新混合模式的m3u8索引文件（直播模式）
+     * @return void
+     */
+    protected function updateMixedM3u8()
+    {
+        $segmentDir = $this->_config['segmentDir'] ?? '';
+        if (empty($segmentDir)) {
+            return;
+        }
+
+        $segmentCount = $this->mixedBufferIndex;
+        if ($segmentCount == 0) {
+            return;
+        }
+
+        $maxDuration = 0;
+
+        $lines = [];
+        $lines[] = "#EXTM3U";
+        $lines[] = "#EXT-X-VERSION:7";
+        $lines[] = "#EXT-X-MEDIA-SEQUENCE:1";
+        $lines[] = "#EXT-X-PLAYLIST-TYPE:EVENT";
+        $lines[] = "#EXT-X-INDEPENDENT-SEGMENTS";
+        $lines[] = "#EXT-X-MAP:URI=\"init.mp4\"";
+
+        for ($i = 1; $i <= $segmentCount; $i++) {
+            $durationMs = isset($this->mixedSegmentDurations[$i]) ? $this->mixedSegmentDurations[$i] : 4000;
+            $duration = max(0.001, round($durationMs / 1000, 3));
+            $maxDuration = max($maxDuration, $duration);
+            $lines[] = "#EXTINF:" . $duration . ",";
+            $lines[] = "segment_{$i}.m4s";
+        }
+
+        array_splice($lines, 2, 0, "#EXT-X-TARGETDURATION:" . (int)ceil($maxDuration));
+
+        $m3u8Content = implode("\n", $lines) . "\n";
+        $m3u8Path = rtrim($segmentDir, '/') . "/index.m3u8";
+        file_put_contents($m3u8Path, $m3u8Content);
+    }
+
+    /**
+     * 更新分离模式的音频m3u8索引文件（直播模式）
+     * @return void
+     */
+    protected function updateAudioM3u8()
+    {
+        $segmentDir = $this->_config['segmentDir'] ?? '';
+        if (empty($segmentDir)) {
+            return;
+        }
+
+        $segmentCount = $this->audioBufferIndex;
+        if ($segmentCount == 0) {
+            return;
+        }
+
+        $maxDuration = 0;
+
+        $lines = [];
+        $lines[] = "#EXTM3U";
+        $lines[] = "#EXT-X-VERSION:7";
+        $lines[] = "#EXT-X-MEDIA-SEQUENCE:1";
+        $lines[] = "#EXT-X-PLAYLIST-TYPE:EVENT";
+        $lines[] = "#EXT-X-INDEPENDENT-SEGMENTS";
+        $lines[] = "#EXT-X-MAP:URI=\"audio_init.mp4\"";
+
+        for ($i = 1; $i <= $segmentCount; $i++) {
+            $durationMs = isset($this->audioSegmentDurations[$i]) ? $this->audioSegmentDurations[$i] : 4000;
+            $duration = max(0.001, round($durationMs / 1000, 3));
+            $maxDuration = max($maxDuration, $duration);
+            $lines[] = "#EXTINF:" . $duration . ",";
+            $lines[] = "audio_{$i}.m4s";
+        }
+
+        array_splice($lines, 2, 0, "#EXT-X-TARGETDURATION:" . (int)ceil($maxDuration));
+
+        $m3u8Content = implode("\n", $lines) . "\n";
+        $m3u8Path = rtrim($segmentDir, '/') . "/audio.m3u8";
+        file_put_contents($m3u8Path, $m3u8Content);
+
+        $this->generateMasterM3u8($segmentDir, $this->hasAudio, $this->hasVideo);
+    }
+
+    /**
+     * 更新分离模式的视频m3u8索引文件（直播模式）
+     * @return void
+     */
+    protected function updateVideoM3u8()
+    {
+        $segmentDir = $this->_config['segmentDir'] ?? '';
+        if (empty($segmentDir)) {
+            return;
+        }
+
+        $segmentCount = $this->videoBufferIndex;
+        if ($segmentCount == 0) {
+            return;
+        }
+
+        $maxDuration = 0;
+
+        $lines = [];
+        $lines[] = "#EXTM3U";
+        $lines[] = "#EXT-X-VERSION:7";
+        $lines[] = "#EXT-X-MEDIA-SEQUENCE:1";
+        $lines[] = "#EXT-X-PLAYLIST-TYPE:EVENT";
+        $lines[] = "#EXT-X-INDEPENDENT-SEGMENTS";
+        $lines[] = "#EXT-X-MAP:URI=\"video_init.mp4\"";
+
+        for ($i = 1; $i <= $segmentCount; $i++) {
+            $durationMs = isset($this->videoSegmentDurations[$i]) ? $this->videoSegmentDurations[$i] : 4000;
+            $duration = max(0.001, round($durationMs / 1000, 3));
+            $maxDuration = max($maxDuration, $duration);
+            $lines[] = "#EXTINF:" . $duration . ",";
+            $lines[] = "video_{$i}.m4s";
+        }
+
+        array_splice($lines, 2, 0, "#EXT-X-TARGETDURATION:" . (int)ceil($maxDuration));
+
+        $m3u8Content = implode("\n", $lines) . "\n";
+        $m3u8Path = rtrim($segmentDir, '/') . "/video.m3u8";
+        file_put_contents($m3u8Path, $m3u8Content);
+
+        $this->generateMasterM3u8($segmentDir, $this->hasAudio, $this->hasVideo);
+    }
+
+    /**
      * 完成直播转码，刷新缓冲区并更新元数据
      * 在关闭播放器时调用此方法，处理剩余数据并更新元信息，不再合并分片为大文件
      * @param string|null $outputFile 输出文件路径（已废弃，不再使用）
@@ -1043,38 +1629,66 @@ class LiveFlvToMp4
      */
     public function finalize($outputFile = null, $deleteSegments = true)
     {
-        // 处理剩余的 FLV 数据缓冲区
         if (strlen($this->flvBuffer) > 0) {
             $this->processBuffer(0);
         }
 
-        // 刷新缓冲区，确保所有数据都写入文件
         $this->flushMediaBuffer();
 
-        // 确保当前分片文件已关闭
         if ($this->currentSegmentFile !== null) {
             fclose($this->currentSegmentFile);
             $this->currentSegmentFile = null;
         }
 
-        // 检查是否有分片目录配置
         if (!isset($this->_config['segmentDir']) || empty($this->_config['segmentDir'])) {
             return false;
         }
 
         $segmentDir = $this->_config['segmentDir'];
 
-        // 如果目录不存在，返回失败
         if (!is_dir($segmentDir)) {
             return false;
         }
 
-        // 分离模式：直接生成 meta.json，不处理混合切片相关逻辑
         if ($this->separateTracks) {
             try {
-                $this->generateMetaJson($segmentDir, 0);
+                $this->flushAudioTmpToFinal();
+                $this->flushVideoTmpToFinal();
+
+                $duration = 0;
+
+                $audioPattern = rtrim($segmentDir, '/') . "/audio_*.m4s";
+                $videoPattern = rtrim($segmentDir, '/') . "/video_*.m4s";
+                $audioFiles = glob($audioPattern);
+                $videoFiles = glob($videoPattern);
+
+                $segmentFiles = array_merge($audioFiles, $videoFiles);
+                if (!empty($segmentFiles)) {
+                    $duration = $this->calculateDurationFromSegments($segmentFiles);
+                }
+
+                $this->generateMetaJson($segmentDir, $duration);
+
+                if ($this->hasAudio) {
+                    $this->updateAudioM3u8();
+                    $audioM3u8Path = rtrim($segmentDir, '/') . "/audio.m3u8";
+                    $audioM3u8Content = file_get_contents($audioM3u8Path);
+                    $audioM3u8Content .= "#EXT-X-ENDLIST\n";
+                    file_put_contents($audioM3u8Path, $audioM3u8Content);
+                }
+
+                if ($this->hasVideo) {
+                    $this->updateVideoM3u8();
+                    $videoM3u8Path = rtrim($segmentDir, '/') . "/video.m3u8";
+                    $videoM3u8Content = file_get_contents($videoM3u8Path);
+                    $videoM3u8Content .= "#EXT-X-ENDLIST\n";
+                    file_put_contents($videoM3u8Path, $videoM3u8Content);
+                }
+
+                $this->generateMasterM3u8($segmentDir, $this->hasAudio, $this->hasVideo);
+
                 if ($this->onMediaInfo) {
-                    call_user_func($this->onMediaInfo, null, ['segmentDir' => $segmentDir]);
+                    call_user_func($this->onMediaInfo, null, ['segmentDir' => $segmentDir, 'duration' => $duration]);
                 }
                 return true;
             } catch (\Exception $e) {
@@ -1082,18 +1696,17 @@ class LiveFlvToMp4
             }
         }
 
+        $this->flushMixedTmpToFinal();
+
         $initFile = rtrim($segmentDir, '/') . "/init.mp4";
 
-        // 检查初始化文件是否存在
         if (!file_exists($initFile)) {
             return false;
         }
 
-        // 获取所有分片文件并排序
         $segmentPattern = rtrim($segmentDir, '/') . "/segment_*.m4s";
         $segmentFiles = glob($segmentPattern);
 
-        // 按分片索引排序
         usort($segmentFiles, function($a, $b) {
             $pattern = '/segment_(\d+)\.m4s/';
             preg_match($pattern, $a, $matchesA);
@@ -1104,13 +1717,10 @@ class LiveFlvToMp4
         });
 
         try {
-            // 读取初始化文件（用于获取原始元数据）
             $initData = file_get_contents($initFile);
 
-            // 计算实际时长
             $duration = $this->calculateDurationFromSegments($segmentFiles);
 
-            // 如果计算出了有效时长，更新 metas 中的 duration 并重新生成 init.mp4
             if ($duration > 0 && count($this->metas) > 0) {
                 foreach ($this->metas as &$meta) {
                     if (isset($meta['timescale'])) {
@@ -1121,10 +1731,14 @@ class LiveFlvToMp4
                 file_put_contents($initFile, $initData);
             }
 
-            // 生成 meta.json
             $this->generateMetaJson($segmentDir, $duration);
 
-            // 触发回调
+            $this->updateMixedM3u8();
+            $mixedM3u8Path = rtrim($segmentDir, '/') . "/index.m3u8";
+            $mixedM3u8Content = file_get_contents($mixedM3u8Path);
+            $mixedM3u8Content .= "#EXT-X-ENDLIST\n";
+            file_put_contents($mixedM3u8Path, $mixedM3u8Content);
+
             if ($this->onMediaInfo) {
                 call_user_func($this->onMediaInfo, null, ['segmentDir' => $segmentDir, 'duration' => $duration]);
             }
@@ -1133,6 +1747,105 @@ class LiveFlvToMp4
         } catch (\Exception $e) {
             return false;
         }
+    }
+
+    /**
+     * 将混合切片临时文件转换为正式文件
+     */
+    protected function flushMixedTmpToFinal()
+    {
+        if (!$this->mixedTmpFile) {
+            return;
+        }
+
+        fclose($this->mixedTmpFile);
+        $this->mixedTmpFile = null;
+
+        $segmentDuration = 0;
+        if ($this->mixedSegmentFirstVideoDts >= 0 && $this->mixedSegmentLastVideoDts >= 0) {
+            $segmentDuration = $this->mixedSegmentLastVideoDts - $this->mixedSegmentFirstVideoDts;
+        }
+
+        if (filesize($this->mixedTmpFilePath) > 0) {
+            $this->mixedBufferIndex++;
+            $segmentDir = $this->_config['segmentDir'];
+            $finalPath = rtrim($segmentDir, '/') . "/segment_{$this->mixedBufferIndex}.m4s";
+            @unlink($finalPath);
+            rename($this->mixedTmpFilePath, $finalPath);
+            $this->mixedSegmentDurations[$this->mixedBufferIndex] = $segmentDuration;
+        } else {
+            @unlink($this->mixedTmpFilePath);
+        }
+
+        $this->mixedTmpFilePath = '';
+        $this->mixedSegmentFirstVideoDts = -1;
+        $this->mixedSegmentLastVideoDts = -1;
+    }
+
+    /**
+     * 将音频切片临时文件转换为正式文件
+     */
+    protected function flushAudioTmpToFinal()
+    {
+        if (!$this->audioTmpFile) {
+            return;
+        }
+
+        fclose($this->audioTmpFile);
+        $this->audioTmpFile = null;
+
+        $segmentDuration = 0;
+        if ($this->audioSegmentFirstDts >= 0 && $this->audioSegmentLastDts >= 0) {
+            $segmentDuration = $this->audioSegmentLastDts - $this->audioSegmentFirstDts;
+        }
+
+        if (filesize($this->audioTmpFilePath) > 0) {
+            $this->audioBufferIndex++;
+            $segmentDir = $this->_config['segmentDir'];
+            $finalPath = rtrim($segmentDir, '/') . "/audio_{$this->audioBufferIndex}.m4s";
+            @unlink($finalPath);
+            rename($this->audioTmpFilePath, $finalPath);
+            $this->audioSegmentDurations[$this->audioBufferIndex] = $segmentDuration;
+        } else {
+            @unlink($this->audioTmpFilePath);
+        }
+
+        $this->audioTmpFilePath = '';
+        $this->audioSegmentFirstDts = -1;
+        $this->audioSegmentLastDts = -1;
+    }
+
+    /**
+     * 将视频切片临时文件转换为正式文件
+     */
+    protected function flushVideoTmpToFinal()
+    {
+        if (!$this->videoTmpFile) {
+            return;
+        }
+
+        fclose($this->videoTmpFile);
+        $this->videoTmpFile = null;
+
+        $segmentDuration = 0;
+        if ($this->videoSegmentFirstDts >= 0 && $this->videoSegmentLastDts >= 0) {
+            $segmentDuration = $this->videoSegmentLastDts - $this->videoSegmentFirstDts;
+        }
+
+        if (filesize($this->videoTmpFilePath) > 0) {
+            $this->videoBufferIndex++;
+            $segmentDir = $this->_config['segmentDir'];
+            $finalPath = rtrim($segmentDir, '/') . "/video_{$this->videoBufferIndex}.m4s";
+            @unlink($finalPath);
+            rename($this->videoTmpFilePath, $finalPath);
+            $this->videoSegmentDurations[$this->videoBufferIndex] = $segmentDuration;
+        } else {
+            @unlink($this->videoTmpFilePath);
+        }
+
+        $this->videoTmpFilePath = '';
+        $this->videoSegmentFirstDts = -1;
+        $this->videoSegmentLastDts = -1;
     }
 
     /**
@@ -1152,9 +1865,8 @@ class LiveFlvToMp4
             'separateTracks' => $this->separateTracks,
             'audioSegmentIndex' => $this->audioBufferIndex,
             'videoSegmentIndex' => $this->videoBufferIndex,
-            'mixedBufferSize' => $this->mixedBufferSize,
-            'audioBufferSize' => $this->audioBufferSize,
-            'videoBufferSize' => $this->videoBufferSize
+            'targetSegmentDuration' => $this->targetSegmentDuration,
+            'maxSegmentDuration' => $this->maxSegmentDuration
         ];
     }
 
