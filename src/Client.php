@@ -104,10 +104,12 @@ class Client
         }
 
         // 写入剩余的缓冲区内容
+        $finalSegmentCount = $index;
         if (!empty($buffer)) {
             $segmentData = implode("", $buffer);
             file_put_contents("$outputDir/segment_$index.m4s", $segmentData);
             echo "\n已写入剩余切片: $outputDir/segment_$index.m4s (大小: " . strlen($segmentData) . " bytes)\n";
+            $finalSegmentCount = $index;
         }
 
         if ($initSegment && !empty($segments)) {
@@ -120,6 +122,11 @@ class Client
             $fullBinary = $initSegment . implode('', $segments);
             $mp4Name = date("Y_m_d_H_i_s") . "_" . uniqid() . '.mp4';
             file_put_contents("$outputDir/$mp4Name", $fullBinary);
+
+            // 生成 m3u8 索引文件
+            $m3u8Path = self::generateMixedM3u8($outputDir, $finalSegmentCount, 3.0, $actualDuration);
+            echo "\n已写入 m3u8 索引文件: $m3u8Path\n";
+
             return "$outputDir/$mp4Name";
         } else {
             return "";
@@ -290,6 +297,41 @@ class Client
             echo "\n已写入剩余视频切片: $filename (大小: " . strlen($segmentData) . " bytes, 包含 " . count($videoBuffer) . " 个包)\n";
         }
 
+        // 获取媒体元数据中的总时长
+        $totalDuration = 0;
+        $hasAudio = !empty($outputFiles['audioInit']);
+        $hasVideo = !empty($outputFiles['videoInit']);
+
+        // 从meta.json中读取时长信息
+        if (file_exists($outputFiles['meta'])) {
+            $metaContent = file_get_contents($outputFiles['meta']);
+            $meta = json_decode($metaContent, true);
+            if (isset($meta['duration'])) {
+                $totalDuration = (int)$meta['duration'];
+            }
+        }
+
+        // 生成音视频子m3u8索引文件
+        $audioSegmentCount = count($outputFiles['audioSegments']);
+        $videoSegmentCount = count($outputFiles['videoSegments']);
+
+        if ($hasAudio) {
+            $audioM3u8 = self::generateAudioM3u8($outputDir, $audioSegmentCount, 3.0, $totalDuration);
+            $outputFiles['audioM3u8'] = $audioM3u8;
+            echo "\n已写入音频 m3u8 索引文件: $audioM3u8\n";
+        }
+
+        if ($hasVideo) {
+            $videoM3u8 = self::generateVideoM3u8($outputDir, $videoSegmentCount, 3.0, $totalDuration);
+            $outputFiles['videoM3u8'] = $videoM3u8;
+            echo "\n已写入视频 m3u8 索引文件: $videoM3u8\n";
+        }
+
+        // 生成主m3u8索引文件（引用音视频子索引）
+        $masterM3u8 = self::generateMasterM3u8($outputDir, $hasAudio, $hasVideo);
+        $outputFiles['masterM3u8'] = $masterM3u8;
+        echo "\n已写入主 m3u8 索引文件: $masterM3u8\n";
+
         return $outputFiles;
     }
 
@@ -301,6 +343,156 @@ class Client
     protected static function isFlvFile(string $filename)
     {
         return strtolower(pathinfo($filename, PATHINFO_EXTENSION)) === 'flv';
+    }
+
+    /**
+     * 生成混合模式的fMP4 m3u8索引文件
+     * @param string $outputDir 输出目录
+     * @param int $segmentCount 切片数量
+     * @param float $targetDuration 目标切片时长（秒）
+     * @param int $totalDuration 总时长（毫秒）
+     * @return string m3u8文件路径
+     */
+    protected static function generateMixedM3u8(string $outputDir, int $segmentCount, float $targetDuration = 3.0, int $totalDuration = 0): string
+    {
+        $lines = [];
+        $lines[] = "#EXTM3U";
+        $lines[] = "#EXT-X-VERSION:7";
+        $lines[] = "#EXT-X-TARGETDURATION:" . (int)ceil($targetDuration);
+        $lines[] = "#EXT-X-MEDIA-SEQUENCE:1";
+        $lines[] = "#EXT-X-INDEPENDENT-SEGMENTS";
+        $lines[] = "#EXT-X-MAP:URI=\"init.mp4\"";
+
+        $segmentDuration = $totalDuration > 0 ? $totalDuration / 1000 / max(1, $segmentCount) : $targetDuration;
+
+        for ($i = 1; $i <= $segmentCount; $i++) {
+            $duration = ($i == $segmentCount && $totalDuration > 0) ? 
+                ($totalDuration / 1000) - ($segmentDuration * ($segmentCount - 1)) : 
+                $segmentDuration;
+            $duration = max(0.001, round($duration, 3));
+            $lines[] = "#EXTINF:" . $duration . ",";
+            $lines[] = "segment_{$i}.m4s";
+        }
+
+        $lines[] = "#EXT-X-ENDLIST";
+
+        $m3u8Content = implode("\n", $lines) . "\n";
+        $m3u8Path = "$outputDir/index.m3u8";
+        file_put_contents($m3u8Path, $m3u8Content);
+
+        return $m3u8Path;
+    }
+
+    /**
+     * 生成分离模式的音频m3u8索引文件
+     * @param string $outputDir 输出目录
+     * @param int $segmentCount 切片数量
+     * @param float $targetDuration 目标切片时长（秒）
+     * @param int $totalDuration 总时长（毫秒）
+     * @return string m3u8文件路径
+     */
+    protected static function generateAudioM3u8(string $outputDir, int $segmentCount, float $targetDuration = 3.0, int $totalDuration = 0): string
+    {
+        $lines = [];
+        $lines[] = "#EXTM3U";
+        $lines[] = "#EXT-X-VERSION:7";
+        $lines[] = "#EXT-X-TARGETDURATION:" . (int)ceil($targetDuration);
+        $lines[] = "#EXT-X-MEDIA-SEQUENCE:1";
+        $lines[] = "#EXT-X-INDEPENDENT-SEGMENTS";
+        $lines[] = "#EXT-X-MAP:URI=\"audio_init.mp4\"";
+
+        $segmentDuration = $totalDuration > 0 ? $totalDuration / 1000 / max(1, $segmentCount) : $targetDuration;
+
+        for ($i = 1; $i <= $segmentCount; $i++) {
+            $duration = ($i == $segmentCount && $totalDuration > 0) ? 
+                ($totalDuration / 1000) - ($segmentDuration * ($segmentCount - 1)) : 
+                $segmentDuration;
+            $duration = max(0.001, round($duration, 3));
+            $lines[] = "#EXTINF:" . $duration . ",";
+            $lines[] = "audio_{$i}.m4s";
+        }
+
+        $lines[] = "#EXT-X-ENDLIST";
+
+        $m3u8Content = implode("\n", $lines) . "\n";
+        $m3u8Path = "$outputDir/audio.m3u8";
+        file_put_contents($m3u8Path, $m3u8Content);
+
+        return $m3u8Path;
+    }
+
+    /**
+     * 生成分离模式的视频m3u8索引文件
+     * @param string $outputDir 输出目录
+     * @param int $segmentCount 切片数量
+     * @param float $targetDuration 目标切片时长（秒）
+     * @param int $totalDuration 总时长（毫秒）
+     * @return string m3u8文件路径
+     */
+    protected static function generateVideoM3u8(string $outputDir, int $segmentCount, float $targetDuration = 3.0, int $totalDuration = 0): string
+    {
+        $lines = [];
+        $lines[] = "#EXTM3U";
+        $lines[] = "#EXT-X-VERSION:7";
+        $lines[] = "#EXT-X-TARGETDURATION:" . (int)ceil($targetDuration);
+        $lines[] = "#EXT-X-MEDIA-SEQUENCE:1";
+        $lines[] = "#EXT-X-INDEPENDENT-SEGMENTS";
+        $lines[] = "#EXT-X-MAP:URI=\"video_init.mp4\"";
+
+        $segmentDuration = $totalDuration > 0 ? $totalDuration / 1000 / max(1, $segmentCount) : $targetDuration;
+
+        for ($i = 1; $i <= $segmentCount; $i++) {
+            $duration = ($i == $segmentCount && $totalDuration > 0) ? 
+                ($totalDuration / 1000) - ($segmentDuration * ($segmentCount - 1)) : 
+                $segmentDuration;
+            $duration = max(0.001, round($duration, 3));
+            $lines[] = "#EXTINF:" . $duration . ",";
+            $lines[] = "video_{$i}.m4s";
+        }
+
+        $lines[] = "#EXT-X-ENDLIST";
+
+        $m3u8Content = implode("\n", $lines) . "\n";
+        $m3u8Path = "$outputDir/video.m3u8";
+        file_put_contents($m3u8Path, $m3u8Content);
+
+        return $m3u8Path;
+    }
+
+    /**
+     * 生成分离模式的主m3u8索引文件（引用音视频子索引）
+     * @param string $outputDir 输出目录
+     * @param bool $hasAudio 是否有音频
+     * @param bool $hasVideo 是否有视频
+     * @return string m3u8文件路径
+     */
+    protected static function generateMasterM3u8(string $outputDir, bool $hasAudio, bool $hasVideo): string
+    {
+        $lines = [];
+        $lines[] = "#EXTM3U";
+        $lines[] = "#EXT-X-VERSION:7";
+
+        $audioId = 1;
+        $videoId = 1;
+
+        if ($hasAudio) {
+            $lines[] = "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"Audio\",DEFAULT=YES,AUTOSELECT=YES,URI=\"audio.m3u8\"";
+            $audioId = "audio";
+        }
+
+        if ($hasVideo) {
+            $lines[] = "#EXT-X-STREAM-INF:BANDWIDTH=2000000,AUDIO=\"$audioId\"";
+            $lines[] = "video.m3u8";
+        } elseif ($hasAudio) {
+            $lines[] = "#EXT-X-STREAM-INF:BANDWIDTH=128000,AUDIO=\"$audioId\"";
+            $lines[] = "audio.m3u8";
+        }
+
+        $m3u8Content = implode("\n", $lines) . "\n";
+        $m3u8Path = "$outputDir/index.m3u8";
+        file_put_contents($m3u8Path, $m3u8Content);
+
+        return $m3u8Path;
     }
 
     /**
