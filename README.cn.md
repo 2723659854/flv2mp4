@@ -10,17 +10,18 @@
 
 ## 🎯 核心功能
 
-| 功能         | 方向               | 说明                                                                 |
-|--------------|--------------------|----------------------------------------------------------------------|
-| 转码封装     | FLV → MP4 / FMP4   | 生成标准 MP4 或分离的 fMP4 切片（适用于 MSE）                         |
-| 切片分发     | FLV → HLS          | 生成 M3U8 + TS 切片，兼容 hls.js、VLC 等播放器                       |
-| 逆向还原     | HLS → FLV          | 将 HLS 切片合并还原为单个 FLV 文件                                   |
-| 格式互转     | MP4 → FLV          | 将 MP4 文件转码为 FLV 封装格式                                       |
-| 直播网关     | FLV 网关           | 高性能多级转发，支持高并发连接                                        |
-| 文件服务     | HTTP 文件网关      | 轻量级静态文件服务器，支持目录浏览                                    |
-| 推流客户端   | FLV / MP4 → RTMP   | 将静态文件以伪直播方式推流至 RTMP 服务器（HTTP-FLV / WS-FLV 同样支持） |
-| 拉流客户端   | HTTP-FLV / WS-FLV / RTMP → FLV | 从直播流拉取并保存为本地 FLV 文件                                     |
-| 转播客户端   | 多协议输入 → 多协议输出 | 拉取直播流后同时转发至多个目标地址                                   |
+| 功能         | 方向                             | 说明                                              |
+|--------------|--------------------------------|-------------------------------------------------|
+| 转码封装     | FLV → MP4 / FMP4               | 生成标准 MP4 或分离的 fMP4 切片（适用于 MSE）                  |
+| 切片分发     | FLV → HLS                      | 生成 M3U8 + TS 切片，兼容 hls.js、VLC 等播放器              |
+| 逆向还原     | HLS → FLV                      | 将 HLS 切片合并还原为单个 FLV 文件                          |
+| 格式互转     | MP4 → FLV                      | 将 MP4 文件转码为 FLV 封装格式                            |
+| 格式互转     | FMP4 → FLV                     | 将 FMP4切片合并为 FLV 格式                            |
+| 直播网关     | FLV 网关                         | 高性能多级转发，支持高并发连接                                 |
+| 文件服务     | HTTP 文件网关                      | 轻量级静态文件服务器，支持目录浏览                               |
+| 推流客户端   | FLV / MP4 → RTMP               | 将静态文件以伪直播方式推流至 RTMP 服务器（HTTP-FLV / WS-FLV 同样支持） |
+| 拉流客户端   | HTTP-FLV / WS-FLV / RTMP → FLV | 从直播流拉取并保存为本地 FLV 文件                             |
+| 转播客户端   | 多协议输入 → 多协议输出                  | 拉取直播流后同时转发至多个目标地址                               |
 
 ## 环境依赖
 
@@ -70,6 +71,12 @@ $result = \Xiaosongshu\Flv2mp4\Client::runMp42Flv(__DIR__ . '/test.mp4', __DIR__
 
 // 6. FLV → MP4
 $result = \Xiaosongshu\Flv2mp4\Client::runFlv2Mp4($mp4File, __DIR__ . '/output.mp4');
+
+// 7. separate audio/video fMP4 segments → FLV
+$result = \Xiaosongshu\Flv2mp4\Client::runFmp42Flv(__DIR__."/output_separate/index.m3u8", __DIR__ . "/004.flv");
+
+// 8 . mixed audio/video fMP4 segments  → FLV
+$result = \Xiaosongshu\Flv2mp4\Client::runFmp42Flv(__DIR__."/output_merge/index.m3u8", __DIR__ . "/004.flv");
 ```
 
 ## 🌐 高级功能
@@ -290,12 +297,12 @@ php forward.php http://127.0.0.1:8501/a/b.flv \
 
 ## 🧪 测试与播放
 
-| 输出格式       | 推荐播放器          | 参考文件            |
-|----------------|---------------------|---------------------|
-| 普通 MP4       | HTML5 `<video>`     | `index.html`        |
-| fMP4 切片      | MSE 播放器          | `play_merge.html`   |
-| HLS (TS)       | hls.js / Safari     | `play.html`         |
-| 合并 FLV       | flv.js              | `flv.html`          |
+| 输出格式       | 推荐播放器          | 参考文件                         |
+|----------------|---------------------|------------------------------|
+| 普通 MP4       | HTML5 `<video>`     | `index.html`                 |
+| fMP4 切片      | MSE 播放器          | `play_merge.html`,`mse.html` |
+| HLS (TS)       | hls.js / Safari     | `play.html`                  |
+| 合并 FLV       | flv.js              | `flv.html`                   |
 
 ## 🎯 应用场景
 

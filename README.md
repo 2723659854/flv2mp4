@@ -10,17 +10,18 @@ Supports bidirectional conversion between FLV and FMP4 / MP4 / HLS, live stream 
 
 ## 🎯 Core Features
 
-| Feature                     | Direction                          | Description                                                                 |
-|-----------------------------|------------------------------------|-----------------------------------------------------------------------------|
-| Transcoding / Muxing        | FLV → MP4 / FMP4                   | Generate standard MP4 or separate fMP4 segments (suitable for MSE)          |
-| Segment Distribution        | FLV → HLS                          | Generate M3U8 + TS segments, compatible with hls.js, VLC, etc.              |
-| Reverse Restoration         | HLS → FLV                          | Merge HLS segments back into a single FLV file                              |
-| Format Conversion           | MP4 → FLV                          | Transcode an MP4 file into FLV container format                             |
-| Live Gateway                | FLV Gateway                        | High-performance multi-level forwarding, supporting high concurrency         |
-| File Server                 | HTTP File Gateway                  | Lightweight static file server with directory listing support               |
-| Push Client                 | FLV / MP4 → RTMP                   | Push static files as pseudo-live streams to an RTMP server (HTTP-FLV / WS-FLV also supported) |
-| Pull Client                 | HTTP-FLV / WS-FLV / RTMP → FLV     | Pull a live stream and save it as a local FLV file                          |
-| Relay Client                | Multi-protocol input → Multi-protocol output | Pull a live stream and forward it to multiple target addresses simultaneously |
+| Feature                     | Direction                                    | Description                                                                                   |
+|-----------------------------|----------------------------------------------|-----------------------------------------------------------------------------------------------|
+| Transcoding / Muxing        | FLV → MP4 / FMP4                             | Generate standard MP4 or separate fMP4 segments (suitable for MSE)                            |
+| Segment Distribution        | FLV → HLS                                    | Generate M3U8 + TS segments, compatible with hls.js, VLC, etc.                                |
+| Reverse Restoration         | HLS → FLV                                    | Merge HLS segments back into a single FLV file                                                |
+| Format Conversion           | MP4 → FLV                                    | Transcode an MP4 file into FLV container format                                               |
+| Format Conversion           | FMP4 → FLV                                   | Transcode an FMP4 file into FLV container format                                              |
+| Live Gateway                | FLV Gateway                                  | High-performance multi-level forwarding, supporting high concurrency                          |
+| File Server                 | HTTP File Gateway                            | Lightweight static file server with directory listing support                                 |
+| Push Client                 | FLV / MP4 → RTMP                             | Push static files as pseudo-live streams to an RTMP server (HTTP-FLV / WS-FLV also supported) |
+| Pull Client                 | HTTP-FLV / WS-FLV / RTMP → FLV               | Pull a live stream and save it as a local FLV file                                            |
+| Relay Client                | Multi-protocol input → Multi-protocol output | Pull a live stream and forward it to multiple target addresses simultaneously                 |
 
 ## Prerequisites
 
@@ -70,6 +71,12 @@ $result = \Xiaosongshu\Flv2mp4\Client::runMp42Flv(__DIR__ . '/test.mp4', __DIR__
 
 // 6. FLV → MP4
 $result = \Xiaosongshu\Flv2mp4\Client::runFlv2Mp4($mp4File, __DIR__ . '/output.mp4');
+
+// 7. separate audio/video fMP4 segments → FLV
+$result = \Xiaosongshu\Flv2mp4\Client::runFmp42Flv(__DIR__."/output_separate/index.m3u8", __DIR__ . "/004.flv");
+
+// 8 . mixed audio/video fMP4 segments  → FLV
+$result = \Xiaosongshu\Flv2mp4\Client::runFmp42Flv(__DIR__."/output_merge/index.m3u8", __DIR__ . "/004.flv");
 ```
 
 ## 🌐 Advanced Features
@@ -293,7 +300,7 @@ Supports RTMP, HTTP-FLV, and WS-FLV for both input and output. See [xiaosongshu/
 | Output Format   | Recommended Player        | Reference File      |
 |-----------------|---------------------------|---------------------|
 | Regular MP4     | HTML5 `<video>`           | `index.html`        |
-| fMP4 Segments   | MSE player                | `play_merge.html`   |
+| fMP4 Segments   | MSE player                | `play_merge.html`,`mse.html`   |
 | HLS (TS)        | hls.js / Safari           | `play.html`         |
 | Merged FLV      | flv.js                    | `flv.html`          |
 
