@@ -2,8 +2,10 @@
 
 namespace Xiaosongshu\Flv2mp4\Manage;
 
-use Xiaosongshu\Flv2mp4\MP4\MP4;
-
+/**
+ * @purpose 将fmp4转码合并为flv文件核心文件
+ * @author yanglong
+ */
 class Fmp42Flv
 {
     public $_config;
@@ -148,7 +150,9 @@ class Fmp42Flv
         $mdhd = $this->findBox([$mdia], 'mdhd');
         $timescale = 90000;
         if ($mdhd) {
-            $timescale = unpack('N', substr($mdhd['data'], 12, 4))[1];
+            $version = ord($mdhd['data'][0]);
+            $timescaleOffset = $version == 0 ? 12 : 20;
+            $timescale = unpack('N', substr($mdhd['data'], $timescaleOffset, 4))[1];
         }
 
         $minf = $this->findBox([$mdia], 'minf');
@@ -322,15 +326,13 @@ class Fmp42Flv
                 return;
             }
 
-            if ($tag == 0x03) {
-                $skipBytes = 3;
-                if ($length > $skipBytes) {
-                    $this->parseEsds(substr($data, $pos + $skipBytes, $length - $skipBytes), false);
-                }
-            } elseif ($tag == 0x04) {
-                $skipBytes = 13;
-                if ($length > $skipBytes) {
-                    $this->parseEsds(substr($data, $pos + $skipBytes, $length - $skipBytes), false);
+            if ($tag == 0x03 || $tag == 0x04) {
+                $innerData = substr($data, $pos, $length);
+                if (strlen($innerData) > 0) {
+                    $this->parseEsds($innerData, false);
+                    if (!empty($this->audioSpecificConfig)) {
+                        return;
+                    }
                 }
             }
 

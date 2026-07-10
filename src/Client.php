@@ -754,7 +754,15 @@ class Client
         };
 
         try {
-            if (!empty($parsed['audioInitFile'])) {
+            if (!empty($parsed['initFile'])) {
+                $initPath = $m3u8Dir . DIRECTORY_SEPARATOR . $parsed['initFile'];
+                if (file_exists($initPath)) {
+                    $initData = file_get_contents($initPath);
+                    $fmp42flv->setInitSegment($initData);
+                }
+            }
+
+            if (!empty($parsed['audioInitFile']) && !$fmp42flv->hasAudio) {
                 $audioInitPath = $m3u8Dir . DIRECTORY_SEPARATOR . $parsed['audioInitFile'];
                 if (file_exists($audioInitPath)) {
                     $audioInitData = file_get_contents($audioInitPath);
@@ -762,19 +770,11 @@ class Client
                 }
             }
 
-            if (!empty($parsed['videoInitFile'])) {
+            if (!empty($parsed['videoInitFile']) && !$fmp42flv->hasVideo) {
                 $videoInitPath = $m3u8Dir . DIRECTORY_SEPARATOR . $parsed['videoInitFile'];
                 if (file_exists($videoInitPath)) {
                     $videoInitData = file_get_contents($videoInitPath);
                     $fmp42flv->setInitSegment($videoInitData);
-                }
-            }
-
-            if (!empty($parsed['initFile'])) {
-                $initPath = $m3u8Dir . DIRECTORY_SEPARATOR . $parsed['initFile'];
-                if (file_exists($initPath)) {
-                    $initData = file_get_contents($initPath);
-                    $fmp42flv->setInitSegment($initData);
                 }
             }
 
