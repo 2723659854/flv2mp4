@@ -7,6 +7,7 @@ use Xiaosongshu\Flv2mp4\Manage\Flv2Hls;
 use Xiaosongshu\Flv2mp4\Manage\Hls2Flv;
 use Xiaosongshu\Flv2mp4\Manage\Mp4ToFlv;
 use Xiaosongshu\Flv2mp4\Manage\FlvToMp4;
+use Xiaosongshu\Flv2mp4\Manage\Fmp42Flv;
 
 /**
  * @purpose flv文件转码mp4客户端
@@ -715,6 +716,177 @@ class Client
         }catch (\Exception $e){
             throw new \RuntimeException("error:" . $e->getMessage());
         }
+    }
+
+    /**
+     * 将fMP4切片转码为FLV文件
+     * @param string $m3u8File fMP4的m3u8索引文件路径（支持混合模式和分离模式）
+     * @param string $outputFile 输出的FLV文件路径
+     * @return string|void 返回转码成功的FLV文件路径
+     */
+    public static function runFmp42Flv(string $m3u8File, string $outputFile)
+    {
+        if (!file_exists($m3u8File)) {
+            throw new \RuntimeException("m3u8 file not exist!");
+        }
+
+        $m3u8Dir = dirname($m3u8File);
+        $parsed = self::parseFmp4M3U8($m3u8File);
+
+        $outputDir = dirname($outputFile);
+        if (!is_dir($outputDir)) {
+            mkdir($outputDir, 0777, true);
+        }
+
+        $fmp42flv = new Fmp42Flv();
+        $flvData = '';
+
+        $fmp42flv->onFlvData = function ($data) use (&$flvData) {
+            $flvData .= $data;
+        };
+
+        $fmp42flv->onMediaInfo = function ($info) {
+            echo "\n[回调] 媒体信息:\n";
+            echo "  宽度: " . ($info['width'] ?? 'N/A') . "\n";
+            echo "  高度: " . ($info['height'] ?? 'N/A') . "\n";
+            echo "  音频: " . ($info['hasAudio'] ? '是' : '否') . "\n";
+            echo "  视频: " . ($info['hasVideo'] ? '是' : '否') . "\n";
+        };
+
+        try {
+            if (!empty($parsed['audioInitFile'])) {
+                $audioInitPath = $m3u8Dir . DIRECTORY_SEPARATOR . $parsed['audioInitFile'];
+                if (file_exists($audioInitPath)) {
+                    $audioInitData = file_get_contents($audioInitPath);
+                    $fmp42flv->setInitSegment($audioInitData);
+                }
+            }
+
+            if (!empty($parsed['videoInitFile'])) {
+                $videoInitPath = $m3u8Dir . DIRECTORY_SEPARATOR . $parsed['videoInitFile'];
+                if (file_exists($videoInitPath)) {
+                    $videoInitData = file_get_contents($videoInitPath);
+                    $fmp42flv->setInitSegment($videoInitData);
+                }
+            }
+
+            if (!empty($parsed['initFile'])) {
+                $initPath = $m3u8Dir . DIRECTORY_SEPARATOR . $parsed['initFile'];
+                if (file_exists($initPath)) {
+                    $initData = file_get_contents($initPath);
+                    $fmp42flv->setInitSegment($initData);
+                }
+            }
+
+            $fmp42flv->flushInit();
+
+            $allSegments = [];
+            if (!empty($parsed['audioSegments'])) {
+                foreach ($parsed['audioSegments'] as $seg) {
+                    $allSegments[] = ['type' => 'audio', 'file' => $seg];
+                }
+            }
+            if (!empty($parsed['videoSegments'])) {
+                foreach ($parsed['videoSegments'] as $seg) {
+                    $allSegments[] = ['type' => 'video', 'file' => $seg];
+                }
+            }
+            if (!empty($parsed['segmentFiles'])) {
+                foreach ($parsed['segmentFiles'] as $seg) {
+                    $allSegments[] = ['type' => 'mixed', 'file' => $seg];
+                }
+            }
+
+            foreach ($allSegments as $segmentInfo) {
+                $segmentPath = $m3u8Dir . DIRECTORY_SEPARATOR . $segmentInfo['file'];
+                if (!file_exists($segmentPath)) {
+                    throw new \RuntimeException("segment file not exist: $segmentPath");
+                }
+                $segmentData = file_get_contents($segmentPath);
+                $fmp42flv->setMediaSegment($segmentData);
+            }
+
+            file_put_contents($outputFile, $flvData);
+            return $outputFile;
+        } catch (\Exception $e) {
+            throw new \RuntimeException("error:" . $e->getMessage());
+        }
+    }
+
+    /**
+     * 解析fMP4的m3u8索引文件，提取init.mp4和切片文件列表（支持混合模式和分离模式）
+     * @param string $m3u8File m3u8文件路径
+     * @return array ['initFile' => string, 'segmentFiles' => array, 'audioInitFile' => string, 'audioSegments' => array, 'videoInitFile' => string, 'videoSegments' => array]
+     */
+    protected static function parseFmp4M3U8(string $m3u8File): array
+    {
+        $content = file_get_contents($m3u8File);
+        $lines = explode("\n", $content);
+        
+        $m3u8Dir = dirname($m3u8File);
+        
+        $initFile = null;
+        $segmentFiles = [];
+        $audioInitFile = null;
+        $audioSegments = [];
+        $videoInitFile = null;
+        $videoSegments = [];
+
+        $audioM3u8File = null;
+        $videoM3u8File = null;
+
+        foreach ($lines as $line) {
+            $line = trim($line);
+            if (empty($line)) continue;
+
+            if (strpos($line, '#EXT-X-MAP:') === 0) {
+                preg_match('/URI="([^"]+)"/', $line, $matches);
+                if (isset($matches[1])) {
+                    $initFile = $matches[1];
+                }
+            } elseif (strpos($line, '#EXT-X-MEDIA:TYPE=AUDIO') === 0) {
+                preg_match('/URI="([^"]+)"/', $line, $matches);
+                if (isset($matches[1])) {
+                    $audioM3u8File = $matches[1];
+                }
+            } elseif (strpos($line, '#EXT-X-STREAM-INF:') === 0) {
+                continue;
+            } elseif (strpos($line, '#') !== 0) {
+                $ext = pathinfo($line, PATHINFO_EXTENSION);
+                if ($ext === 'm4s') {
+                    $segmentFiles[] = $line;
+                } elseif ($ext === 'm3u8') {
+                    $videoM3u8File = $line;
+                }
+            }
+        }
+
+        if ($audioM3u8File) {
+            $audioM3u8Path = $m3u8Dir . DIRECTORY_SEPARATOR . $audioM3u8File;
+            if (file_exists($audioM3u8Path)) {
+                $audioParsed = self::parseFmp4M3U8($audioM3u8Path);
+                $audioInitFile = $audioParsed['initFile'];
+                $audioSegments = $audioParsed['segmentFiles'];
+            }
+        }
+
+        if ($videoM3u8File) {
+            $videoM3u8Path = $m3u8Dir . DIRECTORY_SEPARATOR . $videoM3u8File;
+            if (file_exists($videoM3u8Path)) {
+                $videoParsed = self::parseFmp4M3U8($videoM3u8Path);
+                $videoInitFile = $videoParsed['initFile'];
+                $videoSegments = $videoParsed['segmentFiles'];
+            }
+        }
+
+        return [
+            'initFile' => $initFile,
+            'segmentFiles' => $segmentFiles,
+            'audioInitFile' => $audioInitFile,
+            'audioSegments' => $audioSegments,
+            'videoInitFile' => $videoInitFile,
+            'videoSegments' => $videoSegments
+        ];
     }
 
     /**
