@@ -88,6 +88,11 @@ class Fmp42Flv
         }
     }
 
+    public function collectMediaSegmentSamples($data)
+    {
+        return $this->parseMediaSegment($data);
+    }
+
     private function parseInitSegment($data)
     {
         $boxes = $this->parseBoxes($data, 0, strlen($data));
@@ -651,7 +656,7 @@ class Fmp42Flv
         $this->_pendingSamples = [];
     }
 
-    private function writeSample($sample)
+    public function writeSample($sample)
     {
         if ($sample['type'] === 'video') {
             $this->writeVideoSample($sample);

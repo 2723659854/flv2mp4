@@ -780,30 +780,50 @@ class Client
 
             $fmp42flv->flushInit();
 
-            $allSegments = [];
+            $allSamples = [];
+
             if (!empty($parsed['audioSegments'])) {
                 foreach ($parsed['audioSegments'] as $seg) {
-                    $allSegments[] = ['type' => 'audio', 'file' => $seg];
-                }
-            }
-            if (!empty($parsed['videoSegments'])) {
-                foreach ($parsed['videoSegments'] as $seg) {
-                    $allSegments[] = ['type' => 'video', 'file' => $seg];
-                }
-            }
-            if (!empty($parsed['segmentFiles'])) {
-                foreach ($parsed['segmentFiles'] as $seg) {
-                    $allSegments[] = ['type' => 'mixed', 'file' => $seg];
+                    $segmentPath = $m3u8Dir . DIRECTORY_SEPARATOR . $seg;
+                    if (!file_exists($segmentPath)) {
+                        throw new \RuntimeException("segment file not exist: $segmentPath");
+                    }
+                    $segmentData = file_get_contents($segmentPath);
+                    $samples = $fmp42flv->collectMediaSegmentSamples($segmentData);
+                    $allSamples = array_merge($allSamples, $samples);
                 }
             }
 
-            foreach ($allSegments as $segmentInfo) {
-                $segmentPath = $m3u8Dir . DIRECTORY_SEPARATOR . $segmentInfo['file'];
-                if (!file_exists($segmentPath)) {
-                    throw new \RuntimeException("segment file not exist: $segmentPath");
+            if (!empty($parsed['videoSegments'])) {
+                foreach ($parsed['videoSegments'] as $seg) {
+                    $segmentPath = $m3u8Dir . DIRECTORY_SEPARATOR . $seg;
+                    if (!file_exists($segmentPath)) {
+                        throw new \RuntimeException("segment file not exist: $segmentPath");
+                    }
+                    $segmentData = file_get_contents($segmentPath);
+                    $samples = $fmp42flv->collectMediaSegmentSamples($segmentData);
+                    $allSamples = array_merge($allSamples, $samples);
                 }
-                $segmentData = file_get_contents($segmentPath);
-                $fmp42flv->setMediaSegment($segmentData);
+            }
+
+            if (!empty($parsed['segmentFiles'])) {
+                foreach ($parsed['segmentFiles'] as $seg) {
+                    $segmentPath = $m3u8Dir . DIRECTORY_SEPARATOR . $seg;
+                    if (!file_exists($segmentPath)) {
+                        throw new \RuntimeException("segment file not exist: $segmentPath");
+                    }
+                    $segmentData = file_get_contents($segmentPath);
+                    $samples = $fmp42flv->collectMediaSegmentSamples($segmentData);
+                    $allSamples = array_merge($allSamples, $samples);
+                }
+            }
+
+            usort($allSamples, function ($a, $b) {
+                return $a['dts'] - $b['dts'];
+            });
+
+            foreach ($allSamples as $sample) {
+                $fmp42flv->writeSample($sample);
             }
 
             file_put_contents($outputFile, $flvData);
