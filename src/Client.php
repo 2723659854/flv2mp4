@@ -20,10 +20,11 @@ class Client
      * 静态flv转fMP4入口函数，音视频混合切片，并生成合并的mp4文件
      * @param string $inputFile 需要转换的flv文件
      * @param string $outputDir 存储mp4的目录
-     * @param int $segmentPackets 每个切片包含的包数量（默认30）
+     * @param int $targetSegmentDuration 目标切片时长（毫秒，默认4000）
+     * @param int $maxSegmentDuration 最大切片时长/安全阀（毫秒，默认8000）
      * @return string|void
      */
-    public static function runFlv2Fmp4Mixed(string $inputFile, string $outputDir, int $segmentPackets = 30)
+    public static function runFlv2Fmp4Mixed(string $inputFile, string $outputDir, int $targetSegmentDuration = 4000, int $maxSegmentDuration = 8000)
     {
         if (!file_exists($inputFile)) {
             throw new \RuntimeException("flv not exist!");
@@ -69,17 +70,77 @@ class Client
             }
         };
 
-        $flv2fmp4->onMediaSegment = function ($data) use (&$segments, &$segmentIndex, $outputDir, &$buffer, &$index, $segmentPackets) {
-            /** 将多个包合并成一个切片，防止生成过多的切片 */
+        $segmentIndex = 0;
+        $buffer = [];
+        $index = 1;
+        $segmentStartDts = -1;
+        $segmentFirstVideoDts = -1;
+        $segmentLastVideoDts = -1;
+        $readyToCut = false;
+        $allSegments = [];
+
+        $flv2fmp4->onMediaSegment = function ($data, $value) use (&$segments, &$segmentIndex, $outputDir, &$buffer, &$index, $targetSegmentDuration, $maxSegmentDuration, &$segmentStartDts, &$segmentFirstVideoDts, &$segmentLastVideoDts, &$readyToCut, &$allSegments) {
+            $info = $value['info'] ?? null;
+            $track = $value['track'] ?? '';
+            $isKeyframe = isset($value['isKeyframe']) ? $value['isKeyframe'] : false;
+
             $buffer[] = $data;
             $segments[] = $data;
 
-            if (count($buffer) >= $segmentPackets) {
+            $shouldFlush = false;
+
+            if ($info) {
+                $currentEndDts = $info->originalEndDts ?? $info->endDts ?? 0;
+
+                if ($segmentStartDts < 0) {
+                    $segmentStartDts = $info->originalBeginDts ?? $info->beginDts ?? 0;
+                }
+
+                if ($track == 'video') {
+                    if ($segmentFirstVideoDts < 0) {
+                        $segmentFirstVideoDts = $info->originalBeginDts ?? $info->beginDts ?? 0;
+                    }
+                    $segmentLastVideoDts = $info->originalEndDts ?? $info->endDts ?? 0;
+
+                    if ($readyToCut && $isKeyframe) {
+                        $shouldFlush = true;
+                        $readyToCut = false;
+                    } else {
+                        $duration = $currentEndDts - $segmentStartDts;
+                        if ($duration >= $maxSegmentDuration) {
+                            $shouldFlush = true;
+                            $readyToCut = false;
+                        } elseif ($duration >= $targetSegmentDuration) {
+                            $readyToCut = true;
+                        }
+                    }
+                } else {
+                    $duration = $currentEndDts - $segmentStartDts;
+                    if ($duration >= $maxSegmentDuration) {
+                        $readyToCut = true;
+                    } elseif ($duration >= $targetSegmentDuration) {
+                        $readyToCut = true;
+                    }
+                }
+            }
+
+            if ($shouldFlush && !empty($buffer)) {
                 $segmentData = implode("", $buffer);
+                $segmentDuration = 0;
+                if ($segmentFirstVideoDts >= 0 && $segmentLastVideoDts >= 0) {
+                    $segmentDuration = $segmentLastVideoDts - $segmentFirstVideoDts;
+                }
+
                 file_put_contents("$outputDir/segment_$index.m4s", $segmentData);
-                echo "已写入: $outputDir/segment_$index.m4s (大小: " . strlen($segmentData) . " bytes)\n";
+                echo "已写入: $outputDir/segment_$index.m4s (大小: " . strlen($segmentData) . " bytes, 时长: " . ($segmentDuration / 1000) . "s)\n";
+
+                $allSegments[] = ['path' => "$outputDir/segment_$index.m4s", 'duration' => $segmentDuration];
                 $buffer = [];
                 $index++;
+
+                $segmentStartDts = -1;
+                $segmentFirstVideoDts = -1;
+                $segmentLastVideoDts = -1;
             }
 
             $segmentIndex++;
@@ -107,8 +168,13 @@ class Client
         $finalSegmentCount = $index;
         if (!empty($buffer)) {
             $segmentData = implode("", $buffer);
+            $segmentDuration = 0;
+            if ($segmentFirstVideoDts >= 0 && $segmentLastVideoDts >= 0) {
+                $segmentDuration = $segmentLastVideoDts - $segmentFirstVideoDts;
+            }
             file_put_contents("$outputDir/segment_$index.m4s", $segmentData);
-            echo "\n已写入剩余切片: $outputDir/segment_$index.m4s (大小: " . strlen($segmentData) . " bytes)\n";
+            echo "\n已写入剩余切片: $outputDir/segment_$index.m4s (大小: " . strlen($segmentData) . " bytes, 时长: " . ($segmentDuration / 1000) . "s)\n";
+            $allSegments[] = ['path' => "$outputDir/segment_$index.m4s", 'duration' => $segmentDuration];
             $finalSegmentCount = $index;
         }
 
@@ -123,8 +189,8 @@ class Client
             $mp4Name = date("Y_m_d_H_i_s") . "_" . uniqid() . '.mp4';
             file_put_contents("$outputDir/$mp4Name", $fullBinary);
 
-            // 生成 m3u8 索引文件
-            $m3u8Path = self::generateMixedM3u8($outputDir, $finalSegmentCount, 3.0, $actualDuration);
+            // 生成 m3u8 索引文件（使用实际切片时长）
+            $m3u8Path = self::generateMixedM3u8WithDurations($outputDir, $allSegments, $actualDuration);
             echo "\n已写入 m3u8 索引文件: $m3u8Path\n";
 
             return "$outputDir/$mp4Name";
@@ -138,10 +204,11 @@ class Client
      * flv转fMP4生成分开的音视频切片（用于浏览器播放）
      * @param string $inputFile 需要转换的flv文件
      * @param string $outputDir 存储切片的目录
-     * @param int $segmentPackets 每个切片包含的包数量（默认30）
+     * @param int $targetSegmentDuration 目标切片时长（毫秒，默认4000）
+     * @param int $maxSegmentDuration 最大切片时长/安全阀（毫秒，默认8000）
      * @return array 返回生成的文件信息
      */
-    public static function runFlv2Fmp4Separate(string $inputFile, string $outputDir, int $segmentPackets = 30)
+    public static function runFlv2Fmp4Separate(string $inputFile, string $outputDir, int $targetSegmentDuration = 4000, int $maxSegmentDuration = 8000)
     {
         if (!file_exists($inputFile)) {
             throw new \RuntimeException("flv not exist!");
@@ -168,12 +235,23 @@ class Client
             'videoInit' => null,
             'audioSegments' => [],
             'videoSegments' => [],
+            'audioSegmentDurations' => [],
+            'videoSegmentDurations' => [],
             'meta' => null
         ];
 
         // 音频缓冲区和视频缓冲区
         $audioBuffer = [];
         $videoBuffer = [];
+
+        // 时间跟踪变量
+        $audioSegmentStartDts = -1;
+        $audioSegmentFirstDts = -1;
+        $audioSegmentLastDts = -1;
+        $videoSegmentStartDts = -1;
+        $videoSegmentFirstDts = -1;
+        $videoSegmentLastDts = -1;
+        $videoReadyToCut = false;
 
         // 音频初始化片段回调
         $flv2fmp4->onAudioInitSegment = function ($data, $meta) use ($outputDir, &$outputFiles) {
@@ -194,21 +272,51 @@ class Client
         };
 
         // 音频切片回调
-        $flv2fmp4->onAudioSegment = function ($data, $value) use ($outputDir, &$audioSegmentIndex, &$outputFiles, &$audioBuffer, $segmentPackets) {
+        $flv2fmp4->onAudioSegment = function ($data, $value) use ($outputDir, &$audioSegmentIndex, &$outputFiles, &$audioBuffer, $targetSegmentDuration, $maxSegmentDuration, &$audioSegmentStartDts, &$audioSegmentFirstDts, &$audioSegmentLastDts) {
             $audioSegmentIndex++;
+            $info = $value['info'] ?? null;
 
             // 将数据添加到缓冲区
             $audioBuffer[] = $data;
 
-            // 当缓冲区达到指定数量时，写入切片文件
-            if (count($audioBuffer) >= $segmentPackets) {
+            $shouldFlush = false;
+            if ($info) {
+                $currentEndDts = $info->originalEndDts ?? $info->endDts ?? 0;
+
+                if ($audioSegmentStartDts < 0) {
+                    $audioSegmentStartDts = $info->originalBeginDts ?? $info->beginDts ?? 0;
+                }
+
+                if ($audioSegmentFirstDts < 0) {
+                    $audioSegmentFirstDts = $info->originalBeginDts ?? $info->beginDts ?? 0;
+                }
+                $audioSegmentLastDts = $info->originalEndDts ?? $info->endDts ?? 0;
+
+                $duration = $currentEndDts - $audioSegmentStartDts;
+                if ($duration >= $targetSegmentDuration) {
+                    $shouldFlush = true;
+                }
+            }
+
+            // 当达到目标时长时，写入切片文件
+            if ($shouldFlush && !empty($audioBuffer)) {
                 $segmentData = implode("", $audioBuffer);
+                $segmentDuration = 0;
+                if ($audioSegmentFirstDts >= 0 && $audioSegmentLastDts >= 0) {
+                    $segmentDuration = $audioSegmentLastDts - $audioSegmentFirstDts;
+                }
+
                 $audioBufferIndex = count($outputFiles['audioSegments']) + 1;
                 $filename = "$outputDir/audio_$audioBufferIndex.m4s";
                 file_put_contents($filename, $segmentData);
                 $outputFiles['audioSegments'][] = $filename;
-                echo "\n已写入: $filename (大小: " . strlen($segmentData) . " bytes, 包含 " . $segmentPackets . " 个包)\n";
+                $outputFiles['audioSegmentDurations'][] = $segmentDuration;
+                echo "\n已写入: $filename (大小: " . strlen($segmentData) . " bytes, 时长: " . ($segmentDuration / 1000) . "s)\n";
+
                 $audioBuffer = [];
+                $audioSegmentStartDts = -1;
+                $audioSegmentFirstDts = -1;
+                $audioSegmentLastDts = -1;
             }
 
             echo "\n[回调] 音频段#$audioSegmentIndex\n";
@@ -216,21 +324,60 @@ class Client
         };
 
         // 视频切片回调
-        $flv2fmp4->onVideoSegment = function ($data, $value) use ($outputDir, &$videoSegmentIndex, &$outputFiles, &$videoBuffer, $segmentPackets) {
+        $flv2fmp4->onVideoSegment = function ($data, $value) use ($outputDir, &$videoSegmentIndex, &$outputFiles, &$videoBuffer, $targetSegmentDuration, $maxSegmentDuration, &$videoSegmentStartDts, &$videoSegmentFirstDts, &$videoSegmentLastDts, &$videoReadyToCut) {
             $videoSegmentIndex++;
+            $info = $value['info'] ?? null;
+            $isKeyframe = isset($value['isKeyframe']) ? $value['isKeyframe'] : false;
 
             // 将数据添加到缓冲区
             $videoBuffer[] = $data;
 
-            // 当缓冲区达到指定数量时，写入切片文件
-            if (count($videoBuffer) >= $segmentPackets) {
+            $shouldFlush = false;
+            if ($info) {
+                $currentEndDts = $info->originalEndDts ?? $info->endDts ?? 0;
+
+                if ($videoSegmentStartDts < 0) {
+                    $videoSegmentStartDts = $info->originalBeginDts ?? $info->beginDts ?? 0;
+                }
+
+                if ($videoSegmentFirstDts < 0) {
+                    $videoSegmentFirstDts = $info->originalBeginDts ?? $info->beginDts ?? 0;
+                }
+                $videoSegmentLastDts = $info->originalEndDts ?? $info->endDts ?? 0;
+
+                if ($videoReadyToCut && $isKeyframe) {
+                    $shouldFlush = true;
+                    $videoReadyToCut = false;
+                } else {
+                    $duration = $currentEndDts - $videoSegmentStartDts;
+                    if ($duration >= $maxSegmentDuration) {
+                        $shouldFlush = true;
+                        $videoReadyToCut = false;
+                    } elseif ($duration >= $targetSegmentDuration) {
+                        $videoReadyToCut = true;
+                    }
+                }
+            }
+
+            // 当达到目标时长且遇到关键帧时，写入切片文件
+            if ($shouldFlush && !empty($videoBuffer)) {
                 $segmentData = implode("", $videoBuffer);
+                $segmentDuration = 0;
+                if ($videoSegmentFirstDts >= 0 && $videoSegmentLastDts >= 0) {
+                    $segmentDuration = $videoSegmentLastDts - $videoSegmentFirstDts;
+                }
+
                 $videoBufferIndex = count($outputFiles['videoSegments']) + 1;
                 $filename = "$outputDir/video_$videoBufferIndex.m4s";
                 file_put_contents($filename, $segmentData);
                 $outputFiles['videoSegments'][] = $filename;
-                echo "\n已写入: $filename (大小: " . strlen($segmentData) . " bytes, 包含 " . $segmentPackets . " 个包)\n";
+                $outputFiles['videoSegmentDurations'][] = $segmentDuration;
+                echo "\n已写入: $filename (大小: " . strlen($segmentData) . " bytes, 时长: " . ($segmentDuration / 1000) . "s)\n";
+
                 $videoBuffer = [];
+                $videoSegmentStartDts = -1;
+                $videoSegmentFirstDts = -1;
+                $videoSegmentLastDts = -1;
             }
 
             echo "\n[回调] 视频段#$videoSegmentIndex\n";
@@ -280,21 +427,33 @@ class Client
         // 写入剩余的音频缓冲区内容
         if (!empty($audioBuffer)) {
             $segmentData = implode("", $audioBuffer);
+            $segmentDuration = 0;
+            if ($audioSegmentFirstDts >= 0 && $audioSegmentLastDts >= 0) {
+                $segmentDuration = $audioSegmentLastDts - $audioSegmentFirstDts;
+            }
+
             $audioBufferIndex = count($outputFiles['audioSegments']) + 1;
             $filename = "$outputDir/audio_$audioBufferIndex.m4s";
             file_put_contents($filename, $segmentData);
             $outputFiles['audioSegments'][] = $filename;
-            echo "\n已写入剩余音频切片: $filename (大小: " . strlen($segmentData) . " bytes, 包含 " . count($audioBuffer) . " 个包)\n";
+            $outputFiles['audioSegmentDurations'][] = $segmentDuration;
+            echo "\n已写入剩余音频切片: $filename (大小: " . strlen($segmentData) . " bytes, 时长: " . ($segmentDuration / 1000) . "s)\n";
         }
 
         // 写入剩余的视频缓冲区内容
         if (!empty($videoBuffer)) {
             $segmentData = implode("", $videoBuffer);
+            $segmentDuration = 0;
+            if ($videoSegmentFirstDts >= 0 && $videoSegmentLastDts >= 0) {
+                $segmentDuration = $videoSegmentLastDts - $videoSegmentFirstDts;
+            }
+
             $videoBufferIndex = count($outputFiles['videoSegments']) + 1;
             $filename = "$outputDir/video_$videoBufferIndex.m4s";
             file_put_contents($filename, $segmentData);
             $outputFiles['videoSegments'][] = $filename;
-            echo "\n已写入剩余视频切片: $filename (大小: " . strlen($segmentData) . " bytes, 包含 " . count($videoBuffer) . " 个包)\n";
+            $outputFiles['videoSegmentDurations'][] = $segmentDuration;
+            echo "\n已写入剩余视频切片: $filename (大小: " . strlen($segmentData) . " bytes, 时长: " . ($segmentDuration / 1000) . "s)\n";
         }
 
         // 获取媒体元数据中的总时长
@@ -311,18 +470,18 @@ class Client
             }
         }
 
-        // 生成音视频子m3u8索引文件
+        // 生成音视频子m3u8索引文件（使用实际切片时长）
         $audioSegmentCount = count($outputFiles['audioSegments']);
         $videoSegmentCount = count($outputFiles['videoSegments']);
 
         if ($hasAudio) {
-            $audioM3u8 = self::generateAudioM3u8($outputDir, $audioSegmentCount, 3.0, $totalDuration);
+            $audioM3u8 = self::generateAudioM3u8WithDurations($outputDir, $outputFiles['audioSegmentDurations'], $totalDuration);
             $outputFiles['audioM3u8'] = $audioM3u8;
             echo "\n已写入音频 m3u8 索引文件: $audioM3u8\n";
         }
 
         if ($hasVideo) {
-            $videoM3u8 = self::generateVideoM3u8($outputDir, $videoSegmentCount, 3.0, $totalDuration);
+            $videoM3u8 = self::generateVideoM3u8WithDurations($outputDir, $outputFiles['videoSegmentDurations'], $totalDuration);
             $outputFiles['videoM3u8'] = $videoM3u8;
             echo "\n已写入视频 m3u8 索引文件: $videoM3u8\n";
         }
@@ -366,8 +525,8 @@ class Client
         $segmentDuration = $totalDuration > 0 ? $totalDuration / 1000 / max(1, $segmentCount) : $targetDuration;
 
         for ($i = 1; $i <= $segmentCount; $i++) {
-            $duration = ($i == $segmentCount && $totalDuration > 0) ? 
-                ($totalDuration / 1000) - ($segmentDuration * ($segmentCount - 1)) : 
+            $duration = ($i == $segmentCount && $totalDuration > 0) ?
+                ($totalDuration / 1000) - ($segmentDuration * ($segmentCount - 1)) :
                 $segmentDuration;
             $duration = max(0.001, round($duration, 3));
             $lines[] = "#EXTINF:" . $duration . ",";
@@ -404,8 +563,8 @@ class Client
         $segmentDuration = $totalDuration > 0 ? $totalDuration / 1000 / max(1, $segmentCount) : $targetDuration;
 
         for ($i = 1; $i <= $segmentCount; $i++) {
-            $duration = ($i == $segmentCount && $totalDuration > 0) ? 
-                ($totalDuration / 1000) - ($segmentDuration * ($segmentCount - 1)) : 
+            $duration = ($i == $segmentCount && $totalDuration > 0) ?
+                ($totalDuration / 1000) - ($segmentDuration * ($segmentCount - 1)) :
                 $segmentDuration;
             $duration = max(0.001, round($duration, 3));
             $lines[] = "#EXTINF:" . $duration . ",";
@@ -442,8 +601,8 @@ class Client
         $segmentDuration = $totalDuration > 0 ? $totalDuration / 1000 / max(1, $segmentCount) : $targetDuration;
 
         for ($i = 1; $i <= $segmentCount; $i++) {
-            $duration = ($i == $segmentCount && $totalDuration > 0) ? 
-                ($totalDuration / 1000) - ($segmentDuration * ($segmentCount - 1)) : 
+            $duration = ($i == $segmentCount && $totalDuration > 0) ?
+                ($totalDuration / 1000) - ($segmentDuration * ($segmentCount - 1)) :
                 $segmentDuration;
             $duration = max(0.001, round($duration, 3));
             $lines[] = "#EXTINF:" . $duration . ",";
@@ -490,6 +649,108 @@ class Client
 
         $m3u8Content = implode("\n", $lines) . "\n";
         $m3u8Path = "$outputDir/index.m3u8";
+        file_put_contents($m3u8Path, $m3u8Content);
+
+        return $m3u8Path;
+    }
+
+    /**
+     * 生成混合模式的fMP4 m3u8索引文件（使用实际切片时长）
+     * @param string $outputDir 输出目录
+     * @param array $segments 切片数组（包含path和duration字段）
+     * @param int $totalDuration 总时长（毫秒）
+     * @return string m3u8文件路径
+     */
+    protected static function generateMixedM3u8WithDurations(string $outputDir, array $segments, int $totalDuration = 0): string
+    {
+        $lines = [];
+        $lines[] = "#EXTM3U";
+        $lines[] = "#EXT-X-VERSION:7";
+        $lines[] = "#EXT-X-MEDIA-SEQUENCE:1";
+        $lines[] = "#EXT-X-INDEPENDENT-SEGMENTS";
+        $lines[] = "#EXT-X-MAP:URI=\"init.mp4\"";
+
+        $maxDuration = 0;
+        foreach ($segments as $i => $segment) {
+            $duration = max(0.001, round($segment['duration'] / 1000, 3));
+            $maxDuration = max($maxDuration, $duration);
+            $lines[] = "#EXTINF:" . $duration . ",";
+            $lines[] = "segment_" . ($i + 1) . ".m4s";
+        }
+
+        $lines[] = "#EXT-X-TARGETDURATION:" . (int)ceil($maxDuration);
+        $lines[] = "#EXT-X-ENDLIST";
+
+        $m3u8Content = implode("\n", $lines) . "\n";
+        $m3u8Path = "$outputDir/index.m3u8";
+        file_put_contents($m3u8Path, $m3u8Content);
+
+        return $m3u8Path;
+    }
+
+    /**
+     * 生成分离模式的音频m3u8索引文件（使用实际切片时长）
+     * @param string $outputDir 输出目录
+     * @param array $durations 每个切片的时长数组（毫秒）
+     * @param int $totalDuration 总时长（毫秒）
+     * @return string m3u8文件路径
+     */
+    protected static function generateAudioM3u8WithDurations(string $outputDir, array $durations, int $totalDuration = 0): string
+    {
+        $lines = [];
+        $lines[] = "#EXTM3U";
+        $lines[] = "#EXT-X-VERSION:7";
+        $lines[] = "#EXT-X-MEDIA-SEQUENCE:1";
+        $lines[] = "#EXT-X-INDEPENDENT-SEGMENTS";
+        $lines[] = "#EXT-X-MAP:URI=\"audio_init.mp4\"";
+
+        $maxDuration = 0;
+        foreach ($durations as $i => $duration) {
+            $durationSec = max(0.001, round($duration / 1000, 3));
+            $maxDuration = max($maxDuration, $durationSec);
+            $lines[] = "#EXTINF:" . $durationSec . ",";
+            $lines[] = "audio_" . ($i + 1) . ".m4s";
+        }
+
+        $lines[] = "#EXT-X-TARGETDURATION:" . (int)ceil($maxDuration);
+        $lines[] = "#EXT-X-ENDLIST";
+
+        $m3u8Content = implode("\n", $lines) . "\n";
+        $m3u8Path = "$outputDir/audio.m3u8";
+        file_put_contents($m3u8Path, $m3u8Content);
+
+        return $m3u8Path;
+    }
+
+    /**
+     * 生成分离模式的视频m3u8索引文件（使用实际切片时长）
+     * @param string $outputDir 输出目录
+     * @param array $durations 每个切片的时长数组（毫秒）
+     * @param int $totalDuration 总时长（毫秒）
+     * @return string m3u8文件路径
+     */
+    protected static function generateVideoM3u8WithDurations(string $outputDir, array $durations, int $totalDuration = 0): string
+    {
+        $lines = [];
+        $lines[] = "#EXTM3U";
+        $lines[] = "#EXT-X-VERSION:7";
+        $lines[] = "#EXT-X-MEDIA-SEQUENCE:1";
+        $lines[] = "#EXT-X-INDEPENDENT-SEGMENTS";
+        $lines[] = "#EXT-X-MAP:URI=\"video_init.mp4\"";
+
+        $maxDuration = 0;
+        foreach ($durations as $i => $duration) {
+            $durationSec = max(0.001, round($duration / 1000, 3));
+            $maxDuration = max($maxDuration, $durationSec);
+            $lines[] = "#EXTINF:" . $durationSec . ",";
+            $lines[] = "video_" . ($i + 1) . ".m4s";
+        }
+
+        $lines[] = "#EXT-X-TARGETDURATION:" . (int)ceil($maxDuration);
+        $lines[] = "#EXT-X-ENDLIST";
+
+        $m3u8Content = implode("\n", $lines) . "\n";
+        $m3u8Path = "$outputDir/video.m3u8";
         file_put_contents($m3u8Path, $m3u8Content);
 
         return $m3u8Path;

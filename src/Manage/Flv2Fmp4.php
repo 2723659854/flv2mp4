@@ -124,7 +124,7 @@ class Flv2Fmp4
     {
         // 直接输出，不要缓存
         if ($this->onMediaSegment) {
-            call_user_func($this->onMediaSegment, $value['data']);
+            call_user_func($this->onMediaSegment, $value['data'], ['track' => $track, 'info' => $value['info'] ?? null, 'isKeyframe' => $value['isKeyframe'] ?? false]);
         }
 
         // 分开输出音视频切片
