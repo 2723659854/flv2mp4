@@ -480,7 +480,8 @@ class TagDemux
             $meta['channelCount'] = $misc['channelCount'];
             $meta['codec'] = $misc['codec'];
             $meta['config'] = $misc['config'];
-            $meta['refSampleDuration'] = (int)(1024 / $meta['audioSampleRate'] * $meta['timescale']);
+            $samplePerFrame = ($misc['originalAudioObjectType'] == 5 || $misc['originalAudioObjectType'] == 29) ? 2048 : 1024;
+            $meta['refSampleDuration'] = (int)($samplePerFrame / $meta['audioSampleRate'] * $meta['timescale']);
             //error_log($this->TAG . ' Parsed AudioSpecificConfig');
             if ($this->_isInitialMetadataDispatched()) {
                 if ($this->_dispatch && (count($this->_audioTrack['samples']) || count($this->_videoTrack['samples']))) {
@@ -549,30 +550,30 @@ class TagDemux
         }
         $extensionSamplingIndex = null;
         $audioExtensionObjectType = null;
-        if ($audioObjectType == 5) {
+        if ($audioObjectType == 5 || $audioObjectType == 29) {
             $byte2 = isset($data[2]) ? ord($data[2]) : 0;
             $extensionSamplingIndex = (($byte1 & 0x07) << 1) | ($byte2 >> 7);
             $audioExtensionObjectType = ($byte2 & 0x7C) >> 2;
         }
-        $configSize = 2;
-        if ($audioObjectType == 5) {
-            $configSize = 4;
+        $outputSampleRate = $samplingFrequence;
+        if ($audioObjectType == 5 || $audioObjectType == 29) {
+            $extensionSampleRate = $mpegSamplingRates[$extensionSamplingIndex] ?? 0;
+            if ($extensionSamplingIndex != $samplingIndex || $extensionSampleRate != $samplingFrequence) {
+                $outputSampleRate = $extensionSampleRate;
+            } else {
+                $outputSampleRate = $samplingFrequence * 2;
+            }
         }
-        $config = array_fill(0, $configSize, 0);
-        $config[0] = $audioObjectType << 3;
-        $config[0] |= ($samplingIndex & 0x0F) >> 1;
-        $config[1] = ($samplingIndex & 0x0F) << 7;
-        $config[1] |= ($channelConfig & 0x0F) << 3;
-        if ($audioObjectType == 5) {
-            $config[1] |= (($extensionSamplingIndex & 0x0F) >> 1);
-            $config[2] = ($extensionSamplingIndex & 0x01) << 7;
-            $config[2] |= (2 << 2);
-            $config[3] = 0;
+
+        $outputChannelCount = $channelConfig;
+        if ($audioObjectType == 29 && $channelConfig == 1) {
+            $outputChannelCount = 2;
         }
+
         return [
-            'config' => pack('C*', ...$config),
-            'samplingRate' => $samplingFrequence,
-            'channelCount' => $channelConfig,
+            'config' => $data,
+            'samplingRate' => $outputSampleRate,
+            'channelCount' => $outputChannelCount,
             'codec' => 'mp4a.40.' . $audioObjectType,
             'originalAudioObjectType' => $originalAudioObjectType
         ];
