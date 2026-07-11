@@ -5,13 +5,15 @@ namespace Xiaosongshu\Flv2mp4\Manage;
 /**
  * @purpose 将fmp4转码合并为flv文件核心文件
  * @author yanglong
+ * @note 仅兼容标准h264,标准aac,其他格式兼容太复杂了，暂时不处理了
  */
 class Fmp42Flv
 {
     public $_config;
     public $onFlvData = null;
     public $onMediaInfo = null;
-    public $error = null;
+    public $onError = null;
+    public $onDebug = null;
 
     public $hasVideo = false;
     public $hasAudio = false;
@@ -26,6 +28,7 @@ class Fmp42Flv
     public $audioSampleRate = 44100;
     public $audioChannels = 2;
     public $audioObjectType = 2;
+    public $audioFreqIndex = 4;
 
     public $videoWidth = 0;
     public $videoHeight = 0;
@@ -36,6 +39,26 @@ class Fmp42Flv
     public $audioTimescale = 90000;
 
     public $_pendingSamples = [];
+
+    // 音频采样率映射表
+    private $sampleRateTable = [
+        0 => 96000,
+        1 => 88200,
+        2 => 64000,
+        3 => 48000,
+        4 => 44100,
+        5 => 32000,
+        6 => 24000,
+        7 => 22050,
+        8 => 16000,
+        9 => 12000,
+        10 => 11025,
+        11 => 8000,
+        12 => 7350,
+        13 => 0,
+        14 => 0,
+        15 => 0
+    ];
 
     public function __construct($config = [])
     {
@@ -56,6 +79,7 @@ class Fmp42Flv
         $this->audioSampleRate = 44100;
         $this->audioChannels = 2;
         $this->audioObjectType = 2;
+        $this->audioFreqIndex = 4;
         $this->videoWidth = 0;
         $this->videoHeight = 0;
         $this->videoTrackId = 0;
@@ -63,6 +87,20 @@ class Fmp42Flv
         $this->videoTimescale = 90000;
         $this->audioTimescale = 90000;
         $this->_pendingSamples = [];
+    }
+
+    /** 是否开启调试模式 */
+    public bool $debug = false;
+
+    private function debugLog($message)
+    {
+        if ($this->debug) {
+            if ($this->onDebug) {
+                call_user_func($this->onDebug, $message);
+            } else {
+                error_log("[Fmp42Flv] " . $message);
+            }
+        }
     }
 
     public function setInitSegment($data)
@@ -73,6 +111,9 @@ class Fmp42Flv
     public function flushInit()
     {
         if (!$this->flvHeaderWritten) {
+            if ($this->hasAudio && empty($this->audioSpecificConfig)) {
+                $this->debugLog("WARNING: hasAudio=true but audioSpecificConfig is empty!");
+            }
             $this->writeFlvHeader();
             $this->flushPendingSamples();
         }
@@ -100,8 +141,8 @@ class Fmp42Flv
         $boxes = $this->parseBoxes($data, 0, strlen($data));
         $moov = $this->findBox($boxes, 'moov');
         if (!$moov) {
-            if ($this->error) {
-                call_user_func($this->error, new \Exception('未找到moov盒子'));
+            if ($this->onError) {
+                call_user_func($this->onError, new \Exception('未找到moov盒子'));
             }
             return;
         }
@@ -118,7 +159,8 @@ class Fmp42Flv
                 'hasAudio' => $this->hasAudio,
                 'hasVideo' => $this->hasVideo,
                 'audioSampleRate' => $this->audioSampleRate,
-                'audioChannels' => $this->audioChannels
+                'audioChannels' => $this->audioChannels,
+                'audioObjectType' => $this->audioObjectType
             ]);
         }
     }
@@ -134,6 +176,8 @@ class Fmp42Flv
         $hdlr = $this->findBox([$mdia], 'hdlr');
         if (!$hdlr) return;
         $handlerType = substr($hdlr['data'], 8, 4);
+
+        $this->debugLog("parseTrack: trackId=$trackId, handlerType=$handlerType");
 
         if ($handlerType === 'vide') {
             $dataLen = strlen($tkhd['data']);
@@ -172,12 +216,14 @@ class Fmp42Flv
                 $this->hasVideo = true;
                 $this->videoTrackId = $trackId;
                 $this->videoTimescale = $timescale;
+                $this->debugLog("Video track found: trackId=$trackId, timescale=$timescale");
                 $this->parseAvcCFromStsdEntry(substr($stsdData, $pos, $entrySize));
                 break;
             } elseif ($handlerType === 'soun' && $entryType === 'mp4a') {
                 $this->hasAudio = true;
                 $this->audioTrackId = $trackId;
                 $this->audioTimescale = $timescale;
+                $this->debugLog("Audio track found: trackId=$trackId, timescale=$timescale");
                 $this->parseEsdsFromStsdEntry(substr($stsdData, $pos, $entrySize));
                 break;
             }
@@ -291,26 +337,53 @@ class Fmp42Flv
     private function parseEsdsFromStsdEntry($data)
     {
         $pos = strpos($data, 'esds');
-        if ($pos === false || $pos < 4) return;
+        if ($pos === false || $pos < 4) {
+            $this->debugLog("esds box not found in stsd entry");
+            return;
+        }
+
         $boxSize = unpack('N', substr($data, $pos - 4, 4))[1];
-        $esdsData = substr($data, $pos + 4, $boxSize - 8);
-        $this->parseEsds($esdsData);
+        $esdsBoxData = substr($data, $pos - 4, $boxSize);
+
+        $this->debugLog(sprintf(
+            "ESDS box found: size=%d, hex=%s",
+            $boxSize,
+            bin2hex(substr($esdsBoxData, 0, min(64, strlen($esdsBoxData))))
+        ));
+
+        // ESDS FullBox 结构:
+        // size: 4 bytes
+        // type 'esds': 4 bytes
+        // version: 1 byte
+        // flags: 3 bytes
+        // 之后是 ES_Descriptor (tag 0x03)
+        // 所以跳过 12 字节
+
+        $descriptors = substr($esdsBoxData, 12);
+        $this->parseMP4Descriptors($descriptors);
     }
 
-    private function parseEsds($data, $hasFullBoxHeader = true)
+    /**
+     * 解析 MP4 描述符序列
+     */
+    private function parseMP4Descriptors($data)
     {
         $len = strlen($data);
-        if ($len < 2) return;
+        $this->debugLog(sprintf(
+            "parseMP4Descriptors: dataLen=%d, hex=%s",
+            $len,
+            bin2hex(substr($data, 0, min(32, $len)))
+        ));
 
-        $pos = $hasFullBoxHeader ? 4 : 0;
+        $pos = 0;
 
         while ($pos + 2 <= $len) {
             $tag = ord($data[$pos]);
             $pos++;
 
-            if ($pos >= $len) break;
-
+            // 读取可变长度
             $length = 0;
+            $lengthStart = $pos;
             while ($pos < $len) {
                 $byte = ord($data[$pos]);
                 $pos++;
@@ -318,59 +391,256 @@ class Fmp42Flv
                 if (($byte & 0x80) == 0) break;
             }
 
-            if ($pos + $length > $len) break;
+            $this->debugLog(sprintf(
+                "Descriptor: tag=0x%02X, length=%d, pos=%d, remaining=%d",
+                $tag, $length, $pos, $len - $pos
+            ));
 
-            if ($tag == 0x05) {
-                $this->audioSpecificConfig = substr($data, $pos, $length);
-                $this->parseAudioSpecificConfig($this->audioSpecificConfig);
-                return;
+            if ($pos + $length > $len) {
+                $this->debugLog(sprintf(
+                    "Descriptor tag=0x%02X length=%d exceeds boundary, pos=%d, total=%d",
+                    $tag, $length, $pos, $len
+                ));
+                break;
             }
 
-            if ($tag == 0x03 || $tag == 0x04) {
-                $innerData = substr($data, $pos, $length);
-                if (strlen($innerData) > 0) {
-                    $this->parseEsds($innerData, false);
-                    if (!empty($this->audioSpecificConfig)) {
-                        return;
-                    }
-                }
+            $payload = substr($data, $pos, $length);
+
+            switch ($tag) {
+                case 0x03: // ES_Descriptor
+                    $this->parseESDescriptorPayload($payload);
+                    break;
+
+                case 0x04: // DecoderConfigDescriptor
+                    $this->parseDecoderConfigDescriptorPayload($payload);
+                    break;
+
+                case 0x05: // DecoderSpecificInfo
+                    $this->audioSpecificConfig = $payload;
+                    $this->parseAudioSpecificConfig($this->audioSpecificConfig);
+                    $this->debugLog("AudioSpecificConfig found: " . bin2hex($this->audioSpecificConfig));
+                    return;
+
+                case 0x06: // SLConfigDescriptor
+                    // 通常不需要解析，直接跳过
+                    $this->debugLog("SLConfigDescriptor (skipped)");
+                    break;
+
+                default:
+                    $this->debugLog(sprintf("Unknown descriptor tag: 0x%02X", $tag));
+                    break;
             }
 
             $pos += $length;
+
+            // 如果已经找到 AudioSpecificConfig，退出
+            if (!empty($this->audioSpecificConfig)) {
+                return;
+            }
         }
     }
 
+    /**
+     * 解析 ES_Descriptor payload（不包含 tag 和 length）
+     */
+    private function parseESDescriptorPayload($data)
+    {
+        $len = strlen($data);
+        $this->debugLog(sprintf(
+            "ES_Descriptor payload: len=%d, hex=%s",
+            $len,
+            bin2hex(substr($data, 0, min(16, $len)))
+        ));
+
+        if ($len < 3) return;
+
+        $pos = 0;
+
+        // ES_ID: 2 bytes
+        $esId = unpack('n', substr($data, $pos, 2))[1];
+        $pos += 2;
+
+        // flags: 1 byte
+        $flags = ord($data[$pos]);
+        $pos += 1;
+
+        $streamDependenceFlag = ($flags & 0x80) >> 7;
+        $urlFlag = ($flags & 0x40) >> 6;
+        $ocrStreamFlag = ($flags & 0x20) >> 5;
+
+        $this->debugLog(sprintf(
+            "ES_Descriptor: ES_ID=%d, flags=0x%02X (dep=%d, url=%d, ocr=%d)",
+            $esId, $flags, $streamDependenceFlag, $urlFlag, $ocrStreamFlag
+        ));
+
+        // dependsOn_ES_ID (16 bits)
+        if ($streamDependenceFlag) {
+            if ($pos + 2 > $len) return;
+            $dependsOnEsId = unpack('n', substr($data, $pos, 2))[1];
+            $pos += 2;
+            $this->debugLog("dependsOn_ES_ID: $dependsOnEsId");
+        }
+
+        // URL (variable length string)
+        if ($urlFlag) {
+            if ($pos >= $len) return;
+            $urlLength = ord($data[$pos]);
+            $pos += 1;
+            if ($pos + $urlLength > $len) return;
+            $url = substr($data, $pos, $urlLength);
+            $pos += $urlLength;
+            $this->debugLog("URL: $url");
+        }
+
+        // OCR_ES_ID (16 bits)
+        if ($ocrStreamFlag) {
+            if ($pos + 2 > $len) return;
+            $ocrEsId = unpack('n', substr($data, $pos, 2))[1];
+            $pos += 2;
+            $this->debugLog("OCR_ES_ID: $ocrEsId");
+        }
+
+        // 剩余数据是嵌套的描述符
+        if ($pos < $len) {
+            $remaining = substr($data, $pos);
+            $this->parseMP4Descriptors($remaining);
+        }
+    }
+
+    /**
+     * 解析 DecoderConfigDescriptor payload（不包含 tag 和 length）
+     */
+    private function parseDecoderConfigDescriptorPayload($data)
+    {
+        $len = strlen($data);
+        $this->debugLog(sprintf(
+            "DecoderConfigDescriptor payload: len=%d, hex=%s",
+            $len,
+            bin2hex(substr($data, 0, min(16, $len)))
+        ));
+
+        if ($len < 13) return;
+
+        $pos = 0;
+
+        // objectTypeIndication: 1 byte
+        $objectTypeIndication = ord($data[$pos]);
+        $pos += 1;
+
+        // streamType (6 bits) + upStream (1 bit) + reserved (1 bit)
+        $byteVal = ord($data[$pos]);
+        $streamType = ($byteVal >> 2) & 0x3F;
+        $upStream = ($byteVal >> 1) & 0x01;
+        $pos += 1;
+
+        // bufferSizeDB: 3 bytes
+        $bufferSizeDB = (ord($data[$pos]) << 16) | (ord($data[$pos+1]) << 8) | ord($data[$pos+2]);
+        $pos += 3;
+
+        // maxBitrate: 4 bytes
+        $maxBitrate = unpack('N', substr($data, $pos, 4))[1];
+        $pos += 4;
+
+        // avgBitrate: 4 bytes
+        $avgBitrate = unpack('N', substr($data, $pos, 4))[1];
+        $pos += 4;
+
+        $this->debugLog(sprintf(
+            "DecoderConfig: objectType=0x%02X, streamType=%d, bufferSize=%d, maxBitrate=%d, avgBitrate=%d",
+            $objectTypeIndication, $streamType, $bufferSizeDB, $maxBitrate, $avgBitrate
+        ));
+
+        // 剩余数据是嵌套的描述符
+        if ($pos < $len) {
+            $remaining = substr($data, $pos);
+            $this->parseMP4Descriptors($remaining);
+        }
+    }
+
+    /**
+     * 解析 AudioSpecificConfig
+     */
     private function parseAudioSpecificConfig($config)
     {
         $len = strlen($config);
-        if ($len < 2) return;
+        if ($len < 2) {
+            $this->debugLog("AudioSpecificConfig too short: $len bytes");
+            return;
+        }
 
         $bytes = unpack('n', substr($config, 0, 2))[1];
+
         $this->audioObjectType = ($bytes >> 11) & 0x1F;
         $freqIndex = ($bytes >> 7) & 0x0F;
         $channelConfig = ($bytes >> 3) & 0x0F;
 
-        $rates = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350];
-        $baseRate = $rates[$freqIndex] ?? 44100;
+        $this->audioFreqIndex = $freqIndex;
+
+        $this->debugLog(sprintf(
+            "AudioSpecificConfig: hex=%s, AOT=%d, freqIndex=%d, channelConfig=%d",
+            bin2hex(substr($config, 0, min($len, 4))),
+            $this->audioObjectType,
+            $freqIndex,
+            $channelConfig
+        ));
+
+        $baseRate = $this->getSampleRateFromIndex($freqIndex, $config);
 
         switch ($this->audioObjectType) {
-            case 2:
+            case 2:  // AAC-LC
                 $this->audioSampleRate = $baseRate;
                 $this->audioChannels = $channelConfig;
                 break;
-            case 5:
+
+            case 5:  // HE-AAC (SBR)
                 $this->audioSampleRate = $baseRate * 2;
                 $this->audioChannels = $channelConfig;
                 break;
-            case 29:
+
+            case 29: // HE-AACv2
                 $this->audioSampleRate = $baseRate * 2;
                 $this->audioChannels = 2;
                 break;
+
             default:
                 $this->audioSampleRate = $baseRate;
-                $this->audioChannels = $channelConfig;
+                $this->audioChannels = max(1, min($channelConfig, 2));
                 break;
         }
+
+        if ($this->audioChannels < 1 || $this->audioChannels > 2) {
+            $this->debugLog("Invalid channels: {$this->audioChannels}, defaulting to 2");
+            $this->audioChannels = 2;
+        }
+
+        if ($this->audioSampleRate < 8000 || $this->audioSampleRate > 192000) {
+            $this->debugLog("Invalid sample rate: {$this->audioSampleRate}, defaulting to 44100");
+            $this->audioSampleRate = 44100;
+        }
+
+        $this->debugLog(sprintf(
+            "Final audio config: sampleRate=%d Hz, channels=%d, AOT=%d",
+            $this->audioSampleRate,
+            $this->audioChannels,
+            $this->audioObjectType
+        ));
+    }
+
+    private function getSampleRateFromIndex($freqIndex, $config)
+    {
+        if ($freqIndex >= 0 && $freqIndex <= 12) {
+            return $this->sampleRateTable[$freqIndex];
+        }
+
+        if ($freqIndex == 15) {
+            if (strlen($config) >= 5) {
+                $extRate = (ord($config[2]) << 16) | (ord($config[3]) << 8) | ord($config[4]);
+                return $extRate;
+            }
+            return 44100;
+        }
+
+        return 44100;
     }
 
     private function parseMediaSegment($data)
@@ -694,9 +964,9 @@ class Fmp42Flv
 
         $dtsMs = (int)round($sample['dts'] * 1000 / $this->audioTimescale);
 
-        $soundFormat = 10;
+        $soundFormat = 10; // AAC
         $soundRate = $this->getSoundRate();
-        $soundSize = 1;
+        $soundSize = 1;    // 16-bit
         $soundType = ($this->audioChannels == 2) ? 1 : 0;
         $audioHeader = ($soundFormat << 4) | ($soundRate << 2) | ($soundSize << 1) | $soundType;
 
@@ -718,31 +988,58 @@ class Fmp42Flv
         $videoData = "\x17\x00\x00\x00\x00" . $record;
         $this->writeFlvTag(9, $videoData, 0);
         $this->videoHeaderWritten = true;
+        $this->debugLog("AVC sequence header written");
     }
 
     private function writeAACSequenceHeader()
     {
-        $soundFormat = 10;
+        $soundFormat = 10; // AAC
         $soundRate = $this->getSoundRate();
-        $soundSize = 1;
+        $soundSize = 1;    // 16-bit
         $soundType = ($this->audioChannels == 2) ? 1 : 0;
         $audioHeader = ($soundFormat << 4) | ($soundRate << 2) | ($soundSize << 1) | $soundType;
 
         $audioData = chr($audioHeader) . "\x00" . $this->audioSpecificConfig;
+
+        $this->debugLog(sprintf(
+            "AAC sequence header: sampleRate=%d, channels=%d, AOT=%d, config=%s",
+            $this->audioSampleRate,
+            $this->audioChannels,
+            $this->audioObjectType,
+            bin2hex($this->audioSpecificConfig)
+        ));
+
         $this->writeFlvTag(8, $audioData, 0);
         $this->audioHeaderWritten = true;
     }
 
     private function getSoundRate()
     {
-        switch ($this->audioSampleRate) {
-            case 5512:  return 0;
-            case 11025: return 1;
-            case 22050: return 2;
-            case 44100: return 3;
-            case 48000: return 4;
-            default:    return 3;
+        $rateMap = [
+            5512 => 0,
+            11025 => 1,
+            22050 => 2,
+            44100 => 3,
+            48000 => 3,
+        ];
+
+        if (isset($rateMap[$this->audioSampleRate])) {
+            return $rateMap[$this->audioSampleRate];
         }
+
+        $standardRates = [5512, 11025, 22050, 44100, 48000];
+        $nearest = 44100;
+        $minDiff = PHP_INT_MAX;
+
+        foreach ($standardRates as $rate) {
+            $diff = abs($this->audioSampleRate - $rate);
+            if ($diff < $minDiff) {
+                $minDiff = $diff;
+                $nearest = $rate;
+            }
+        }
+
+        return $rateMap[$nearest];
     }
 
     private function writeFlvTag($tagType, $data, $timestamp)
@@ -768,5 +1065,215 @@ class Fmp42Flv
         if ($this->onFlvData) {
             call_user_func($this->onFlvData, $data);
         }
+    }
+
+    public static function runFmp42Flv(string $m3u8File, string $outputFile, bool $debug = false)
+    {
+        if (!file_exists($m3u8File)) {
+            throw new \RuntimeException("m3u8 file not exist: $m3u8File");
+        }
+
+        $m3u8Dir = dirname($m3u8File);
+        $parsed = self::parseFmp4M3U8($m3u8File);
+
+        $outputDir = dirname($outputFile);
+        if (!is_dir($outputDir)) {
+            mkdir($outputDir, 0777, true);
+        }
+
+        $fmp42flv = new Fmp42Flv();
+        $flvData = '';
+        $debugLogs = [];
+
+        $fmp42flv->onFlvData = function ($data) use (&$flvData) {
+            $flvData .= $data;
+        };
+
+        if ($debug) {
+            $fmp42flv->onDebug = function ($msg) use (&$debugLogs) {
+                $debugLogs[] = date('[Y-m-d H:i:s] ') . $msg;
+                echo $msg . "\n";
+            };
+        }
+
+        $fmp42flv->onMediaInfo = function ($info) use ($debug) {
+            if ($debug) {
+                echo "\n[媒体信息]\n";
+                echo "  宽度: " . ($info['width'] ?? 'N/A') . "\n";
+                echo "  高度: " . ($info['height'] ?? 'N/A') . "\n";
+                echo "  音频: " . ($info['hasAudio'] ? '是' : '否') . "\n";
+                echo "  视频: " . ($info['hasVideo'] ? '是' : '否') . "\n";
+                echo "  音频采样率: " . ($info['audioSampleRate'] ?? 'N/A') . " Hz\n";
+                echo "  音频声道: " . ($info['audioChannels'] ?? 'N/A') . "\n";
+                echo "  音频类型: " . ($info['audioObjectType'] ?? 'N/A') . "\n";
+            }
+        };
+
+        try {
+            if (!empty($parsed['initFile'])) {
+                $initPath = $m3u8Dir . DIRECTORY_SEPARATOR . $parsed['initFile'];
+                if (file_exists($initPath)) {
+                    $initData = file_get_contents($initPath);
+                    $fmp42flv->setInitSegment($initData);
+                }
+            }
+
+            if (!empty($parsed['audioInitFile']) && !$fmp42flv->hasAudio) {
+                $audioInitPath = $m3u8Dir . DIRECTORY_SEPARATOR . $parsed['audioInitFile'];
+                if (file_exists($audioInitPath)) {
+                    $audioInitData = file_get_contents($audioInitPath);
+                    $fmp42flv->setInitSegment($audioInitData);
+                }
+            }
+
+            if (!empty($parsed['videoInitFile']) && !$fmp42flv->hasVideo) {
+                $videoInitPath = $m3u8Dir . DIRECTORY_SEPARATOR . $parsed['videoInitFile'];
+                if (file_exists($videoInitPath)) {
+                    $videoInitData = file_get_contents($videoInitPath);
+                    $fmp42flv->setInitSegment($videoInitData);
+                }
+            }
+
+            $fmp42flv->flushInit();
+
+            $allSamples = [];
+
+            if (!empty($parsed['audioSegments'])) {
+                foreach ($parsed['audioSegments'] as $seg) {
+                    $segmentPath = $m3u8Dir . DIRECTORY_SEPARATOR . $seg;
+                    if (!file_exists($segmentPath)) {
+                        throw new \RuntimeException("segment file not exist: $segmentPath");
+                    }
+                    $segmentData = file_get_contents($segmentPath);
+                    $samples = $fmp42flv->collectMediaSegmentSamples($segmentData);
+                    $allSamples = array_merge($allSamples, $samples);
+                }
+            }
+
+            if (!empty($parsed['videoSegments'])) {
+                foreach ($parsed['videoSegments'] as $seg) {
+                    $segmentPath = $m3u8Dir . DIRECTORY_SEPARATOR . $seg;
+                    if (!file_exists($segmentPath)) {
+                        throw new \RuntimeException("segment file not exist: $segmentPath");
+                    }
+                    $segmentData = file_get_contents($segmentPath);
+                    $samples = $fmp42flv->collectMediaSegmentSamples($segmentData);
+                    $allSamples = array_merge($allSamples, $samples);
+                }
+            }
+
+            if (!empty($parsed['segmentFiles'])) {
+                foreach ($parsed['segmentFiles'] as $seg) {
+                    $segmentPath = $m3u8Dir . DIRECTORY_SEPARATOR . $seg;
+                    if (!file_exists($segmentPath)) {
+                        throw new \RuntimeException("segment file not exist: $segmentPath");
+                    }
+                    $segmentData = file_get_contents($segmentPath);
+                    $samples = $fmp42flv->collectMediaSegmentSamples($segmentData);
+                    $allSamples = array_merge($allSamples, $samples);
+                }
+            }
+
+            usort($allSamples, function ($a, $b) {
+                return $a['dts'] - $b['dts'];
+            });
+
+            $totalSamples = count($allSamples);
+            if ($debug) {
+                echo "\n[处理] 共收集 $totalSamples 个样本\n";
+            }
+
+            foreach ($allSamples as $index => $sample) {
+                if ($debug && $index % 100 == 0) {
+                    echo "  处理样本: $index/$totalSamples\n";
+                }
+                $fmp42flv->writeSample($sample);
+            }
+
+            if ($debug) {
+                echo "\n[完成] 写入文件: $outputFile\n";
+                echo "  视频: " . ($fmp42flv->hasVideo ? '是' : '否') . "\n";
+                echo "  音频: " . ($fmp42flv->hasAudio ? '是' : '否') . "\n";
+                echo "  音频采样率: {$fmp42flv->audioSampleRate} Hz\n";
+                echo "  音频声道: {$fmp42flv->audioChannels}\n";
+            }
+
+            file_put_contents($outputFile, $flvData);
+            return $outputFile;
+
+        } catch (\Exception $e) {
+            throw new \RuntimeException("转码失败: " . $e->getMessage());
+        }
+    }
+
+    protected static function parseFmp4M3U8(string $m3u8File): array
+    {
+        $content = file_get_contents($m3u8File);
+        $lines = explode("\n", $content);
+
+        $m3u8Dir = dirname($m3u8File);
+
+        $initFile = null;
+        $segmentFiles = [];
+        $audioInitFile = null;
+        $audioSegments = [];
+        $videoInitFile = null;
+        $videoSegments = [];
+
+        $audioM3u8File = null;
+        $videoM3u8File = null;
+
+        foreach ($lines as $line) {
+            $line = trim($line);
+            if (empty($line)) continue;
+
+            if (strpos($line, '#EXT-X-MAP:') === 0) {
+                preg_match('/URI="([^"]+)"/', $line, $matches);
+                if (isset($matches[1])) {
+                    $initFile = $matches[1];
+                }
+            } elseif (strpos($line, '#EXT-X-MEDIA:TYPE=AUDIO') === 0) {
+                preg_match('/URI="([^"]+)"/', $line, $matches);
+                if (isset($matches[1])) {
+                    $audioM3u8File = $matches[1];
+                }
+            } elseif (strpos($line, '#EXT-X-STREAM-INF:') === 0) {
+                continue;
+            } elseif (strpos($line, '#') !== 0) {
+                $ext = pathinfo($line, PATHINFO_EXTENSION);
+                if ($ext === 'm4s') {
+                    $segmentFiles[] = $line;
+                } elseif ($ext === 'm3u8') {
+                    $videoM3u8File = $line;
+                }
+            }
+        }
+
+        if ($audioM3u8File) {
+            $audioM3u8Path = $m3u8Dir . DIRECTORY_SEPARATOR . $audioM3u8File;
+            if (file_exists($audioM3u8Path)) {
+                $audioParsed = self::parseFmp4M3U8($audioM3u8Path);
+                $audioInitFile = $audioParsed['initFile'];
+                $audioSegments = $audioParsed['segmentFiles'];
+            }
+        }
+
+        if ($videoM3u8File) {
+            $videoM3u8Path = $m3u8Dir . DIRECTORY_SEPARATOR . $videoM3u8File;
+            if (file_exists($videoM3u8Path)) {
+                $videoParsed = self::parseFmp4M3U8($videoM3u8Path);
+                $videoInitFile = $videoParsed['initFile'];
+                $videoSegments = $videoParsed['segmentFiles'];
+            }
+        }
+
+        return [
+            'initFile' => $initFile,
+            'segmentFiles' => $segmentFiles,
+            'audioInitFile' => $audioInitFile,
+            'audioSegments' => $audioSegments,
+            'videoInitFile' => $videoInitFile,
+            'videoSegments' => $videoSegments
+        ];
     }
 }
