@@ -223,6 +223,7 @@ class FlvToMp4
                 $pos++;
 
                 if ($valType == 0x00) {
+                    if ($pos + 8 > strlen($data)) break;
                     $value = unpack('d', substr($data, $pos, 8))[1];
                     $pos += 8;
 
