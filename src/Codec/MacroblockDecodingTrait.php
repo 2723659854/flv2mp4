@@ -1009,6 +1009,10 @@ trait MacroblockDecodingTrait
     {
         $mbWidth = $this->picWidthInMbs;
 
+        if ($this->debugSliceIndex === 3 && $mbX === 16 && $mbY === 13) {
+            echo "[DEBUG_MB] MB(16,13): mb_type=$mbType\n";
+        }
+
         // P_L0_16x16 (mb_type 0)
         if ($mbType === 0) {
             //echo "[DECODER] MB($mbX,$mbY): P_L0_16x16\n";
@@ -1085,9 +1089,6 @@ trait MacroblockDecodingTrait
         $this->performMotionCompensation16x16($mbX, $mbY, $mvX, $mvY, $refIdx);
 
         $this->saveMvForPrediction($mbX, $mbY, $mvX, $mvY, $refIdx);
-        
-        $mbIdx = $mbY * $this->picWidthInMbs + $mbX;
-        $this->mvForDeblock[$mbIdx] = [$mvX, $mvY, $refIdx];
 
         $this->updateNzCountZero($mbX, $mbY);
 
@@ -1149,6 +1150,11 @@ trait MacroblockDecodingTrait
         list($predMvX, $predMvY) = $this->getP16x16MvPrediction($mbX, $mbY, $refIdx);
         $mvX = $predMvX + $mvdL0X;
         $mvY = $predMvY + $mvdL0Y;
+
+        if ($this->debugSliceIndex === 3 && $mbX === 16 && $mbY === 13) {
+            echo "[DEBUG_MB] MB(16,13) P_16x16:\n";
+            echo "  pred_mv=($predMvX,$predMvY), mvd=($mvdL0X,$mvdL0Y), mv=($mvX,$mvY), ref=$refIdx\n";
+        }
 
         // Debug: Frame 2 first few MBs
         //if ($this->debugSliceIndex === 3 && $mbY === 0 && $mbX <= 5) {
@@ -1239,9 +1245,6 @@ trait MacroblockDecodingTrait
         }
 
         $this->saveMvForPrediction($mbX, $mbY, $mvX, $mvY, $refIdx);
-        
-        $mbIdx = $mbY * $this->picWidthInMbs + $mbX;
-        $this->mvForDeblock[$mbIdx] = [$mvX, $mvY, $refIdx];
 
         return $mbQpDelta;
     }
@@ -1276,6 +1279,12 @@ trait MacroblockDecodingTrait
         $this->performMotionCompensation16x8($mbX, $mbY, 0, $mv0X, $mv0Y, $refIdx0);
         $this->performMotionCompensation16x8($mbX, $mbY, 1, $mv1X, $mv1Y, $refIdx1);
 
+        if ($this->debugSliceIndex === 3 && $mbX === 15 && $mbY === 13) {
+            echo "[DEBUG_MB] MB(15,13) P_16x8:\n";
+            echo "  part0 (top): pred_mv=($predMv0X,$predMv0Y), mvd=($mvd0X,$mvd0Y), mv=($mv0X,$mv0Y), ref=$refIdx0\n";
+            echo "  part1 (bottom): pred_mv=($predMv1X,$predMv1Y), mvd=($mvd1X,$mvd1Y), mv=($mv1X,$mv1Y), ref=$refIdx1\n";
+        }
+
         $cbpCode = $this->reader->readUe();
         $codedBlockPattern = self::GOLOMB_TO_INTER_CBP[$cbpCode] ?? 0;
         $mbQpDelta = 0;
@@ -1291,9 +1300,6 @@ trait MacroblockDecodingTrait
         }
 
         $this->saveMvForPrediction16x8($mbX, $mbY, $mv0X, $mv0Y, $refIdx0, $mv1X, $mv1Y, $refIdx1);
-        
-        $mbIdx = $mbY * $this->picWidthInMbs + $mbX;
-        $this->mvForDeblock[$mbIdx] = [$mv0X, $mv0Y, $refIdx0];
 
         return $mbQpDelta;
     }
@@ -1901,6 +1907,13 @@ trait MacroblockDecodingTrait
             }
         }
 
+        if ($this->debugSliceIndex === 3 && $mbX === 16 && $mbY === 13) {
+            echo "[MVP_16x16] MB(16,13):\n";
+            echo "  mvLeft=" . ($mvLeft ? "({$mvLeft[0]},{$mvLeft[1]},{$mvLeft[2]})" : "null") . "\n";
+            echo "  mvTop=" . ($mvTop ? "({$mvTop[0]},{$mvTop[1]},{$mvTop[2]})" : "null") . "\n";
+            echo "  mvC=" . ($mvC ? "({$mvC[0]},{$mvC[1]},{$mvC[2]})" : "null") . "\n";
+        }
+
         // 调试：Frame 2 第一行前6个MB
 //        if ($this->debugSliceIndex === 3 && $mbY === 0 && $mbX <= 5) {
 //            echo "[PRED16x16] MB($mbX,$mbY): mvLeft=" . ($mvLeft ? "({$mvLeft[0]},{$mvLeft[1]},{$mvLeft[2]})" : "null") .
@@ -1975,16 +1988,21 @@ trait MacroblockDecodingTrait
             $mvTop = $mvPart0;
         }
 
-        if ($mbX + 1 < $mbWidth) {
-            if ($partIdx === 0) {
-                if ($mbY > 0) {
-                    $mvTopRight = $this->mvTopRow[($mbX + 1) * 4] ?? null;
-                }
-            } else {
-                if ($mbY > 0) {
-                    $mvTopRight = $this->mvTopRow[($mbX + 1) * 4 + 1] ?? null;
-                }
+        if ($partIdx === 0) {
+            if ($mbX + 1 < $mbWidth && $mbY > 0) {
+                $mvTopRight = $this->mvTopRow[($mbX + 1) * 4] ?? null;
             }
+        } else {
+            if ($mbX > 0) {
+                $mvTopRight = $this->mvLeftCol[$partIdx * 2 - 1] ?? null;
+            }
+        }
+
+        if ($this->debugSliceIndex === 3 && $mbX === 15 && $mbY === 13) {
+            echo "[MVP_16x8] MB(15,13) part=$partIdx:\n";
+            echo "  mvLeft=" . ($mvLeft ? "({$mvLeft[0]},{$mvLeft[1]},{$mvLeft[2]})" : "null") . "\n";
+            echo "  mvTop=" . ($mvTop ? "({$mvTop[0]},{$mvTop[1]},{$mvTop[2]})" : "null") . "\n";
+            echo "  mvTopRight=" . ($mvTopRight ? "({$mvTopRight[0]},{$mvTopRight[1]},{$mvTopRight[2]})" : "null") . "\n";
         }
 
         if ($partIdx === 0) {
@@ -2028,8 +2046,14 @@ trait MacroblockDecodingTrait
             }
         }
 
-        if ($partIdx === 1 && $mbX + 1 < $mbWidth && $mbY > 0) {
-            $mvTopRight = $this->mvTopRow[($mbX + 1) * 4] ?? null;
+        if ($partIdx === 0) {
+            if ($mbY > 0) {
+                $mvTopRight = $this->mvTopRow[$mbX * 4 + 2] ?? null;
+            }
+        } else {
+            if ($mbX + 1 < $mbWidth && $mbY > 0) {
+                $mvTopRight = $this->mvTopRow[($mbX + 1) * 4] ?? null;
+            }
         }
 
         if ($partIdx === 0) {

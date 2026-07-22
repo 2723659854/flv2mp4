@@ -17,6 +17,7 @@ trait SliceDecodingTrait
 
         $sliceTypeRaw = $this->reader->readUe();
         $sliceType = $sliceTypeRaw % 5;
+        $this->currentSliceType = $sliceType;
         //echo "[SLICE HDR] slice_type_raw=$sliceTypeRaw slice_type=$sliceType bitPos=" . $this->reader->getBitPosition() . "\n";
 
         $ppsId = $this->reader->readUe();
@@ -267,6 +268,7 @@ trait SliceDecodingTrait
                 if ($mbSkipRun > 0) {
                     $mbSkipRun--;
                     $this->decodePSkip($mbX, $mbY);
+                    $this->mbTypeForDeblock[$mbIdx] = 0;
                     $this->mbQpForDeblock[$mbIdx] = $qp;
                     if ($isDebugSlice && $this->debugMbTraceFh) {
                         fwrite($this->debugMbTraceFh, "  SKIP, qp=$qp\n");

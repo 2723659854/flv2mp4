@@ -17,12 +17,6 @@ trait DeblockingFilterTrait
         9, 9, 10, 10, 11, 11, 12, 12, 13, 13, 14, 14,
         15, 15, 16, 16, 17, 17, 18, 18,
     ];
-    
-    private function getMvForDeblock(int $mbX, int $mbY): ?array
-    {
-        $mbIdx = $mbY * $this->picWidthInMbs + $mbX;
-        return $this->mvForDeblock[$mbIdx] ?? null;
-    }
 
     private const TC0_TABLE = [
         [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0],
@@ -296,9 +290,22 @@ trait DeblockingFilterTrait
         $mbWidth = $this->picWidthInMbs;
         $mbHeight = $this->picHeightInMbs;
         $mbIdx = $mbY * $mbWidth + $mbX;
-        $curType = $this->mbTypeForDeblock[$mbIdx] ?? 0;
-        $curIntra = ($curType >= 0 && $curType <= 24);
-        $curIpcm = ($curType == 25);
+        $curType = $this->mbTypeForDeblock[$mbIdx] ?? -1;
+        $sliceType = $this->currentSliceType;
+        $isIslice = ($sliceType === 2 || $sliceType === 4);
+        $isPslice = ($sliceType === 0 || $sliceType === 5);
+
+        $curIntra = false;
+        $curIpcm = false;
+        if ($curType >= 0) {
+            if ($isIslice) {
+                $curIntra = ($curType >= 0 && $curType <= 24);
+                $curIpcm = ($curType == 25);
+            } elseif ($isPslice) {
+                $curIntra = ($curType >= 5 && $curType <= 29);
+                $curIpcm = ($curType == 30);
+            }
+        }
 
         $bsVertical = [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
         $bsHorizontal = [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
@@ -311,20 +318,18 @@ trait DeblockingFilterTrait
                 $qIntra = $curIntra;
                 $pIpcm = $curIpcm;
                 $qIpcm = $curIpcm;
-                $diffRefIdx = false;
-                $mvDiff = 0;
 
                 if ($isMbEdge && $edge == 0 && $mbX > 0) {
                     $leftIdx = ($mbY * $mbWidth + $mbX - 1);
-                    $leftType = $this->mbTypeForDeblock[$leftIdx] ?? 0;
-                    $pIntra = ($leftType >= 0 && $leftType <= 24);
-                    $pIpcm = ($leftType == 25);
-                    
-                    $curMv = $this->getMvForDeblock($mbX, $mbY);
-                    $leftMv = $this->getMvForDeblock($mbX - 1, $mbY);
-                    if ($curMv && $leftMv) {
-                        $diffRefIdx = ($curMv[2] != $leftMv[2]);
-                        $mvDiff = abs($curMv[0] - $leftMv[0]) + abs($curMv[1] - $leftMv[1]);
+                    $leftType = $this->mbTypeForDeblock[$leftIdx] ?? -1;
+                    if ($leftType >= 0) {
+                        if ($isIslice) {
+                            $pIntra = ($leftType >= 0 && $leftType <= 24);
+                            $pIpcm = ($leftType == 25);
+                        } elseif ($isPslice) {
+                            $pIntra = ($leftType >= 5 && $leftType <= 29);
+                            $pIpcm = ($leftType == 30);
+                        }
                     }
                 }
 
@@ -333,11 +338,7 @@ trait DeblockingFilterTrait
                 } elseif ($pIntra || $qIntra) {
                     $bsVertical[$edge][$pair] = $isMbEdge ? 4 : 3;
                 } else {
-                    if ($diffRefIdx || $mvDiff >= 4) {
-                        $bsVertical[$edge][$pair] = 2;
-                    } else {
-                        $bsVertical[$edge][$pair] = 1;
-                    }
+                    $bsVertical[$edge][$pair] = 2;
                 }
             }
         }
@@ -350,20 +351,18 @@ trait DeblockingFilterTrait
                 $qIntra = $curIntra;
                 $pIpcm = $curIpcm;
                 $qIpcm = $curIpcm;
-                $diffRefIdx = false;
-                $mvDiff = 0;
 
                 if ($isMbEdge && $edge == 0 && $mbY > 0) {
                     $topIdx = (($mbY - 1) * $mbWidth + $mbX);
-                    $topType = $this->mbTypeForDeblock[$topIdx] ?? 0;
-                    $pIntra = ($topType >= 0 && $topType <= 24);
-                    $pIpcm = ($topType == 25);
-                    
-                    $curMv = $this->getMvForDeblock($mbX, $mbY);
-                    $topMv = $this->getMvForDeblock($mbX, $mbY - 1);
-                    if ($curMv && $topMv) {
-                        $diffRefIdx = ($curMv[2] != $topMv[2]);
-                        $mvDiff = abs($curMv[0] - $topMv[0]) + abs($curMv[1] - $topMv[1]);
+                    $topType = $this->mbTypeForDeblock[$topIdx] ?? -1;
+                    if ($topType >= 0) {
+                        if ($isIslice) {
+                            $pIntra = ($topType >= 0 && $topType <= 24);
+                            $pIpcm = ($topType == 25);
+                        } elseif ($isPslice) {
+                            $pIntra = ($topType >= 5 && $topType <= 29);
+                            $pIpcm = ($topType == 30);
+                        }
                     }
                 }
 
@@ -372,12 +371,7 @@ trait DeblockingFilterTrait
                 } elseif ($pIntra || $qIntra) {
                     $bsHorizontal[$edge][$pair] = $isMbEdge ? 4 : 3;
                 } else {
-                    // Inter宏块：根据MV差异决定BS
-                    if ($diffRefIdx || $mvDiff >= 4) {
-                        $bsHorizontal[$edge][$pair] = 2;
-                    } else {
-                        $bsHorizontal[$edge][$pair] = 1;
-                    }
+                    $bsHorizontal[$edge][$pair] = 2;
                 }
             }
         }

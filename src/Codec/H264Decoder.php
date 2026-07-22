@@ -64,6 +64,7 @@ class H264Decoder
     public int $sliceBetaOffset = 0;
     public array $mbTypeForDeblock = [];
     public array $mbQpForDeblock = [];
+    public int $currentSliceType = 0;
 
     // P帧参考帧控制
     public bool $numRefIdxActiveOverrideFlag = false;
@@ -83,7 +84,6 @@ class H264Decoder
     // 运动向量缓存（用于P帧预测）- 4x4子块粒度
     public array $mvTopRow = [];      // 上方宏块行的运动向量，每宏块4个（4列4x4块）[colIdx] = [mvX, mvY, refIdx]
     public array $mvLeftCol = [];     // 左方宏块列的运动向量，4行4x4块
-    public array $mvForDeblock = [];   // 每个宏块的运动向量（用于去块滤波）[mbIdx] = [mvX, mvY, refIdx]
 
     public $debugLastQp = 0;
     public $debugLastDcScan = [];
