@@ -2459,7 +2459,7 @@ trait MacroblockDecodingTrait
                 }
 
                 // Cr 处理
-                if ($chromaCbp >= 3) {
+                if ($chromaCbp >= 2) {
                     $acBlockCr = array_fill(0, 4, array_fill(0, 4, 0));
                     for ($y = 0; $y < 4; $y++) for ($x = 0; $x < 4; $x++) {
                         $acBlockCr[$y][$x] = $crAcCoeffs[$blk][$y * 4 + $x];

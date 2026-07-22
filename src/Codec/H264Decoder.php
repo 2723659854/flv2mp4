@@ -355,25 +355,46 @@ class H264Decoder
                 $this->decodeSlice($nal['data'], $nalType === 5, $nalRefIdc);
                 //$endTime = microtime(true);
 
-                // 恢复实际图像尺寸
-                $this->width = $origWidth;
-                $this->height = $origHeight;
-
-                //echo "[DECODER]   Slice {$sliceCount} decoded in " . number_format($endTime - $startTime, 2) . "s" . PHP_EOL;
-
-                // 更新参考帧（用于P帧运动补偿）
+                // 更新参考帧（用于P帧运动补偿）- 在恢复尺寸之前进行
+                echo "[DEBUG] Frame {$sliceCount}: nalType={$nalType}, nalRefIdc={$nalRefIdc}, updating ref frame=" . ($nalRefIdc !== 0 || $nalType === 5 ? 'YES' : 'NO') . PHP_EOL;
                 if ($nalRefIdc !== 0 || $nalType === 5) {
-                    $this->refFrameY = $this->yPlane;
-                    $this->refFrameU = $this->uPlane;
-                    $this->refFrameV = $this->vPlane;
+                    $this->refFrameY = array_values($this->yPlane);
+                    $this->refFrameU = array_values($this->uPlane);
+                    $this->refFrameV = array_values($this->vPlane);
                     $this->refStrideY = $mbAlignedWidth;
                     $this->refStrideUv = (int)($mbAlignedWidth / 2);
                     $this->refWidthY = $mbAlignedWidth;
                     $this->refHeightY = $mbAlignedHeight;
                     $this->refWidthUv = (int)($mbAlignedWidth / 2);
                     $this->refHeightUv = (int)($mbAlignedHeight / 2);
-                    //echo "[DECODER]   Reference frame updated" . PHP_EOL;
+                    // 验证参考帧更新
+                    $ySum = 0;
+                    $yCount = min(10000, count($this->refFrameY));
+                    for ($i = 0; $i < $yCount; $i++) {
+                        $ySum += $this->refFrameY[$i];
+                    }
+                    echo "[DEBUG] Ref frame updated, Y avg: " . number_format($ySum / $yCount, 2) . ", Y[0]=" . $this->refFrameY[0] . PHP_EOL;
+                    
+                    // 验证U平面
+                    $uSum = 0;
+                    $uCount = min(2500, count($this->refFrameU));
+                    for ($i = 0; $i < $uCount; $i++) {
+                        $uSum += $this->refFrameU[$i];
+                    }
+                    echo "[DEBUG] Ref frame updated, U avg: " . number_format($uSum / $uCount, 2) . ", U[0]=" . $this->refFrameU[0] . PHP_EOL;
+                    
+                    // 验证V平面
+                    $vSum = 0;
+                    $vCount = min(2500, count($this->refFrameV));
+                    for ($i = 0; $i < $vCount; $i++) {
+                        $vSum += $this->refFrameV[$i];
+                    }
+                    echo "[DEBUG] Ref frame updated, V avg: " . number_format($vSum / $vCount, 2) . ", V[0]=" . $this->refFrameV[0] . PHP_EOL;
                 }
+
+                // 恢复实际图像尺寸
+                $this->width = $origWidth;
+                $this->height = $origHeight;
 
                 // 将本帧转为二进制并追加到输出（裁剪到实际图像尺寸）
                 $yBin = '';
