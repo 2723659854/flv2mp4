@@ -36,8 +36,8 @@ trait TransformTrait
         $dbg = false;
         if ($qp === 27 && $type === 0 && $coeff[0] == 11) {
             $dbg = true;
-            echo "[DEQUANT_DBG] qp=$qp type=$type listIdx=$listIdx coeff[0]={$coeff[0]}\n";
-            echo "[DEQUANT_DBG] table[0][27][0]={$this->dequant4Table[0][27][0]}\n";
+            //echo "[DEQUANT_DBG] qp=$qp type=$type listIdx=$listIdx coeff[0]={$coeff[0]}\n";
+            //echo "[DEQUANT_DBG] table[0][27][0]={$this->dequant4Table[0][27][0]}\n";
         }
 
         for ($i = 0; $i < 16; $i++) {
@@ -46,7 +46,7 @@ trait TransformTrait
             // intdiv是向0取整，对负数结果错误
             $out[$i] = ($coeff[$i] * $this->dequant4Table[$listIdx][$qp][$i] + 32) >> 6;
             if ($dbg && $i < 4) {
-                echo "[DEQUANT_DBG]   i=$i coeff={$coeff[$i]} table={$this->dequant4Table[$listIdx][$qp][$i]} out={$out[$i]}\n";
+                //echo "[DEQUANT_DBG]   i=$i coeff={$coeff[$i]} table={$this->dequant4Table[$listIdx][$qp][$i]} out={$out[$i]}\n";
             }
         }
         return $out;

@@ -13,16 +13,16 @@ trait MacroblockDecodingTrait
         $bitBefore = $this->reader->getBitPosition();
 
         $dbgMb = ($mbX === 4 && $mbY === 0);
-        if ($dbgMb) echo "[DBG_MB(4,0)] bitPosBeforeMbType=" . $this->reader->getBitPosition() . "\n";
-        if (($mbX === 1 || $mbX === 2) && $mbY === 0) {
-            echo "[DBG_MB($mbX,$mbY)] bitPosBeforeMbType=$bitBefore\n";
-        }
+//        if ($dbgMb) echo "[DBG_MB(4,0)] bitPosBeforeMbType=" . $this->reader->getBitPosition() . "\n";
+//        if (($mbX === 1 || $mbX === 2) && $mbY === 0) {
+//            echo "[DBG_MB($mbX,$mbY)] bitPosBeforeMbType=$bitBefore\n";
+//        }
         $mbType = $this->reader->readUe();
-        echo "[DECODER] MB($mbX,$mbY): 读取 mb_type = {$mbType}\n";
-        if ($dbgMb) echo "[DBG_MB(4,0)] bitPosAfterMbType=" . $this->reader->getBitPosition() . "\n";
-        if (($mbX === 1 || $mbX === 2) && $mbY === 0) {
-            echo "[DBG_MB($mbX,$mbY)] bitPosAfterMbType=" . $this->reader->getBitPosition() . " mb_type=$mbType\n";
-        }
+        //echo "[DECODER] MB($mbX,$mbY): 读取 mb_type = {$mbType}\n";
+        //if ($dbgMb) echo "[DBG_MB(4,0)] bitPosAfterMbType=" . $this->reader->getBitPosition() . "\n";
+        //if (($mbX === 1 || $mbX === 2) && $mbY === 0) {
+            //echo "[DBG_MB($mbX,$mbY)] bitPosAfterMbType=" . $this->reader->getBitPosition() . " mb_type=$mbType\n";
+        //}
 
         $isDebugSlice = ($this->debugTargetSlice > 0 && $this->debugSliceIndex === $this->debugTargetSlice);
         if ($isDebugSlice && $this->debugMbTraceFh) {
@@ -45,12 +45,12 @@ trait MacroblockDecodingTrait
         }
         // 其他类型（B帧等）暂时填充灰色
         else {
-            echo "[DECODER] MB($mbX,$mbY): 不支持的sliceType=$sliceType，填充灰色\n";
+            //echo "[DECODER] MB($mbX,$mbY): 不支持的sliceType={$sliceType}，填充灰色\n";
             $this->fillMacroblockGray($mbX, $mbY);
         }
 
         $bitAfter = $this->reader->getBitPosition();
-        echo "[DECODER] MB($mbX,$mbY): bitPos before={$bitBefore} after={$bitAfter} consumed=" . ($bitAfter - $bitBefore) . "\n";
+        //echo "[DECODER] MB($mbX,$mbY): bitPos before={$bitBefore} after={$bitAfter} consumed=" . ($bitAfter - $bitBefore) . "\n";
         return $mbQpDelta;
     }
 
@@ -150,14 +150,14 @@ trait MacroblockDecodingTrait
             }
             $modeCache[$rasterIdx] = $mode;
             $modes[$rasterIdx] = $mode;
-            if ($mbX === 2 && $mbY === 0) {
-                $bitsRead = $prevFlag ? 1 : 4;
-                echo "[DBG_MODE scan=$scanIdx raster=$rasterIdx blk($blkX,$blkY)] left=$leftMode top=$topMode pred=$predicted prev=$prevFlag rem=$remMode mode=$mode bitPos=$bitPosBefore bits=$bitsRead\n";
-            }
-            if ($mbX === 1 && $mbY === 0) {
-                $bitsRead = $prevFlag ? 1 : 4;
-                echo "[DBG_MODE_MB1 scan=$scanIdx raster=$rasterIdx blk($blkX,$blkY)] left=$leftMode top=$topMode pred=$predicted prev=$prevFlag rem=$remMode mode=$mode bitPos=$bitPosBefore bits=$bitsRead\n";
-            }
+            //if ($mbX === 2 && $mbY === 0) {
+                //$bitsRead = $prevFlag ? 1 : 4;
+                //echo "[DBG_MODE scan=$scanIdx raster=$rasterIdx blk($blkX,$blkY)] left=$leftMode top=$topMode pred=$predicted prev=$prevFlag rem=$remMode mode=$mode bitPos=$bitPosBefore bits=$bitsRead\n";
+            //}
+            //if ($mbX === 1 && $mbY === 0) {
+                //$bitsRead = $prevFlag ? 1 : 4;
+                //echo "[DBG_MODE_MB1 scan=$scanIdx raster=$rasterIdx blk($blkX,$blkY)] left=$leftMode top=$topMode pred=$predicted prev=$prevFlag rem=$remMode mode=$mode bitPos=$bitPosBefore bits=$bitsRead\n";
+            //}
         }
 
         // 更新跨宏块预测模式缓存
@@ -183,10 +183,10 @@ trait MacroblockDecodingTrait
         }
         $qp = max(0, min(51, $sliceQp + $mbQpDelta));
         $bitPosEnd = $this->reader->getBitPosition();
-        if ($mbX === 1 && $mbY === 1) {
-            echo "[DBG_MB11] sliceQp=$sliceQp mbQpDelta=$mbQpDelta qp=$qp\n";
-        }
-        echo "[DECODER] MB($mbX,$mbY): I4x4 modes=" . implode(',', $modes) . " chromaPred=$chromaPredMode cbpCode=$cbpCode cbp=$cbp bits=" . ($bitPosEnd - $bitPosStart) . "\n";
+//        if ($mbX === 1 && $mbY === 1) {
+//            echo "[DBG_MB11] sliceQp=$sliceQp mbQpDelta=$mbQpDelta qp=$qp\n";
+//        }
+        //echo "[DECODER] MB($mbX,$mbY): I4x4 modes=" . implode(',', $modes) . " chromaPred=$chromaPredMode cbpCode=$cbpCode cbp=$cbp bits=" . ($bitPosEnd - $bitPosStart) . "\n";
 
         $yCoeffs = array_fill(0, 16, array_fill(0, 16, 0));
         $cbCoeffs = array_fill(0, 4, array_fill(0, 16, 0));
@@ -227,15 +227,15 @@ trait MacroblockDecodingTrait
         // i8x8: 8x8块索引(0-3), i4x4: 8x8块内的4x4子块索引(0-3)
         for ($i8x8 = 0; $i8x8 < 4; $i8x8++) {
             if (($lumaCbp & (1 << $i8x8)) !== 0) {
-                if ($mbX === 1 && $mbY === 0) {
-                    echo "[DBG_CBP MB(1,0)] i8x8=$i8x8 (8x8块), bit=" . (1 << $i8x8) . ", cbp_bit_set=1\n";
-                }
+//                if ($mbX === 1 && $mbY === 0) {
+//                    echo "[DBG_CBP MB(1,0)] i8x8=$i8x8 (8x8块), bit=" . (1 << $i8x8) . ", cbp_bit_set=1\n";
+//                }
                 for ($i4x4 = 0; $i4x4 < 4; $i4x4++) {
                     $scanIdx = $i8x8 * 4 + $i4x4;
                     $rasterIdx = $scanToRaster[$scanIdx];
-                    if ($mbX === 1 && $mbY === 0) {
-                        echo "[DBG_CBP MB(1,0)]   i4x4=$i4x4, scanIdx=$scanIdx, rasterIdx=$rasterIdx\n";
-                    }
+//                    if ($mbX === 1 && $mbY === 0) {
+//                        echo "[DBG_CBP MB(1,0)]   i4x4=$i4x4, scanIdx=$scanIdx, rasterIdx=$rasterIdx\n";
+//                    }
                     $nc = $this->computeNc($rasterIdx, $mbX, $mbY, $nzCache, $leftNz, $topNz, $leftAvailable, $topAvailable);
                     $oldDbg = $this->debugResidual;
                     $isTargetBlk = ($mbX === 2 && $mbY === 0 && $rasterIdx === 2);
@@ -246,9 +246,9 @@ trait MacroblockDecodingTrait
                     if ($isTargetBlk || $isMb10 || $isMb11blk8 || $isMb11Any || $isMb01Any) {
                         $bp = $this->reader->getBitPosition();
                         $bits16 = $this->reader->peek(16);
-                        echo "[DEBUG MB($mbX,$mbY) Blk$rasterIdx] before decode: bitPos=$bp nc=$nc peek16=0x" . sprintf('%04X', $bits16) . " (" . str_pad(decbin($bits16), 16, '0', STR_PAD_LEFT) . ")\n";
-                        echo "[DEBUG MB($mbX,$mbY) Blk$rasterIdx] nzCache[0-7]=" . implode(',', array_slice($nzCache, 0, 8)) . " nzCache[8-15]=" . implode(',', array_slice($nzCache, 8, 8)) . "\n";
-                        echo "[DEBUG MB($mbX,$mbY) Blk$rasterIdx] leftNz=" . implode(',', $leftNz) . "\n";
+                        //echo "[DEBUG MB($mbX,$mbY) Blk$rasterIdx] before decode: bitPos=$bp nc=$nc peek16=0x" . sprintf('%04X', $bits16) . " (" . str_pad(decbin($bits16), 16, '0', STR_PAD_LEFT) . ")\n";
+                        //echo "[DEBUG MB($mbX,$mbY) Blk$rasterIdx] nzCache[0-7]=" . implode(',', array_slice($nzCache, 0, 8)) . " nzCache[8-15]=" . implode(',', array_slice($nzCache, 8, 8)) . "\n";
+                        //echo "[DEBUG MB($mbX,$mbY) Blk$rasterIdx] leftNz=" . implode(',', $leftNz) . "\n";
                         $this->debugResidual = true;
                     }
                     $coeffs = $this->decodeResidualBlock(16, $nc);
@@ -257,42 +257,42 @@ trait MacroblockDecodingTrait
                     for ($i = 0; $i < 16; $i++) if ($coeffs[$i] != 0) $totalCoeff++;
                     for ($i = 0; $i < 16; $i++) $yCoeffs[$rasterIdx][$i] = $coeffs[$i];
                     $yCoeffs[$rasterIdx] = $this->zigzagToRaster($yCoeffs[$rasterIdx]);
-                    if ($mbX === 2 && $mbY === 0) {
-                        echo "[DEBUG MB(2,0) Blk$rasterIdx] nc=$nc coeffs zigzag: " . implode(',', $coeffs) . "\n";
-                    }
-                    if ($isMb10) {
-                        echo "[DEBUG MB(1,0) Blk$rasterIdx] nc=$nc coeffs zigzag: " . implode(',', $coeffs) . " nz=$totalCoeff\n";
-                    }
-                    if ($isMb11blk8) {
-                        echo "[DEBUG MB(1,1) Blk8] nc=$nc coeffs zigzag: " . implode(',', $coeffs) . " nz=$totalCoeff\n";
-                        echo "[DEBUG MB(1,1) Blk8] leftNz=" . implode(',', $leftNz) . " topNz[4..8]=" . implode(',', array_slice($topNz, 4, 4)) . "\n";
-                    }
-                    if ($mbX === 0 && $mbY === 0) {
-                        echo "[DEBUG MB(0,0) Blk$rasterIdx] qp=$qp nc=$nc scanIdx=$scanIdx\n";
-                        echo "[DEBUG MB(0,0) Blk$rasterIdx] coeffs zigzag: " . implode(',', $coeffs) . "\n";
-                        echo "[DEBUG MB(0,0) Blk$rasterIdx] nzCount=" . ($totalCoeff ?? 0) . "\n";
-                    }
+//                    if ($mbX === 2 && $mbY === 0) {
+//                        echo "[DEBUG MB(2,0) Blk$rasterIdx] nc=$nc coeffs zigzag: " . implode(',', $coeffs) . "\n";
+//                    }
+//                    if ($isMb10) {
+//                        echo "[DEBUG MB(1,0) Blk$rasterIdx] nc=$nc coeffs zigzag: " . implode(',', $coeffs) . " nz=$totalCoeff\n";
+//                    }
+//                    if ($isMb11blk8) {
+//                        echo "[DEBUG MB(1,1) Blk8] nc=$nc coeffs zigzag: " . implode(',', $coeffs) . " nz=$totalCoeff\n";
+//                        echo "[DEBUG MB(1,1) Blk8] leftNz=" . implode(',', $leftNz) . " topNz[4..8]=" . implode(',', array_slice($topNz, 4, 4)) . "\n";
+//                    }
+//                    if ($mbX === 0 && $mbY === 0) {
+//                        echo "[DEBUG MB(0,0) Blk$rasterIdx] qp=$qp nc=$nc scanIdx=$scanIdx\n";
+//                        echo "[DEBUG MB(0,0) Blk$rasterIdx] coeffs zigzag: " . implode(',', $coeffs) . "\n";
+//                        echo "[DEBUG MB(0,0) Blk$rasterIdx] nzCount=" . ($totalCoeff ?? 0) . "\n";
+//                    }
                     $yCoeffs[$rasterIdx] = $this->dequantize4x4($yCoeffs[$rasterIdx], 0, $qp);
-                    if ($mbX === 0 && $mbY === 0) {
-                        echo "[DEBUG MB(0,0) Blk$rasterIdx] after dequant: " . implode(',', $yCoeffs[$rasterIdx]) . "\n";
-                    }
-                    if ($mbX === 2 && $mbY === 0 && $rasterIdx === 2) {
-                        echo "[DEBUG MB(2,0) Blk2] after dequant: " . implode(',', $yCoeffs[$rasterIdx]) . "\n";
-                    }
-                    if ($isMb10) {
-                        echo "[DEBUG MB(1,0) Blk$rasterIdx] after dequant: " . implode(',', $yCoeffs[$rasterIdx]) . "\n";
-                    }
-                    if ($isMb11blk8) {
-                        echo "[DEBUG MB(1,1) Blk8] after dequant (raster): " . implode(',', $yCoeffs[$rasterIdx]) . " qp=$qp\n";
-                    }
+//                    if ($mbX === 0 && $mbY === 0) {
+//                        echo "[DEBUG MB(0,0) Blk$rasterIdx] after dequant: " . implode(',', $yCoeffs[$rasterIdx]) . "\n";
+//                    }
+//                    if ($mbX === 2 && $mbY === 0 && $rasterIdx === 2) {
+//                        echo "[DEBUG MB(2,0) Blk2] after dequant: " . implode(',', $yCoeffs[$rasterIdx]) . "\n";
+//                    }
+//                    if ($isMb10) {
+//                        echo "[DEBUG MB(1,0) Blk$rasterIdx] after dequant: " . implode(',', $yCoeffs[$rasterIdx]) . "\n";
+//                    }
+//                    if ($isMb11blk8) {
+//                        echo "[DEBUG MB(1,1) Blk8] after dequant (raster): " . implode(',', $yCoeffs[$rasterIdx]) . " qp=$qp\n";
+//                    }
                     $nzCount = 0;
                     for ($i = 0; $i < 16; $i++) if ($coeffs[$i] != 0) $nzCount++;
                     $nzCache[$rasterIdx] = $nzCount;
                 }
             } else {
-                if ($mbX === 1 && $mbY === 0) {
-                    echo "[DBG_CBP MB(1,0)] i8x8=$i8x8 (8x8块), bit=" . (1 << $i8x8) . ", cbp_bit_set=0, all 4x4 blocks skipped\n";
-                }
+//                if ($mbX === 1 && $mbY === 0) {
+//                    echo "[DBG_CBP MB(1,0)] i8x8=$i8x8 (8x8块), bit=" . (1 << $i8x8) . ", cbp_bit_set=0, all 4x4 blocks skipped\n";
+//                }
                 for ($i4x4 = 0; $i4x4 < 4; $i4x4++) {
                     $scanIdx = $i8x8 * 4 + $i4x4;
                     $rasterIdx = $scanToRaster[$scanIdx];
@@ -362,23 +362,23 @@ trait MacroblockDecodingTrait
                 for ($y = 0; $y < 4; $y++) for ($x = 0; $x < 4; $x++) $block[$y][$x] = $yCoeffs[$blk][$y * 4 + $x];
                 $idct = $this->idct4x4($block);
                 for ($y = 0; $y < 4; $y++) for ($x = 0; $x < 4; $x++) $yPixels[$blkY * 4 + $y][$blkX * 4 + $x] = $idct[$y][$x];
-                if ($mbX === 1 && $mbY === 0 && $blk === 3) {
-                    echo "[DBG MB(1,0) blk3 (raster)] yCoeffs=" . implode(',', $yCoeffs[$blk]) . " idct=";
-                    foreach ($idct as $row) echo implode(',', $row) . ' ';
-                    echo "\n";
-                }
-                if ($mbX === 1 && $mbY === 0 && in_array($blk, [10, 11, 14, 15])) {
-                    echo "[DBG_BLK blk=$blk (raster) blkX=$blkX blkY=$blkY]\n";
-                    echo "  yCoeffs (raster): " . implode(',', $yCoeffs[$blk]) . "\n";
-                    echo "  idct:\n";
-                    foreach ($idct as $row) echo "    " . implode(',', $row) . "\n";
-                }
-                if ($mbX === 1 && $mbY === 1 && $blk === 8) {
-                    echo "[DBG MB(1,1) blk8 (raster) blkX=$blkX blkY=$blkY]\n";
-                    echo "  yCoeffs (raster): " . implode(',', $yCoeffs[$blk]) . "\n";
-                    echo "  idct:\n";
-                    foreach ($idct as $row) echo "    " . implode(',', $row) . "\n";
-                }
+//                if ($mbX === 1 && $mbY === 0 && $blk === 3) {
+//                    echo "[DBG MB(1,0) blk3 (raster)] yCoeffs=" . implode(',', $yCoeffs[$blk]) . " idct=";
+//                    foreach ($idct as $row) echo implode(',', $row) . ' ';
+//                    echo "\n";
+//                }
+//                if ($mbX === 1 && $mbY === 0 && in_array($blk, [10, 11, 14, 15])) {
+//                    echo "[DBG_BLK blk=$blk (raster) blkX=$blkX blkY=$blkY]\n";
+//                    echo "  yCoeffs (raster): " . implode(',', $yCoeffs[$blk]) . "\n";
+//                    echo "  idct:\n";
+//                    foreach ($idct as $row) echo "    " . implode(',', $row) . "\n";
+//                }
+//                if ($mbX === 1 && $mbY === 1 && $blk === 8) {
+//                    echo "[DBG MB(1,1) blk8 (raster) blkX=$blkX blkY=$blkY]\n";
+//                    echo "  yCoeffs (raster): " . implode(',', $yCoeffs[$blk]) . "\n";
+//                    echo "  idct:\n";
+//                    foreach ($idct as $row) echo "    " . implode(',', $row) . "\n";
+//                }
             }
         }
 
@@ -388,15 +388,15 @@ trait MacroblockDecodingTrait
                 $blk = $blkY * 4 + $blkX;
                 $predicted = $this->intra4x4Prediction($mbX, $mbY, $blkX, $blkY, $modes[$blk]);
                 if (($mbX === 1 && $mbY === 0) || ($mbX === 2 && $mbY === 0)) {
-                    echo "[DBG MB($mbX,$mbY) blk($blkX,$blkY) mode={$modes[$blk]}] predicted:\n";
-                    foreach ($predicted as $row) echo "    " . implode(',', $row) . "\n";
-                    echo "  residual (yPixels):\n";
+                    //echo "[DBG MB($mbX,$mbY) blk($blkX,$blkY) mode={$modes[$blk]}] predicted:\n";
+                    //foreach ($predicted as $row) echo "    " . implode(',', $row) . "\n";
+                    //echo "  residual (yPixels):\n";
                     for ($y = 0; $y < 4; $y++) {
                         $row = [];
                         for ($x = 0; $x < 4; $x++) $row[] = $yPixels[$blkY * 4 + $y][$blkX * 4 + $x];
-                        echo "    " . implode(',', $row) . "\n";
+                        //echo "    " . implode(',', $row) . "\n";
                     }
-                    echo "  FINAL PIXELS:\n";
+                    //echo "  FINAL PIXELS:\n";
                     for ($y = 0; $y < 4; $y++) {
                         $row = [];
                         for ($x = 0; $x < 4; $x++) {
@@ -404,27 +404,27 @@ trait MacroblockDecodingTrait
                             $val = max(0, min(255, $val));
                             $row[] = $val;
                         }
-                        echo "    " . implode(',', $row) . "\n";
+                        //echo "    " . implode(',', $row) . "\n";
                     }
                 }
                 if ($mbX === 0 && $mbY === 0 && $blk === 4) {
-                    echo "[DBG MB(0,0) blk4 mode={$modes[$blk]}] predicted:\n";
-                    foreach ($predicted as $row) echo "    " . implode(',', $row) . "\n";
-                    echo "  residual (yPixels):\n";
+                    //echo "[DBG MB(0,0) blk4 mode={$modes[$blk]}] predicted:\n";
+                    //foreach ($predicted as $row) echo "    " . implode(',', $row) . "\n";
+                    //echo "  residual (yPixels):\n";
                     for ($y = 0; $y < 4; $y++) {
                         $row = [];
                         for ($x = 0; $x < 4; $x++) $row[] = $yPixels[$blkY * 4 + $y][$blkX * 4 + $x];
-                        echo "    " . implode(',', $row) . "\n";
+                        //echo "    " . implode(',', $row) . "\n";
                     }
                 }
                 if ($mbX === 0 && $mbY === 0 && $blk === 6) {
-                    echo "[DBG MB(0,0) blk6 mode={$modes[$blk]}] predicted:\n";
-                    foreach ($predicted as $row) echo "    " . implode(',', $row) . "\n";
-                    echo "  residual (yPixels):\n";
+                    //echo "[DBG MB(0,0) blk6 mode={$modes[$blk]}] predicted:\n";
+                    //foreach ($predicted as $row) echo "    " . implode(',', $row) . "\n";
+                    //echo "  residual (yPixels):\n";
                     for ($y = 0; $y < 4; $y++) {
                         $row = [];
                         for ($x = 0; $x < 4; $x++) $row[] = $yPixels[$blkY * 4 + $y][$blkX * 4 + $x];
-                        echo "    " . implode(',', $row) . "\n";
+                        //echo "    " . implode(',', $row) . "\n";
                     }
                 }
                 if ($mbX === 1 && $mbY === 0 && $blk == 0) {
@@ -442,14 +442,14 @@ trait MacroblockDecodingTrait
                     }
                     $tlIdx = ($mbPy - 1) * $this->width + ($mbPx - 1);
                     $tlPix = $this->yPlane[$tlIdx] ?? -1;
-                    echo "[DBG MB(1,0) blk0 mode={$modes[$blk]}] left=[" . implode(',', $leftPix) . "] top=[" . implode(',', $topPix) . "] topLeft=$tlPix\n";
-                    echo "  predicted:\n";
-                    foreach ($predicted as $row) echo "    " . implode(',', $row) . "\n";
-                    echo "  residual (yPixels):\n";
+                    //echo "[DBG MB(1,0) blk0 mode={$modes[$blk]}] left=[" . implode(',', $leftPix) . "] top=[" . implode(',', $topPix) . "] topLeft=$tlPix\n";
+                    //echo "  predicted:\n";
+                    //foreach ($predicted as $row) echo "    " . implode(',', $row) . "\n";
+                    //echo "  residual (yPixels):\n";
                     for ($y = 0; $y < 4; $y++) {
                         $row = [];
                         for ($x = 0; $x < 4; $x++) $row[] = $yPixels[$blkY * 4 + $y][$blkX * 4 + $x];
-                        echo "    " . implode(',', $row) . "\n";
+                        //echo "    " . implode(',', $row) . "\n";
                     }
                 }
                 if ($mbX === 2 && $mbY === 0 && $blk === 0) {
@@ -467,14 +467,14 @@ trait MacroblockDecodingTrait
                     }
                     $tlIdx2 = ($mbPy2 - 1) * $this->width + ($mbPx2 - 1);
                     $tlPix2 = $this->yPlane[$tlIdx2] ?? -1;
-                    echo "[DBG MB(2,0) blk0 mode={$modes[$blk]}] left=[" . implode(',', $leftPix2) . "] top=[" . implode(',', $topPix2) . "] topLeft=$tlPix2\n";
-                    echo "  predicted:\n";
-                    foreach ($predicted as $row) echo "    " . implode(',', $row) . "\n";
-                    echo "  residual (yPixels):\n";
+                    //echo "[DBG MB(2,0) blk0 mode={$modes[$blk]}] left=[" . implode(',', $leftPix2) . "] top=[" . implode(',', $topPix2) . "] topLeft=$tlPix2\n";
+                    //echo "  predicted:\n";
+                    //foreach ($predicted as $row) echo "    " . implode(',', $row) . "\n";
+                    //echo "  residual (yPixels):\n";
                     for ($y = 0; $y < 4; $y++) {
                         $row2 = [];
                         for ($x = 0; $x < 4; $x++) $row2[] = $yPixels[$blkY * 4 + $y][$blkX * 4 + $x];
-                        echo "    " . implode(',', $row2) . "\n";
+                        //echo "    " . implode(',', $row2) . "\n";
                     }
                 }
                 if ($mbX === 2 && $mbY === 0 && $blk === 1) {
@@ -492,14 +492,14 @@ trait MacroblockDecodingTrait
                     }
                     $tlIdx2 = ($mbPy2 - 1) * $this->width + ($mbPx2 - 1);
                     $tlPix2 = $this->yPlane[$tlIdx2] ?? -1;
-                    echo "[DBG MB(2,0) blk1 mode={$modes[$blk]}] left=[" . implode(',', $leftPix2) . "] top=[" . implode(',', $topPix2) . "] topLeft=$tlPix2\n";
-                    echo "  predicted:\n";
-                    foreach ($predicted as $row) echo "    " . implode(',', $row) . "\n";
-                    echo "  residual (yPixels):\n";
+                    //echo "[DBG MB(2,0) blk1 mode={$modes[$blk]}] left=[" . implode(',', $leftPix2) . "] top=[" . implode(',', $topPix2) . "] topLeft=$tlPix2\n";
+                    //echo "  predicted:\n";
+                    //foreach ($predicted as $row) echo "    " . implode(',', $row) . "\n";
+                    //echo "  residual (yPixels):\n";
                     for ($y = 0; $y < 4; $y++) {
                         $row2 = [];
                         for ($x = 0; $x < 4; $x++) $row2[] = $yPixels[$blkY * 4 + $y][$blkX * 4 + $x];
-                        echo "    " . implode(',', $row2) . "\n";
+                        //echo "    " . implode(',', $row2) . "\n";
                     }
                 }
                 if ($mbX === 2 && $mbY === 0 && $blk === 2) {
@@ -517,14 +517,14 @@ trait MacroblockDecodingTrait
                     }
                     $tlIdx2 = ($mbPy2 - 1) * $this->width + ($mbPx2 - 1);
                     $tlPix2 = $this->yPlane[$tlIdx2] ?? -1;
-                    echo "[DBG MB(2,0) blk2 (raster=$blk, blkX=$blkX, blkY=$blkY) mode={$modes[$blk]}] left=[" . implode(',', $leftPix2) . "] top=[" . implode(',', $topPix2) . "] topLeft=$tlPix2\n";
-                    echo "  predicted:\n";
-                    foreach ($predicted as $row) echo "    " . implode(',', $row) . "\n";
-                    echo "  residual (yPixels):\n";
+                    //echo "[DBG MB(2,0) blk2 (raster=$blk, blkX=$blkX, blkY=$blkY) mode={$modes[$blk]}] left=[" . implode(',', $leftPix2) . "] top=[" . implode(',', $topPix2) . "] topLeft=$tlPix2\n";
+                    //echo "  predicted:\n";
+                    //foreach ($predicted as $row) echo "    " . implode(',', $row) . "\n";
+                    //echo "  residual (yPixels):\n";
                     for ($y = 0; $y < 4; $y++) {
                         $row2 = [];
                         for ($x = 0; $x < 4; $x++) $row2[] = $yPixels[$blkY * 4 + $y][$blkX * 4 + $x];
-                        echo "    " . implode(',', $row2) . "\n";
+                        //echo "    " . implode(',', $row2) . "\n";
                     }
                     echo "  FINAL PIXELS (predicted + residual):\n";
                     for ($y = 0; $y < 4; $y++) {
@@ -533,7 +533,7 @@ trait MacroblockDecodingTrait
                             $val = $predicted[$y][$x] + $yPixels[$blkY * 4 + $y][$blkX * 4 + $x];
                             $row2[] = $val;
                         }
-                        echo "    " . implode(',', $row2) . "\n";
+                        //echo "    " . implode(',', $row2) . "\n";
                     }
                 }
                 if ($mbX === 2 && $mbY === 0 && $blk == 12) {
@@ -551,14 +551,14 @@ trait MacroblockDecodingTrait
                     }
                     $tlIdx2 = ($mbPy2 - 1) * $this->width + ($mbPx2 - 1);
                     $tlPix2 = $this->yPlane[$tlIdx2] ?? -1;
-                    echo "[DBG MB(2,0) blk12 mode={$modes[$blk]}] left=[" . implode(',', $leftPix2) . "] top=[" . implode(',', $topPix2) . "] topLeft=$tlPix2\n";
-                    echo "  predicted:\n";
-                    foreach ($predicted as $row) echo "    " . implode(',', $row) . "\n";
-                    echo "  residual (yPixels):\n";
+                    //echo "[DBG MB(2,0) blk12 mode={$modes[$blk]}] left=[" . implode(',', $leftPix2) . "] top=[" . implode(',', $topPix2) . "] topLeft=$tlPix2\n";
+                    //echo "  predicted:\n";
+                    //foreach ($predicted as $row) echo "    " . implode(',', $row) . "\n";
+                    //echo "  residual (yPixels):\n";
                     for ($y = 0; $y < 4; $y++) {
                         $row2 = [];
                         for ($x = 0; $x < 4; $x++) $row2[] = $yPixels[$blkY * 4 + $y][$blkX * 4 + $x];
-                        echo "    " . implode(',', $row2) . "\n";
+                        //echo "    " . implode(',', $row2) . "\n";
                     }
                 }
                 if ($mbX === 3 && $mbY === 1 && $blk == 5) {
@@ -577,25 +577,25 @@ trait MacroblockDecodingTrait
                     }
                     $tlIdx = ($mbPy - 1) * $this->width + ($mbPx - 1);
                     $tlPix = $this->yPlane[$tlIdx] ?? -1;
-                    echo "[DBG MB(3,1) blk5 mode={$modes[$blk]}] left=[" . implode(',', $leftPix) . "] top=[" . implode(',', $topPix) . "] topLeft=$tlPix\n";
-                    echo "  predicted:\n";
-                    foreach ($predicted as $row) echo "    " . implode(',', $row) . "\n";
-                    echo "  residual (yPixels):\n";
+                    //echo "[DBG MB(3,1) blk5 mode={$modes[$blk]}] left=[" . implode(',', $leftPix) . "] top=[" . implode(',', $topPix) . "] topLeft=$tlPix\n";
+                    //echo "  predicted:\n";
+                    //foreach ($predicted as $row) echo "    " . implode(',', $row) . "\n";
+                    //echo "  residual (yPixels):\n";
                     for ($y = 0; $y < 4; $y++) {
                         $row = [];
                         for ($x = 0; $x < 4; $x++) $row[] = $yPixels[$blkY * 4 + $y][$blkX * 4 + $x];
-                        echo "    " . implode(',', $row) . "\n";
+                        //echo "    " . implode(',', $row) . "\n";
                     }
                 }
                 if ($mbX === 2 && $mbY === 0 && $blkX === 2 && $blkY === 0) {
-                    echo "[DBG_PRED MB(2,0) blk(2,0) mode={$modes[$blk]}]\n";
-                    echo "  predicted:\n";
-                    foreach ($predicted as $row) echo "    " . implode(',', $row) . "\n";
-                    echo "  residual (yPixels):\n";
+                    //echo "[DBG_PRED MB(2,0) blk(2,0) mode={$modes[$blk]}]\n";
+                    //echo "  predicted:\n";
+                    //foreach ($predicted as $row) echo "    " . implode(',', $row) . "\n";
+                    //echo "  residual (yPixels):\n";
                     for ($y = 0; $y < 4; $y++) {
                         $row = [];
                         for ($x = 0; $x < 4; $x++) $row[] = $yPixels[$blkY * 4 + $y][$blkX * 4 + $x];
-                        echo "    " . implode(',', $row) . "\n";
+                        //echo "    " . implode(',', $row) . "\n";
                     }
                 }
                 if ($mbX === 1 && $mbY === 1 && $blk === 8) {
@@ -614,23 +614,23 @@ trait MacroblockDecodingTrait
                     }
                     $dbgTlIdx = ($dbgPy - 1) * $this->width + ($dbgPx - 1);
                     $dbgTl = $this->yPlane[$dbgTlIdx] ?? -1;
-                    echo "[DBG MB(1,1) blk8 mode={$modes[$blk]}] left=[" . implode(',', $dbgLeft) . "] top=[" . implode(',', $dbgTop) . "] topLeft=$dbgTl\n";
-                    echo "[DBG MB(1,1) blk8] predicted:\n";
-                    foreach ($predicted as $row) echo "    " . implode(',', $row) . "\n";
-                    echo "[DBG MB(1,1) blk8] residual (yPixels):\n";
+                    //echo "[DBG MB(1,1) blk8 mode={$modes[$blk]}] left=[" . implode(',', $dbgLeft) . "] top=[" . implode(',', $dbgTop) . "] topLeft=$dbgTl\n";
+                    //echo "[DBG MB(1,1) blk8] predicted:\n";
+                    //foreach ($predicted as $row) echo "    " . implode(',', $row) . "\n";
+                    //echo "[DBG MB(1,1) blk8] residual (yPixels):\n";
                     for ($y = 0; $y < 4; $y++) {
                         $row = [];
                         for ($x = 0; $x < 4; $x++) $row[] = $yPixels[$blkY * 4 + $y][$blkX * 4 + $x];
-                        echo "    " . implode(',', $row) . "\n";
+                        //echo "    " . implode(',', $row) . "\n";
                     }
-                    echo "[DBG MB(1,1) blk8] FINAL PIXELS (predicted + residual):\n";
+                    //echo "[DBG MB(1,1) blk8] FINAL PIXELS (predicted + residual):\n";
                     for ($y = 0; $y < 4; $y++) {
                         $row = [];
                         for ($x = 0; $x < 4; $x++) {
                             $val = $predicted[$y][$x] + $yPixels[$blkY * 4 + $y][$blkX * 4 + $x];
                             $row[] = max(0, min(255, $val));
                         }
-                        echo "    " . implode(',', $row) . "\n";
+                        //echo "    " . implode(',', $row) . "\n";
                     }
                 }
                 for ($y = 0; $y < 4; $y++) {
@@ -642,34 +642,34 @@ trait MacroblockDecodingTrait
                             $val = max(0, min(255, $val));
                             $idx = $py * $this->width + $px;
                             $this->yPlane[$idx] = $val;
-                            if ($mbX === 1 && $mbY === 0 && $blk === 3) {
-                                echo "[DBG_WRITE MB(1,0) blk3] ($px,$py) predicted={$predicted[$y][$x]} residual={$yPixels[$blkY * 4 + $y][$blkX * 4 + $x]} val=$val idx=$idx\n";
-                            }
-                            if ($mbX === 1 && $mbY === 1 && $blk === 8) {
-                                echo "[DBG_WRITE MB(1,1) blk8] ($px,$py) predicted={$predicted[$y][$x]} residual={$yPixels[$blkY * 4 + $y][$blkX * 4 + $x]} val=$val idx=$idx\n";
-                            }
+//                            if ($mbX === 1 && $mbY === 0 && $blk === 3) {
+//                                echo "[DBG_WRITE MB(1,0) blk3] ($px,$py) predicted={$predicted[$y][$x]} residual={$yPixels[$blkY * 4 + $y][$blkX * 4 + $x]} val=$val idx=$idx\n";
+//                            }
+//                            if ($mbX === 1 && $mbY === 1 && $blk === 8) {
+//                                echo "[DBG_WRITE MB(1,1) blk8] ($px,$py) predicted={$predicted[$y][$x]} residual={$yPixels[$blkY * 4 + $y][$blkX * 4 + $x]} val=$val idx=$idx\n";
+//                            }
                         }
                     }
                 }
             }
         }
 
-        if ($mbX === 0 && $mbY === 0) {
-            echo "[DBG MB(0,0) RIGHT EDGE] x=15 (rightmost column): ";
-            for ($y = 0; $y < 16; $y++) {
-                $idx = $y * $this->width + 15;
-                echo $this->yPlane[$idx] . ",";
-            }
-            echo "\n";
-        }
-        if ($mbX === 1 && $mbY === 0) {
-            echo "[DBG MB(1,0) RIGHT EDGE] x=31 (rightmost column): ";
-            for ($y = 0; $y < 16; $y++) {
-                $idx = $y * $this->width + 31;
-                echo $this->yPlane[$idx] . ",";
-            }
-            echo "\n";
-        }
+//        if ($mbX === 0 && $mbY === 0) {
+//            echo "[DBG MB(0,0) RIGHT EDGE] x=15 (rightmost column): ";
+//            for ($y = 0; $y < 16; $y++) {
+//                $idx = $y * $this->width + 15;
+//                echo $this->yPlane[$idx] . ",";
+//            }
+//            echo "\n";
+//        }
+//        if ($mbX === 1 && $mbY === 0) {
+//            echo "[DBG MB(1,0) RIGHT EDGE] x=31 (rightmost column): ";
+//            for ($y = 0; $y < 16; $y++) {
+//                $idx = $y * $this->width + 31;
+//                echo $this->yPlane[$idx] . ",";
+//            }
+//            echo "\n";
+//        }
 
         // 色度DC逆哈达玛 + AC IDCT
         // 参考Rust mb.rs decode_chroma:
@@ -788,7 +788,7 @@ trait MacroblockDecodingTrait
      */
     public function decodeIntra16x16(int $mbX, int $mbY, int $mbType, int $qp): int
     {
-        echo "[DECODER] MB($mbX,$mbY): === Intra16x16 解码 ===\n";
+        //echo "[DECODER] MB($mbX,$mbY): === Intra16x16 解码 ===\n";
 
         // 参考 C语言编码器 cavlc_mb_header_i 的公式：
         // mb_type = 1 + pred_mode + cbp_chroma * 4 + (cbp_luma == 0 ? 0 : 12)
@@ -802,7 +802,7 @@ trait MacroblockDecodingTrait
         $cbpChroma = intdiv(($mbType - 1 - $base), 4);
         $cbpLuma = $hasLumaAc ? 15 : 0;
 
-        echo "[DECODER] MB($mbX,$mbY): mbType={$mbType}, predMode={$predMode}, cbpLuma={$cbpLuma}, cbpChroma={$cbpChroma}\n";
+        //echo "[DECODER] MB($mbX,$mbY): mbType={$mbType}, predMode={$predMode}, cbpLuma={$cbpLuma}, cbpChroma={$cbpChroma}\n";
 
         // I_16x16宏块总是编码chroma_pred_mode（参考C语言编码器cavlc_mb_header_i）
         // chroma = CHROMA_FORMAT == CHROMA_420 || CHROMA_FORMAT == CHROMA_422，对于YUV420总是true
@@ -811,18 +811,18 @@ trait MacroblockDecodingTrait
         $chromaPredMode = $this->reader->readUe();
         $bitAfterChroma = $this->reader->getBitPosition();
         if ($chromaPredMode > 3) {
-            echo "[DECODER] MB($mbX,$mbY): 错误 - chromaPredMode=$chromaPredMode 超出范围 (0-3) bitPos=$bitBeforeChroma consumed=" . ($bitAfterChroma - $bitBeforeChroma) . "\n";
+            //echo "[DECODER] MB($mbX,$mbY): 错误 - chromaPredMode=$chromaPredMode 超出范围 (0-3) bitPos=$bitBeforeChroma consumed=" . ($bitAfterChroma - $bitBeforeChroma) . "\n";
             // 打印接下来的16个比特用于调试
             $peek16 = $this->reader->peek(16);
-            echo "[DECODER] MB($mbX,$mbY): next16bits=" . sprintf('%016b', $peek16) . " bitPos=" . $this->reader->getBitPosition() . "\n";
+            //echo "[DECODER] MB($mbX,$mbY): next16bits=" . sprintf('%016b', $peek16) . " bitPos=" . $this->reader->getBitPosition() . "\n";
             $chromaPredMode = 0; // 回退到DC模式
         }
-        echo "[DECODER] MB($mbX,$mbY): 读取 chromaPredMode = $chromaPredMode\n";
+        //echo "[DECODER] MB($mbX,$mbY): 读取 chromaPredMode = $chromaPredMode\n";
 
         // mb_qp_delta - I_16x16无论cbp如何都要读取（H.264标准 7.4.5.2）
         $mbQpDelta = $this->reader->readSe();
         $qp = max(0, min(51, $qp + $mbQpDelta));
-        echo "[DECODER] MB($mbX,$mbY): 读取 mbQpDelta = $mbQpDelta, qp = $qp\n";
+        //echo "[DECODER] MB($mbX,$mbY): 读取 mbQpDelta = $mbQpDelta, qp = $qp\n";
 
         // 亮度DC系数
         // 参考x264编码顺序: 亮度DC -> 亮度AC -> 色度DC -> 色度AC
@@ -873,10 +873,10 @@ trait MacroblockDecodingTrait
             $yDcNc = min($avgNz, 16);
         }
         $dbgI16 = ($mbX === 3 && $mbY === 0);
-        if ($dbgI16) {
-            echo "[DBG_I16 MB(3,0)] leftNz=" . implode(',', array_slice($leftNz, 0, 4)) . " leftAvail=" . ($leftAvailable ? 1 : 0) . " topAvail=" . ($topAvailable ? 1 : 0) . "\n";
-            echo "[DBG_I16 MB(3,0)] yDcNc=$yDcNc bitPosBefore=" . $this->reader->getBitPosition() . "\n";
-        }
+        //if ($dbgI16) {
+            //echo "[DBG_I16 MB(3,0)] leftNz=" . implode(',', array_slice($leftNz, 0, 4)) . " leftAvail=" . ($leftAvailable ? 1 : 0) . " topAvail=" . ($topAvailable ? 1 : 0) . "\n";
+            //echo "[DBG_I16 MB(3,0)] yDcNc=$yDcNc bitPosBefore=" . $this->reader->getBitPosition() . "\n";
+        //}
         if ($mbX === 0 && $mbY === 0) $this->debugResidual = true;
         if ($mbX === 3 && $mbY === 0) $this->debugResidual = true;
         $bitBeforeDc = $this->reader->getBitPosition();
@@ -889,10 +889,10 @@ trait MacroblockDecodingTrait
             if ($yDcZigzag[$i] != 0) $dcNzCount++;
         }
         
-        if ($dbgI16) {
-            echo "[DBG_I16 MB(3,0)] yDcZigzag=" . implode(',', $yDcZigzag) . " nzCount=$dcNzCount\n";
-            echo "[DBG_I16 MB(3,0)] bitPosAfter=$bitAfterDc dcConsumed=" . ($bitAfterDc - $bitBeforeDc) . "\n";
-        }
+//        if ($dbgI16) {
+//            echo "[DBG_I16 MB(3,0)] yDcZigzag=" . implode(',', $yDcZigzag) . " nzCount=$dcNzCount\n";
+//            echo "[DBG_I16 MB(3,0)] bitPosAfter=$bitAfterDc dcConsumed=" . ($bitAfterDc - $bitBeforeDc) . "\n";
+//        }
         // decodeResidualBlock返回zig-zag顺序，需先转为raster顺序
         // raster顺序在宏块DC语境下对应4x4矩阵: row=block_row, col=block_col
         // 这是Hadamard变换所需的输入顺序
@@ -909,20 +909,20 @@ trait MacroblockDecodingTrait
         $yDcResultBlockOrder = $this->lumaDcDequantIdct($yDcRaster, $lumaQmul);
 
         if ($mbX === 0 && $mbY === 0) {
-            echo "[DEBUG MB(0,0)] DC raster: " . implode(',', $yDcRaster) . "\n";
-            echo "[DEBUG MB(0,0)] qp=$qp lumaQmul=$lumaQmul\n";
-            echo "[DEBUG MB(0,0)] DC Hadamard (raster order): " . implode(',', $yDcResultBlockOrder) . "\n";
+            //echo "[DEBUG MB(0,0)] DC raster: " . implode(',', $yDcRaster) . "\n";
+            //echo "[DEBUG MB(0,0)] qp=$qp lumaQmul=$lumaQmul\n";
+            //echo "[DEBUG MB(0,0)] DC Hadamard (raster order): " . implode(',', $yDcResultBlockOrder) . "\n";
             $this->debugLastQp = $qp;
             $this->debugLastDcScan = $yDcRaster;
             $this->debugLastDcRaster = $yDcRaster;
             $this->debugLastQmul = $lumaQmul;
             $this->debugLastDcResult = $yDcResultBlockOrder;
         }
-        if ($mbX === 1 && $mbY === 0) {
-            echo "[DEBUG MB(1,0)] DC raster: " . implode(',', $yDcRaster) . "\n";
-            echo "[DEBUG MB(1,0)] qp=$qp lumaQmul=$lumaQmul\n";
-            echo "[DEBUG MB(1,0)] DC Hadamard (raster order): " . implode(',', $yDcResultBlockOrder) . "\n";
-        }
+//        if ($mbX === 1 && $mbY === 0) {
+//            echo "[DEBUG MB(1,0)] DC raster: " . implode(',', $yDcRaster) . "\n";
+//            echo "[DEBUG MB(1,0)] qp=$qp lumaQmul=$lumaQmul\n";
+//            echo "[DEBUG MB(1,0)] DC Hadamard (raster order): " . implode(',', $yDcResultBlockOrder) . "\n";
+//        }
 
         $yAcCoeffs = array_fill(0, 16, array_fill(0, 16, 0));
         $blockIndexToRaster = [0, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15];
@@ -944,10 +944,10 @@ trait MacroblockDecodingTrait
                 $nzCount = 0;
                 for ($i = 0; $i < 15; $i++) if ($ac[$i] != 0) $nzCount++;
                 $nzCache[$rasterIdx] = $nzCount;
-                if ($mbX === 0 && $mbY === 0 && $blkIdx === 0) {
-                    echo "[DEBUG MB(0,0) Blk0] nc=$nc AC scan: " . implode(',', $ac) . "\n";
-                    echo "[DEBUG MB(0,0) Blk0] AC raster+dequant: " . implode(',', $yAcCoeffs[$rasterIdx]) . "\n";
-                }
+//                if ($mbX === 0 && $mbY === 0 && $blkIdx === 0) {
+//                    echo "[DEBUG MB(0,0) Blk0] nc=$nc AC scan: " . implode(',', $ac) . "\n";
+//                    echo "[DEBUG MB(0,0) Blk0] AC raster+dequant: " . implode(',', $yAcCoeffs[$rasterIdx]) . "\n";
+//                }
             }
         }
 
@@ -1296,38 +1296,38 @@ trait MacroblockDecodingTrait
 
         // P_L0_16x16 (mb_type 0)
         if ($mbType === 0) {
-            echo "[DECODER] MB($mbX,$mbY): P_L0_16x16\n";
+            //echo "[DECODER] MB($mbX,$mbY): P_L0_16x16\n";
             return $this->decodePL0_16x16($mbX, $mbY, $sliceQp);
         }
 
         // P_L0_L0_16x8 (mb_type 1)
         if ($mbType === 1) {
-            echo "[DECODER] MB($mbX,$mbY): P_L0_L0_16x8\n";
+            //echo "[DECODER] MB($mbX,$mbY): P_L0_L0_16x8\n";
             return $this->decodePL0_16x8($mbX, $mbY, $sliceQp);
         }
 
         // P_L0_L0_8x16 (mb_type 2)
         if ($mbType === 2) {
-            echo "[DECODER] MB($mbX,$mbY): P_L0_L0_8x16\n";
+            //echo "[DECODER] MB($mbX,$mbY): P_L0_L0_8x16\n";
             return $this->decodePL0_8x16($mbX, $mbY, $sliceQp);
         }
 
         // P_8x8 (mb_type 3)
         if ($mbType === 3) {
-            echo "[DECODER] MB($mbX,$mbY): P_8x8\n";
+            //echo "[DECODER] MB($mbX,$mbY): P_8x8\n";
             return $this->decodeP_8x8($mbX, $mbY, $sliceQp);
         }
 
         // P_8x8ref0 (mb_type 4)
         if ($mbType === 4) {
-            echo "[DECODER] MB($mbX,$mbY): P_8x8ref0\n";
+            //echo "[DECODER] MB($mbX,$mbY): P_8x8ref0\n";
             return $this->decodeP_8x8ref0($mbX, $mbY, $sliceQp);
         }
 
         // Intra 模式 (mb_type >= 5, 即 mb_type - 5 对应 I_4x4..I_PCM)
         if ($mbType >= 5 && $mbType <= 30) {
             $intraMbType = $mbType - 5;
-            echo "[DECODER] MB($mbX,$mbY): P帧Intra宏块, intra_mb_type=$intraMbType\n";
+            //echo "[DECODER] MB($mbX,$mbY): P帧Intra宏块, intra_mb_type=$intraMbType\n";
             $mbQpDelta = $this->decodeIntraMacroblock($mbX, $mbY, $intraMbType, $sliceQp);
             $this->mvLeftCol = [null, null, null, null];
             $this->mvTopRow[$mbX * 4 + 0] = null;
@@ -1337,7 +1337,7 @@ trait MacroblockDecodingTrait
             return $mbQpDelta;
         }
 
-        echo "[DECODER] MB($mbX,$mbY): 未知P帧mb_type={$mbType}，填充灰色\n";
+        //echo "[DECODER] MB($mbX,$mbY): 未知P帧mb_type={$mbType}，填充灰色\n";
         $this->fillMacroblockGray($mbX, $mbY);
         return 0;
     }
@@ -1356,10 +1356,10 @@ trait MacroblockDecodingTrait
 
         // Debug: Frame 2 first few MBs
         if ($this->debugSliceIndex === 3 && $mbY === 0 && $mbX <= 5) {
-            echo "[MV_DEBUG] MB($mbX,$mbY) P_Skip: pred_mv=($predMvX,$predMvY) mv=($mvX,$mvY) refIdx=$refIdx\n";
-            echo "[MV_DEBUG]   mvLeftCol[0]=" . ($this->mvLeftCol[0] ? "({$this->mvLeftCol[0][0]},{$this->mvLeftCol[0][1]},{$this->mvLeftCol[0][2]})" : "null") . "\n";
+            //echo "[MV_DEBUG] MB($mbX,$mbY) P_Skip: pred_mv=($predMvX,$predMvY) mv=($mvX,$mvY) refIdx=$refIdx\n";
+            //echo "[MV_DEBUG]   mvLeftCol[0]=" . ($this->mvLeftCol[0] ? "({$this->mvLeftCol[0][0]},{$this->mvLeftCol[0][1]},{$this->mvLeftCol[0][2]})" : "null") . "\n";
             $topMv = $this->mvTopRow[$mbX * 4] ?? null;
-            echo "[MV_DEBUG]   mvTopRow[mbX*4]=" . ($topMv ? "({$topMv[0]},{$topMv[1]},{$topMv[2]})" : "null") . "\n";
+            //echo "[MV_DEBUG]   mvTopRow[mbX*4]=" . ($topMv ? "({$topMv[0]},{$topMv[1]},{$topMv[2]})" : "null") . "\n";
         }
 
         $isDebugSlice = ($this->debugTargetSlice > 0 && $this->debugSliceIndex === $this->debugTargetSlice);
@@ -1424,17 +1424,17 @@ trait MacroblockDecodingTrait
 
         // Debug: Frame 2 first few MBs
         if ($this->debugSliceIndex === 3 && $mbY === 0 && $mbX <= 5) {
-            echo "[MV_DEBUG] MB($mbX,$mbY) P_16x16: mvd=($mvdL0X,$mvdL0Y) pred_mv=($predMvX,$predMvY) mv=($mvX,$mvY) refIdx=$refIdx\n";
-            echo "[MV_DEBUG]   bitBeforeMvdX=$bitBeforeMvdX bitBeforeMvdY=$bitBeforeMvdY bitAfterMvd=$bitAfterMvd\n";
-            echo "[MV_DEBUG]   mvdX_bits=" . ($bitBeforeMvdY - $bitBeforeMvdX) . " mvdY_bits=" . ($bitAfterMvd - $bitBeforeMvdY) . "\n";
-            echo "[MV_DEBUG]   mvLeftCol[0]=" . ($this->mvLeftCol[0] ? "({$this->mvLeftCol[0][0]},{$this->mvLeftCol[0][1]},{$this->mvLeftCol[0][2]})" : "null") . "\n";
+            //echo "[MV_DEBUG] MB($mbX,$mbY) P_16x16: mvd=($mvdL0X,$mvdL0Y) pred_mv=($predMvX,$predMvY) mv=($mvX,$mvY) refIdx=$refIdx\n";
+            //echo "[MV_DEBUG]   bitBeforeMvdX=$bitBeforeMvdX bitBeforeMvdY=$bitBeforeMvdY bitAfterMvd=$bitAfterMvd\n";
+            //echo "[MV_DEBUG]   mvdX_bits=" . ($bitBeforeMvdY - $bitBeforeMvdX) . " mvdY_bits=" . ($bitAfterMvd - $bitBeforeMvdY) . "\n";
+            //echo "[MV_DEBUG]   mvLeftCol[0]=" . ($this->mvLeftCol[0] ? "({$this->mvLeftCol[0][0]},{$this->mvLeftCol[0][1]},{$this->mvLeftCol[0][2]})" : "null") . "\n";
             $topMv = $this->mvTopRow[$mbX * 4] ?? null;
-            echo "[MV_DEBUG]   mvTopRow[mbX*4]=" . ($topMv ? "({$topMv[0]},{$topMv[1]},{$topMv[2]})" : "null") . "\n";
+            //echo "[MV_DEBUG]   mvTopRow[mbX*4]=" . ($topMv ? "({$topMv[0]},{$topMv[1]},{$topMv[2]})" : "null") . "\n";
             $topRightMv = $this->mvTopRow[($mbX + 1) * 4] ?? null;
-            echo "[MV_DEBUG]   mvTopRow[(mbX+1)*4]=" . ($topRightMv ? "({$topRightMv[0]},{$topRightMv[1]},{$topRightMv[2]})" : "null") . "\n";
+            //echo "[MV_DEBUG]   mvTopRow[(mbX+1)*4]=" . ($topRightMv ? "({$topRightMv[0]},{$topRightMv[1]},{$topRightMv[2]})" : "null") . "\n";
         }
 
-        echo "[DECODER] MB($mbX,$mbY): refIdx=$refIdx mvd=($mvdL0X,$mvdL0Y) pred_mv=($predMvX,$predMvY) mv=($mvX,$mvY)\n";
+        //echo "[DECODER] MB($mbX,$mbY): refIdx=$refIdx mvd=($mvdL0X,$mvdL0Y) pred_mv=($predMvX,$predMvY) mv=($mvX,$mvY)\n";
 
         $isDebugSlice = ($this->debugTargetSlice > 0 && $this->debugSliceIndex === $this->debugTargetSlice);
         if ($isDebugSlice && $this->debugMbTraceFh) {
@@ -1442,20 +1442,20 @@ trait MacroblockDecodingTrait
         }
 
         if ($mbX === 2 && $mbY === 0) {
-            echo "[DBG_MB20] bitBeforeMvdX=$bitBeforeMvdX bitBeforeMvdY=$bitBeforeMvdY bitAfterMvd=$bitAfterMvd\n";
-            echo "[DBG_MB20] mvdX_bits=" . ($bitBeforeMvdY - $bitBeforeMvdX) . " mvdY_bits=" . ($bitAfterMvd - $bitBeforeMvdY) . "\n";
-            echo "[DBG_MB20] mvd=($mvdL0X,$mvdL0Y) pred_mv=($predMvX,$predMvY) mv=($mvX,$mvY)\n";
+            //echo "[DBG_MB20] bitBeforeMvdX=$bitBeforeMvdX bitBeforeMvdY=$bitBeforeMvdY bitAfterMvd=$bitAfterMvd\n";
+            //echo "[DBG_MB20] mvdX_bits=" . ($bitBeforeMvdY - $bitBeforeMvdX) . " mvdY_bits=" . ($bitAfterMvd - $bitBeforeMvdY) . "\n";
+            //echo "[DBG_MB20] mvd=($mvdL0X,$mvdL0Y) pred_mv=($predMvX,$predMvY) mv=($mvX,$mvY)\n";
             // 临时测试：强制使用 MV=(-2,0)
             if (property_exists($this, 'forceMvMb20') && $this->forceMvMb20) {
                 $mvX = -2;
                 $mvY = 0;
-                echo "[DBG_MB20] 强制 MV=(-2,0)\n";
+                //echo "[DBG_MB20] 强制 MV=(-2,0)\n";
             }
         }
         if ($mbX === 1 && $mbY === 0) {
-            echo "[DBG_MB10] bitBeforeMvdX=$bitBeforeMvdX bitBeforeMvdY=$bitBeforeMvdY bitAfterMvd=$bitAfterMvd\n";
-            echo "[DBG_MB10] mvdX_bits=" . ($bitBeforeMvdY - $bitBeforeMvdX) . " mvdY_bits=" . ($bitAfterMvd - $bitBeforeMvdY) . "\n";
-            echo "[DBG_MB10] mvd=($mvdL0X,$mvdL0Y) pred_mv=($predMvX,$predMvY) mv=($mvX,$mvY)\n";
+            //echo "[DBG_MB10] bitBeforeMvdX=$bitBeforeMvdX bitBeforeMvdY=$bitBeforeMvdY bitAfterMvd=$bitAfterMvd\n";
+            //echo "[DBG_MB10] mvdX_bits=" . ($bitBeforeMvdY - $bitBeforeMvdX) . " mvdY_bits=" . ($bitAfterMvd - $bitBeforeMvdY) . "\n";
+            //echo "[DBG_MB10] mvd=($mvdL0X,$mvdL0Y) pred_mv=($predMvX,$predMvY) mv=($mvX,$mvY)\n";
         }
 
         $this->performMotionCompensation16x16($mbX, $mbY, $mvX, $mvY, $refIdx);
@@ -1463,10 +1463,10 @@ trait MacroblockDecodingTrait
         $cbpCode = $this->reader->readUe();
         $codedBlockPattern = self::GOLOMB_TO_INTER_CBP[$cbpCode] ?? 0;
         if ($mbX === 1 && $mbY === 1) {
-            echo "[DBG_MB11] cbpCode=$cbpCode cbp=$codedBlockPattern\n";
+            //echo "[DBG_MB11] cbpCode=$cbpCode cbp=$codedBlockPattern\n";
         }
         if (($mbX === 1 || $mbX === 2) && $mbY === 0) {
-            echo "[DBG_MB($mbX,$mbY)] bitAfterCbp=" . $this->reader->getBitPosition() . " cbpCode=$cbpCode cbp=$codedBlockPattern\n";
+            //echo "[DBG_MB($mbX,$mbY)] bitAfterCbp=" . $this->reader->getBitPosition() . " cbpCode=$cbpCode cbp=$codedBlockPattern\n";
         }
         $mbQpDelta = 0;
         if ($codedBlockPattern !== 0) {
@@ -1474,14 +1474,14 @@ trait MacroblockDecodingTrait
             $qp = $sliceQp + $mbQpDelta;
             $qp = max(0, min(51, $qp));
             if ($mbX === 1 && $mbY === 1) {
-                echo "[DBG_MB11] sliceQp=$sliceQp mbQpDelta=$mbQpDelta qp=$qp\n";
+                //echo "[DBG_MB11] sliceQp=$sliceQp mbQpDelta=$mbQpDelta qp=$qp\n";
             }
             if (($mbX === 1 || $mbX === 2) && $mbY === 0) {
-                echo "[DBG_MB($mbX,$mbY)] mbQpDelta=$mbQpDelta qp=$qp bitBeforeResidual=" . $this->reader->getBitPosition() . "\n";
+                //echo "[DBG_MB($mbX,$mbY)] mbQpDelta=$mbQpDelta qp=$qp bitBeforeResidual=" . $this->reader->getBitPosition() . "\n";
             }
             $this->decodeResidualAndAdd($mbX, $mbY, $codedBlockPattern, $qp, 0);
             if (($mbX === 1 || $mbX === 2) && $mbY === 0) {
-                echo "[DBG_MB($mbX,$mbY)] bitAfterResidual=" . $this->reader->getBitPosition() . "\n";
+                //echo "[DBG_MB($mbX,$mbY)] bitAfterResidual=" . $this->reader->getBitPosition() . "\n";
             }
         }
 
@@ -1576,9 +1576,9 @@ trait MacroblockDecodingTrait
 
         // Debug: Frame 2 first few MBs
         if ($this->debugSliceIndex === 3 && $mbY === 0 && $mbX <= 5) {
-            echo "[MV_DEBUG] MB($mbX,$mbY) P_8x16: part0 mv=($mv0X,$mv0Y) ref=$refIdx0, part1 mv=($mv1X,$mv1Y) ref=$refIdx1\n";
-            echo "[MV_DEBUG]   pred0=($predMv0X,$predMv0Y) mvd0=($mvd0X,$mvd0Y)\n";
-            echo "[MV_DEBUG]   pred1=($predMv1X,$predMv1Y) mvd1=($mvd1X,$mvd1Y)\n";
+            //echo "[MV_DEBUG] MB($mbX,$mbY) P_8x16: part0 mv=($mv0X,$mv0Y) ref=$refIdx0, part1 mv=($mv1X,$mv1Y) ref=$refIdx1\n";
+            //echo "[MV_DEBUG]   pred0=($predMv0X,$predMv0Y) mvd0=($mvd0X,$mvd0Y)\n";
+            //echo "[MV_DEBUG]   pred1=($predMv1X,$predMv1Y) mvd1=($mvd1X,$mvd1Y)\n";
         }
 
         $this->performMotionCompensation8x16($mbX, $mbY, 0, $mv0X, $mv0Y, $refIdx0);
@@ -1610,7 +1610,7 @@ trait MacroblockDecodingTrait
      */
     private function decodeP_8x8(int $mbX, int $mbY, int $sliceQp): int
     {
-        echo "[DECODER] MB($mbX,$mbY): P_8x8\n";
+        //echo "[DECODER] MB($mbX,$mbY): P_8x8\n";
 
         $mbWidth = $this->picWidthInMbs;
 
@@ -1631,7 +1631,7 @@ trait MacroblockDecodingTrait
             $subMbTypes[$i] = $this->reader->readUe();
             $blkX = $subMbScan[$i][0];
             $blkY = $subMbScan[$i][1];
-            echo "[DECODER] MB($mbX,$mbY) sub($blkX,$blkY): sub_mb_type={$subMbTypes[$i]}\n";
+            //echo "[DECODER] MB($mbX,$mbY) sub($blkX,$blkY): sub_mb_type={$subMbTypes[$i]}\n";
         }
 
         for ($i = 0; $i < 4; $i++) {
@@ -1745,7 +1745,7 @@ trait MacroblockDecodingTrait
                 }
 
             } else {
-                echo "[DECODER] MB($mbX,$mbY): 未知sub_mb_type=$subMbType\n";
+                //echo "[DECODER] MB($mbX,$mbY): 未知sub_mb_type=$subMbType\n";
                 break;
             }
         }
@@ -1777,7 +1777,7 @@ trait MacroblockDecodingTrait
      */
     private function decodeP_8x8ref0(int $mbX, int $mbY, int $sliceQp): int
     {
-        echo "[DECODER] MB($mbX,$mbY): P_8x8ref0\n";
+        //echo "[DECODER] MB($mbX,$mbY): P_8x8ref0\n";
 
         $mbWidth = $this->picWidthInMbs;
         $refIdx = 0;
@@ -1798,7 +1798,7 @@ trait MacroblockDecodingTrait
             $subMbTypes[$i] = $this->reader->readUe();
             $blkX = $subMbScan[$i][0];
             $blkY = $subMbScan[$i][1];
-            echo "[DECODER] MB($mbX,$mbY) sub($blkX,$blkY): sub_mb_type={$subMbTypes[$i]} (ref0)\n";
+            //echo "[DECODER] MB($mbX,$mbY) sub($blkX,$blkY): sub_mb_type={$subMbTypes[$i]} (ref0)\n";
         }
 
         for ($i = 0; $i < 4; $i++) {
@@ -1903,7 +1903,7 @@ trait MacroblockDecodingTrait
                 }
 
             } else {
-                echo "[DECODER] MB($mbX,$mbY): 未知sub_mb_type=$subMbType\n";
+                //echo "[DECODER] MB($mbX,$mbY): 未知sub_mb_type=$subMbType\n";
                 break;
             }
         }
@@ -2151,13 +2151,13 @@ trait MacroblockDecodingTrait
         }
 
         // 调试：Frame 2 第一行前6个MB
-        if ($this->debugSliceIndex === 3 && $mbY === 0 && $mbX <= 5) {
-            echo "[PRED16x16] MB($mbX,$mbY): mvLeft=" . ($mvLeft ? "({$mvLeft[0]},{$mvLeft[1]},{$mvLeft[2]})" : "null") . 
-                 " mvTop=" . ($mvTop ? "({$mvTop[0]},{$mvTop[1]},{$mvTop[2]})" : "null") .
-                 " mvC=" . ($mvC ? "({$mvC[0]},{$mvC[1]},{$mvC[2]})" : "null") .
-                 " refIdx=$refIdx\n";
-            echo "[PRED16x16]   mvLeftCol[0]=" . ($this->mvLeftCol[0] ? "({$this->mvLeftCol[0][0]},{$this->mvLeftCol[0][1]},{$this->mvLeftCol[0][2]})" : "null") . "\n";
-        }
+//        if ($this->debugSliceIndex === 3 && $mbY === 0 && $mbX <= 5) {
+//            echo "[PRED16x16] MB($mbX,$mbY): mvLeft=" . ($mvLeft ? "({$mvLeft[0]},{$mvLeft[1]},{$mvLeft[2]})" : "null") .
+//                 " mvTop=" . ($mvTop ? "({$mvTop[0]},{$mvTop[1]},{$mvTop[2]})" : "null") .
+//                 " mvC=" . ($mvC ? "({$mvC[0]},{$mvC[1]},{$mvC[2]})" : "null") .
+//                 " refIdx=$refIdx\n";
+//            echo "[PRED16x16]   mvLeftCol[0]=" . ($this->mvLeftCol[0] ? "({$this->mvLeftCol[0][0]},{$this->mvLeftCol[0][1]},{$this->mvLeftCol[0][2]})" : "null") . "\n";
+//        }
 
         return $this->predictMvP16x16($mvLeft, $mvTop, $mvC, $refIdx);
     }
@@ -2554,7 +2554,7 @@ trait MacroblockDecodingTrait
                     if (($mbX === 1 && $mbY === 0) || ($mbX === 1 && $mbY === 1)) {
                         $nz = 0;
                         for ($i = 0; $i < 16; $i++) if ($coeffs[$i] != 0) $nz++;
-                        echo "[DBG_MB({$mbX},{$mbY})_RES] luma blk scan=$scanIdx raster=$rasterIdx nc=$nc nz=$nz bits=" . ($bpAfter - $bpBefore) . " (from $bpBefore to $bpAfter)\n";
+                        //echo "[DBG_MB({$mbX},{$mbY})_RES] luma blk scan=$scanIdx raster=$rasterIdx nc=$nc nz=$nz bits=" . ($bpAfter - $bpBefore) . " (from $bpBefore to $bpAfter)\n";
                     }
                     for ($i = 0; $i < 16; $i++) $yCoeffs[$rasterIdx][$i] = $coeffs[$i];
                     $yCoeffs[$rasterIdx] = $this->zigzagToRaster($yCoeffs[$rasterIdx]);
@@ -2586,13 +2586,13 @@ trait MacroblockDecodingTrait
             $cbDc = $this->decodeResidualBlock(4, -1);
             $bpAfter = $this->reader->getBitPosition();
             if (($mbX === 1 && $mbY === 0) || ($mbX === 1 && $mbY === 1)) {
-                echo "[DBG_MB({$mbX},{$mbY})_RES] chroma cb_dc bits=" . ($bpAfter - $bpBefore) . " (from $bpBefore to $bpAfter)\n";
+                //echo "[DBG_MB({$mbX},{$mbY})_RES] chroma cb_dc bits=" . ($bpAfter - $bpBefore) . " (from $bpBefore to $bpAfter)\n";
             }
             $bpBefore = $this->reader->getBitPosition();
             $crDc = $this->decodeResidualBlock(4, -1);
             $bpAfter = $this->reader->getBitPosition();
             if (($mbX === 1 && $mbY === 0) || ($mbX === 1 && $mbY === 1)) {
-                echo "[DBG_MB({$mbX},{$mbY})_RES] chroma cr_dc bits=" . ($bpAfter - $bpBefore) . " (from $bpBefore to $bpAfter)\n";
+                //echo "[DBG_MB({$mbX},{$mbY})_RES] chroma cr_dc bits=" . ($bpAfter - $bpBefore) . " (from $bpBefore to $bpAfter)\n";
             }
         }
 
@@ -2611,7 +2611,7 @@ trait MacroblockDecodingTrait
                 $bpAfter = $this->reader->getBitPosition();
                 if (($mbX === 1 && $mbY === 0) || ($mbX === 1 && $mbY === 1)) {
                     $nzCnt = 0; for ($i = 0; $i < 15; $i++) if ($ac[$i] != 0) $nzCnt++;
-                    echo "[DBG_MB({$mbX},{$mbY})_RES] chroma cb_ac blk=$blk blockIdx=$blockIdx nc=$nc nz=$nzCnt bits=" . ($bpAfter - $bpBefore) . " (from $bpBefore to $bpAfter)\n";
+                    //echo "[DBG_MB({$mbX},{$mbY})_RES] chroma cb_ac blk=$blk blockIdx=$blockIdx nc=$nc nz=$nzCnt bits=" . ($bpAfter - $bpBefore) . " (from $bpBefore to $bpAfter)\n";
                 }
                 $nzCnt = 0; for ($i = 0; $i < 15; $i++) if ($ac[$i] != 0) $nzCnt++;
                 for ($i = 1; $i < 16; $i++) $cbAcCoeffs[$blk][$i] = $ac[$i - 1];
@@ -2630,7 +2630,7 @@ trait MacroblockDecodingTrait
                 $bpAfter = $this->reader->getBitPosition();
                 if (($mbX === 1 && $mbY === 0) || ($mbX === 1 && $mbY === 1)) {
                     $nzCnt = 0; for ($i = 0; $i < 15; $i++) if ($ac[$i] != 0) $nzCnt++;
-                    echo "[DBG_MB({$mbX},{$mbY})_RES] chroma cr_ac blk=$blk blockIdx=$blockIdx nc=$nc nz=$nzCnt bits=" . ($bpAfter - $bpBefore) . " (from $bpBefore to $bpAfter)\n";
+                    //echo "[DBG_MB({$mbX},{$mbY})_RES] chroma cr_ac blk=$blk blockIdx=$blockIdx nc=$nc nz=$nzCnt bits=" . ($bpAfter - $bpBefore) . " (from $bpBefore to $bpAfter)\n";
                 }
                 $nzCnt = 0; for ($i = 0; $i < 15; $i++) if ($ac[$i] != 0) $nzCnt++;
                 for ($i = 1; $i < 16; $i++) $crAcCoeffs[$blk][$i] = $ac[$i - 1];

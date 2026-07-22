@@ -864,7 +864,7 @@ trait ResidualDecodingTrait
                 $absLevel = $absLevelMinus1 + 1;
                 $levels[$levelIdx] = $sign ? -$absLevel : $absLevel;
 
-                if ($dbg) echo "[DBG CAVLC] level[$levelIdx] prefix=$prefix suffixLen=$suffixLength levelCode=$levelCode absLevel=$absLevel sign=$sign => level={$levels[$levelIdx]}\n";
+                //if ($dbg) echo "[DBG CAVLC] level[$levelIdx] prefix=$prefix suffixLen=$suffixLength levelCode=$levelCode absLevel=$absLevel sign=$sign => level={$levels[$levelIdx]}\n";
 
                 // Update suffix_length
                 $absLevel = abs($levels[$levelIdx]);
@@ -879,7 +879,7 @@ trait ResidualDecodingTrait
             }
         }
 
-        if ($dbg) echo "[DBG CAVLC] levels: " . implode(',', array_slice($levels, 0, $totalCoeff)) . "\n";
+        //if ($dbg) echo "[DBG CAVLC] levels: " . implode(',', array_slice($levels, 0, $totalCoeff)) . "\n";
 
         // 3. Read total_zeros
         if ($totalCoeff < $maxCoef) {
@@ -888,7 +888,7 @@ trait ResidualDecodingTrait
             $totalZeros = 0;
         }
 
-        if ($dbg) echo "[DBG CAVLC] totalZeros=$totalZeros\n";
+        //if ($dbg) echo "[DBG CAVLC] totalZeros=$totalZeros\n";
 
         // 4. Read run_before and place coefficients
         $zerosLeft = $totalZeros;
@@ -905,7 +905,7 @@ trait ResidualDecodingTrait
                 $run = $zerosLeft;
             }
 
-            if ($dbg) echo "[DBG CAVLC] run_before[$i] run=$run zerosLeft=$zerosLeft coeffIdx=$coeffIdx level={$levels[$i]}\n";
+            //if ($dbg) echo "[DBG CAVLC] run_before[$i] run=$run zerosLeft=$zerosLeft coeffIdx=$coeffIdx level={$levels[$i]}\n";
 
             if ($coeffIdx >= 0 && $coeffIdx < $maxCoef) {
                 $coeffs[$coeffIdx] = $levels[$i];
@@ -918,7 +918,7 @@ trait ResidualDecodingTrait
             }
         }
 
-        if ($dbg) echo "[DBG CAVLC] coeffs: " . implode(',', $coeffs) . "\n";
+        //if ($dbg) echo "[DBG CAVLC] coeffs: " . implode(',', $coeffs) . "\n";
 
         return $coeffs;
     }

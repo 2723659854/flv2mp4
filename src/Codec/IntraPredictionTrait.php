@@ -95,33 +95,33 @@ trait IntraPredictionTrait
         // 当top不可用时，保持top数组初始值128（与Rust/FFmpeg一致）
 
         if (($mbX === 1 || $mbX === 2) && $mbY === 0 && $blkX === 0 && $blkY === 0) {
-            echo "[DBG_PRED_FUNC MB($mbX,$mbY) blk(0,0)] top=[" . implode(',', $top) . "] left=[" . implode(',', $left) . "] topAvail=" . ($topAvail ? 1 : 0) . " leftAvail=" . ($leftAvail ? 1 : 0) . " mode=$mode\n";
+            //echo "[DBG_PRED_FUNC MB($mbX,$mbY) blk(0,0)] top=[" . implode(',', $top) . "] left=[" . implode(',', $left) . "] topAvail=" . ($topAvail ? 1 : 0) . " leftAvail=" . ($leftAvail ? 1 : 0) . " mode=$mode\n";
             if ($mbX === 1) {
-                echo "[DBG_PRED_FUNC MB(1,0) blk(0,0)] blk(0,0) decoded pixels: ";
+                //echo "[DBG_PRED_FUNC MB(1,0) blk(0,0)] blk(0,0) decoded pixels: ";
                 for ($y = 0; $y < 4; $y++) {
                     for ($x = 0; $x < 4; $x++) {
                         $idx = $y * $this->width + (16 + $x);
                         echo $this->yPlane[$idx] . ",";
                     }
                 }
-                echo "\n";
+                //echo "\n";
             }
         }
-        if ($mbX === 2 && $mbY === 0 && $blkX === 2 && $blkY === 0) {
-            echo "[DBG_PRED_FUNC MB(2,0) blk(2,0)] top=[" . implode(',', $top) . "] left=[" . implode(',', $left) . "] topAvail=" . ($topAvail ? 1 : 0) . " leftAvail=" . ($leftAvail ? 1 : 0) . " mode=$mode\n";
-            echo "[DBG_PRED_FUNC MB(2,0) blk(2,0)] blk(1,0) right edge (x=35): ";
-            for ($y = 0; $y < 4; $y++) {
-                $idx = $y * $this->width + 35;
-                echo $this->yPlane[$idx] . ",";
-            }
-            echo "\n";
-        }
-        if ($mbX === 1 && $mbY === 0 && $blkX === 3 && $blkY === 0) {
-            echo "[DBG_PRED_FUNC MB(1,0) blk(3,0)] mode=$mode top=[" . implode(',', $top) . "] left=[" . implode(',', $left) . "] topLeft=$topLeft topAvail=" . ($topAvail ? 1 : 0) . " leftAvail=" . ($leftAvail ? 1 : 0) . " mbPx=$mbPx mbPy=$mbPy\n";
-        }
-        if ($mbX === 6 && $mbY === 0 && $blkX === 0 && $blkY === 0) {
-            echo "[DBG_PRED_FUNC MB(6,0) blk(0,0)] top=[" . implode(',', $top) . "] left=[" . implode(',', $left) . "] topAvail=" . ($topAvail ? 1 : 0) . " leftAvail=" . ($leftAvail ? 1 : 0) . " mode=$mode\n";
-        }
+//        if ($mbX === 2 && $mbY === 0 && $blkX === 2 && $blkY === 0) {
+//            echo "[DBG_PRED_FUNC MB(2,0) blk(2,0)] top=[" . implode(',', $top) . "] left=[" . implode(',', $left) . "] topAvail=" . ($topAvail ? 1 : 0) . " leftAvail=" . ($leftAvail ? 1 : 0) . " mode=$mode\n";
+//            echo "[DBG_PRED_FUNC MB(2,0) blk(2,0)] blk(1,0) right edge (x=35): ";
+//            for ($y = 0; $y < 4; $y++) {
+//                $idx = $y * $this->width + 35;
+//                echo $this->yPlane[$idx] . ",";
+//            }
+//            echo "\n";
+//        }
+//        if ($mbX === 1 && $mbY === 0 && $blkX === 3 && $blkY === 0) {
+//            echo "[DBG_PRED_FUNC MB(1,0) blk(3,0)] mode=$mode top=[" . implode(',', $top) . "] left=[" . implode(',', $left) . "] topLeft=$topLeft topAvail=" . ($topAvail ? 1 : 0) . " leftAvail=" . ($leftAvail ? 1 : 0) . " mbPx=$mbPx mbPy=$mbPy\n";
+//        }
+//        if ($mbX === 6 && $mbY === 0 && $blkX === 0 && $blkY === 0) {
+//            echo "[DBG_PRED_FUNC MB(6,0) blk(0,0)] top=[" . implode(',', $top) . "] left=[" . implode(',', $left) . "] topAvail=" . ($topAvail ? 1 : 0) . " leftAvail=" . ($leftAvail ? 1 : 0) . " mode=$mode\n";
+//        }
 
         if ($topAvail && $leftAvail) {
             $cornerIdx = ($mbPy - 1) * $this->width + ($mbPx - 1);
@@ -137,9 +137,9 @@ trait IntraPredictionTrait
         $dst = array_fill(0, 16, 0);
         $stride = 4;
 
-        if ($mbX === 2 && $mbY === 0) {
-            echo "[DBG_PRED_MODE MB(2,0) blk($blkX,$blkY)] mode=$mode topAvail=" . ($topAvail ? 1 : 0) . " leftAvail=" . ($leftAvail ? 1 : 0) . "\n";
-        }
+//        if ($mbX === 2 && $mbY === 0) {
+//            echo "[DBG_PRED_MODE MB(2,0) blk($blkX,$blkY)] mode=$mode topAvail=" . ($topAvail ? 1 : 0) . " leftAvail=" . ($leftAvail ? 1 : 0) . "\n";
+//        }
 
         switch ($mode) {
             case 0: // Vertical
@@ -177,10 +177,10 @@ trait IntraPredictionTrait
                         $predicted[$y][$x] = $avg;
                     }
                 }
-                if ($mbX === 2 && $mbY === 0 && $blkX === 2 && $blkY === 0) {
-                    echo "[DBG_PRED MB(2,0) blk(2,0) mode=2] sum=$sum avg=$avg\n";
-                    echo "[DBG_PRED] predicted=[" . implode(',', $predicted[0]) . "],[" . implode(',', $predicted[1]) . "],[" . implode(',', $predicted[2]) . "],[" . implode(',', $predicted[3]) . "]\n";
-                }
+//                if ($mbX === 2 && $mbY === 0 && $blkX === 2 && $blkY === 0) {
+//                    echo "[DBG_PRED MB(2,0) blk(2,0) mode=2] sum=$sum avg=$avg\n";
+//                    echo "[DBG_PRED] predicted=[" . implode(',', $predicted[0]) . "],[" . implode(',', $predicted[1]) . "],[" . implode(',', $predicted[2]) . "],[" . implode(',', $predicted[3]) . "]\n";
+//                }
                 break;
 
             case 3: // Diagonal Down-Left

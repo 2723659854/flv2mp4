@@ -355,11 +355,11 @@ trait DeblockingFilterTrait
     public function applyDeblockingFilter(): void
     {
         if ($this->disableDeblockingFilterIdc == 1) {
-            echo "[DEBLOCK] Deblocking filter disabled (idc=1)" . PHP_EOL;
+            //echo "[DEBLOCK] Deblocking filter disabled (idc=1)" . PHP_EOL;
             return;
         }
 
-        echo "[DEBLOCK] Applying deblocking filter..." . PHP_EOL;
+        //echo "[DEBLOCK] Applying deblocking filter..." . PHP_EOL;
         $startTime = microtime(true);
 
         $mbWidth = $this->picWidthInMbs;
@@ -416,6 +416,6 @@ trait DeblockingFilterTrait
         }
 
         $endTime = microtime(true);
-        echo "[DEBLOCK] Deblocking filter completed in " . number_format($endTime - $startTime, 2) . "s" . PHP_EOL;
+        //echo "[DEBLOCK] Deblocking filter completed in " . number_format($endTime - $startTime, 2) . "s" . PHP_EOL;
     }
 }

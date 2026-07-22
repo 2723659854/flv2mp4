@@ -240,7 +240,7 @@ class H264Decoder
      */
     public function decode(array $nalUnits, bool $parseOnly = false): ?array
     {
-        echo "[DECODER] Start decoding, " . count($nalUnits) . " NAL units, parseOnly=" . ($parseOnly ? 'true' : 'false') . PHP_EOL;
+        //echo "[DECODER] Start decoding, " . count($nalUnits) . " NAL units, parseOnly=" . ($parseOnly ? 'true' : 'false') . PHP_EOL;
 
         // 记录之前的分辨率（用于判断是否需要重新初始化）
         $prevWidth = $this->width;
@@ -252,14 +252,14 @@ class H264Decoder
         $this->vPlane = [];
 
         // 第一轮：解析SPS/PPS获取分辨率
-        echo "[DECODER] Step 1: Parsing SPS/PPS..." . PHP_EOL;
+        //echo "[DECODER] Step 1: Parsing SPS/PPS..." . PHP_EOL;
         foreach ($nalUnits as $nal) {
             $nalType = $nal['type'];
             if ($nalType === 7) {
-                echo "[DECODER]   Parsing SPS (data size=" . strlen($nal['data']) . ")" . PHP_EOL;
+                //echo "[DECODER]   Parsing SPS (data size=" . strlen($nal['data']) . ")" . PHP_EOL;
                 $this->parseSPS($nal['data']);
             } elseif ($nalType === 8) {
-                echo "[DECODER]   Parsing PPS (data size=" . strlen($nal['data']) . ")" . PHP_EOL;
+                //echo "[DECODER]   Parsing PPS (data size=" . strlen($nal['data']) . ")" . PHP_EOL;
                 $this->parsePPS($nal['data']);
             }
         }
@@ -269,15 +269,15 @@ class H264Decoder
             // 恢复之前的分辨率
             $this->width = $prevWidth;
             $this->height = $prevHeight;
-            echo "[DECODER] Using previous resolution: {$this->width}x{$this->height}" . PHP_EOL;
+            //echo "[DECODER] Using previous resolution: {$this->width}x{$this->height}" . PHP_EOL;
         } elseif ($this->width <= 0 || $this->height <= 0) {
-            echo "[DECODER] ERROR: Invalid resolution {$this->width}x{$this->height}" . PHP_EOL;
+            //echo "[DECODER] ERROR: Invalid resolution {$this->width}x{$this->height}" . PHP_EOL;
             return null;
         }
-        echo "[DECODER] Resolution: {$this->width}x{$this->height}" . PHP_EOL;
+        //echo "[DECODER] Resolution: {$this->width}x{$this->height}" . PHP_EOL;
 
         if ($parseOnly) {
-            echo "[DECODER] Parse only mode, returning..." . PHP_EOL;
+            //echo "[DECODER] Parse only mode, returning..." . PHP_EOL;
             return [
                 'width' => $this->width,
                 'height' => $this->height,
@@ -293,7 +293,7 @@ class H264Decoder
         $uvSize = (int)($ySize / 4);
 
         // 第二轮：解码图像Slice — 每个Slice是一帧，各自初始化并输出
-        echo "[DECODER] Step 3: Decoding slices..." . PHP_EOL;
+        //echo "[DECODER] Step 3: Decoding slices..." . PHP_EOL;
         $sliceCount = 0;
         $outputData = '';
         $this->debugTargetSlice = 3; // 第3个slice = 第2个P帧 (1=IDR, 2=P1, 3=P2)
@@ -304,7 +304,7 @@ class H264Decoder
                 $nalRefIdc = ($nalHeader >> 5) & 0x03;
                 $sliceCount++;
                 $this->debugSliceIndex = $sliceCount;
-                echo "[DECODER]   Decoding slice {$sliceCount} (type=" . ($nalType === 5 ? 'IDR' : 'P') . ", data size=" . strlen($nal['data']) . ")" . PHP_EOL;
+                //echo "[DECODER]   Decoding slice {$sliceCount} (type=" . ($nalType === 5 ? 'IDR' : 'P') . ", data size=" . strlen($nal['data']) . ")" . PHP_EOL;
                 if ($sliceCount === $this->debugTargetSlice) {
                     $this->debugMbTraceFh = fopen('php_mb_trace.txt', 'w');
                     fwrite($this->debugMbTraceFh, "=== PHP Decoder MB Trace - Slice $sliceCount ===\n");
@@ -329,7 +329,7 @@ class H264Decoder
                 $this->width = $origWidth;
                 $this->height = $origHeight;
 
-                echo "[DECODER]   Slice {$sliceCount} decoded in " . number_format($endTime - $startTime, 2) . "s" . PHP_EOL;
+                //echo "[DECODER]   Slice {$sliceCount} decoded in " . number_format($endTime - $startTime, 2) . "s" . PHP_EOL;
 
                 // 更新参考帧（用于P帧运动补偿）
                 if ($nalRefIdc !== 0 || $nalType === 5) {
@@ -342,7 +342,7 @@ class H264Decoder
                     $this->refHeightY = $mbAlignedHeight;
                     $this->refWidthUv = (int)($mbAlignedWidth / 2);
                     $this->refHeightUv = (int)($mbAlignedHeight / 2);
-                    echo "[DECODER]   Reference frame updated" . PHP_EOL;
+                    //echo "[DECODER]   Reference frame updated" . PHP_EOL;
                 }
 
                 // 将本帧转为二进制并追加到输出（裁剪到实际图像尺寸）
@@ -364,13 +364,13 @@ class H264Decoder
                 if ($sliceCount === $this->debugTargetSlice && $this->debugMbTraceFh) {
                     fclose($this->debugMbTraceFh);
                     $this->debugMbTraceFh = null;
-                    echo "[DECODER]   MB trace written to php_mb_trace.txt" . PHP_EOL;
+                    //echo "[DECODER]   MB trace written to php_mb_trace.txt" . PHP_EOL;
                 }
             }
         }
 
         $totalSize = strlen($outputData);
-        echo "[DECODER] Decoding complete, total output: {$totalSize} bytes ({$sliceCount} frames)" . PHP_EOL;
+        //echo "[DECODER] Decoding complete, total output: {$totalSize} bytes ({$sliceCount} frames)" . PHP_EOL;
         return [
             'data' => $outputData,
             'width' => $this->width,
