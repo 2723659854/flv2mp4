@@ -1009,8 +1009,9 @@ trait MacroblockDecodingTrait
     {
         $mbWidth = $this->picWidthInMbs;
 
-        if ($this->debugSliceIndex === 3 && $mbX === 16 && $mbY === 13) {
-            echo "[DEBUG_MB] MB(16,13): mb_type=$mbType\n";
+        if (($this->debugSliceIndex === 3 && $mbX === 15 && $mbY === 13) ||
+            ($this->debugSliceIndex === 3 && $mbX === 16 && $mbY === 13)) {
+            echo "[DEBUG_MB] MB($mbX,$mbY): mb_type=$mbType\n";
         }
 
         // P_L0_16x16 (mb_type 0)
@@ -1283,10 +1284,47 @@ trait MacroblockDecodingTrait
             echo "[DEBUG_MB] MB(15,13) P_16x8:\n";
             echo "  part0 (top): pred_mv=($predMv0X,$predMv0Y), mvd=($mvd0X,$mvd0Y), mv=($mv0X,$mv0Y), ref=$refIdx0\n";
             echo "  part1 (bottom): pred_mv=($predMv1X,$predMv1Y), mvd=($mvd1X,$mvd1Y), mv=($mv1X,$mv1Y), ref=$refIdx1\n";
+            $lumaRefX1 = $mbX * 64 + $mv1X;
+            $lumaRefY1 = $mbY * 64 + $mv1Y + 8 * 4;
+            echo "  part1 lumaRefX=$lumaRefX1, lumaRefY=$lumaRefY1, intX=" . ($lumaRefX1 >> 2) . ", fracX=" . ($lumaRefX1 & 3) . "\n";
+            // 输出参考帧中的整像素值
+            $intX = $lumaRefX1 >> 2;
+            $intY = $lumaRefY1 >> 2;
+            echo "  参考帧整像素值 (x=$intX-2 到 x=$intX+5, y=$intY 到 y=$intY+2):\n";
+            echo "  [DEBUG] before loop, refFrameY is array: " . is_array($this->refFrameY) . ", count=" . count($this->refFrameY) . "\n";
+            for ($dy = 0; $dy < 3; $dy++) {
+                $refVals = [];
+                for ($x = -2; $x <= 5; $x++) {
+                    $rx = max(0, min($this->refWidthY - 1, $intX + $x));
+                    $ry = max(0, min($this->refHeightY - 1, $intY + $dy));
+                    $idx = $ry * $this->refStrideY + $rx;
+                    $v = isset($this->refFrameY[$idx]) ? $this->refFrameY[$idx] : -1;
+                    $refVals[] = sprintf("%3d", $v);
+                }
+                echo "    y=" . ($intY + $dy) . ": " . implode(" ", $refVals) . "\n";
+            }
+            echo "  [DEBUG] after loop\n";
+            echo "  预测值（运动补偿后，残差前）下半部分第0-3列:\n";
+            for ($y = 8; $y < 11; $y++) {
+                $line = "    y=$y: ";
+                for ($x = 0; $x < 4; $x++) {
+                    $px = $mbX * 16 + $x;
+                    $py = $mbY * 16 + $y;
+                    $idx = $py * $this->width + $px;
+                    $v = $this->yPlane[$idx];
+                    $line .= sprintf("%3d ", $v);
+                }
+                echo $line . "\n";
+            }
         }
 
         $cbpCode = $this->reader->readUe();
         $codedBlockPattern = self::GOLOMB_TO_INTER_CBP[$cbpCode] ?? 0;
+
+        if ($this->debugSliceIndex === 3 && $mbX === 15 && $mbY === 13) {
+            echo "[DEBUG_MB] MB(15,13) cbp_code=$cbpCode, cbp=" . sprintf("0x%03x", $codedBlockPattern) . "\n";
+        }
+
         $mbQpDelta = 0;
         if ($codedBlockPattern !== 0) {
             $mbQpDelta = $this->reader->readSe();
@@ -1340,6 +1378,12 @@ trait MacroblockDecodingTrait
 
         $this->performMotionCompensation8x16($mbX, $mbY, 0, $mv0X, $mv0Y, $refIdx0);
         $this->performMotionCompensation8x16($mbX, $mbY, 1, $mv1X, $mv1Y, $refIdx1);
+
+        if ($this->debugSliceIndex === 3 && $mbX === 14 && $mbY === 13) {
+            echo "[DEBUG_MB] MB(14,13) P_8x16:\n";
+            echo "  part0 (left): pred_mv=($predMv0X,$predMv0Y), mvd=($mvd0X,$mvd0Y), mv=($mv0X,$mv0Y), ref=$refIdx0\n";
+            echo "  part1 (right): pred_mv=($predMv1X,$predMv1Y), mvd=($mvd1X,$mvd1Y), mv=($mv1X,$mv1Y), ref=$refIdx1\n";
+        }
 
         $cbpCode = $this->reader->readUe();
         $codedBlockPattern = self::GOLOMB_TO_INTER_CBP[$cbpCode] ?? 0;
@@ -1998,8 +2042,9 @@ trait MacroblockDecodingTrait
             }
         }
 
-        if ($this->debugSliceIndex === 3 && $mbX === 15 && $mbY === 13) {
-            echo "[MVP_16x8] MB(15,13) part=$partIdx:\n";
+        if (($this->debugSliceIndex === 3 && $mbX === 15 && $mbY === 13) ||
+            ($this->debugSliceIndex === 3 && $mbX === 14 && $mbY === 13)) {
+            echo "[MVP_16x8] MB($mbX,$mbY) part=$partIdx:\n";
             echo "  mvLeft=" . ($mvLeft ? "({$mvLeft[0]},{$mvLeft[1]},{$mvLeft[2]})" : "null") . "\n";
             echo "  mvTop=" . ($mvTop ? "({$mvTop[0]},{$mvTop[1]},{$mvTop[2]})" : "null") . "\n";
             echo "  mvTopRight=" . ($mvTopRight ? "({$mvTopRight[0]},{$mvTopRight[1]},{$mvTopRight[2]})" : "null") . "\n";
