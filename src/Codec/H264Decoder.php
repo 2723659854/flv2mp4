@@ -49,8 +49,9 @@ class H264Decoder
     public array $nzTopRowLuma = [];  // 上边行：每列1个，共 picWidthInMbs * 4
     public array $nzTopRowChroma = []; // 上边行：每列1个（Cb+Cr），共 picWidthInMbs * 2 * 2
     public array $nzLeftColLuma = [];  // 左边列：每行1个，共 4
-    public bool $debugResidual = false;
     public array $nzLeftColChroma = []; // 左边列：每行1个（Cb+Cr），共 4
+    public bool $enableMbStats = false;
+    public array $mbStats = [];
 
     // 宏块间Intra4x4预测模式缓存（用于跨宏块预测模式计算）
     public array $intra4x4TopModes = [];  // 上边行：每列1个，共 picWidthInMbs * 4
