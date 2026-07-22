@@ -45,9 +45,9 @@ trait TransformTrait
             // PHP的>>对负数是算术右移（向负无穷取整），与Rust/FFmpeg一致
             // intdiv是向0取整，对负数结果错误
             $out[$i] = ($coeff[$i] * $this->dequant4Table[$listIdx][$qp][$i] + 32) >> 6;
-            if ($dbg && $i < 4) {
+            //if ($dbg && $i < 4) {
                 //echo "[DEQUANT_DBG]   i=$i coeff={$coeff[$i]} table={$this->dequant4Table[$listIdx][$qp][$i]} out={$out[$i]}\n";
-            }
+            //}
         }
         return $out;
     }

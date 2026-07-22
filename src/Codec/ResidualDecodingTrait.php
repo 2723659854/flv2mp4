@@ -792,7 +792,7 @@ trait ResidualDecodingTrait
         // trailingOnes不能超过totalCoeff
         $trailingOnes = min($trailingOnes, $totalCoeff);
 
-        if ($dbg) echo "[DBG CAVLC] maxCoef=$maxCoef nC=$nC totalCoeff=$totalCoeff trailingOnes=$trailingOnes\n";
+        //if ($dbg) echo "[DBG CAVLC] maxCoef=$maxCoef nC=$nC totalCoeff=$totalCoeff trailingOnes=$trailingOnes\n";
 
         if ($totalCoeff === 0) {
             return $coeffs;

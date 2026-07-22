@@ -94,19 +94,19 @@ trait IntraPredictionTrait
         }
         // 当top不可用时，保持top数组初始值128（与Rust/FFmpeg一致）
 
-        if (($mbX === 1 || $mbX === 2) && $mbY === 0 && $blkX === 0 && $blkY === 0) {
+        //if (($mbX === 1 || $mbX === 2) && $mbY === 0 && $blkX === 0 && $blkY === 0) {
             //echo "[DBG_PRED_FUNC MB($mbX,$mbY) blk(0,0)] top=[" . implode(',', $top) . "] left=[" . implode(',', $left) . "] topAvail=" . ($topAvail ? 1 : 0) . " leftAvail=" . ($leftAvail ? 1 : 0) . " mode=$mode\n";
-            if ($mbX === 1) {
+            //if ($mbX === 1) {
                 //echo "[DBG_PRED_FUNC MB(1,0) blk(0,0)] blk(0,0) decoded pixels: ";
-                for ($y = 0; $y < 4; $y++) {
-                    for ($x = 0; $x < 4; $x++) {
-                        $idx = $y * $this->width + (16 + $x);
-                        echo $this->yPlane[$idx] . ",";
-                    }
-                }
+                //for ($y = 0; $y < 4; $y++) {
+                    //for ($x = 0; $x < 4; $x++) {
+                        //$idx = $y * $this->width + (16 + $x);
+                        //echo $this->yPlane[$idx] . ",";
+                    //}
+                //}
                 //echo "\n";
-            }
-        }
+            //}
+        //}
 //        if ($mbX === 2 && $mbY === 0 && $blkX === 2 && $blkY === 0) {
 //            echo "[DBG_PRED_FUNC MB(2,0) blk(2,0)] top=[" . implode(',', $top) . "] left=[" . implode(',', $left) . "] topAvail=" . ($topAvail ? 1 : 0) . " leftAvail=" . ($leftAvail ? 1 : 0) . " mode=$mode\n";
 //            echo "[DBG_PRED_FUNC MB(2,0) blk(2,0)] blk(1,0) right edge (x=35): ";

@@ -321,9 +321,9 @@ class H264Decoder
                 $this->width = $mbAlignedWidth;
                 $this->height = $mbAlignedHeight;
 
-                $startTime = microtime(true);
+                //$startTime = microtime(true);
                 $this->decodeSlice($nal['data'], $nalType === 5, $nalRefIdc);
-                $endTime = microtime(true);
+                //$endTime = microtime(true);
 
                 // 恢复实际图像尺寸
                 $this->width = $origWidth;
@@ -369,7 +369,7 @@ class H264Decoder
             }
         }
 
-        $totalSize = strlen($outputData);
+        //$totalSize = strlen($outputData);
         //echo "[DECODER] Decoding complete, total output: {$totalSize} bytes ({$sliceCount} frames)" . PHP_EOL;
         return [
             'data' => $outputData,
