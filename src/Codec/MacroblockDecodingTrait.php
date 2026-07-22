@@ -2328,7 +2328,7 @@ trait MacroblockDecodingTrait
         $isDebugSlice = ($this->debugTargetSlice > 0 && $this->debugSliceIndex === $this->debugTargetSlice);
         $isDebugMb = $isDebugSlice && $mbY === 0 && ($mbX === 1 || $mbX === 2);
 
-        if ($chromaCbp === 1 || $chromaCbp === 3) {
+        if ($chromaCbp >= 1) {
             if ($isDebugMb && $this->debugMbTraceFh) {
                 fwrite($this->debugMbTraceFh, "\n    [RES] chroma DC start, bitPos=" . $this->reader->getBitPosition() . " chromaCbp=$chromaCbp");
             }
@@ -2443,7 +2443,7 @@ trait MacroblockDecodingTrait
                             }
                         }
                     }
-                } elseif ($chromaCbp === 1) {
+                } else {
                     $dcAddCb = ($dcCb + 32) >> 6;
                     for ($y = 0; $y < 4; $y++) {
                         for ($x = 0; $x < 4; $x++) {
@@ -2477,7 +2477,7 @@ trait MacroblockDecodingTrait
                             }
                         }
                     }
-                } elseif ($chromaCbp >= 1) {
+                } else {
                     $dcAddCr = ($dcCr + 32) >> 6;
                     for ($y = 0; $y < 4; $y++) {
                         for ($x = 0; $x < 4; $x++) {
