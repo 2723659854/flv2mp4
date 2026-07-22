@@ -66,8 +66,8 @@ $generator = new \Xiaosongshu\Flv2mp4\Manage\PurePhpHlsGenerator(
     __DIR__ . '/hls/output'
 );
 $startTime = time();
-//$generator->processFlv(__DIR__ . '/test_i_frame.flv');
-$generator->processFlv(__DIR__ . '/base.flv');
+// 测试baseline profile 转码
+$generator->processFlv(__DIR__ . '/test.flv');
 $endTime = time();
 $cost = $endTime - $startTime;
 echo "HLS 生成完成！\n";
