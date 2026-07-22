@@ -9,7 +9,7 @@ use Xiaosongshu\Flv2mp4\Codec\VideoScaler;
 use Xiaosongshu\Flv2mp4\Codec\NalUtil;
 class PurePhpHlsGenerator
 {
-    private int $segmentDuration = 4;
+    private int $segmentDuration = 3;
     private int $videoPid = 0x100;
     private int $audioPid = 0x101;
     private int $pmtPid = 0x1000;
