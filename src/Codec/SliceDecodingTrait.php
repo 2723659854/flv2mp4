@@ -172,10 +172,22 @@ trait SliceDecodingTrait
         }
 
         $sliceQpDelta = $this->reader->readSe();
-        //echo "[SLICE HDR] slice_qp_delta=$sliceQpDelta bitPos=" . $this->reader->getBitPosition() . "\n";
         $qp = $this->picInitQp + $sliceQpDelta;
         $qp = max(0, min(51, $qp));
-        //echo "[DEBUG SLICE] picInitQp={$this->picInitQp} sliceQpDelta={$sliceQpDelta} qp={$qp}\n";
+        $isDebugSlice = ($this->debugTargetSlice > 0 && $this->debugSliceIndex === $this->debugTargetSlice);
+        if ($isDebugSlice && $this->debugMbTraceFh) {
+            fwrite($this->debugMbTraceFh, "=== Slice Header ===\n");
+            fwrite($this->debugMbTraceFh, "  first_mb_in_slice=$firstMbInSlice\n");
+            fwrite($this->debugMbTraceFh, "  slice_type=$sliceType\n");
+            fwrite($this->debugMbTraceFh, "  pic_parameter_set_id=$ppsId\n");
+            fwrite($this->debugMbTraceFh, "  frame_num=$frameNum\n");
+            fwrite($this->debugMbTraceFh, "  picInitQp={$this->picInitQp}\n");
+            fwrite($this->debugMbTraceFh, "  slice_qp_delta=$sliceQpDelta\n");
+            fwrite($this->debugMbTraceFh, "  initial_qp=$qp\n");
+            fwrite($this->debugMbTraceFh, "  idr_pic_id=" . (isset($idrPicId) ? $idrPicId : 'N/A') . "\n");
+            fwrite($this->debugMbTraceFh, "  bitPos at end of header: " . $this->reader->getBitPosition() . "\n");
+            fwrite($this->debugMbTraceFh, "===================\n");
+        }
 
         if ($sliceType === 3 || $sliceType === 4) {
             if ($sliceType === 3) $this->reader->skip(1);

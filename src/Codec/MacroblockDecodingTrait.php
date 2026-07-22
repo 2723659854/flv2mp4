@@ -1122,16 +1122,26 @@ trait MacroblockDecodingTrait
      */
     private function decodePL0_16x16(int $mbX, int $mbY, int $sliceQp): int
     {
+        $isDebugSlice = ($this->debugTargetSlice > 0 && $this->debugSliceIndex === $this->debugTargetSlice);
+        $isDebugMb = $isDebugSlice && $mbY === 0 && $mbX <= 5;
+        if ($isDebugMb && $this->debugMbTraceFh) {
+            fwrite($this->debugMbTraceFh, "\n  [DBG] bitPos at func start: " . $this->reader->getBitPosition());
+        }
         $refIdx = 0;
-        //$bitBeforeRef = $this->reader->getBitPosition();
         if ($this->numRefIdxL0Active > 1) {
             $refIdx = $this->reader->readUe();
         }
-        //$bitBeforeMvdX = $this->reader->getBitPosition();
+        if ($isDebugMb && $this->debugMbTraceFh) {
+            fwrite($this->debugMbTraceFh, "\n  [DBG] bitPos after ref_idx: " . $this->reader->getBitPosition() . " refIdx=$refIdx");
+        }
         $mvdL0X = $this->reader->readSe();
-        //$bitBeforeMvdY = $this->reader->getBitPosition();
+        if ($isDebugMb && $this->debugMbTraceFh) {
+            fwrite($this->debugMbTraceFh, "\n  [DBG] bitPos after mvd_x: " . $this->reader->getBitPosition() . " mvdL0X=$mvdL0X");
+        }
         $mvdL0Y = $this->reader->readSe();
-        //$bitAfterMvd = $this->reader->getBitPosition();
+        if ($isDebugMb && $this->debugMbTraceFh) {
+            fwrite($this->debugMbTraceFh, "\n  [DBG] bitPos after mvd_y: " . $this->reader->getBitPosition() . " mvdL0Y=$mvdL0Y");
+        }
 
         list($predMvX, $predMvY) = $this->getP16x16MvPrediction($mbX, $mbY, $refIdx);
         $mvX = $predMvX + $mvdL0X;
@@ -1151,7 +1161,6 @@ trait MacroblockDecodingTrait
 
         //echo "[DECODER] MB($mbX,$mbY): refIdx=$refIdx mvd=($mvdL0X,$mvdL0Y) pred_mv=($predMvX,$predMvY) mv=($mvX,$mvY)\n";
 
-        $isDebugSlice = ($this->debugTargetSlice > 0 && $this->debugSliceIndex === $this->debugTargetSlice);
         if ($isDebugSlice && $this->debugMbTraceFh) {
             fwrite($this->debugMbTraceFh, " [P_L0_16x16] refIdx=$refIdx mvd=($mvdL0X,$mvdL0Y) pred_mv=($predMvX,$predMvY) mv=($mvX,$mvY)");
         }
@@ -1176,29 +1185,46 @@ trait MacroblockDecodingTrait
 
         $this->performMotionCompensation16x16($mbX, $mbY, $mvX, $mvY, $refIdx);
 
+        if ($isDebugMb && $this->debugMbTraceFh) {
+            fwrite($this->debugMbTraceFh, "\n  [MC] Motion compensated prediction (Y, first 4 rows):");
+            for ($yy = 0; $yy < 4; $yy++) {
+                $line = "\n    row $yy: ";
+                $py = $mbY * 16 + $yy;
+                $baseIdx = $py * $this->width + $mbX * 16;
+                for ($xx = 0; $xx < 16; $xx++) {
+                    $line .= $this->yPlane[$baseIdx + $xx] . " ";
+                }
+                fwrite($this->debugMbTraceFh, $line);
+            }
+        }
+
         $cbpCode = $this->reader->readUe();
         $codedBlockPattern = self::GOLOMB_TO_INTER_CBP[$cbpCode] ?? 0;
-        //if ($mbX === 1 && $mbY === 1) {
-            //echo "[DBG_MB11] cbpCode=$cbpCode cbp=$codedBlockPattern\n";
-        //}
-        //if (($mbX === 1 || $mbX === 2) && $mbY === 0) {
-            //echo "[DBG_MB($mbX,$mbY)] bitAfterCbp=" . $this->reader->getBitPosition() . " cbpCode=$cbpCode cbp=$codedBlockPattern\n";
-        //}
+        if ($isDebugMb && $this->debugMbTraceFh) {
+            fwrite($this->debugMbTraceFh, "\n  [DBG] bitPos after cbp: " . $this->reader->getBitPosition() . " cbpCode=$cbpCode cbp=$codedBlockPattern");
+        }
         $mbQpDelta = 0;
         if ($codedBlockPattern !== 0) {
             $mbQpDelta = $this->reader->readSe();
             $qp = $sliceQp + $mbQpDelta;
             $qp = max(0, min(51, $qp));
-            //if ($mbX === 1 && $mbY === 1) {
-                //echo "[DBG_MB11] sliceQp=$sliceQp mbQpDelta=$mbQpDelta qp=$qp\n";
-            //}
-            //if (($mbX === 1 || $mbX === 2) && $mbY === 0) {
-                //echo "[DBG_MB($mbX,$mbY)] mbQpDelta=$mbQpDelta qp=$qp bitBeforeResidual=" . $this->reader->getBitPosition() . "\n";
-            //}
+            if ($isDebugMb && $this->debugMbTraceFh) {
+                fwrite($this->debugMbTraceFh, "\n  [DBG] bitPos after mb_qp_delta: " . $this->reader->getBitPosition() . " mbQpDelta=$mbQpDelta qp=$qp");
+            }
             $this->decodeResidualAndAdd($mbX, $mbY, $codedBlockPattern, $qp, 0);
-            //if (($mbX === 1 || $mbX === 2) && $mbY === 0) {
-                //echo "[DBG_MB($mbX,$mbY)] bitAfterResidual=" . $this->reader->getBitPosition() . "\n";
-            //}
+            if ($isDebugMb && $this->debugMbTraceFh) {
+                fwrite($this->debugMbTraceFh, "\n  [DBG] bitPos after residual: " . $this->reader->getBitPosition());
+                fwrite($this->debugMbTraceFh, "\n  [OUT] Decoded pixels after residual (Y, first 4 rows):");
+                for ($yy = 0; $yy < 4; $yy++) {
+                    $line = "\n    row $yy: ";
+                    $py = $mbY * 16 + $yy;
+                    $baseIdx = $py * $this->width + $mbX * 16;
+                    for ($xx = 0; $xx < 16; $xx++) {
+                        $line .= $this->yPlane[$baseIdx + $xx] . " ";
+                    }
+                    fwrite($this->debugMbTraceFh, $line);
+                }
+            }
         }
 
         if ($isDebugSlice && $this->debugMbTraceFh) {
@@ -2264,14 +2290,16 @@ trait MacroblockDecodingTrait
                     $scanIdx = $i8x8 * 4 + $i4x4;
                     $rasterIdx = $scanToRaster[$scanIdx];
                     $nc = $this->computeNc($rasterIdx, $mbX, $mbY, $nzCache, $leftNz, $topNz, $leftAvailable, $topAvailable);
-                    //$bpBefore = $this->reader->getBitPosition();
+                    $isDebugSlice = ($this->debugTargetSlice > 0 && $this->debugSliceIndex === $this->debugTargetSlice);
+                    $isDebugMb = $isDebugSlice && $mbY === 0 && ($mbX === 1 || $mbX === 2);
+                    $bpBefore = $this->reader->getBitPosition();
                     $coeffs = $this->decodeResidualBlock(16, $nc);
-                    //$bpAfter = $this->reader->getBitPosition();
-                    //if (($mbX === 1 && $mbY === 0) || ($mbX === 1 && $mbY === 1)) {
-                        //$nz = 0;
-                        //for ($i = 0; $i < 16; $i++) if ($coeffs[$i] != 0) $nz++;
-                        //echo "[DBG_MB({$mbX},{$mbY})_RES] luma blk scan=$scanIdx raster=$rasterIdx nc=$nc nz=$nz bits=" . ($bpAfter - $bpBefore) . " (from $bpBefore to $bpAfter)\n";
-                    //}
+                    $bpAfter = $this->reader->getBitPosition();
+                    if ($isDebugMb && $this->debugMbTraceFh) {
+                        $nz = 0;
+                        for ($i = 0; $i < 16; $i++) if ($coeffs[$i] != 0) $nz++;
+                        fwrite($this->debugMbTraceFh, "\n    [RES] luma blk scan=$scanIdx raster=$rasterIdx nc=$nc nz=$nz bits=" . ($bpAfter - $bpBefore) . " (from $bpBefore to $bpAfter)");
+                    }
                     for ($i = 0; $i < 16; $i++) $yCoeffs[$rasterIdx][$i] = $coeffs[$i];
                     $yCoeffs[$rasterIdx] = $this->zigzagToRaster($yCoeffs[$rasterIdx]);
                     $yCoeffs[$rasterIdx] = $this->dequantize4x4($yCoeffs[$rasterIdx], 0, $qp);
@@ -2297,19 +2325,27 @@ trait MacroblockDecodingTrait
         $cbAcCoeffs = array_fill(0, 4, array_fill(0, 16, 0));
         $crAcCoeffs = array_fill(0, 4, array_fill(0, 16, 0));
 
-        if ($chromaCbp != 0) {
-            //$bpBefore = $this->reader->getBitPosition();
+        $isDebugSlice = ($this->debugTargetSlice > 0 && $this->debugSliceIndex === $this->debugTargetSlice);
+        $isDebugMb = $isDebugSlice && $mbY === 0 && ($mbX === 1 || $mbX === 2);
+
+        if ($chromaCbp === 1 || $chromaCbp === 3) {
+            if ($isDebugMb && $this->debugMbTraceFh) {
+                fwrite($this->debugMbTraceFh, "\n    [RES] chroma DC start, bitPos=" . $this->reader->getBitPosition() . " chromaCbp=$chromaCbp");
+            }
+            $bpBefore = $this->reader->getBitPosition();
             $cbDc = $this->decodeResidualBlock(4, -1);
-            //$bpAfter = $this->reader->getBitPosition();
-            //if (($mbX === 1 && $mbY === 0) || ($mbX === 1 && $mbY === 1)) {
-                //echo "[DBG_MB({$mbX},{$mbY})_RES] chroma cb_dc bits=" . ($bpAfter - $bpBefore) . " (from $bpBefore to $bpAfter)\n";
-            //}
-            //$bpBefore = $this->reader->getBitPosition();
+            $bpAfter = $this->reader->getBitPosition();
+            if ($isDebugMb && $this->debugMbTraceFh) {
+                $nz = 0; for ($i = 0; $i < 4; $i++) if ($cbDc[$i] != 0) $nz++;
+                fwrite($this->debugMbTraceFh, "\n    [RES] chroma Cb DC: nc=-1 nz=$nz bits=" . ($bpAfter - $bpBefore) . " (from $bpBefore to $bpAfter) coeffs=[" . implode(",", $cbDc) . "]");
+            }
+            $bpBefore = $this->reader->getBitPosition();
             $crDc = $this->decodeResidualBlock(4, -1);
-            //$bpAfter = $this->reader->getBitPosition();
-            //if (($mbX === 1 && $mbY === 0) || ($mbX === 1 && $mbY === 1)) {
-                //echo "[DBG_MB({$mbX},{$mbY})_RES] chroma cr_dc bits=" . ($bpAfter - $bpBefore) . " (from $bpBefore to $bpAfter)\n";
-            //}
+            $bpAfter = $this->reader->getBitPosition();
+            if ($isDebugMb && $this->debugMbTraceFh) {
+                $nz = 0; for ($i = 0; $i < 4; $i++) if ($crDc[$i] != 0) $nz++;
+                fwrite($this->debugMbTraceFh, "\n    [RES] chroma Cr DC: nc=-1 nz=$nz bits=" . ($bpAfter - $bpBefore) . " (from $bpBefore to $bpAfter) coeffs=[" . implode(",", $crDc) . "]");
+            }
         }
 
         $cbQmul = $this->dequant4Table[1][$chromaQp][0];
@@ -2317,37 +2353,35 @@ trait MacroblockDecodingTrait
         $cbDcResult = $this->chromaDcDequantIdct($cbDc, $cbQmul);
         $crDcResult = $this->chromaDcDequantIdct($crDc, $crQmul);
 
-        if ($chromaCbp >= 2) {
+        if ($chromaCbp === 2 || $chromaCbp === 3) {
             $cbScanOrder = [16, 17, 18, 19];
             foreach ($cbScanOrder as $blockIdx) {
                 $blk = $blockIdx - 16;
                 $nc = $this->computeNc($blockIdx, $mbX, $mbY, $nzCache, $leftNz, $topNz, $leftAvailable, $topAvailable);
-                //$bpBefore = $this->reader->getBitPosition();
+                $bpBefore = $this->reader->getBitPosition();
                 $ac = $this->decodeResidualBlock(15, $nc);
-                //$bpAfter = $this->reader->getBitPosition();
-                //if (($mbX === 1 && $mbY === 0) || ($mbX === 1 && $mbY === 1)) {
-                    //$nzCnt = 0; for ($i = 0; $i < 15; $i++) if ($ac[$i] != 0) $nzCnt++;
-                    //echo "[DBG_MB({$mbX},{$mbY})_RES] chroma cb_ac blk=$blk blockIdx=$blockIdx nc=$nc nz=$nzCnt bits=" . ($bpAfter - $bpBefore) . " (from $bpBefore to $bpAfter)\n";
-                //}
+                $bpAfter = $this->reader->getBitPosition();
+                if ($isDebugMb && $this->debugMbTraceFh) {
+                    $nzCnt = 0; for ($i = 0; $i < 15; $i++) if ($ac[$i] != 0) $nzCnt++;
+                    fwrite($this->debugMbTraceFh, "\n    [RES] chroma Cb AC blk=$blk blockIdx=$blockIdx nc=$nc nz=$nzCnt bits=" . ($bpAfter - $bpBefore) . " (from $bpBefore to $bpAfter)");
+                }
                 $nzCnt = 0; for ($i = 0; $i < 15; $i++) if ($ac[$i] != 0) $nzCnt++;
                 for ($i = 1; $i < 16; $i++) $cbAcCoeffs[$blk][$i] = $ac[$i - 1];
                 $cbAcCoeffs[$blk] = $this->zigzagToRaster($cbAcCoeffs[$blk]);
                 $cbAcCoeffs[$blk] = $this->dequantize4x4($cbAcCoeffs[$blk], 1, $chromaQp);
                 $nzCache[$blockIdx] = $nzCnt;
             }
-        }
-        if ($chromaCbp >= 3) {
             $crScanOrder = [20, 21, 22, 23];
             foreach ($crScanOrder as $blockIdx) {
                 $blk = $blockIdx - 20;
                 $nc = $this->computeNc($blockIdx, $mbX, $mbY, $nzCache, $leftNz, $topNz, $leftAvailable, $topAvailable);
-                //$bpBefore = $this->reader->getBitPosition();
+                $bpBefore = $this->reader->getBitPosition();
                 $ac = $this->decodeResidualBlock(15, $nc);
-                //$bpAfter = $this->reader->getBitPosition();
-                //if (($mbX === 1 && $mbY === 0) || ($mbX === 1 && $mbY === 1)) {
-                    //$nzCnt = 0; for ($i = 0; $i < 15; $i++) if ($ac[$i] != 0) $nzCnt++;
-                    //echo "[DBG_MB({$mbX},{$mbY})_RES] chroma cr_ac blk=$blk blockIdx=$blockIdx nc=$nc nz=$nzCnt bits=" . ($bpAfter - $bpBefore) . " (from $bpBefore to $bpAfter)\n";
-                //}
+                $bpAfter = $this->reader->getBitPosition();
+                if ($isDebugMb && $this->debugMbTraceFh) {
+                    $nzCnt = 0; for ($i = 0; $i < 15; $i++) if ($ac[$i] != 0) $nzCnt++;
+                    fwrite($this->debugMbTraceFh, "\n    [RES] chroma Cr AC blk=$blk blockIdx=$blockIdx nc=$nc nz=$nzCnt bits=" . ($bpAfter - $bpBefore) . " (from $bpBefore to $bpAfter)");
+                }
                 $nzCnt = 0; for ($i = 0; $i < 15; $i++) if ($ac[$i] != 0) $nzCnt++;
                 for ($i = 1; $i < 16; $i++) $crAcCoeffs[$blk][$i] = $ac[$i - 1];
                 $crAcCoeffs[$blk] = $this->zigzagToRaster($crAcCoeffs[$blk]);
@@ -2468,10 +2502,10 @@ trait MacroblockDecodingTrait
         $this->nzLeftColLuma[2] = $nzCache[11];
         $this->nzLeftColLuma[3] = $nzCache[15];
 
-        $this->nzTopRowChroma[$mbX * 2 + 0] = $nzCache[16];
-        $this->nzTopRowChroma[$mbX * 2 + 1] = $nzCache[17];
-        $this->nzTopRowChroma[$mbWidth * 2 + $mbX * 2 + 0] = $nzCache[20];
-        $this->nzTopRowChroma[$mbWidth * 2 + $mbX * 2 + 1] = $nzCache[21];
+        $this->nzTopRowChroma[$mbX * 2 + 0] = $nzCache[18];
+        $this->nzTopRowChroma[$mbX * 2 + 1] = $nzCache[19];
+        $this->nzTopRowChroma[$mbWidth * 2 + $mbX * 2 + 0] = $nzCache[22];
+        $this->nzTopRowChroma[$mbWidth * 2 + $mbX * 2 + 1] = $nzCache[23];
         $this->nzLeftColChroma[0] = $nzCache[17];
         $this->nzLeftColChroma[1] = $nzCache[19];
         $this->nzLeftColChroma[2] = $nzCache[21];

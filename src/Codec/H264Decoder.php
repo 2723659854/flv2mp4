@@ -308,6 +308,36 @@ class H264Decoder
                 if ($sliceCount === $this->debugTargetSlice) {
                     $this->debugMbTraceFh = fopen('php_mb_trace.txt', 'w');
                     fwrite($this->debugMbTraceFh, "=== PHP Decoder MB Trace - Slice $sliceCount ===\n");
+                    fwrite($this->debugMbTraceFh, "  nalType=$nalType, nalRefIdc=$nalRefIdc\n");
+                    fwrite($this->debugMbTraceFh, "  Reference frame available: " . ($this->refFrameY !== null ? "yes" : "no") . "\n");
+                    if ($this->refFrameY !== null) {
+                        fwrite($this->debugMbTraceFh, "  refWidthY={$this->refWidthY}, refHeightY={$this->refHeightY}, refStrideY={$this->refStrideY}\n");
+                        fwrite($this->debugMbTraceFh, "  refWidthUv={$this->refWidthUv}, refHeightUv={$this->refHeightUv}, refStrideUv={$this->refStrideUv}\n");
+                        fwrite($this->debugMbTraceFh, "  First 16 rows of Y (first 48 pixels each):\n");
+                        for ($yy = 0; $yy < 16; $yy++) {
+                            $line = "    row $yy: ";
+                            for ($xx = 0; $xx < 48; $xx++) {
+                                $line .= $this->refFrameY[$yy * $this->refStrideY + $xx] . " ";
+                            }
+                            fwrite($this->debugMbTraceFh, $line . "\n");
+                        }
+                        fwrite($this->debugMbTraceFh, "  First 8 rows of U (first 24 pixels each):\n");
+                        for ($yy = 0; $yy < 8; $yy++) {
+                            $line = "    row $yy: ";
+                            for ($xx = 0; $xx < 24; $xx++) {
+                                $line .= $this->refFrameU[$yy * $this->refStrideUv + $xx] . " ";
+                            }
+                            fwrite($this->debugMbTraceFh, $line . "\n");
+                        }
+                        fwrite($this->debugMbTraceFh, "  First 8 rows of V (first 24 pixels each):\n");
+                        for ($yy = 0; $yy < 8; $yy++) {
+                            $line = "    row $yy: ";
+                            for ($xx = 0; $xx < 24; $xx++) {
+                                $line .= $this->refFrameV[$yy * $this->refStrideUv + $xx] . " ";
+                            }
+                            fwrite($this->debugMbTraceFh, $line . "\n");
+                        }
+                    }
                 }
 
                 // 每帧重新初始化像素平面
