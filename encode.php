@@ -2,7 +2,7 @@
 
 require_once __DIR__ . '/vendor/autoload.php';
 ini_set('memory_limit', '2048M');
-// 使用纯 PHP 多码率 HLS 生成器
+// 使用纯 PHP 多码率 HLS 生成器 ffmpeg -i test.mp4 -c:v libx264 -profile:v baseline -level:v 3.1 -x264-params "no-cabac=1:ref=1" -g 90 -keyint_min 90 -c:a aac -b:a 128k -y test.flv
 
 // 定义规格
 $profiles = [
