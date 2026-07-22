@@ -250,19 +250,6 @@ class PurePhpHlsGenerator
         }
     }
 
-    /**
-     * 纯PHP解码器，移除FFmpeg shell调用
-     */
-    private function decodeNaluToYuv2(string $avcData): ?string
-    {
-        $nalUnits = $this->extractNalUnitsFromAVCC($avcData);
-        $frame = $this->decoder->decode($nalUnits);
-        if ($frame && !empty($frame['data'])) {
-            return $frame['data'];
-        }
-        return null;
-    }
-
     private function decodeNaluToYuv(string $avcData): ?string
     {
         $nalUnits = $this->extractNalUnitsFromAVCC($avcData);
@@ -455,26 +442,6 @@ class PurePhpHlsGenerator
         return $result;
     }
 
-    /**
-     * 拆分AVCC为NAL单元数组
-     */
-    private function extractNalUnitsFromAVCC2(string $data): array
-    {
-        $list = [];
-        $offset = 0;
-        $totalLen = strlen($data);
-        while ($offset + 4 <= $totalLen) {
-            $nalSize = unpack('N', substr($data, $offset, 4))[1];
-            $offset += 4;
-            if ($offset + $nalSize > $totalLen) break;
-            $nalRaw = substr($data, $offset, $nalSize);
-            $offset += $nalSize;
-            $type = ord($nalRaw[0]) & 0x1F;
-            $rbspData = substr($nalRaw, 1);
-            $list[] = ['type' => $type, 'data' => $rbspData, 'raw' => $nalRaw];
-        }
-        return $list;
-    }
 
     private function extractNalUnitsFromAVCC(string $data): array
     {
