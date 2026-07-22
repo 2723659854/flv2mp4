@@ -291,6 +291,9 @@ trait DeblockingFilterTrait
         $mbHeight = $this->picHeightInMbs;
         $mbIdx = $mbY * $mbWidth + $mbX;
         $curType = $this->mbTypeForDeblock[$mbIdx] ?? -1;
+        $curNnz = $this->mbNnzForDeblock[$mbIdx] ?? array_fill(0, 24, 0);
+        $curMv = $this->mbMvForDeblock[$mbIdx] ?? array_fill(0, 16, [0, 0]);
+        $curRef = $this->mbRefForDeblock[$mbIdx] ?? array_fill(0, 16, 0);
         $sliceType = $this->currentSliceType;
         $isIslice = ($sliceType === 2 || $sliceType === 4);
         $isPslice = ($sliceType === 0 || $sliceType === 5);
@@ -310,18 +313,38 @@ trait DeblockingFilterTrait
         $bsVertical = [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
         $bsHorizontal = [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
 
+        // 垂直边界: Q块在(col=edge, row=pair), P块在(col=edge-1, row=pair)
         for ($edge = 0; $edge < 4; $edge++) {
             $isMbEdge = ($edge == 0);
 
             for ($pair = 0; $pair < 4; $pair++) {
-                $pIntra = $curIntra;
+                $qBx = $edge;
+                $qBy = $pair;
+                $qIdx = $qBy * 4 + $qBx;
                 $qIntra = $curIntra;
-                $pIpcm = $curIpcm;
                 $qIpcm = $curIpcm;
+                $qNnz = $curNnz[$qIdx] ?? 0;
+                $qMv = $curMv[$qIdx] ?? [0, 0];
+                $qRef = $curRef[$qIdx] ?? 0;
 
-                if ($isMbEdge && $edge == 0 && $mbX > 0) {
-                    $leftIdx = ($mbY * $mbWidth + $mbX - 1);
+                $pIntra = $curIntra;
+                $pIpcm = $curIpcm;
+                $pNnz = 0;
+                $pMv = [0, 0];
+                $pRef = 0;
+
+                if ($isMbEdge && $mbX > 0) {
+                    $leftIdx = $mbY * $mbWidth + $mbX - 1;
                     $leftType = $this->mbTypeForDeblock[$leftIdx] ?? -1;
+                    $leftNnz = $this->mbNnzForDeblock[$leftIdx] ?? array_fill(0, 24, 0);
+                    $leftMv = $this->mbMvForDeblock[$leftIdx] ?? array_fill(0, 16, [0, 0]);
+                    $leftRef = $this->mbRefForDeblock[$leftIdx] ?? array_fill(0, 16, 0);
+                    $pBx = 3;
+                    $pBy = $qBy;
+                    $pIdx = $pBy * 4 + $pBx;
+                    $pNnz = $leftNnz[$pIdx] ?? 0;
+                    $pMv = $leftMv[$pIdx] ?? [0, 0];
+                    $pRef = $leftRef[$pIdx] ?? 0;
                     if ($leftType >= 0) {
                         if ($isIslice) {
                             $pIntra = ($leftType >= 0 && $leftType <= 24);
@@ -331,30 +354,54 @@ trait DeblockingFilterTrait
                             $pIpcm = ($leftType == 30);
                         }
                     }
+                } elseif (!$isMbEdge) {
+                    $pBx = $qBx - 1;
+                    $pBy = $qBy;
+                    $pIdx = $pBy * 4 + $pBx;
+                    $pNnz = $curNnz[$pIdx] ?? 0;
+                    $pMv = $curMv[$pIdx] ?? [0, 0];
+                    $pRef = $curRef[$pIdx] ?? 0;
                 }
 
-                if ($pIpcm || $qIpcm) {
-                    $bsVertical[$edge][$pair] = 0;
-                } elseif ($pIntra || $qIntra) {
-                    $bsVertical[$edge][$pair] = $isMbEdge ? 4 : 3;
-                } else {
-                    $bsVertical[$edge][$pair] = 2;
-                }
+                $bsVertical[$edge][$pair] = $this->computeBsSingle(
+                    $isMbEdge, $pIntra, $qIntra, $pIpcm, $qIpcm,
+                    $pNnz, $qNnz, $pMv, $qMv, $pRef, $qRef
+                );
             }
         }
 
+        // 水平边界: Q块在(col=pair, row=edge), P块在(col=pair, row=edge-1)
         for ($edge = 0; $edge < 4; $edge++) {
             $isMbEdge = ($edge == 0);
 
             for ($pair = 0; $pair < 4; $pair++) {
-                $pIntra = $curIntra;
+                $qBx = $pair;
+                $qBy = $edge;
+                $qIdx = $qBy * 4 + $qBx;
                 $qIntra = $curIntra;
-                $pIpcm = $curIpcm;
                 $qIpcm = $curIpcm;
+                $qNnz = $curNnz[$qIdx] ?? 0;
+                $qMv = $curMv[$qIdx] ?? [0, 0];
+                $qRef = $curRef[$qIdx] ?? 0;
 
-                if ($isMbEdge && $edge == 0 && $mbY > 0) {
-                    $topIdx = (($mbY - 1) * $mbWidth + $mbX);
+                $pIntra = $curIntra;
+                $pIpcm = $curIpcm;
+                $pNnz = 0;
+                $pMv = [0, 0];
+                $pRef = 0;
+
+                if ($isMbEdge && $mbY > 0) {
+                    $topIdx = ($mbY - 1) * $mbWidth + $mbX;
                     $topType = $this->mbTypeForDeblock[$topIdx] ?? -1;
+                    $topNnz = $this->mbNnzForDeblock[$topIdx] ?? array_fill(0, 24, 0);
+                    $topMv = $this->mbMvForDeblock[$topIdx] ?? array_fill(0, 16, [0, 0]);
+                    $topRef = $this->mbRefForDeblock[$topIdx] ?? array_fill(0, 16, 0);
+                    $pBx = $qBx;
+                    $pBy = 3;
+                    $pIdx = $pBy * 4 + $pBx;
+                    $pNnz = $topNnz[$pIdx] ?? 0;
+                    $pMv = $topMv[$pIdx] ?? [0, 0];
+                    $pRef = $topRef[$pIdx] ?? 0;
                     if ($topType >= 0) {
                         if ($isIslice) {
                             $pIntra = ($topType >= 0 && $topType <= 24);
@@ -364,19 +411,44 @@ trait DeblockingFilterTrait
                             $pIpcm = ($topType == 30);
                         }
                     }
+                } elseif (!$isMbEdge) {
+                    $pBx = $qBx;
+                    $pBy = $qBy - 1;
+                    $pIdx = $pBy * 4 + $pBx;
+                    $pNnz = $curNnz[$pIdx] ?? 0;
+                    $pMv = $curMv[$pIdx] ?? [0, 0];
+                    $pRef = $curRef[$pIdx] ?? 0;
                 }
 
-                if ($pIpcm || $qIpcm) {
-                    $bsHorizontal[$edge][$pair] = 0;
-                } elseif ($pIntra || $qIntra) {
-                    $bsHorizontal[$edge][$pair] = $isMbEdge ? 4 : 3;
-                } else {
-                    $bsHorizontal[$edge][$pair] = 2;
-                }
+                $bsHorizontal[$edge][$pair] = $this->computeBsSingle(
+                    $isMbEdge, $pIntra, $qIntra, $pIpcm, $qIpcm,
+                    $pNnz, $qNnz, $pMv, $qMv, $pRef, $qRef
+                );
             }
         }
 
         return [$bsVertical, $bsHorizontal];
+    }
+
+    private function computeBsSingle($isMbEdge, $pIntra, $qIntra, $pIpcm, $qIpcm,
+                                     $pNnz, $qNnz, $pMv, $qMv, $pRef, $qRef): int
+    {
+        if ($pIpcm || $qIpcm) {
+            return 0;
+        }
+        if ($pIntra || $qIntra) {
+            return $isMbEdge ? 4 : 3;
+        }
+        if ($pNnz != 0 || $qNnz != 0) {
+            return 2;
+        }
+        // 检查MV和参考帧是否不同
+        $mvDiffX = abs($pMv[0] - $qMv[0]);
+        $mvDiffY = abs($pMv[1] - $qMv[1]);
+        if ($pRef != $qRef || $mvDiffX >= 4 || $mvDiffY >= 4) {
+            return 1;
+        }
+        return 0;
     }
 
     public function applyDeblockingFilter(): void

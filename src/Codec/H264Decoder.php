@@ -64,6 +64,9 @@ class H264Decoder
     public int $sliceBetaOffset = 0;
     public array $mbTypeForDeblock = [];
     public array $mbQpForDeblock = [];
+    public array $mbNnzForDeblock = [];
+    public array $mbMvForDeblock = [];
+    public array $mbRefForDeblock = [];
     public int $currentSliceType = 0;
 
     // P帧参考帧控制

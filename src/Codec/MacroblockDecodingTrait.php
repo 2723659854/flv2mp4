@@ -32,6 +32,9 @@ trait MacroblockDecodingTrait
         $mbWidth = $this->picWidthInMbs;
         $mbIdx = $mbY * $mbWidth + $mbX;
         $this->mbTypeForDeblock[$mbIdx] = $mbType;
+        $this->mbNnzForDeblock[$mbIdx] = array_fill(0, 24, 0);
+        $this->mbMvForDeblock[$mbIdx] = array_fill(0, 16, [0, 0]);
+        $this->mbRefForDeblock[$mbIdx] = array_fill(0, 16, 0);
 
         $mbQpDelta = 0;
 
@@ -1010,7 +1013,8 @@ trait MacroblockDecodingTrait
         $mbWidth = $this->picWidthInMbs;
 
         if (($this->debugSliceIndex === 3 && $mbX === 15 && $mbY === 13) ||
-            ($this->debugSliceIndex === 3 && $mbX === 16 && $mbY === 13)) {
+            ($this->debugSliceIndex === 3 && $mbX === 16 && $mbY === 13) ||
+            ($this->debugSliceIndex === 2 && $mbX === 8 && $mbY === 10)) {
             echo "[DEBUG_MB] MB($mbX,$mbY): mb_type=$mbType\n";
         }
 
@@ -1074,12 +1078,10 @@ trait MacroblockDecodingTrait
         $mvX = $predMvX;
         $mvY = $predMvY;
 
-        // Debug: Frame 2 first few MBs
-        if ($this->debugSliceIndex === 3 && $mbY === 0 && $mbX <= 5) {
-            //echo "[MV_DEBUG] MB($mbX,$mbY) P_Skip: pred_mv=($predMvX,$predMvY) mv=($mvX,$mvY) refIdx=$refIdx\n";
-            //echo "[MV_DEBUG]   mvLeftCol[0]=" . ($this->mvLeftCol[0] ? "({$this->mvLeftCol[0][0]},{$this->mvLeftCol[0][1]},{$this->mvLeftCol[0][2]})" : "null") . "\n";
-            $topMv = $this->mvTopRow[$mbX * 4] ?? null;
-            //echo "[MV_DEBUG]   mvTopRow[mbX*4]=" . ($topMv ? "({$topMv[0]},{$topMv[1]},{$topMv[2]})" : "null") . "\n";
+        // Debug: Frame 1 MB(8,10) and Frame 2 MB(8,10)
+        if (($this->debugSliceIndex === 2 && $mbX === 8 && $mbY === 10) ||
+            ($this->debugSliceIndex === 3 && $mbX === 8 && $mbY === 10)) {
+            echo "[DEBUG_MB] MB($mbX,$mbY) P_Skip: pred_mv=($predMvX,$predMvY) mv=($mvX,$mvY) refIdx=$refIdx\n";
         }
 
         $isDebugSlice = ($this->debugTargetSlice > 0 && $this->debugSliceIndex === $this->debugTargetSlice);
@@ -1092,6 +1094,13 @@ trait MacroblockDecodingTrait
         $this->saveMvForPrediction($mbX, $mbY, $mvX, $mvY, $refIdx);
 
         $this->updateNzCountZero($mbX, $mbY);
+
+        $mbWidth = $this->picWidthInMbs;
+        $mbIdx = $mbY * $mbWidth + $mbX;
+        for ($i = 0; $i < 16; $i++) {
+            $this->mbMvForDeblock[$mbIdx][$i] = [$mvX, $mvY];
+            $this->mbRefForDeblock[$mbIdx][$i] = $refIdx;
+        }
 
         return 0;
     }
@@ -1152,8 +1161,9 @@ trait MacroblockDecodingTrait
         $mvX = $predMvX + $mvdL0X;
         $mvY = $predMvY + $mvdL0Y;
 
-        if ($this->debugSliceIndex === 3 && $mbX === 16 && $mbY === 13) {
-            echo "[DEBUG_MB] MB(16,13) P_16x16:\n";
+        if (($this->debugSliceIndex === 3 && $mbX === 16 && $mbY === 13) ||
+            ($this->debugSliceIndex === 2 && $mbX === 8 && $mbY === 10)) {
+            echo "[DEBUG_MB] MB($mbX,$mbY) P_16x16:\n";
             echo "  pred_mv=($predMvX,$predMvY), mvd=($mvdL0X,$mvdL0Y), mv=($mvX,$mvY), ref=$refIdx\n";
         }
 
@@ -1210,6 +1220,10 @@ trait MacroblockDecodingTrait
 
         $cbpCode = $this->reader->readUe();
         $codedBlockPattern = self::GOLOMB_TO_INTER_CBP[$cbpCode] ?? 0;
+        if (($this->debugSliceIndex === 3 && $mbX === 16 && $mbY === 13) ||
+            ($this->debugSliceIndex === 2 && $mbX === 8 && $mbY === 10)) {
+            echo "[DEBUG_MB] MB($mbX,$mbY) cbp_code=$cbpCode, cbp=0x" . dechex($codedBlockPattern) . "\n";
+        }
         if ($isDebugMb && $this->debugMbTraceFh) {
             fwrite($this->debugMbTraceFh, "\n  [DBG] bitPos after cbp: " . $this->reader->getBitPosition() . " cbpCode=$cbpCode cbp=$codedBlockPattern");
         }
@@ -1246,6 +1260,13 @@ trait MacroblockDecodingTrait
         }
 
         $this->saveMvForPrediction($mbX, $mbY, $mvX, $mvY, $refIdx);
+
+        $mbWidth = $this->picWidthInMbs;
+        $mbIdx = $mbY * $mbWidth + $mbX;
+        for ($i = 0; $i < 16; $i++) {
+            $this->mbMvForDeblock[$mbIdx][$i] = [$mvX, $mvY];
+            $this->mbRefForDeblock[$mbIdx][$i] = $refIdx;
+        }
 
         return $mbQpDelta;
     }
@@ -1339,6 +1360,17 @@ trait MacroblockDecodingTrait
 
         $this->saveMvForPrediction16x8($mbX, $mbY, $mv0X, $mv0Y, $refIdx0, $mv1X, $mv1Y, $refIdx1);
 
+        $mbWidth = $this->picWidthInMbs;
+        $mbIdx = $mbY * $mbWidth + $mbX;
+        for ($i = 0; $i < 8; $i++) {
+            $this->mbMvForDeblock[$mbIdx][$i] = [$mv0X, $mv0Y];
+            $this->mbRefForDeblock[$mbIdx][$i] = $refIdx0;
+        }
+        for ($i = 8; $i < 16; $i++) {
+            $this->mbMvForDeblock[$mbIdx][$i] = [$mv1X, $mv1Y];
+            $this->mbRefForDeblock[$mbIdx][$i] = $refIdx1;
+        }
+
         return $mbQpDelta;
     }
 
@@ -1400,6 +1432,19 @@ trait MacroblockDecodingTrait
         }
 
         $this->saveMvForPrediction8x16($mbX, $mbY, $mv0X, $mv0Y, $refIdx0, $mv1X, $mv1Y, $refIdx1);
+
+        $mbWidth = $this->picWidthInMbs;
+        $mbIdx = $mbY * $mbWidth + $mbX;
+        $leftBlocks = [0, 1, 4, 5, 8, 9, 12, 13];
+        $rightBlocks = [2, 3, 6, 7, 10, 11, 14, 15];
+        foreach ($leftBlocks as $i) {
+            $this->mbMvForDeblock[$mbIdx][$i] = [$mv0X, $mv0Y];
+            $this->mbRefForDeblock[$mbIdx][$i] = $refIdx0;
+        }
+        foreach ($rightBlocks as $i) {
+            $this->mbMvForDeblock[$mbIdx][$i] = [$mv1X, $mv1Y];
+            $this->mbRefForDeblock[$mbIdx][$i] = $refIdx1;
+        }
 
         return $mbQpDelta;
     }
@@ -1724,6 +1769,19 @@ trait MacroblockDecodingTrait
         }
 
         $this->saveMvForPrediction8x8($mbX, $mbY, $mbMvs);
+
+        $mbWidth = $this->picWidthInMbs;
+        $mbIdx = $mbY * $mbWidth + $mbX;
+        for ($y = 0; $y < 4; $y++) {
+            for ($x = 0; $x < 4; $x++) {
+                $idx = $y * 4 + $x;
+                $mv = $mbMvs[$y][$x];
+                if ($mv !== null) {
+                    $this->mbMvForDeblock[$mbIdx][$idx] = [$mv[0], $mv[1]];
+                    $this->mbRefForDeblock[$mbIdx][$idx] = $mv[2];
+                }
+            }
+        }
 
         return $mbQpDelta;
     }
@@ -2588,5 +2646,8 @@ trait MacroblockDecodingTrait
         $this->nzLeftColChroma[1] = $nzCache[19];
         $this->nzLeftColChroma[2] = $nzCache[21];
         $this->nzLeftColChroma[3] = $nzCache[23];
+
+        $mbIdx = $mbY * $this->picWidthInMbs + $mbX;
+        $this->mbNnzForDeblock[$mbIdx] = $nzCache;
     }
 }
