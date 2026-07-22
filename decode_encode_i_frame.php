@@ -5,6 +5,7 @@ require_once 'vendor/autoload.php';
 use Xiaosongshu\Flv2mp4\Codec\H264Decoder;
 use Xiaosongshu\Flv2mp4\Codec\H264Encoder;
 use Xiaosongshu\Flv2mp4\Codec\NalUtil;
+use Xiaosongshu\Flv2mp4\Codec\VideoScaler;
 
 $inputH264 = 'test_extracted.h264';
 $decodedYuv = 'decoded_i_frame.yuv';
@@ -83,10 +84,16 @@ if (strlen($result['data']) >= $expectedSize) {
     die("ERROR: 解码数据大小不足\n");
 }
 
-echo "=== Step 4: 使用PHP编码器重新编码I帧 ===\n";
-$width = $result['width'];
-$height = $result['height'];
-$yuvData = $firstFrame;
+echo "=== Step 4: 使用VideoScaler缩放YUV到640x360 ===\n";
+$scaler = new VideoScaler();
+$scaledYuv = $scaler->scaleYUV420P($firstFrame, $result['width'], $result['height'], 640, 360);
+echo "  缩放前: {$result['width']}x{$result['height']} ({$expectedSize} bytes)\n";
+echo "  缩放后: 640x360 (" . strlen($scaledYuv) . " bytes)\n\n";
+
+echo "=== Step 5: 使用PHP编码器重新编码I帧 ===\n";
+$width = 640;
+$height = 360;
+$yuvData = $scaledYuv;
 
 $encoder = new H264Encoder($width, $height, 30);
 $encoder->setQp(30);
@@ -106,7 +113,7 @@ foreach ($nalUnits as $i => $nal) {
 }
 echo "\n";
 
-echo "=== Step 5: 验证重新编码的H264 ===\n";
+echo "=== Step 6: 验证重新编码的H264 ===\n";
 $output = shell_exec("ffmpeg -v error -i $reencodedH264 -f null - 2>&1");
 if (empty($output)) {
     echo "RESULT: ✅ ffmpeg验证通过！\n";
@@ -124,4 +131,4 @@ echo "\n=== 生成可播放的MP4 ===\n";
 shell_exec("ffmpeg -y -f h264 -i $reencodedH264 -c:v copy reencoded_i_frame.mp4 2>&1");
 echo "生成: reencoded_i_frame.mp4\n";
 
-echo "\n✅ 完成：PHP解码 -> PHP编码 (I帧) 流程测试成功！\n";
+echo "\n✅ 完成：PHP解码 -> VideoScaler缩放 -> PHP编码 (I帧) 流程测试成功！\n";
