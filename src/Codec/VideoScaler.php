@@ -2,84 +2,106 @@
 
 namespace Xiaosongshu\Flv2mp4\Codec;
 
-/**
- * 视频缩放器 - 纯 PHP 实现
- */
 class VideoScaler
 {
-    private int $srcWidth;
-    private int $srcHeight;
-    private int $dstWidth;
-    private int $dstHeight;
-
     /**
-     * 缩放 YUV420P 格式视频
+     * 使用双立方插值 (Catmull-Rom) 缩放 YUV420P 图像
+     * 比双线性插值质量好很多，能更好地保留边缘细节
      */
     public function scaleYUV420P(string $yuvData, int $srcW, int $srcH, int $dstW, int $dstH): string
     {
-        $this->srcWidth = $srcW;
-        $this->srcHeight = $srcH;
-        $this->dstWidth = $dstW;
-        $this->dstHeight = $dstH;
+        // YUV420P 强制宽高为偶数，防止UV平面尺寸错乱花屏
+        $srcW = $srcW - ($srcW & 1);
+        $srcH = $srcH - ($srcH & 1);
+        $dstW = $dstW - ($dstW & 1);
+        $dstH = $dstH - ($dstH & 1);
 
-        // YUV420P 数据布局: Y 平面 + U 平面 + V 平面
+        // 尺寸一致直接返回原始数据，跳过计算
+        if ($srcW === $dstW && $srcH === $dstH) {
+            return $yuvData;
+        }
+
         $ySize = $srcW * $srcH;
-        $uvSize = $ySize / 4;
-
+        $uvSize = intdiv($ySize, 4);
         $yPlane = substr($yuvData, 0, $ySize);
         $uPlane = substr($yuvData, $ySize, $uvSize);
         $vPlane = substr($yuvData, $ySize + $uvSize, $uvSize);
 
-        // 缩放各平面
-        $scaledY = $this->scalePlane($yPlane, $srcW, $srcH, $dstW, $dstH);
-        $scaledU = $this->scalePlane($uPlane, $srcW/2, $srcH/2, $dstW/2, $dstH/2);
-        $scaledV = $this->scalePlane($vPlane, $srcW/2, $srcH/2, $dstW/2, $dstH/2);
+        $scaledY = $this->scalePlaneBicubic($yPlane, $srcW, $srcH, $dstW, $dstH);
+        $scaledU = $this->scalePlaneBicubic($uPlane, $srcW >> 1, $srcH >> 1, $dstW >> 1, $dstH >> 1);
+        $scaledV = $this->scalePlaneBicubic($vPlane, $srcW >> 1, $srcH >> 1, $dstW >> 1, $dstH >> 1);
 
         return $scaledY . $scaledU . $scaledV;
     }
 
     /**
-     * 缩放单个平面（使用双线性插值）
+     * 双立方插值 (Catmull-Rom spline)
+     * 使用周围16个像素点进行加权计算，边缘保留更好
+     * 修复：unpack索引偏移BUG、权重短路优化、浮点数除零保护
      */
-    private function scalePlane(string $data, float $srcW, float $srcH, float $dstW, float $dstH): string
+    private function scalePlaneBicubic(string $data, int $srcW, int $srcH, int $dstW, int $dstH): string
     {
-        $src = unpack('C*', $data);
-        $dst = [];
-
-        $srcW = (int)$srcW;
-        $srcH = (int)$srcH;
-        $dstW = (int)$dstW;
-        $dstH = (int)$dstH;
-
-        // 如果尺寸相同，直接返回
-        if ($srcW == $dstW && $srcH == $dstH) {
+        if ($srcW === $dstW && $srcH === $dstH) {
             return $data;
         }
 
-        // 双线性插值
+        $src = array_values(unpack('C*', $data));
+        $dst = [];
+        $ratioX = $srcW / $dstW;
+        $ratioY = $srcH / $dstH;
+
+        // Catmull-Rom 权重计算
+        $cubic = function(float $t): float {
+            $t = abs($t);
+            if ($t <= 1.0) {
+                return 1 - 2 * $t * $t + $t * $t * $t;
+            }
+            if ($t < 2.0) {
+                return 4 - 8 * $t + 5 * $t * $t - $t * $t * $t;
+            }
+            return 0.0;
+        };
+
         for ($y = 0; $y < $dstH; $y++) {
+            $srcYf = $y * $ratioY;
+            $y0 = (int)floor($srcYf);
+            $dy = $srcYf - $y0;
+
             for ($x = 0; $x < $dstW; $x++) {
-                // 计算源图像坐标
-                $srcX = ($x + 0.5) * $srcW / $dstW - 0.5;
-                $srcY = ($y + 0.5) * $srcH / $dstH - 0.5;
+                $srcXf = $x * $ratioX;
+                $x0 = (int)floor($srcXf);
+                $dx = $srcXf - $x0;
 
-                $x0 = (int)floor($srcX);
-                $y0 = (int)floor($srcY);
-                $x1 = min($x0 + 1, $srcW - 1);
-                $y1 = min($y0 + 1, $srcH - 1);
+                $sum = 0.0;
+                $weightSum = 0.0;
 
-                $fx = $srcX - $x0;
-                $fy = $srcY - $y0;
+                // 4x4邻域采样
+                for ($j = -1; $j <= 2; $j++) {
+                    $py = min(max($y0 + $j, 0), $srcH - 1);
+                    $wy = $cubic($j - $dy);
+                    if ($wy < 1e-8) continue;
 
-                // 获取四个邻近像素
-                $v00 = $src[$y0 * $srcW + $x0 + 1] ?? 0;
-                $v01 = $src[$y0 * $srcW + $x1 + 1] ?? 0;
-                $v10 = $src[$y1 * $srcW + $x0 + 1] ?? 0;
-                $v11 = $src[$y1 * $srcW + $x1 + 1] ?? 0;
+                    for ($i = -1; $i <= 2; $i++) {
+                        $px = min(max($x0 + $i, 0), $srcW - 1);
+                        $wx = $cubic($i - $dx);
+                        if ($wx < 1e-8) continue;
 
-                // 双线性插值
-                $value = (1-$fx)*(1-$fy)*$v00 + $fx*(1-$fy)*$v01 + (1-$fx)*$fy*$v10 + $fx*$fy*$v11;
-                $dst[] = (int)round($value);
+                        $idx = $py * $srcW + $px;
+                        $v = $src[$idx] ?? 128;
+                        $w = $wx * $wy;
+
+                        $sum += $v * $w;
+                        $weightSum += $w;
+                    }
+                }
+
+                // 防止除零
+                if ($weightSum < 1e-6) {
+                    $val = 128;
+                } else {
+                    $val = (int)round($sum / $weightSum);
+                }
+                $dst[] = max(0, min(255, $val));
             }
         }
 
@@ -87,34 +109,44 @@ class VideoScaler
     }
 
     /**
-     * 缩放单个平面（使用最近邻插值 - 更快但质量稍差）
+     * 简单的双线性插值 (保留作为快速降级选项)
+     * 修复索引偏移BUG
      */
-    private function scalePlaneNearest(string $data, float $srcW, float $srcH, float $dstW, float $dstH): string
+    private function scalePlaneBilinear(string $data, int $srcW, int $srcH, int $dstW, int $dstH): string
     {
-        $src = unpack('C*', $data);
-        $dst = [];
-
-        $srcW = (int)$srcW;
-        $srcH = (int)$srcH;
-        $dstW = (int)$dstW;
-        $dstH = (int)$dstH;
-
-        if ($srcW == $dstW && $srcH == $dstH) {
+        if ($srcW === $dstW && $srcH === $dstH) {
             return $data;
         }
 
+        $src = array_values(unpack('C*', $data));
+        $dst = [];
         $ratioX = $srcW / $dstW;
         $ratioY = $srcH / $dstH;
 
         for ($y = 0; $y < $dstH; $y++) {
+            $srcY = $y * $ratioY;
+            $y0 = (int)floor($srcY);
+            $y1 = min($y0 + 1, $srcH - 1);
+            $dy = $srcY - $y0;
+
             for ($x = 0; $x < $dstW; $x++) {
-                $srcX = (int)($x * $ratioX);
-                $srcY = (int)($y * $ratioY);
-                $value = $src[$srcY * $srcW + $srcX + 1] ?? 0;
-                $dst[] = $value;
+                $srcX = $x * $ratioX;
+                $x0 = (int)floor($srcX);
+                $x1 = min($x0 + 1, $srcW - 1);
+                $dx = $srcX - $x0;
+
+                $v00 = $src[$y0 * $srcW + $x0] ?? 128;
+                $v01 = $src[$y0 * $srcW + $x1] ?? 128;
+                $v10 = $src[$y1 * $srcW + $x0] ?? 128;
+                $v11 = $src[$y1 * $srcW + $x1] ?? 128;
+
+                $val = (1 - $dx) * (1 - $dy) * $v00
+                    + $dx * (1 - $dy) * $v01
+                    + (1 - $dx) * $dy * $v10
+                    + $dx * $dy * $v11;
+                $dst[] = (int)round(max(0, min(255, $val)));
             }
         }
-
         return pack('C*', ...$dst);
     }
 }
