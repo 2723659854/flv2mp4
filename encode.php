@@ -33,6 +33,7 @@ $profiles = [
         'bitrate' => 600000,   // 600 Kbps
         'fps' => 24,
         'audioBitrate' => 64000,
+        'qp'=>30
     ],
 ];
 
@@ -42,7 +43,7 @@ $generator = new \Xiaosongshu\Flv2mp4\Manage\PurePhpHlsGenerator(
     __DIR__ . '/hls/output'
 );
 $startTime = time();
-$generator->processFlv(__DIR__ . '/test.flv');
+$generator->processFlv(__DIR__ . '/test_i_frame.flv');
 $endTime = time();
 $cost = $endTime - $startTime;
 echo "HLS 生成完成！\n";

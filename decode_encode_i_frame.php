@@ -1,7 +1,7 @@
 <?php
 
 require_once 'vendor/autoload.php';
-
+ini_set('memory_limit', '2048M');
 use Xiaosongshu\Flv2mp4\Codec\H264Decoder;
 use Xiaosongshu\Flv2mp4\Codec\H264Encoder;
 use Xiaosongshu\Flv2mp4\Codec\NalUtil;
@@ -17,7 +17,7 @@ echo "=== Step 1: 准备输入H264文件 (多帧全I帧) ===\n";
 if (!file_exists($inputH264)) {
     echo "生成测试用H264 (5秒全I帧)...\n";
     $cmd = sprintf(
-        'ffmpeg -y -i test.mp4 -t 5 -c:v libx264 -profile:v baseline '
+        'ffmpeg -y -i test.mp4 -t 10 -c:v libx264 -profile:v baseline '
         . '-x264-params bframes=0:keyint=1:min-keyint=1:no-scenecut=1 '
         . '-preset veryfast -an -f h264 %s 2>&1',
         escapeshellarg($inputH264)
