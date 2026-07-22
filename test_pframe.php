@@ -16,10 +16,10 @@ $refYuv = 'test_pframe_ref.yuv';
 // 用 ffmpeg 生成 baseline profile 的测试序列（I+P帧，无B帧）
 echo "=== Step 1: 生成 Baseline profile 测试序列 (前5帧) ===\n";
 $cmd = sprintf(
-    'ffmpeg -y -i %s -t 1 -c:v libx264 -profile:v baseline '
+    'ffmpeg -y -f lavfi -i testsrc=duration=1:size=320x240:rate=30 -pix_fmt yuv420p '
+    . '-c:v libx264 -profile:v baseline '
     . '-x264-params bframes=0:keyint=30:min-keyint=30 '
     . '-preset veryfast -an -f h264 %s 2>&1',
-    escapeshellarg($mp4File),
     escapeshellarg($extractedH264)
 );
 $result = shell_exec($cmd);
@@ -52,6 +52,8 @@ $nalUnits = NalUtil::splitNalUnits($h264Data);
 echo "总NAL单元数量: " . count($nalUnits) . "\n";
 
 $decoder = new H264Decoder();
+// 添加宏块统计
+$decoder->enableMbStats = true;
 $result = $decoder->decode($nalUnits);
 
 if (!$result) {
@@ -86,9 +88,9 @@ $refData = file_get_contents($refYuv);
 for ($i = 0; $i < min($numFrames, 5); $i++) {
     $decFrame = substr($decData, $i * $frameSize, $frameSize);
     $refFrame = substr($refData, $i * $frameSize, $frameSize);
-    
+
     if (strlen($decFrame) < $frameSize || strlen($refFrame) < $frameSize) break;
-    
+
     // Y PSNR
     $mseY = 0;
     for ($j = 0; $j < $ySize; $j++) {
@@ -97,7 +99,7 @@ for ($i = 0; $i < min($numFrames, 5); $i++) {
     }
     $mseY /= $ySize;
     $psnrY = $mseY > 0 ? 10 * log10(255 * 255 / $mseY) : INF;
-    
+
     // U PSNR
     $mseU = 0;
     for ($j = 0; $j < $uvSize; $j++) {
@@ -106,7 +108,7 @@ for ($i = 0; $i < min($numFrames, 5); $i++) {
     }
     $mseU /= $uvSize;
     $psnrU = $mseU > 0 ? 10 * log10(255 * 255 / $mseU) : INF;
-    
+
     // V PSNR
     $mseV = 0;
     for ($j = 0; $j < $uvSize; $j++) {
@@ -115,7 +117,7 @@ for ($i = 0; $i < min($numFrames, 5); $i++) {
     }
     $mseV /= $uvSize;
     $psnrV = $mseV > 0 ? 10 * log10(255 * 255 / $mseV) : INF;
-    
+
     $avgPsnr = ($psnrY + $psnrU + $psnrV) / 3;
     printf("Frame %d: Y=%.2fdB, U=%.2fdB, V=%.2fdB, Avg=%.2fdB\n", $i, $psnrY, $psnrU, $psnrV, $avgPsnr);
 }

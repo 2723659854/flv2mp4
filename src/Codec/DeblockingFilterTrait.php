@@ -381,8 +381,7 @@ trait DeblockingFilterTrait
 
     public function applyDeblockingFilter(): void
     {
-        if ($this->disableDeblockingFilterIdc == 1) {
-            //echo "[DEBLOCK] Deblocking filter disabled (idc=1)" . PHP_EOL;
+        if ($this->disableDeblockingFilterIdc == 1 || ($this->forceDisableDeblock ?? false)) {
             return;
         }
 
