@@ -1638,19 +1638,20 @@ class H264Encoder
             $cbpChroma = $hasChromaAc ? 2 : 1;
         }
 
+        // I_4x4编码顺序：mb_type -> intra4x4_pred_mode -> intra_chroma_pred_mode -> CBP -> mb_qp_delta -> residual
+
+        // 1. mb_type = 0 for I_NxN
         $bits .= $this->ue(0);
 
-        $bits .= $this->ue($chromaPredMode);
-
-        $bits .= $this->se(0);
-
+        // 2. 编码intra4x4_pred_mode (16个块)
         $lumaAcScanOrder = [0, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15];
         $modeCache = array_fill(0, 16, -1);
         for ($scanIdx = 0; $scanIdx < 16; $scanIdx++) {
             $rasterIdx = $lumaAcScanOrder[$scanIdx];
             $bx = $rasterIdx % 4;
             $by = (int)($rasterIdx / 4);
-            
+
+            // 获取leftMode
             if ($bx > 0) {
                 $leftMode = $modeCache[$rasterIdx - 1];
             } elseif ($leftAvailable && $leftIntra4x4Mode !== null) {
@@ -1658,7 +1659,8 @@ class H264Encoder
             } else {
                 $leftMode = -1;
             }
-            
+
+            // 获取topMode
             if ($by > 0) {
                 $topMode = $modeCache[$rasterIdx - 4];
             } elseif ($topAvailable && $topIntra4x4Mode !== null) {
@@ -1667,25 +1669,24 @@ class H264Encoder
             } else {
                 $topMode = -1;
             }
-            
+
+            // 计算MPM (Most Probable Mode) - 参考openh264 PredIntra4x4Mode
             $predicted = ($leftMode < 0 || $topMode < 0) ? 2 : min($leftMode, $topMode);
             $mode = $intra4x4PredModes[$rasterIdx];
-            
+
+            // 编码模式
             if ($mode === $predicted) {
-                $bits .= '1';
+                $bits .= '1';  // prev_intra4x4_pred_mode_flag = 1
             } else {
-                $bits .= '0';
+                $bits .= '0';  // prev_intra4x4_pred_mode_flag = 0
                 $remMode = ($mode > $predicted) ? $mode - 1 : $mode;
                 $bits .= $this->u($remMode, 3);
             }
-            
-            if ($mbX === 0 && $mbY === 0) {
-                echo "DEBUG: MB(0,0) Mode Encoding - scanIdx=$scanIdx, rasterIdx=$rasterIdx, bx=$bx, by=$by, leftMode=$leftMode, topMode=$topMode, predicted=$predicted, mode=$mode\n";
-            }
-            
+
             $modeCache[$rasterIdx] = $mode;
         }
-        
+
+        // 更新邻居模式缓存
         if ($leftIntra4x4Mode !== null) {
             for ($by = 0; $by < 4; $by++) {
                 $leftIntra4x4Mode[$by] = $modeCache[3 + $by * 4];
@@ -1699,9 +1700,24 @@ class H264Encoder
                 }
             }
         }
-        
-        if ($mbX < 5 && $mbY === 0) {
-            echo "DEBUG: MB($mbX,$mbY) bits length: " . strlen($bits) . ", cbpLuma=$cbpLuma, cbpChroma=$cbpChroma\n";
+
+        // 3. 编码intra_chroma_pred_mode
+        $bits .= $this->ue($chromaPredMode);
+
+        // 4. 编码CBP (coded_block_pattern)
+        // I_4x4的CBP映射表
+        $intra4x4CbpMap = [
+            47, 31, 15, 0, 23, 27, 29, 30, 7, 11, 13, 14, 39, 43, 45, 46,
+            16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
+            32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47
+        ];
+        $cbpValue = ($cbpChroma << 4) | $cbpLuma;
+        $cbpCode = $intra4x4CbpMap[$cbpValue] ?? 0;
+        $bits .= $this->ue($cbpCode);
+
+        // 5. 编码mb_qp_delta (如果CBP > 0)
+        if ($cbpValue > 0) {
+            $bits .= $this->se(0);
         }
         
         for ($by = 0; $by < 4; $by++) {
