@@ -348,7 +348,7 @@ trait MacroblockDecodingTrait
                 for ($i = 0; $i < 15; $i++) $crCoeffs[$blk][$i + 1] = $ac[$i];
                 $crCoeffs[$blk] = $this->zigzagToRaster($crCoeffs[$blk]);
                 // 反量化AC系数（coeffs[0]保持为0，DC单独处理）
-                $crCoeffs[$blk] = $this->dequantize4x4($crCoeffs[$blk], 1, $chromaQp);
+                $crCoeffs[$blk] = $this->dequantize4x4($crCoeffs[$blk], 2, $chromaQp);
                 // AC-only count（参考tinyh264：totalCoeff只存AC计数）
                 $nzCount = 0;
                 for ($i = 0; $i < 15; $i++) if ($ac[$i] != 0) $nzCount++;
@@ -724,7 +724,7 @@ trait MacroblockDecodingTrait
                 for ($i = 1; $i < 16; $i++) $crAcCoeffs[$blk][$i] = $ac[$i - 1];
                 $crAcCoeffs[$blk] = $this->zigzagToRaster($crAcCoeffs[$blk]);
                 // 反量化AC系数（coeffs[0]保持为0，DC单独处理）
-                $crAcCoeffs[$blk] = $this->dequantize4x4($crAcCoeffs[$blk], 1, $chromaQp);
+                $crAcCoeffs[$blk] = $this->dequantize4x4($crAcCoeffs[$blk], 2, $chromaQp);
                 $nzCache[$blockIdx] = $nzCnt;
             }
         }
@@ -2521,7 +2521,7 @@ trait MacroblockDecodingTrait
                 $nzCnt = 0; for ($i = 0; $i < 15; $i++) if ($ac[$i] != 0) $nzCnt++;
                 for ($i = 1; $i < 16; $i++) $crAcCoeffs[$blk][$i] = $ac[$i - 1];
                 $crAcCoeffs[$blk] = $this->zigzagToRaster($crAcCoeffs[$blk]);
-                $crAcCoeffs[$blk] = $this->dequantize4x4($crAcCoeffs[$blk], 1, $chromaQp);
+                $crAcCoeffs[$blk] = $this->dequantize4x4($crAcCoeffs[$blk], 2, $chromaQp);
                 $nzCache[$blockIdx] = $nzCnt;
             }
         }

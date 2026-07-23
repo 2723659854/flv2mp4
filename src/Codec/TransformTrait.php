@@ -30,8 +30,8 @@ trait TransformTrait
     {
         $out = array_fill(0, 16, 0);
         $qp = max(0, min(51, $qp));
-        // type 0=intra Y (list 0), type 1=chroma (list 1)
-        $listIdx = ($type == 0) ? 0 : 1;
+        // type 0=intra Y (list 0), type 1=Cb (list 1), type 2=Cr (list 2)
+        $listIdx = $type;
 
         $dbg = false;
         if ($qp === 27 && $type === 0 && $coeff[0] == 11) {
