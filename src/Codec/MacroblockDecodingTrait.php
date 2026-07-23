@@ -890,22 +890,6 @@ trait MacroblockDecodingTrait
      */
     private function decodePInterMacroblock(int $mbX, int $mbY, int $mbType, int $sliceQp): int
     {
-
-        if ($this->debugSliceIndex === 2 && $mbY === 13 && $mbX === 0) {
-            echo "\n[DEBUG_ROW] Frame 1 mbY=13 行 MB 类型:\n";
-        }
-        if ($this->debugSliceIndex === 2 && $mbY === 13) {
-            $typeNames = ['P_Skip', 'P_16x16', 'P_16x8', 'P_8x16', 'P_8x8', 'P_8x8ref0', 'I_*'];
-            $typeName = $typeNames[min($mbType, 6)] ?? '?';
-            echo "  MB($mbX,13): type=$mbType ($typeName)";
-            if ($mbX === 19) echo "\n";
-        }
-        if (($this->debugSliceIndex === 3 && $mbX === 15 && $mbY === 13) ||
-            ($this->debugSliceIndex === 3 && $mbX === 16 && $mbY === 13) ||
-            ($this->debugSliceIndex === 2 && $mbX === 8 && $mbY === 10)) {
-            echo "[DEBUG_MB] MB($mbX,$mbY): mb_type=$mbType\n";
-        }
-
         // P_L0_16x16 (mb_type 0)
         if ($mbType === 0) {
             return $this->decodePL0_16x16($mbX, $mbY, $sliceQp);
