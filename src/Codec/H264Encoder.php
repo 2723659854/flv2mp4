@@ -976,22 +976,6 @@ class H264Encoder
 
     public function writeBlockResidualCavlc(array $coeffs, int $endIdx, bool $isChromaDc, int $iNC): string
     {
-        $level = array_fill(0, 16, 0);
-        $run = array_fill(0, 16, 0);
-
-        $totalCoeffs = 0;
-        $trailingOnes = 0;
-        $totalZeros = 0;
-        $zerosLeft = 0;
-        $sign = 0;
-        $levelCode = 0;
-        $levelPrefix = 0;
-        $levelSuffix = 0;
-        $suffixLength = 0;
-        $levelSuffixSize = 0;
-        $value = 0;
-        $threshold = 0;
-        $zeroLeft = 0;
 
         $bits = '';
         
