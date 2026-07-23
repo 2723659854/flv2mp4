@@ -2095,9 +2095,7 @@ trait MacroblockDecodingTrait
                 $mvTopRight = $this->mvTopRow[($mbX + 1) * 4] ?? null;
             }
         } else {
-            if ($mbX > 0) {
-                $mvTopRight = $this->mvLeftCol[$partIdx * 2 - 1] ?? null;
-            }
+            $mvTopRight = $mvPart0;
         }
 
         if (($this->debugSliceIndex === 3 && $mbX === 15 && $mbY === 13) ||
@@ -2108,13 +2106,35 @@ trait MacroblockDecodingTrait
             echo "  mvTopRight=" . ($mvTopRight ? "({$mvTopRight[0]},{$mvTopRight[1]},{$mvTopRight[2]})" : "null") . "\n";
         }
 
+        $primaryMv = null;
+        $otherMv = null;
+
         if ($partIdx === 0) {
             if ($mvTop !== null && $mvTop[2] === $refIdx) {
-                return [$mvTop[0], $mvTop[1]];
+                $primaryMv = $mvTop;
+            }
+            if ($mvLeft !== null && $mvLeft[2] === $refIdx) {
+                $otherMv = $mvLeft;
             }
         } else {
             if ($mvLeft !== null && $mvLeft[2] === $refIdx) {
-                return [$mvLeft[0], $mvLeft[1]];
+                $primaryMv = $mvLeft;
+            }
+            if ($mvTop !== null && $mvTop[2] === $refIdx) {
+                $otherMv = $mvTop;
+            }
+        }
+
+        if ($primaryMv !== null) {
+            if ($otherMv !== null) {
+                $dx = abs($primaryMv[0] - $otherMv[0]);
+                $dy = abs($primaryMv[1] - $otherMv[1]);
+                $threshold = 11;
+                if ($dx < $threshold && $dy < $threshold) {
+                    return [$primaryMv[0], $primaryMv[1]];
+                }
+            } else {
+                return [$primaryMv[0], $primaryMv[1]];
             }
         }
 
