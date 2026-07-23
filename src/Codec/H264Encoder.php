@@ -2662,29 +2662,36 @@ class H264Encoder
         $origX = $mbX * 16;
         $origY = $mbY * 16;
 
+        $blockW = min(16, $this->width - $origX);
+        $blockH = min(16, $this->height - $origY);
+
         // 先检查(0,0)位置
         $sad00 = 0;
-        for ($y = 0; $y < 16; $y++) {
-            for ($x = 0; $x < 16; $x++) {
+        for ($y = 0; $y < $blockH; $y++) {
+            for ($x = 0; $x < $blockW; $x++) {
                 $refIdx = ($origY + $y) * $this->width + ($origX + $x);
                 $sad00 += abs($currentBlock[$y][$x] - ord($refPlane[$refIdx]));
             }
         }
         $bestSAD = $sad00;
+        $bestDX = 0;
+        $bestDY = 0;
 
-        for ($dy = -$searchRange; $dy <= $searchRange; $dy++) {
-            for ($dx = -$searchRange; $dx <= $searchRange; $dx++) {
-                if ($dx == 0 && $dy == 0) continue; // 已检查
+        // 大步长粗搜索（步长=4）
+        $coarseStep = 4;
+        for ($dy = -$searchRange; $dy <= $searchRange; $dy += $coarseStep) {
+            for ($dx = -$searchRange; $dx <= $searchRange; $dx += $coarseStep) {
+                if ($dx == 0 && $dy == 0) continue;
                 $rx = $origX + $dx;
                 $ry = $origY + $dy;
 
-                if ($rx < 0 || $rx + 16 > $this->width || $ry < 0 || $ry + 16 > $this->height) {
+                if ($rx < 0 || $rx + $blockW > $this->width || $ry < 0 || $ry + $blockH > $this->height) {
                     continue;
                 }
 
                 $sad = 0;
-                for ($y = 0; $y < 16; $y++) {
-                    for ($x = 0; $x < 16; $x++) {
+                for ($y = 0; $y < $blockH; $y++) {
+                    for ($x = 0; $x < $blockW; $x++) {
                         $refIdx = ($ry + $y) * $this->width + ($rx + $x);
                         $sad += abs($currentBlock[$y][$x] - ord($refPlane[$refIdx]));
                     }
@@ -2692,11 +2699,42 @@ class H264Encoder
 
                 if ($sad < $bestSAD) {
                     $bestSAD = $sad;
-                    $bestMV = [$dx * 4, $dy * 4]; // 转换为1/4像素单位
+                    $bestDX = $dx;
+                    $bestDY = $dy;
                 }
             }
         }
 
+        // 小步长精搜索（在粗搜索最佳点周围±3，步长=1）
+        $refineRange = 3;
+        for ($dy = $bestDY - $refineRange; $dy <= $bestDY + $refineRange; $dy++) {
+            for ($dx = $bestDX - $refineRange; $dx <= $bestDX + $refineRange; $dx++) {
+                if ($dx == 0 && $dy == 0 && $bestDX == 0 && $bestDY == 0) continue;
+                if (abs($dx) > $searchRange || abs($dy) > $searchRange) continue;
+                $rx = $origX + $dx;
+                $ry = $origY + $dy;
+
+                if ($rx < 0 || $rx + $blockW > $this->width || $ry < 0 || $ry + $blockH > $this->height) {
+                    continue;
+                }
+
+                $sad = 0;
+                for ($y = 0; $y < $blockH; $y++) {
+                    for ($x = 0; $x < $blockW; $x++) {
+                        $refIdx = ($ry + $y) * $this->width + ($rx + $x);
+                        $sad += abs($currentBlock[$y][$x] - ord($refPlane[$refIdx]));
+                    }
+                }
+
+                if ($sad < $bestSAD) {
+                    $bestSAD = $sad;
+                    $bestDX = $dx;
+                    $bestDY = $dy;
+                }
+            }
+        }
+
+        $bestMV = [$bestDX * 4, $bestDY * 4];
         return [$bestMV[0], $bestMV[1], $bestSAD];
     }
 
