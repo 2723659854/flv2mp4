@@ -314,12 +314,18 @@ class H264Encoder
 
     public $quantMatrix = [];
 
+    // 反量化表（用于本地解码重建参考帧）
+    public $dequant4Table = [];
+
     // P帧参考帧管理
-    public $refYPlane = null;      // 参考帧Y平面
+    public $refYPlane = null;      // 参考帧Y平面（重建后的）
     public $refUPlane = null;      // 参考帧U平面
     public $refVPlane = null;      // 参考帧V平面
     public $enableInter = false;   // 是否启用P帧
     public $numRefFrames = 1;      // 参考帧数量
+
+    // 本地解码重建帧（用于正确更新参考帧）
+    public $reconYPlane = '';
 
     public function __construct(int $width = 0, int $height = 0, int $fps = 25, int $bitrate = 1000000)
     {
@@ -334,6 +340,22 @@ class H264Encoder
     {
         $this->quantMatrix[0] = [6, 13, 20, 28, 13, 20, 28, 32, 20, 28, 32, 37, 28, 32, 37, 42];
         $this->quantMatrix[1] = [6, 13, 20, 28, 13, 20, 28, 32, 20, 28, 32, 37, 28, 32, 37, 42];
+
+        // 构建反量化表（与解码器一致，使用flat scaling matrix=16）
+        $posClass = [0, 1, 0, 1, 1, 2, 1, 2, 0, 1, 0, 1, 1, 2, 1, 2];
+        $flatScaling4 = array_fill(0, 16, 16);
+        $this->dequant4Table = array_fill(0, 6, array_fill(0, 52, array_fill(0, 16, 0)));
+        for ($i = 0; $i < 6; $i++) {
+            for ($q = 0; $q < 52; $q++) {
+                $shift = intdiv($q, 6) + 2;
+                $idx = $q % 6;
+                for ($x = 0; $x < 16; $x++) {
+                    $scaleIdx = $posClass[$x];
+                    $this->dequant4Table[$i][$q][$x] =
+                        (self::DEQUANT4_COEFF_INIT[$idx][$scaleIdx] * $flatScaling4[$x]) << $shift;
+                }
+            }
+        }
     }
 
     public function setResolution(int $width, int $height): void
@@ -575,6 +597,9 @@ class H264Encoder
         $this->mvLeftCol = [];
         $this->mvTopRow = [];
 
+        // 初始化本地解码重建帧（用于正确更新参考帧，避免编解码器失配）
+        $this->reconYPlane = str_repeat("\x00", $ySize);
+
         // P帧使用mb_skip_run来编码P_Skip宏块（CAVLC模式）
         $mbSkipRun = 0;
         $isPSlice = ($sliceType === 0 && $this->refYPlane !== null);
@@ -629,8 +654,8 @@ class H264Encoder
         if ($isIDR) $nalType = 5; // IDR片
         $nal = $this->rbspToNal($rbsp, $nalType);
 
-        // 保存当前帧作为下一帧的参考帧
-        $this->refYPlane = $yPlane;
+        // 保存重建后的帧作为下一帧的参考帧（避免编解码器失配）
+        $this->refYPlane = $this->reconYPlane;
         $this->refUPlane = $uPlane;
         $this->refVPlane = $vPlane;
 
@@ -1016,6 +1041,57 @@ class H264Encoder
                 $topNzCr[$topCbx1] = $nzCache[23];
             }
         }
+
+        // === 本地解码重建（用于正确更新参考帧）===
+        // 1. 反量化DC Hadamard系数
+        $dcFlatRecon = [];
+        for ($y = 0; $y < 4; $y++) for ($x = 0; $x < 4; $x++) $dcFlatRecon[] = $dcQuant[$y][$x];
+        $lumaQmul = $this->dequant4Table[0][$this->qp][0];
+        $dcResultRecon = $this->lumaDcDequantIdct($dcFlatRecon, $lumaQmul);
+
+        // 2. 逐4x4块重建像素
+        for ($by = 0; $by < 4; $by++) {
+            for ($bx = 0; $bx < 4; $bx++) {
+                $rasterIdx = $by * 4 + $bx;
+                $dcResidual = $dcResultRecon[$rasterIdx];
+
+                if ($cbpLuma > 0) {
+                    // AC存在: 反量化AC, 将DC放入[0], 一起做IDCT
+                    $acDequant = $this->dequantize4x4($quant4x4Luma[$rasterIdx], 0, $this->qp);
+                    $acDequant[0] = $dcResidual;
+                    $acBlock = array_fill(0, 4, array_fill(0, 4, 0));
+                    for ($y = 0; $y < 4; $y++) for ($x = 0; $x < 4; $x++) $acBlock[$y][$x] = $acDequant[$y * 4 + $x];
+                    $idctResult = $this->idct4x4($acBlock);
+
+                    for ($y = 0; $y < 4; $y++) {
+                        for ($x = 0; $x < 4; $x++) {
+                            $py = $mbY * 16 + $by * 4 + $y;
+                            $px = $mbX * 16 + $bx * 4 + $x;
+                            if ($py < $this->height && $px < $this->width) {
+                                $val = $predPixels[$by * 4 + $y][$bx * 4 + $x] + $idctResult[$y][$x];
+                                $val = max(0, min(255, $val));
+                                $this->reconYPlane[$py * $this->width + $px] = chr($val);
+                            }
+                        }
+                    }
+                } else {
+                    // 仅DC: (DC + 32) >> 6
+                    $dcAdd = ($dcResidual + 32) >> 6;
+                    for ($y = 0; $y < 4; $y++) {
+                        for ($x = 0; $x < 4; $x++) {
+                            $py = $mbY * 16 + $by * 4 + $y;
+                            $px = $mbX * 16 + $bx * 4 + $x;
+                            if ($py < $this->height && $px < $this->width) {
+                                $val = $predPixels[$by * 4 + $y][$bx * 4 + $x] + $dcAdd;
+                                $val = max(0, min(255, $val));
+                                $this->reconYPlane[$py * $this->width + $px] = chr($val);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         return $bits;
     }
 
@@ -2285,6 +2361,104 @@ class H264Encoder
         return $output;
     }
 
+    /**
+     * 4x4反量化（用于本地解码重建参考帧）
+     * 公式: (level * table[qp][pos] + 32) >> 6
+     */
+    public function dequantize4x4(array $coeff, int $type, int $qp): array
+    {
+        $out = array_fill(0, 16, 0);
+        $qp = max(0, min(51, $qp));
+        $listIdx = $type;
+        for ($i = 0; $i < 16; $i++) {
+            if ($coeff[$i] == 0) continue;
+            $out[$i] = ($coeff[$i] * $this->dequant4Table[$listIdx][$qp][$i] + 32) >> 6;
+        }
+        return $out;
+    }
+
+    /**
+     * 4x4 IDCT整数逆变换（与解码器一致）
+     */
+    public function idct4x4(array $in): array
+    {
+        $coeffs = array_fill(0, 16, 0);
+        for ($y = 0; $y < 4; $y++) for ($x = 0; $x < 4; $x++) $coeffs[$y * 4 + $x] = $in[$y][$x];
+
+        $coeffs[0] = $coeffs[0] + 32;
+
+        for ($i = 0; $i < 4; $i++) {
+            $row = 4 * $i;
+            $z0 = $coeffs[$row] + $coeffs[$row + 2];
+            $z1 = $coeffs[$row] - $coeffs[$row + 2];
+            $z2 = ($coeffs[$row + 1] >> 1) - $coeffs[$row + 3];
+            $z3 = $coeffs[$row + 1] + ($coeffs[$row + 3] >> 1);
+
+            $coeffs[$row] = $z0 + $z3;
+            $coeffs[$row + 1] = $z1 + $z2;
+            $coeffs[$row + 2] = $z1 - $z2;
+            $coeffs[$row + 3] = $z0 - $z3;
+        }
+
+        $d = array_fill(0, 16, 0);
+        for ($i = 0; $i < 4; $i++) {
+            $z0 = $coeffs[$i] + $coeffs[$i + 8];
+            $z1 = $coeffs[$i] - $coeffs[$i + 8];
+            $z2 = ($coeffs[$i + 4] >> 1) - $coeffs[$i + 12];
+            $z3 = $coeffs[$i + 4] + ($coeffs[$i + 12] >> 1);
+
+            $d[$i] = ($z0 + $z3) >> 6;
+            $d[$i + 4] = ($z1 + $z2) >> 6;
+            $d[$i + 8] = ($z1 - $z2) >> 6;
+            $d[$i + 12] = ($z0 - $z3) >> 6;
+        }
+
+        $out = array_fill(0, 4, array_fill(0, 4, 0));
+        for ($y = 0; $y < 4; $y++) for ($x = 0; $x < 4; $x++) $out[$y][$x] = $d[$y * 4 + $x];
+        return $out;
+    }
+
+    /**
+     * 亮度DC 4x4逆哈达玛+反量化
+     * 输入: raster顺序的16个DC系数
+     * 输出: raster顺序的16个反量化DC值
+     */
+    public function lumaDcDequantIdct(array $dc4x4, int $qmul): array
+    {
+        $temp = array_fill(0, 16, 0);
+
+        for ($i = 0; $i < 4; $i++) {
+            $base = 4 * $i;
+            $z0 = $dc4x4[$base] + $dc4x4[$base + 1];
+            $z1 = $dc4x4[$base] - $dc4x4[$base + 1];
+            $z2 = $dc4x4[$base + 2] - $dc4x4[$base + 3];
+            $z3 = $dc4x4[$base + 2] + $dc4x4[$base + 3];
+
+            $temp[$base] = $z0 + $z3;
+            $temp[$base + 1] = $z0 - $z3;
+            $temp[$base + 2] = $z1 - $z2;
+            $temp[$base + 3] = $z1 + $z2;
+        }
+
+        $out = array_fill(0, 16, 0);
+        for ($j = 0; $j < 4; $j++) {
+            $z0 = $temp[$j] + $temp[8 + $j];
+            $z1 = $temp[$j] - $temp[8 + $j];
+            $z2 = $temp[4 + $j] - $temp[12 + $j];
+            $z3 = $temp[4 + $j] + $temp[12 + $j];
+
+            $s0 = ($z0 + $z3) * $qmul + 128;
+            $s1 = ($z1 + $z2) * $qmul + 128;
+            $s2 = ($z1 - $z2) * $qmul + 128;
+            $s3 = ($z0 - $z3) * $qmul + 128;
+            $out[0 * 4 + $j] = ($s0 >= 0) ? ($s0 >> 8) : -((abs($s0)) >> 8);
+            $out[1 * 4 + $j] = ($s1 >= 0) ? ($s1 >> 8) : -((abs($s1)) >> 8);
+            $out[2 * 4 + $j] = ($s2 >= 0) ? ($s2 >> 8) : -((abs($s2)) >> 8);
+            $out[3 * 4 + $j] = ($s3 >= 0) ? ($s3 >> 8) : -((abs($s3)) >> 8);
+        }
+        return $out;
+    }
+
     public function ue(int $v): string
     {
         $bin = decbin($v + 1);
@@ -2650,6 +2824,18 @@ class H264Encoder
             $this->mvLeftCol[$mbY] = [$mvX, $mvY];
             $this->mvTopRow[$mbX] = [$mvX, $mvY];
 
+            // P_Skip重建: 直接使用MC预测（MV=0, 无残差）
+            for ($y = 0; $y < 16; $y++) {
+                for ($x = 0; $x < 16; $x++) {
+                    $py = $mbY * 16 + $y;
+                    $px = $mbX * 16 + $x;
+                    if ($py < $this->height && $px < $this->width) {
+                        $val = max(0, min(255, $predBlock[$y][$x]));
+                        $this->reconYPlane[$py * $this->width + $px] = chr($val);
+                    }
+                }
+            }
+
             return '';
         }
 
@@ -2737,6 +2923,46 @@ class H264Encoder
         // 保存当前MV供后续宏块预测（1/4像素单位）
         $this->mvLeftCol[$mbY] = [$mvX, $mvY];
         $this->mvTopRow[$mbX] = [$mvX, $mvY];
+
+        // === P帧本地解码重建 ===
+        for ($by = 0; $by < 4; $by++) {
+            for ($bx = 0; $bx < 4; $bx++) {
+                $blkIdx = $by * 4 + $bx;
+                $block8x8Idx = intdiv($by, 2) * 2 + intdiv($bx, 2);
+
+                if ($cbpLuma & (1 << $block8x8Idx)) {
+                    // 有残差: 反量化 + IDCT + 加到MC预测
+                    $acDequant = $this->dequantize4x4($quantResidual[$blkIdx], 0, $this->qp);
+                    $acBlock = array_fill(0, 4, array_fill(0, 4, 0));
+                    for ($y = 0; $y < 4; $y++) for ($x = 0; $x < 4; $x++) $acBlock[$y][$x] = $acDequant[$y * 4 + $x];
+                    $idctResult = $this->idct4x4($acBlock);
+
+                    for ($y = 0; $y < 4; $y++) {
+                        for ($x = 0; $x < 4; $x++) {
+                            $py = $mbY * 16 + $by * 4 + $y;
+                            $px = $mbX * 16 + $bx * 4 + $x;
+                            if ($py < $this->height && $px < $this->width) {
+                                $val = $predBlock[$by * 4 + $y][$bx * 4 + $x] + $idctResult[$y][$x];
+                                $val = max(0, min(255, $val));
+                                $this->reconYPlane[$py * $this->width + $px] = chr($val);
+                            }
+                        }
+                    }
+                } else {
+                    // 无残差: 直接使用MC预测
+                    for ($y = 0; $y < 4; $y++) {
+                        for ($x = 0; $x < 4; $x++) {
+                            $py = $mbY * 16 + $by * 4 + $y;
+                            $px = $mbX * 16 + $bx * 4 + $x;
+                            if ($py < $this->height && $px < $this->width) {
+                                $val = max(0, min(255, $predBlock[$by * 4 + $y][$bx * 4 + $x]));
+                                $this->reconYPlane[$py * $this->width + $px] = chr($val);
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         return $bits;
     }
