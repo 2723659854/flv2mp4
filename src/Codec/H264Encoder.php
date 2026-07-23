@@ -2656,8 +2656,8 @@ class H264Encoder
         // 非Skip宏块
         $this->lastMbWasSkip = false;
 
-        // P_16x16模式: mb_type = 1 (P_L0_16x16)
-        $bits .= $this->ue(1); // mb_type = 1 for P_L0_16x16
+        // P_L0_16x16模式: mb_type = 0 in P slice (1 partition, 1 MV)
+        $bits .= $this->ue(0); // mb_type = 0 for P_L0_16x16
 
         // 运动向量预测(MVP)
         $leftMV = [0, 0];
@@ -2699,16 +2699,27 @@ class H264Encoder
             $bits .= $this->se(0);
         }
 
-        // 编码残差
+        // 编码残差（按8x8块分组，仅编码cbpLuma对应位为1的块）
         if ($cbpLuma > 0) {
-            $scanOrder = [0, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15];
-            foreach ($scanOrder as $rasterIdx) {
-                $by = (int)($rasterIdx / 4);
-                $bx = $rasterIdx % 4;
+            // 每个8x8块包含4个4x4子块（按scan4顺序排列）
+            $blockGroups = [
+                [0, 1, 4, 5],    // 8x8 block 0 (top-left)
+                [2, 3, 6, 7],    // 8x8 block 1 (top-right)
+                [8, 9, 12, 13],  // 8x8 block 2 (bottom-left)
+                [10, 11, 14, 15],// 8x8 block 3 (bottom-right)
+            ];
+            for ($blk8 = 0; $blk8 < 4; $blk8++) {
+                if (!($cbpLuma & (1 << $blk8))) {
+                    continue;
+                }
+                foreach ($blockGroups[$blk8] as $rasterIdx) {
+                    $by = (int)($rasterIdx / 4);
+                    $bx = $rasterIdx % 4;
 
-                $ac = $this->scan4x4DcAc($quantResidual[$rasterIdx]);
-                $acNc = $this->computeNC($rasterIdx, $mbX, $bx, $by, $leftAvailable, $leftNz, $topAvailable, $topNzLuma, $nzCache);
-                $bits .= $this->writeBlockResidualCavlc($ac, 15, false, $acNc);
+                    $ac = $this->scan4x4DcAc($quantResidual[$rasterIdx]);
+                    $acNc = $this->computeNC($rasterIdx, $mbX, $bx, $by, $leftAvailable, $leftNz, $topAvailable, $topNzLuma, $nzCache);
+                    $bits .= $this->writeBlockResidualCavlc($ac, 15, false, $acNc);
+                }
             }
         }
 
