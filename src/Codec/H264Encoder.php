@@ -2331,13 +2331,135 @@ class H264Encoder
     }
 
     /**
-     * 运动估计：在参考帧中搜索最佳匹配块
-     * @param array $currentBlock 当前16x16块
-     * @param string $refPlane 参考帧Y平面
-     * @param int $mbX 宏块X坐标
-     * @param int $mbY 宏块Y坐标
-     * @param int $searchRange 搜索范围（默认16像素）
-     * @return array [mvX, mvY, sad] 运动向量和SAD值
+     * 6抽头插值滤波器系数 (1/32, -5/32, 20/32, 20/32, -5/32, 1/32)
+     * H.264标准规定的半像素插值
+     */
+    private const INTERP_TAP0 = 1;
+    private const INTERP_TAP1 = -5;
+    private const INTERP_TAP2 = 20;
+    private const INTERP_TAP3 = 20;
+    private const INTERP_TAP4 = -5;
+    private const INTERP_TAP5 = 1;
+
+    /**
+     * 获取参考帧中指定位置的像素值（带边界处理）
+     */
+    private function getRefPixel(string $refPlane, int $x, int $y): int
+    {
+        $x = max(0, min($this->width - 1, $x));
+        $y = max(0, min($this->height - 1, $y));
+        return ord($refPlane[$y * $this->width + $x]);
+    }
+
+    /**
+     * 6抽头水平插值（计算半像素b）
+     * b[i,j] = (E - 5F + 20G + 20H - 5I + J + 16) >> 5
+     */
+    private function interpHorizontal(string $refPlane, int $x, int $y): int
+    {
+        $E = $this->getRefPixel($refPlane, $x - 2, $y);
+        $F = $this->getRefPixel($refPlane, $x - 1, $y);
+        $G = $this->getRefPixel($refPlane, $x,     $y);
+        $H = $this->getRefPixel($refPlane, $x + 1, $y);
+        $I = $this->getRefPixel($refPlane, $x + 2, $y);
+        $J = $this->getRefPixel($refPlane, $x + 3, $y);
+        $val = self::INTERP_TAP0 * $E + self::INTERP_TAP1 * $F + self::INTERP_TAP2 * $G
+             + self::INTERP_TAP3 * $H + self::INTERP_TAP4 * $I + self::INTERP_TAP5 * $J;
+        return max(0, min(255, (($val + 16) >> 5)));
+    }
+
+    /**
+     * 6抽头垂直插值（计算半像素h）
+     */
+    private function interpVertical(string $refPlane, int $x, int $y): int
+    {
+        $A = $this->getRefPixel($refPlane, $x, $y - 2);
+        $B = $this->getRefPixel($refPlane, $x, $y - 1);
+        $C = $this->getRefPixel($refPlane, $x, $y);
+        $D = $this->getRefPixel($refPlane, $x, $y + 1);
+        $E = $this->getRefPixel($refPlane, $x, $y + 2);
+        $F = $this->getRefPixel($refPlane, $x, $y + 3);
+        $val = self::INTERP_TAP0 * $A + self::INTERP_TAP1 * $B + self::INTERP_TAP2 * $C
+             + self::INTERP_TAP3 * $D + self::INTERP_TAP4 * $E + self::INTERP_TAP5 * $F;
+        return max(0, min(255, (($val + 16) >> 5)));
+    }
+
+    /**
+     * 6抽头对角插值（计算半像素j）
+     * 先水平后垂直，或先垂直后水平
+     */
+    private function interpDiagonal(string $refPlane, int $x, int $y): int
+    {
+        // 先做水平插值，得到中间值aa, bb, ..., ff（不clip）
+        $vals = [];
+        for ($dy = -2; $dy <= 3; $dy++) {
+            $E = $this->getRefPixel($refPlane, $x - 2, $y + $dy);
+            $F = $this->getRefPixel($refPlane, $x - 1, $y + $dy);
+            $G = $this->getRefPixel($refPlane, $x,     $y + $dy);
+            $H = $this->getRefPixel($refPlane, $x + 1, $y + $dy);
+            $I = $this->getRefPixel($refPlane, $x + 2, $y + $dy);
+            $J = $this->getRefPixel($refPlane, $x + 3, $y + $dy);
+            $vals[] = self::INTERP_TAP0 * $E + self::INTERP_TAP1 * $F + self::INTERP_TAP2 * $G
+                    + self::INTERP_TAP3 * $H + self::INTERP_TAP4 * $I + self::INTERP_TAP5 * $J;
+        }
+        // 对中间值做垂直插值
+        $val = self::INTERP_TAP0 * $vals[0] + self::INTERP_TAP1 * $vals[1] + self::INTERP_TAP2 * $vals[2]
+             + self::INTERP_TAP3 * $vals[3] + self::INTERP_TAP4 * $vals[4] + self::INTERP_TAP5 * $vals[5];
+        return max(0, min(255, (($val + 512) >> 10)));
+    }
+
+    /**
+     * 获取参考块（支持半像素位置）
+     * @param int $qpX X位置（1/2像素单位，即qpX=2表示1像素，qpX=3表示1.5像素）
+     * @param int $qpY Y位置（1/2像素单位）
+     */
+    private function getReferenceBlock(string $refPlane, int $qpX, int $qpY): array
+    {
+        $block = array_fill(0, 16, array_fill(0, 16, 0));
+        $intX = $qpX >> 1;
+        $intY = $qpY >> 1;
+        $halfX = $qpX & 1;
+        $halfY = $qpY & 1;
+
+        for ($y = 0; $y < 16; $y++) {
+            for ($x = 0; $x < 16; $x++) {
+                $px = $intX + $x;
+                $py = $intY + $y;
+                if ($halfX == 0 && $halfY == 0) {
+                    // 整数像素
+                    $block[$y][$x] = $this->getRefPixel($refPlane, $px, $py);
+                } elseif ($halfX == 1 && $halfY == 0) {
+                    // 水平半像素 b
+                    $block[$y][$x] = $this->interpHorizontal($refPlane, $px, $py);
+                } elseif ($halfX == 0 && $halfY == 1) {
+                    // 垂直半像素 h
+                    $block[$y][$x] = $this->interpVertical($refPlane, $px, $py);
+                } else {
+                    // 对角半像素 j
+                    $block[$y][$x] = $this->interpDiagonal($refPlane, $px, $py);
+                }
+            }
+        }
+        return $block;
+    }
+
+    /**
+     * 计算两个16x16块的SAD
+     */
+    private function computeSAD(array $block1, array $block2): int
+    {
+        $sad = 0;
+        for ($y = 0; $y < 16; $y++) {
+            for ($x = 0; $x < 16; $x++) {
+                $sad += abs($block1[$y][$x] - $block2[$y][$x]);
+            }
+        }
+        return $sad;
+    }
+
+    /**
+     * 运动估计：整数像素搜索
+     * @return array [mvX, mvY, sad] 运动向量和SAD值（mvX/mvY为1/4像素单位）
      */
     public function motionEstimate16x16(array $currentBlock, string $refPlane, int $mbX, int $mbY, int $searchRange = 16): array
     {
@@ -2347,13 +2469,22 @@ class H264Encoder
         $origX = $mbX * 16;
         $origY = $mbY * 16;
 
-        // 简化版搜索：只在整数像素位置搜索
+        // 先检查(0,0)位置
+        $sad00 = 0;
+        for ($y = 0; $y < 16; $y++) {
+            for ($x = 0; $x < 16; $x++) {
+                $refIdx = ($origY + $y) * $this->width + ($origX + $x);
+                $sad00 += abs($currentBlock[$y][$x] - ord($refPlane[$refIdx]));
+            }
+        }
+        $bestSAD = $sad00;
+
         for ($dy = -$searchRange; $dy <= $searchRange; $dy++) {
             for ($dx = -$searchRange; $dx <= $searchRange; $dx++) {
+                if ($dx == 0 && $dy == 0) continue; // 已检查
                 $rx = $origX + $dx;
                 $ry = $origY + $dy;
 
-                // 边界检查
                 if ($rx < 0 || $rx + 16 > $this->width || $ry < 0 || $ry + 16 > $this->height) {
                     continue;
                 }
@@ -2362,15 +2493,13 @@ class H264Encoder
                 for ($y = 0; $y < 16; $y++) {
                     for ($x = 0; $x < 16; $x++) {
                         $refIdx = ($ry + $y) * $this->width + ($rx + $x);
-                        $ref = ord($refPlane[$refIdx]);
-                        $cur = $currentBlock[$y][$x];
-                        $sad += abs($cur - $ref);
+                        $sad += abs($currentBlock[$y][$x] - ord($refPlane[$refIdx]));
                     }
                 }
 
                 if ($sad < $bestSAD) {
                     $bestSAD = $sad;
-                    $bestMV = [$dx, $dy];
+                    $bestMV = [$dx * 4, $dy * 4]; // 转换为1/4像素单位
                 }
             }
         }
@@ -2417,52 +2546,15 @@ class H264Encoder
             }
         }
 
-        // 运动估计
+        // 运动估计（返回1/4像素单位的MV）
         list($mvX, $mvY, $sad) = $this->motionEstimate16x16($lumaPixels, $refYPlane, $mbX, $mbY);
 
-        // 简化：P帧始终使用P_L0_16x16模式，不回退到Intra
-        // （在P slice中编码Intra需要不同的mb_type值）
-
-        // P_16x16模式: mb_type = 0 (P_L0_16x16)
-        $bits .= $this->ue(0); // mb_type = 0 for P_L0_16x16
-
-        // 运动向量预测(MVP)
-        $mvpX = 0;
-        $mvpY = 0;
-
-        // 获取左邻居MV
-        $leftMV = [0, 0];
-        if ($leftAvailable && isset($this->mvLeftCol[$mbY])) {
-            $leftMV = $this->mvLeftCol[$mbY];
-        }
-
-        // 获取上邻居MV
-        $topMV = [0, 0];
-        if ($topAvailable && isset($this->mvTopRow[$mbX])) {
-            $topMV = $this->mvTopRow[$mbX];
-        }
-
-        // 获取右上邻居MV
-        $topRightMV = [0, 0];
-        if ($topAvailable && isset($this->mvTopRow[$mbX + 1])) {
-            $topRightMV = $this->mvTopRow[$mbX + 1];
-        }
-
-        // MVP = median(leftMV, topMV, topRightMV)
-        $mvpX = $this->median3($leftMV[0], $topMV[0], $topRightMV[0]);
-        $mvpY = $this->median3($leftMV[1], $topMV[1], $topRightMV[1]);
-
-        // MVD = MV - MVP
-        $mvdX = $mvX - $mvpX;
-        $mvdY = $mvY - $mvpY;
-
-        $bits .= $this->se($mvdX);
-        $bits .= $this->se($mvdY);
-
-        // 生成预测块
+        // 先计算残差和CBP
         $predBlock = array_fill(0, 16, array_fill(0, 16, 128));
-        $refX = $mbX * 16 + $mvX;
-        $refY = $mbY * 16 + $mvY;
+        $intMvX = $mvX / 4; // 1/4像素 -> 整数像素
+        $intMvY = $mvY / 4;
+        $refX = $mbX * 16 + $intMvX;
+        $refY = $mbY * 16 + $intMvY;
 
         for ($y = 0; $y < 16; $y++) {
             for ($x = 0; $x < 16; $x++) {
@@ -2471,8 +2563,6 @@ class H264Encoder
                 if ($ry >= 0 && $ry < $this->height && $rx >= 0 && $rx < $this->width) {
                     $idx = $ry * $this->width + $rx;
                     $predBlock[$y][$x] = ord($refYPlane[$idx]);
-                } else {
-                    $predBlock[$y][$x] = 128;
                 }
             }
         }
@@ -2522,13 +2612,43 @@ class H264Encoder
             }
         }
 
-        // CBP编码
+        // 如果cbpLuma=0且MV=(0,0)，使用P_Skip（最简单的P模式）
+        if ($cbpLuma == 0 && $mvX == 0 && $mvY == 0) {
+            $bits .= $this->ue(0); // mb_type = 0 for P_Skip
+            // P_Skip不编码mvd, cbp, residual
+
+            // 更新邻居缓存
+            for ($by = 0; $by < 4; $by++) {
+                $leftNz[$by] = 0;
+            }
+            for ($bx = 0; $bx < 4; $bx++) {
+                $topBlkX = $mbX * 4 + $bx;
+                if ($topBlkX < count($topNzLuma)) {
+                    $topNzLuma[$topBlkX] = 0;
+                }
+            }
+
+            // 保存当前MV供后续宏块预测（1/4像素单位）
+            $this->mvLeftCol[$mbY] = [$mvX, $mvY];
+            $this->mvTopRow[$mbX] = [$mvX, $mvY];
+
+            return $bits;
+        }
+
+        // P_16x16模式: mb_type = 1 (P_L0_16x16)
+        $bits .= $this->ue(1); // mb_type = 1 for P_L0_16x16
+
+        // CBP编码（P帧使用Inter映射表）
+        // Inter模式CBP映射表 (codeNum -> cbp)
         $interCbpMap = [
-            0,  2,  3,  7,  4,  8, 17, 13,  5, 18,  9, 14, 10, 15, 16, 11,
-            1, 32, 33, 36, 34, 37, 44, 40, 35, 45, 38, 41, 39, 42, 43, 19,
-            6, 24, 25, 20, 26, 21, 46, 28, 27, 47, 22, 29, 23, 30, 31, 12
+            0, 16, 1, 2, 4, 8, 32, 3, 5, 10, 12, 15, 47, 7, 11, 13,
+            14, 6, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 63, 60,
+            61, 62, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31
         ];
-        $cbpCode = $interCbpMap[$cbpLuma] ?? 0;
+        // 查找cbp对应的codeNum
+        $cbpFull = $cbpLuma;
+        $cbpCode = array_search($cbpFull, $interCbpMap);
+        if ($cbpCode === false) $cbpCode = 0;
         $bits .= $this->ue($cbpCode);
 
         // mb_qp_delta
@@ -2560,13 +2680,9 @@ class H264Encoder
             }
         }
 
-        // 保存当前MV供后续宏块预测
+        // 保存当前MV供后续宏块预测（1/4像素单位）
         $this->mvLeftCol[$mbY] = [$mvX, $mvY];
         $this->mvTopRow[$mbX] = [$mvX, $mvY];
-
-        if (($mbY == 11 && $mbX >= 18) || ($mbY == 12 && $mbX <= 2)) {
-            error_log("DEBUG MB($mbX,$mbY): MV=($mvX,$mvY), MVP=($mvpX,$mvpY), MVD=($mvdX,$mvdY), bits_len=" . strlen($bits) . ", cbpLuma=$cbpLuma");
-        }
 
         return $bits;
     }
