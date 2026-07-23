@@ -575,6 +575,10 @@ class H264Encoder
         $this->mvLeftCol = [];
         $this->mvTopRow = [];
 
+        // P帧使用mb_skip_run来编码P_Skip宏块（CAVLC模式）
+        $mbSkipRun = 0;
+        $isPSlice = ($sliceType === 0 && $this->refYPlane !== null);
+
         for ($mbY = 0; $mbY < $mbHeight; $mbY++) {
             $leftAvailable = false;
             $leftNz = [0, 0, 0, 0, 0, 0, 0, 0];
@@ -582,7 +586,7 @@ class H264Encoder
             // 每行开始时清空mvTopRow（新的顶行）
             $this->mvTopRow = [];
             for ($mbX = 0; $mbX < $mbWidth; $mbX++) {
-                if ($sliceType === 0 && $this->refYPlane !== null) {
+                if ($isPSlice) {
                     // P帧编码
                     $mbBits = $this->encodePMacroblock(
                         $mbX, $mbY, $yPlane, $uPlane, $vPlane,
@@ -591,6 +595,15 @@ class H264Encoder
                         $leftIntra4x4Mode, $topIntra4x4Mode,
                         $this->refYPlane
                     );
+                    if ($this->lastMbWasSkip) {
+                        // P_Skip: 只增加跳过计数，不写mb_type
+                        $mbSkipRun++;
+                    } else {
+                        // 非Skip宏块: 先写mb_skip_run，再写宏块层
+                        $bits .= $this->ue($mbSkipRun);
+                        $bits .= $mbBits;
+                        $mbSkipRun = 0;
+                    }
                 } else {
                     // I帧编码
                     $mbBits = $this->encodeMacroblock(
@@ -599,10 +612,14 @@ class H264Encoder
                         $topNzLuma, $topNzCb, $topNzCr,
                         $leftIntra4x4Mode, $topIntra4x4Mode
                     );
+                    $bits .= $mbBits;
                 }
-                $bits .= $mbBits;
                 $leftAvailable = true;
             }
+        }
+        // P帧结尾: 如果还有未写入的skip宏块，写入最终的mb_skip_run
+        if ($isPSlice && $mbSkipRun > 0) {
+            $bits .= $this->ue($mbSkipRun);
         }
         $bits .= '1';
         while (strlen($bits) % 8 != 0) $bits .= '0';
@@ -2510,6 +2527,7 @@ class H264Encoder
     // P帧运动向量缓存（用于MVP预测）
     public $mvLeftCol = [];      // 左边宏块列的MV
     public $mvTopRow = [];       // 上边宏块行的MV
+    public $lastMbWasSkip = false; // 上一个宏块是否为P_Skip
 
     /**
      * 编码P帧宏块（P_16x16模式）
@@ -2612,10 +2630,10 @@ class H264Encoder
             }
         }
 
-        // 如果cbpLuma=0且MV=(0,0)，使用P_Skip（最简单的P模式）
+        // 如果cbpLuma=0且MV=(0,0)，使用P_Skip
+        // CAVLC模式下P_Skip通过mb_skip_run编码，不写mb_type
         if ($cbpLuma == 0 && $mvX == 0 && $mvY == 0) {
-            $bits .= $this->ue(0); // mb_type = 0 for P_Skip
-            // P_Skip不编码mvd, cbp, residual
+            $this->lastMbWasSkip = true;
 
             // 更新邻居缓存
             for ($by = 0; $by < 4; $by++) {
@@ -2632,8 +2650,11 @@ class H264Encoder
             $this->mvLeftCol[$mbY] = [$mvX, $mvY];
             $this->mvTopRow[$mbX] = [$mvX, $mvY];
 
-            return $bits;
+            return '';
         }
+
+        // 非Skip宏块
+        $this->lastMbWasSkip = false;
 
         // P_16x16模式: mb_type = 1 (P_L0_16x16)
         $bits .= $this->ue(1); // mb_type = 1 for P_L0_16x16
