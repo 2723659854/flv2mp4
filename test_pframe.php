@@ -180,7 +180,7 @@ function encodeYUVWithPHP(array $videoInfo, bool $enablePFrame = true): array
     // 保存H.264文件
     $h264File = tempnam(sys_get_temp_dir(), 'h264_') . '.h264';
     file_put_contents($h264File, $h264Data);
-    file_put_contents(time().'.h264', $h264Data);
+    file_put_contents('index.h264', $h264Data);
 
     $result = [
         'h264_file' => $h264File,
