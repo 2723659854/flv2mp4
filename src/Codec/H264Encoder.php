@@ -305,6 +305,11 @@ class H264Encoder
     public $chromaQpIndexOffset = 0;
     public $mbType = self::MB_TYPE_I16x16;
 
+    // 宏块对齐尺寸（与解码器一致，用于重建帧和参考帧）
+    // 解码器使用mbAlignedWidth/Height存储参考帧，编码器必须匹配
+    public int $mbAlignedWidth = 0;
+    public int $mbAlignedHeight = 0;
+
     public $frameNum = 0;
     public $idrPicId = 0;
     public $poc = 0;
@@ -588,6 +593,9 @@ class H264Encoder
         $mbWidth = (int)ceil($this->width / 16);
         $mbHeight = (int)ceil($this->height / 16);
         $this->picWidthInMbs = $mbWidth;
+        // 使用宏块对齐尺寸（与解码器一致），避免边界宏块参考帧失配
+        $this->mbAlignedWidth = $mbWidth * 16;
+        $this->mbAlignedHeight = $mbHeight * 16;
         $ySize = $this->width * $this->height;
         $uvSize = intdiv($ySize, 4);
         $yPlane = substr($yuvData, 0, $ySize);
@@ -604,10 +612,15 @@ class H264Encoder
         $this->mvTopRow = [];
         $this->mvLeftCol = [null, null, null, null];
 
-        // 初始化本地解码重建帧（用于正确更新参考帧，避免编解码器失配）
-        $this->reconYPlane = str_repeat("\x00", $ySize);
-        $this->reconUPlane = str_repeat("\x80", $uvSize);
-        $this->reconVPlane = str_repeat("\x80", $uvSize);
+        // 初始化本地解码重建帧（使用宏块对齐尺寸，与解码器一致）
+        // 解码器初始化为128，填充区域会被实际解码值覆盖
+        $reconYSize = $this->mbAlignedWidth * $this->mbAlignedHeight;
+        $reconUvW = intdiv($this->mbAlignedWidth, 2);
+        $reconUvH = intdiv($this->mbAlignedHeight, 2);
+        $reconUvSize = $reconUvW * $reconUvH;
+        $this->reconYPlane = str_repeat("\x80", $reconYSize);
+        $this->reconUPlane = str_repeat("\x80", $reconUvSize);
+        $this->reconVPlane = str_repeat("\x80", $reconUvSize);
 
         // P帧使用mb_skip_run来编码P_Skip宏块（CAVLC模式）
         $mbSkipRun = 0;
@@ -716,30 +729,25 @@ class H264Encoder
         $topSum = 0;
         $cntL = 0;
         $cntT = 0;
+        $reconStride = $this->mbAlignedWidth;
         if ($leftAvailable) {
             $refX = $mbX * 16 - 1;
             for ($y = 0; $y < 16; $y++) {
                 $py = $mbY * 16 + $y;
-                if ($py >= $this->height) break;
-                $idx = $py * $this->width + $refX;
-                if ($idx >= 0 && $idx < strlen($this->reconYPlane)) {
-                    $leftPixels[$y] = ord($this->reconYPlane[$idx]);
-                    $leftSum += $leftPixels[$y];
-                    $cntL++;
-                }
+                $idx = $py * $reconStride + $refX;
+                $leftPixels[$y] = ord($this->reconYPlane[$idx]);
+                $leftSum += $leftPixels[$y];
+                $cntL++;
             }
         }
         if ($topAvailable) {
             $refY = $mbY * 16 - 1;
             for ($x = 0; $x < 16; $x++) {
                 $px = $mbX * 16 + $x;
-                if ($px >= $this->width) break;
-                $idx = $refY * $this->width + $px;
-                if ($idx >= 0 && $idx < strlen($this->reconYPlane)) {
-                    $topPixels[$x] = ord($this->reconYPlane[$idx]);
-                    $topSum += $topPixels[$x];
-                    $cntT++;
-                }
+                $idx = $refY * $reconStride + $px;
+                $topPixels[$x] = ord($this->reconYPlane[$idx]);
+                $topSum += $topPixels[$x];
+                $cntT++;
             }
         }
 
@@ -860,34 +868,29 @@ class H264Encoder
         $chromaTopSumV = 0;
         $chromaCntL = 0;
         $chromaCntT = 0;
+        $reconChromaStride = intdiv($this->mbAlignedWidth, 2);
         if ($leftAvailable) {
             $refX = $mbX * 8 - 1;
             for ($y = 0; $y < 8; $y++) {
                 $py = $mbY * 8 + $y;
-                if ($py >= $chromaHeight) break;
-                $idx = $py * $chromaWidth + $refX;
-                if ($idx >= 0 && $idx < strlen($this->reconUPlane)) {
-                    $chromaLeftU[$y] = ord($this->reconUPlane[$idx]);
-                    $chromaLeftV[$y] = ord($this->reconVPlane[$idx]);
-                    $chromaLeftSumU += $chromaLeftU[$y];
-                    $chromaLeftSumV += $chromaLeftV[$y];
-                    $chromaCntL++;
-                }
+                $idx = $py * $reconChromaStride + $refX;
+                $chromaLeftU[$y] = ord($this->reconUPlane[$idx]);
+                $chromaLeftV[$y] = ord($this->reconVPlane[$idx]);
+                $chromaLeftSumU += $chromaLeftU[$y];
+                $chromaLeftSumV += $chromaLeftV[$y];
+                $chromaCntL++;
             }
         }
         if ($topAvailable) {
             $refY = $mbY * 8 - 1;
             for ($x = 0; $x < 8; $x++) {
                 $px = $mbX * 8 + $x;
-                if ($px >= $chromaWidth) break;
-                $idx = $refY * $chromaWidth + $px;
-                if ($idx >= 0 && $idx < strlen($this->reconUPlane)) {
-                    $chromaTopU[$x] = ord($this->reconUPlane[$idx]);
-                    $chromaTopV[$x] = ord($this->reconVPlane[$idx]);
-                    $chromaTopSumU += $chromaTopU[$x];
-                    $chromaTopSumV += $chromaTopV[$x];
-                    $chromaCntT++;
-                }
+                $idx = $refY * $reconChromaStride + $px;
+                $chromaTopU[$x] = ord($this->reconUPlane[$idx]);
+                $chromaTopV[$x] = ord($this->reconVPlane[$idx]);
+                $chromaTopSumU += $chromaTopU[$x];
+                $chromaTopSumV += $chromaTopV[$x];
+                $chromaCntT++;
             }
         }
 
@@ -1081,11 +1084,9 @@ class H264Encoder
                         for ($x = 0; $x < 4; $x++) {
                             $py = $mbY * 16 + $by * 4 + $y;
                             $px = $mbX * 16 + $bx * 4 + $x;
-                            if ($py < $this->height && $px < $this->width) {
-                                $val = $predPixels[$by * 4 + $y][$bx * 4 + $x] + $idctResult[$y][$x];
-                                $val = max(0, min(255, $val));
-                                $this->reconYPlane[$py * $this->width + $px] = chr($val);
-                            }
+                            $val = $predPixels[$by * 4 + $y][$bx * 4 + $x] + $idctResult[$y][$x];
+                            $val = max(0, min(255, $val));
+                            $this->reconYPlane[$py * $reconStride + $px] = chr($val);
                         }
                     }
                 } else {
@@ -1095,11 +1096,9 @@ class H264Encoder
                         for ($x = 0; $x < 4; $x++) {
                             $py = $mbY * 16 + $by * 4 + $y;
                             $px = $mbX * 16 + $bx * 4 + $x;
-                            if ($py < $this->height && $px < $this->width) {
-                                $val = $predPixels[$by * 4 + $y][$bx * 4 + $x] + $dcAdd;
-                                $val = max(0, min(255, $val));
-                                $this->reconYPlane[$py * $this->width + $px] = chr($val);
-                            }
+                            $val = $predPixels[$by * 4 + $y][$bx * 4 + $x] + $dcAdd;
+                            $val = max(0, min(255, $val));
+                            $this->reconYPlane[$py * $reconStride + $px] = chr($val);
                         }
                     }
                 }
@@ -1107,8 +1106,8 @@ class H264Encoder
         }
 
         // === 色度本地解码重建（用于正确更新色度参考帧）===
-        $chromaW = (int)($this->width / 2);
-        $chromaH = (int)($this->height / 2);
+        $chromaW = intdiv($this->mbAlignedWidth, 2);
+        $chromaH = intdiv($this->mbAlignedHeight, 2);
         $cbQmul = $this->dequant4Table[1][$chromaQp][0];
         $crQmul = $this->dequant4Table[2][$chromaQp][0];
         $cbDcResult = $this->chromaDcDequantIdct($qCbDc, $cbQmul);
@@ -1139,13 +1138,11 @@ class H264Encoder
                         for ($x = 0; $x < 4; $x++) {
                             $py = $mbY * 8 + $by * 4 + $y;
                             $px = $mbX * 8 + $bx * 4 + $x;
-                            if ($py < $chromaH && $px < $chromaW) {
-                                $vu = $chromaPredU[$by * 4 + $y][$bx * 4 + $x] + $cbIdct[$y][$x];
-                                $vv = $chromaPredV[$by * 4 + $y][$bx * 4 + $x] + $crIdct[$y][$x];
-                                $idx = $py * $chromaW + $px;
-                                $this->reconUPlane[$idx] = chr(max(0, min(255, $vu)));
-                                $this->reconVPlane[$idx] = chr(max(0, min(255, $vv)));
-                            }
+                            $vu = $chromaPredU[$by * 4 + $y][$bx * 4 + $x] + $cbIdct[$y][$x];
+                            $vv = $chromaPredV[$by * 4 + $y][$bx * 4 + $x] + $crIdct[$y][$x];
+                            $idx = $py * $chromaW + $px;
+                            $this->reconUPlane[$idx] = chr(max(0, min(255, $vu)));
+                            $this->reconVPlane[$idx] = chr(max(0, min(255, $vv)));
                         }
                     }
                 } elseif ($cbpChroma == 1) {
@@ -1156,13 +1153,11 @@ class H264Encoder
                         for ($x = 0; $x < 4; $x++) {
                             $py = $mbY * 8 + $by * 4 + $y;
                             $px = $mbX * 8 + $bx * 4 + $x;
-                            if ($py < $chromaH && $px < $chromaW) {
-                                $vu = $chromaPredU[$by * 4 + $y][$bx * 4 + $x] + $cbDcAdd;
-                                $vv = $chromaPredV[$by * 4 + $y][$bx * 4 + $x] + $crDcAdd;
-                                $idx = $py * $chromaW + $px;
-                                $this->reconUPlane[$idx] = chr(max(0, min(255, $vu)));
-                                $this->reconVPlane[$idx] = chr(max(0, min(255, $vv)));
-                            }
+                            $vu = $chromaPredU[$by * 4 + $y][$bx * 4 + $x] + $cbDcAdd;
+                            $vv = $chromaPredV[$by * 4 + $y][$bx * 4 + $x] + $crDcAdd;
+                            $idx = $py * $chromaW + $px;
+                            $this->reconUPlane[$idx] = chr(max(0, min(255, $vu)));
+                            $this->reconVPlane[$idx] = chr(max(0, min(255, $vv)));
                         }
                     }
                 } else {
@@ -1171,11 +1166,9 @@ class H264Encoder
                         for ($x = 0; $x < 4; $x++) {
                             $py = $mbY * 8 + $by * 4 + $y;
                             $px = $mbX * 8 + $bx * 4 + $x;
-                            if ($py < $chromaH && $px < $chromaW) {
-                                $idx = $py * $chromaW + $px;
-                                $this->reconUPlane[$idx] = chr(max(0, min(255, $chromaPredU[$by * 4 + $y][$bx * 4 + $x])));
-                                $this->reconVPlane[$idx] = chr(max(0, min(255, $chromaPredV[$by * 4 + $y][$bx * 4 + $x])));
-                            }
+                            $idx = $py * $chromaW + $px;
+                            $this->reconUPlane[$idx] = chr(max(0, min(255, $chromaPredU[$by * 4 + $y][$bx * 4 + $x])));
+                            $this->reconVPlane[$idx] = chr(max(0, min(255, $chromaPredV[$by * 4 + $y][$bx * 4 + $x])));
                         }
                     }
                 }
@@ -1754,34 +1747,29 @@ class H264Encoder
         $chromaTopSumV = 0;
         $chromaCntL = 0;
         $chromaCntT = 0;
+        $reconChromaStride = intdiv($this->mbAlignedWidth, 2);
         if ($leftAvailable) {
             $refX = $mbX * 8 - 1;
             for ($y = 0; $y < 8; $y++) {
                 $py = $mbY * 8 + $y;
-                if ($py >= $chromaHeight) break;
-                $idx = $py * $chromaWidth + $refX;
-                if ($idx >= 0 && $idx < strlen($this->reconUPlane)) {
-                    $chromaLeftU[$y] = ord($this->reconUPlane[$idx]);
-                    $chromaLeftV[$y] = ord($this->reconVPlane[$idx]);
-                    $chromaLeftSumU += $chromaLeftU[$y];
-                    $chromaLeftSumV += $chromaLeftV[$y];
-                    $chromaCntL++;
-                }
+                $idx = $py * $reconChromaStride + $refX;
+                $chromaLeftU[$y] = ord($this->reconUPlane[$idx]);
+                $chromaLeftV[$y] = ord($this->reconVPlane[$idx]);
+                $chromaLeftSumU += $chromaLeftU[$y];
+                $chromaLeftSumV += $chromaLeftV[$y];
+                $chromaCntL++;
             }
         }
         if ($topAvailable) {
             $refY = $mbY * 8 - 1;
             for ($x = 0; $x < 8; $x++) {
                 $px = $mbX * 8 + $x;
-                if ($px >= $chromaWidth) break;
-                $idx = $refY * $chromaWidth + $px;
-                if ($idx >= 0 && $idx < strlen($this->reconUPlane)) {
-                    $chromaTopU[$x] = ord($this->reconUPlane[$idx]);
-                    $chromaTopV[$x] = ord($this->reconVPlane[$idx]);
-                    $chromaTopSumU += $chromaTopU[$x];
-                    $chromaTopSumV += $chromaTopV[$x];
-                    $chromaCntT++;
-                }
+                $idx = $refY * $reconChromaStride + $px;
+                $chromaTopU[$x] = ord($this->reconUPlane[$idx]);
+                $chromaTopV[$x] = ord($this->reconVPlane[$idx]);
+                $chromaTopSumU += $chromaTopU[$x];
+                $chromaTopSumV += $chromaTopV[$x];
+                $chromaCntT++;
             }
         }
 
@@ -2774,12 +2762,18 @@ class H264Encoder
      */
     public function motionEstimate16x16(array $currentBlock, string $refPlane, int $mbX, int $mbY, int $searchRange = 16): array
     {
+        // 参考帧使用mbAlignedWidth作为步长（与I帧重建存储格式一致）
+        $refStride = $this->mbAlignedWidth;
+        $refW = $this->mbAlignedWidth;
+        $refH = $this->mbAlignedHeight;
+
         $bestMV = [0, 0];
         $bestSAD = PHP_INT_MAX;
 
         $origX = $mbX * 16;
         $origY = $mbY * 16;
 
+        // 当前块尺寸：用于实际视频内容（width/height为实际分辨率）
         $blockW = min(16, $this->width - $origX);
         $blockH = min(16, $this->height - $origY);
 
@@ -2787,7 +2781,7 @@ class H264Encoder
         $sad00 = 0;
         for ($y = 0; $y < $blockH; $y++) {
             for ($x = 0; $x < $blockW; $x++) {
-                $refIdx = ($origY + $y) * $this->width + ($origX + $x);
+                $refIdx = ($origY + $y) * $refStride + ($origX + $x);
                 $sad00 += abs($currentBlock[$y][$x] - ord($refPlane[$refIdx]));
             }
         }
@@ -2803,14 +2797,15 @@ class H264Encoder
                 $rx = $origX + $dx;
                 $ry = $origY + $dy;
 
-                if ($rx < 0 || $rx + $blockW > $this->width || $ry < 0 || $ry + $blockH > $this->height) {
+                // 边界检查使用mbAligned尺寸（参考帧实际存储尺寸）
+                if ($rx < 0 || $rx + $blockW > $refW || $ry < 0 || $ry + $blockH > $refH) {
                     continue;
                 }
 
                 $sad = 0;
                 for ($y = 0; $y < $blockH; $y++) {
                     for ($x = 0; $x < $blockW; $x++) {
-                        $refIdx = ($ry + $y) * $this->width + ($rx + $x);
+                        $refIdx = ($ry + $y) * $refStride + ($rx + $x);
                         $sad += abs($currentBlock[$y][$x] - ord($refPlane[$refIdx]));
                     }
                 }
@@ -2832,14 +2827,14 @@ class H264Encoder
                 $rx = $origX + $dx;
                 $ry = $origY + $dy;
 
-                if ($rx < 0 || $rx + $blockW > $this->width || $ry < 0 || $ry + $blockH > $this->height) {
+                if ($rx < 0 || $rx + $blockW > $refW || $ry < 0 || $ry + $blockH > $refH) {
                     continue;
                 }
 
                 $sad = 0;
                 for ($y = 0; $y < $blockH; $y++) {
                     for ($x = 0; $x < $blockW; $x++) {
-                        $refIdx = ($ry + $y) * $this->width + ($rx + $x);
+                        $refIdx = ($ry + $y) * $refStride + ($rx + $x);
                         $sad += abs($currentBlock[$y][$x] - ord($refPlane[$refIdx]));
                     }
                 }
@@ -2902,12 +2897,12 @@ class H264Encoder
         // 运动估计（返回1/4像素单位的MV）
         list($mvX, $mvY, $sad) = $this->motionEstimate16x16($lumaPixels, $refYPlane, $mbX, $mbY);
 
-        // 亮度MC预测（整数像素位置，边缘钳位）
-        $intMvX = $mvX / 4; // 1/4像素 -> 整数像素
-        $intMvY = $mvY / 4;
+        // 亮度MC预测（整数像素位置，边缘钳位到mbAligned尺寸，与解码器mcLuma一致）
+        $intMvX = $mvX >> 2; // 1/4像素 -> 整数像素
+        $intMvY = $mvY >> 2;
         $refX = $mbX * 16 + $intMvX;
         $refY = $mbY * 16 + $intMvY;
-        $predBlock = $this->mcLumaBlock($refYPlane, $refX, $refY, $this->width, $this->height);
+        $predBlock = $this->mcLumaBlock($refYPlane, $refX, $refY, $this->mbAlignedWidth, $this->mbAlignedHeight);
 
         // 计算残差
         $residual = array_fill(0, 16, array_fill(0, 16, 0));
@@ -2968,9 +2963,10 @@ class H264Encoder
         // P_Skip的MV = skipMVP，解码器用此MV做MC
         list($skipMvpX, $skipMvpY) = $this->getMvpPSkip($mbX, $mbY);
 
-        // 色度参考帧
-        $chromaW = (int)($this->width / 2);
-        $chromaH = (int)($this->height / 2);
+        // 色度参考帧尺寸（使用mbAligned尺寸，与I帧重建存储格式一致）
+        $chromaW = intdiv($this->mbAlignedWidth, 2);
+        $chromaH = intdiv($this->mbAlignedHeight, 2);
+        $reconStride = $this->mbAlignedWidth;
 
         // P_Skip条件：cbpLuma=0 且 MV等于skipMVP（MVD=0）
         // 这样解码器用MV=skipMVP做MC，与编码器本地解码一致
@@ -2992,13 +2988,12 @@ class H264Encoder
             $this->saveMv16x16($mbX, $skipMvpX, $skipMvpY, 0);
 
             // P_Skip亮度重建: MC预测在MV=skipMVP位置（=实际MV，predBlock已正确）
+            // 使用mbAlignedWidth作为步长（与I帧重建存储格式一致）
             for ($y = 0; $y < 16; $y++) {
                 for ($x = 0; $x < 16; $x++) {
                     $py = $mbY * 16 + $y;
                     $px = $mbX * 16 + $x;
-                    if ($py < $this->height && $px < $this->width) {
-                        $this->reconYPlane[$py * $this->width + $px] = chr(max(0, min(255, $predBlock[$y][$x])));
-                    }
+                    $this->reconYPlane[$py * $reconStride + $px] = chr(max(0, min(255, $predBlock[$y][$x])));
                 }
             }
 
@@ -3012,11 +3007,9 @@ class H264Encoder
                 for ($x = 0; $x < 8; $x++) {
                     $py = $mbY * 8 + $y;
                     $px = $mbX * 8 + $x;
-                    if ($py < $chromaH && $px < $chromaW) {
-                        $idx = $py * $chromaW + $px;
-                        $this->reconUPlane[$idx] = chr($cbPred[$y][$x]);
-                        $this->reconVPlane[$idx] = chr($crPred[$y][$x]);
-                    }
+                    $idx = $py * $chromaW + $px;
+                    $this->reconUPlane[$idx] = chr($cbPred[$y][$x]);
+                    $this->reconVPlane[$idx] = chr($crPred[$y][$x]);
                 }
             }
 
@@ -3096,6 +3089,7 @@ class H264Encoder
         $this->saveMv16x16($mbX, $mvX, $mvY, $refIdx);
 
         // === P帧亮度本地解码重建 ===
+        // 使用mbAlignedWidth作为步长（与I帧重建存储格式一致）
         for ($by = 0; $by < 4; $by++) {
             for ($bx = 0; $bx < 4; $bx++) {
                 $blkIdx = $by * 4 + $bx;
@@ -3112,11 +3106,9 @@ class H264Encoder
                         for ($x = 0; $x < 4; $x++) {
                             $py = $mbY * 16 + $by * 4 + $y;
                             $px = $mbX * 16 + $bx * 4 + $x;
-                            if ($py < $this->height && $px < $this->width) {
-                                $val = $predBlock[$by * 4 + $y][$bx * 4 + $x] + $idctResult[$y][$x];
-                                $val = max(0, min(255, $val));
-                                $this->reconYPlane[$py * $this->width + $px] = chr($val);
-                            }
+                            $val = $predBlock[$by * 4 + $y][$bx * 4 + $x] + $idctResult[$y][$x];
+                            $val = max(0, min(255, $val));
+                            $this->reconYPlane[$py * $reconStride + $px] = chr($val);
                         }
                     }
                 } else {
@@ -3125,10 +3117,8 @@ class H264Encoder
                         for ($x = 0; $x < 4; $x++) {
                             $py = $mbY * 16 + $by * 4 + $y;
                             $px = $mbX * 16 + $bx * 4 + $x;
-                            if ($py < $this->height && $px < $this->width) {
-                                $val = max(0, min(255, $predBlock[$by * 4 + $y][$bx * 4 + $x]));
-                                $this->reconYPlane[$py * $this->width + $px] = chr($val);
-                            }
+                            $val = max(0, min(255, $predBlock[$by * 4 + $y][$bx * 4 + $x]));
+                            $this->reconYPlane[$py * $reconStride + $px] = chr($val);
                         }
                     }
                 }
@@ -3146,11 +3136,9 @@ class H264Encoder
             for ($x = 0; $x < 8; $x++) {
                 $py = $mbY * 8 + $y;
                 $px = $mbX * 8 + $x;
-                if ($py < $chromaH && $px < $chromaW) {
-                    $idx = $py * $chromaW + $px;
-                    $this->reconUPlane[$idx] = chr($cbPred[$y][$x]);
-                    $this->reconVPlane[$idx] = chr($crPred[$y][$x]);
-                }
+                $idx = $py * $chromaW + $px;
+                $this->reconUPlane[$idx] = chr($cbPred[$y][$x]);
+                $this->reconVPlane[$idx] = chr($crPred[$y][$x]);
             }
         }
 
