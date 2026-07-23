@@ -7,13 +7,23 @@ use Xiaosongshu\Flv2mp4\Codec\H264Decoder;
 use Xiaosongshu\Flv2mp4\Codec\H264Encoder;
 use Xiaosongshu\Flv2mp4\Codec\VideoScaler;
 use Xiaosongshu\Flv2mp4\Codec\NalUtil;
+
+/**
+ * @purpose flv转hls多码率
+ * @author yanglong
+ * @time 2026年7月23日14:05:53
+ * @note 本转码器目前仅支持baseline profile
+ */
 class PurePhpHlsGenerator
 {
+
+    /** 切片分割时间 3秒 */
     private int $segmentDuration = 3;
     private int $videoPid = 0x100;
     private int $audioPid = 0x101;
     private int $pmtPid = 0x1000;
 
+    /** 视频质量等级 baseline ,main ,high profile */
     private array $profiles;
     private string $outputDir;
     private array $segmentWriters = [];
@@ -35,8 +45,13 @@ class PurePhpHlsGenerator
     private array $audioFrameCounts = [];
     private array $audioBasePts = [];
 
+    /** 解码器 */
     private H264Decoder $decoder;
+
+    /** 编码器 */
     private H264Encoder $encoder;
+
+    /** 视频尺寸缩放器 */
     private VideoScaler $scaler;
     // 多分辨率解码帧缓存，避免多profile覆盖
     private array $decodedFrameCache = [];
@@ -44,6 +59,8 @@ class PurePhpHlsGenerator
     private int $srcWidth = 0;
     private int $srcHeight = 0;
     private bool $srcInitialized = false;
+
+    /** 最大处理帧数 调试用 */
     private ?int $maxFrames = null;
     private array $videoFrameCounts = [];
     private array $lastDts = [];
@@ -55,6 +72,11 @@ class PurePhpHlsGenerator
     const AVC_PACKET_TYPE_SEQUENCE_HEADER = 0;
     const AVC_PACKET_TYPE_NALU = 1;
 
+    /**
+     * 转码器初始化
+     * @param array $profiles
+     * @param string $outputDir
+     */
     public function __construct(array $profiles, string $outputDir)
     {
         $this->profiles = $profiles;
@@ -81,14 +103,26 @@ class PurePhpHlsGenerator
             $this->segmentFirstFrame[$name] = true;
         }
 
+        /** 初始化空m3u8 */
         $this->ensureInitialPlaylist();
     }
 
+    /**
+     * 设置最大处理帧数
+     * @param int $maxFrames
+     * @return void
+     */
     public function setMaxFrames(int $maxFrames): void
     {
         $this->maxFrames = $maxFrames;
     }
 
+    /**
+     * 处理flv转码
+     * @param string $flvFile
+     * @return void
+     * @throws \Exception
+     */
     public function processFlv(string $flvFile): void
     {
         if (!file_exists($flvFile)) throw new \Exception("FLV file not found: {$flvFile}");
@@ -119,6 +153,11 @@ class PurePhpHlsGenerator
         echo "Done! Processed {$frameCount} frames\n";
     }
 
+    /**
+     * 处理视频帧
+     * @param $tag
+     * @return void
+     */
     private function handleVideoFrame($tag): void
     {
         $body = $tag->body ?? null;
@@ -154,13 +193,16 @@ class PurePhpHlsGenerator
 
         // 切片切分逻辑
         foreach ($this->profiles as $name => $profile) {
+            /** 只在关键帧并且满足切片时间的时候才开始新的切片 */
             if ($isKeyFrame && ($relativeTime - $this->segmentStartTimes[$name]) >= ($this->segmentDuration * 1000)) {
+                /** 关闭当前的切片 */
                 $this->closeSegment($name, $relativeTime);
                 $this->audioFrameCounts[$name] = 0;
                 $this->audioBasePts[$name] = (int)($relativeTime * 90);
                 $this->lastDts[$name] = -1;
                 $this->segmentStartTimes[$name] = $relativeTime;
                 $this->segmentFirstFrame[$name] = true;
+               /** 开启新切片 */
                 $this->startSegment($name);
                 // 切换分片清空帧缓存
                 $this->decodedFrameCache = [];
@@ -195,24 +237,29 @@ class PurePhpHlsGenerator
             if ($needTranscode) {
                 $cacheKey = "{$profile['width']}_{$profile['height']}";
                 if (!isset($this->decodedFrameCache[$cacheKey])) {
+                    /** 解码h264为yuv */
                     $rawYuv = $this->decodeNaluToYuv($avcData);
                     if ($rawYuv !== null) {
+                        /** 缩放尺寸 */
                         $scaledYuv = $this->scaler->scaleYUV420P($rawYuv, $this->srcWidth, $this->srcHeight, $profile['width'], $profile['height']);
                         $this->decodedFrameCache[$cacheKey] = $scaledYuv;
                     }
                 }
 
                 if (isset($this->decodedFrameCache[$cacheKey])) {
+                    /** 取出被缩放的yuv */
                     $scaledYuv = $this->decodedFrameCache[$cacheKey];
                     $this->encoder->setResolution($profile['width'], $profile['height']);
                     $this->encoder->setBitrate($profile['bitrate']);
                     $this->encoder->setFps($profile['fps']);
-                    $this->encoder->setQp($profile['qp'] ?? 26);
+                    $this->encoder->setQp($profile['qp'] ?? 30);
+                    /** 将被缩放后的yuv重新编码为h264 */
                     $encodedNals = $this->encoder->encodeFrame($scaledYuv, $isKeyFrame);
 
                     $outputData = '';
                     $outputSpsPps = '';
                     foreach ($encodedNals as $nal) {
+                        /** 查找nal中是否存在header */
                         $nalHeaderPos = $this->findNalHeaderPos($nal);
                         if ($nalHeaderPos < 0) continue;
                         $nalType = ord($nal[$nalHeaderPos]) & 0x1F;
@@ -233,6 +280,7 @@ class PurePhpHlsGenerator
             if ($isTranscoded) {
                 $annexb = $outputData;
             } else {
+                /** 没有缩放的数据需要重新编码 */
                 $annexb = $this->avccToAnnexB($outputData);
             }
             // 只在每个分片的第一帧前置SPS/PPS，避免重复导致FFmpeg解码错误
@@ -250,8 +298,14 @@ class PurePhpHlsGenerator
         }
     }
 
+    /**
+     * 将Nalu解码为yuv
+     * @param string $avcData
+     * @return string|null
+     */
     private function decodeNaluToYuv(string $avcData): ?string
     {
+        /** 拆分nalu单元 */
         $nalUnits = $this->extractNalUnitsFromAVCC($avcData);
         
         // 将 SPS/PPS 与视频帧一起解码（解码器每次会重置状态）
@@ -283,6 +337,11 @@ class PurePhpHlsGenerator
         return $out;
     }
 
+    /**
+     * 处理音频帧
+     * @param $tag
+     * @return void
+     */
     private function handleAudioFrame($tag): void
     {
         $raw = $tag->body ?? null;
@@ -443,6 +502,11 @@ class PurePhpHlsGenerator
     }
 
 
+    /**
+     * 从avc中拆分nalu，裸数据 = 起始码 + NALU
+     * @param string $data
+     * @return array
+     */
     private function extractNalUnitsFromAVCC(string $data): array
     {
         $list = [];
@@ -836,6 +900,11 @@ class PurePhpHlsGenerator
         file_put_contents("{$this->outputDir}/master.m3u8", implode("\n", $lines) . "\n");
     }
 
+    /**
+     * 检测并跳过 H.264 裸流（Annex-B 格式）开头的起始码（Start Code）
+     * @param string $nal
+     * @return int
+     */
     private function findNalHeaderPos(string $nal): int
     {
         $len = strlen($nal);
