@@ -118,7 +118,7 @@ class H264Decoder
         36, 40, 39, 43, 45, 46, 17, 18, 20, 24, 19, 21, 26, 28, 23, 27, 29, 30, 22, 25, 38, 41,
     ];
 
-    // FFmpeg scan8数组（参考h264_parse.h），用于将块索引映射到缓存位置
+    // FFmpeg scan8数组，用于将块索引映射到缓存位置
     // 用于pred_non_zero_count计算
     public const SCAN8 = [
         12, 13, 20, 21,
@@ -275,15 +275,11 @@ class H264Decoder
             // 恢复之前的分辨率
             $this->width = $prevWidth;
             $this->height = $prevHeight;
-            //echo "[DECODER] Using previous resolution: {$this->width}x{$this->height}" . PHP_EOL;
         } elseif ($this->width <= 0 || $this->height <= 0) {
-            //echo "[DECODER] ERROR: Invalid resolution {$this->width}x{$this->height}" . PHP_EOL;
             return null;
         }
-        //echo "[DECODER] Resolution: {$this->width}x{$this->height}" . PHP_EOL;
 
         if ($parseOnly) {
-            //echo "[DECODER] Parse only mode, returning..." . PHP_EOL;
             return [
                 'width' => $this->width,
                 'height' => $this->height,
@@ -299,7 +295,6 @@ class H264Decoder
         $uvSize = (int)($ySize / 4);
 
         // 第二轮：解码图像Slice — 每个Slice是一帧，各自初始化并输出
-        //echo "[DECODER] Step 3: Decoding slices..." . PHP_EOL;
         $sliceCount = 0;
         $outputData = '';
         foreach ($nalUnits as $nal) {
@@ -309,7 +304,6 @@ class H264Decoder
                 $nalRefIdc = ($nalHeader >> 5) & 0x03;
                 $sliceCount++;
                 $this->debugSliceIndex = $sliceCount;
-                //echo "[DECODER]   Decoding slice {$sliceCount} (type=" . ($nalType === 5 ? 'IDR' : 'P') . ", data size=" . strlen($nal['data']) . ")" . PHP_EOL;
                 // 每帧重新初始化像素平面
                 $this->yPlane = array_fill(0, $ySize, 128);
                 $this->uPlane = array_fill(0, $uvSize, 128);
@@ -321,10 +315,7 @@ class H264Decoder
                 $this->width = $mbAlignedWidth;
                 $this->height = $mbAlignedHeight;
 
-                //$startTime = microtime(true);
                 $this->decodeSlice($nal['data'], $nalType === 5, $nalRefIdc);
-                //$endTime = microtime(true);
-
                 // 更新参考帧（用于P帧运动补偿）- 在恢复尺寸之前进行
                 if ($nalRefIdc !== 0 || $nalType === 5) {
                     $this->refFrameY = array_values($this->yPlane);
@@ -361,13 +352,10 @@ class H264Decoder
                 if ($sliceCount === $this->debugTargetSlice && $this->debugMbTraceFh) {
                     fclose($this->debugMbTraceFh);
                     $this->debugMbTraceFh = null;
-                    //echo "[DECODER]   MB trace written to php_mb_trace.txt" . PHP_EOL;
                 }
             }
         }
 
-        //$totalSize = strlen($outputData);
-        //echo "[DECODER] Decoding complete, total output: {$totalSize} bytes ({$sliceCount} frames)" . PHP_EOL;
         return [
             'data' => $outputData,
             'width' => $this->width,

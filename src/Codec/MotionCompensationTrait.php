@@ -21,7 +21,7 @@ trait MotionCompensationTrait
      * @param int $blockH 块高度
      * @return array 预测块 (二维数组 [$y][$x])
      */
-    public function mcLuma(array &$refPlane, int $refStride, int $refWidth, int $refHeight, int $x, int $y, int $blockW, int $blockH): array
+    public function mcLuma(array $refPlane, int $refStride, int $refWidth, int $refHeight, int $x, int $y, int $blockW, int $blockH): array
     {
         $pred = array_fill(0, $blockH, array_fill(0, $blockW, 0));
 

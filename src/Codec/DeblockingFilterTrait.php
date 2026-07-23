@@ -462,9 +462,6 @@ trait DeblockingFilterTrait
             return;
         }
 
-        //echo "[DEBLOCK] Applying deblocking filter..." . PHP_EOL;
-        //$startTime = microtime(true);
-
         $mbWidth = $this->picWidthInMbs;
         $mbHeight = $this->picHeightInMbs;
 
@@ -517,8 +514,5 @@ trait DeblockingFilterTrait
                 }
             }
         }
-
-        //$endTime = microtime(true);
-        //echo "[DEBLOCK] Deblocking filter completed in " . number_format($endTime - $startTime, 2) . "s" . PHP_EOL;
     }
 }
