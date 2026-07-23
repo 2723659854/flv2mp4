@@ -36,79 +36,149 @@ trait MotionCompensationTrait
             return $pred;
         }
 
-        $tmp = array_fill(0, $blockH + 5, array_fill(0, $blockW, 0));
-
+        $hRows = 0;
+        $hStart = 0;
         if ($fracX !== 0) {
-            $half = array_fill(0, $blockH + 5, array_fill(0, $blockW, 0));
-
-            for ($j = -2; $j < $blockH + 3; $j++) {
-                for ($i = 0; $i < $blockW; $i++) {
-                    $rx = $this->clamp($intX + $i - 2, 0, $refWidth - 1);
-                    $ry = $this->clamp($intY + $j, 0, $refHeight - 1);
-                    $a = $refPlane[$ry * $refStride + $rx];
-                    $rx = $this->clamp($intX + $i - 1, 0, $refWidth - 1);
-                    $b = $refPlane[$ry * $refStride + $rx];
-                    $rx = $this->clamp($intX + $i, 0, $refWidth - 1);
-                    $c = $refPlane[$ry * $refStride + $rx];
-                    $rx = $this->clamp($intX + $i + 1, 0, $refWidth - 1);
-                    $d = $refPlane[$ry * $refStride + $rx];
-                    $rx = $this->clamp($intX + $i + 2, 0, $refWidth - 1);
-                    $e = $refPlane[$ry * $refStride + $rx];
-                    $rx = $this->clamp($intX + $i + 3, 0, $refWidth - 1);
-                    $f = $refPlane[$ry * $refStride + $rx];
-
-                    $h = ($a - 5 * $b + 20 * $c + 20 * $d - 5 * $e + $f + 16) >> 5;
-                    $h = $this->clip255($h);
-                    $half[$j + 2][$i] = $h;
-
-                    if ($fracX === 1) {
-                        $tmp[$j + 2][$i] = ($c + $h + 1) >> 1;
-                    } elseif ($fracX === 2) {
-                        $tmp[$j + 2][$i] = $h;
-                    } else {
-                        $tmp[$j + 2][$i] = ($h + $d + 1) >> 1;
-                    }
-                    $tmp[$j + 2][$i] = $this->clip255($tmp[$j + 2][$i]);
-                }
+            if ($fracY === 0) {
+                $hRows = $blockH;
+                $hStart = 0;
+            } else {
+                $hRows = $blockH + 5;
+                $hStart = -2;
             }
-        } else {
-            for ($j = -2; $j < $blockH + 3; $j++) {
+        }
+
+        $vCols = 0;
+        if ($fracY !== 0) {
+            if ($fracX === 0) {
+                $vCols = $blockW;
+            } else {
+                $vCols = $blockW + 1;
+            }
+        }
+
+        $H = null;
+        if ($fracX !== 0) {
+            $H = array_fill(0, $hRows, array_fill(0, $blockW, 0));
+            for ($j = $hStart; $j < $hStart + $hRows; $j++) {
+                $ry = $this->clamp($intY + $j, 0, $refHeight - 1);
                 for ($i = 0; $i < $blockW; $i++) {
-                    $rx = $this->clamp($intX + $i, 0, $refWidth - 1);
-                    $ry = $this->clamp($intY + $j, 0, $refHeight - 1);
-                    $tmp[$j + 2][$i] = $refPlane[$ry * $refStride + $rx];
+                    $px0 = $refPlane[$ry * $refStride + $this->clamp($intX + $i - 2, 0, $refWidth - 1)];
+                    $px1 = $refPlane[$ry * $refStride + $this->clamp($intX + $i - 1, 0, $refWidth - 1)];
+                    $px2 = $refPlane[$ry * $refStride + $this->clamp($intX + $i, 0, $refWidth - 1)];
+                    $px3 = $refPlane[$ry * $refStride + $this->clamp($intX + $i + 1, 0, $refWidth - 1)];
+                    $px4 = $refPlane[$ry * $refStride + $this->clamp($intX + $i + 2, 0, $refWidth - 1)];
+                    $px5 = $refPlane[$ry * $refStride + $this->clamp($intX + $i + 3, 0, $refWidth - 1)];
+                    $h = ($px0 - 5 * $px1 + 20 * $px2 + 20 * $px3 - 5 * $px4 + $px5 + 16) >> 5;
+                    $H[$j - $hStart][$i] = $this->clip255($h);
                 }
             }
         }
 
+        $V = null;
         if ($fracY !== 0) {
+            $V = array_fill(0, $blockH, array_fill(0, $vCols, 0));
+            for ($j = 0; $j < $blockH; $j++) {
+                for ($i = 0; $i < $vCols; $i++) {
+                    $rx = $this->clamp($intX + $i, 0, $refWidth - 1);
+                    $px0 = $refPlane[$this->clamp($intY + $j - 2, 0, $refHeight - 1) * $refStride + $rx];
+                    $px1 = $refPlane[$this->clamp($intY + $j - 1, 0, $refHeight - 1) * $refStride + $rx];
+                    $px2 = $refPlane[$this->clamp($intY + $j, 0, $refHeight - 1) * $refStride + $rx];
+                    $px3 = $refPlane[$this->clamp($intY + $j + 1, 0, $refHeight - 1) * $refStride + $rx];
+                    $px4 = $refPlane[$this->clamp($intY + $j + 2, 0, $refHeight - 1) * $refStride + $rx];
+                    $px5 = $refPlane[$this->clamp($intY + $j + 3, 0, $refHeight - 1) * $refStride + $rx];
+                    $h = ($px0 - 5 * $px1 + 20 * $px2 + 20 * $px3 - 5 * $px4 + $px5 + 16) >> 5;
+                    $V[$j][$i] = $this->clip255($h);
+                }
+            }
+        }
+
+        $C = null;
+        if ($fracX !== 0 && $fracY !== 0 && ($fracX === 2 || $fracY === 2)) {
+            $C = array_fill(0, $blockH, array_fill(0, $blockW, 0));
             for ($j = 0; $j < $blockH; $j++) {
                 for ($i = 0; $i < $blockW; $i++) {
-                    $a = $tmp[$j][$i];
-                    $b = $tmp[$j + 1][$i];
-                    $c = $tmp[$j + 2][$i];
-                    $d = $tmp[$j + 3][$i];
-                    $e = $tmp[$j + 4][$i];
-                    $f = $tmp[$j + 5][$i];
+                    $px0 = $H[$j][$i];
+                    $px1 = $H[$j + 1][$i];
+                    $px2 = $H[$j + 2][$i];
+                    $px3 = $H[$j + 3][$i];
+                    $px4 = $H[$j + 4][$i];
+                    $px5 = $H[$j + 5][$i];
+                    $h = ($px0 - 5 * $px1 + 20 * $px2 + 20 * $px3 - 5 * $px4 + $px5 + 16) >> 5;
+                    $C[$j][$i] = $this->clip255($h);
+                }
+            }
+        }
 
-                    $h = ($a - 5 * $b + 20 * $c + 20 * $d - 5 * $e + $f + 16) >> 5;
-                    $h = $this->clip255($h);
+        $avg = function($a, $b) {
+            return ($a + $b + 1) >> 1;
+        };
 
-                    if ($fracY === 1) {
-                        $val = ($c + $h + 1) >> 1;
-                    } elseif ($fracY === 2) {
-                        $val = $h;
+        if ($fracY === 0) {
+            for ($j = 0; $j < $blockH; $j++) {
+                $ry = $this->clamp($intY + $j, 0, $refHeight - 1);
+                for ($i = 0; $i < $blockW; $i++) {
+                    if ($fracX === 1) {
+                        $I = $refPlane[$ry * $refStride + $this->clamp($intX + $i, 0, $refWidth - 1)];
+                        $pred[$j][$i] = $avg($I, $H[$j][$i]);
+                    } elseif ($fracX === 2) {
+                        $pred[$j][$i] = $H[$j][$i];
                     } else {
-                        $val = ($h + $d + 1) >> 1;
+                        $I1 = $refPlane[$ry * $refStride + $this->clamp($intX + $i + 1, 0, $refWidth - 1)];
+                        $pred[$j][$i] = $avg($H[$j][$i], $I1);
                     }
-                    $pred[$j][$i] = $this->clip255($val);
+                }
+            }
+        } elseif ($fracX === 0) {
+            for ($j = 0; $j < $blockH; $j++) {
+                for ($i = 0; $i < $blockW; $i++) {
+                    $rx = $this->clamp($intX + $i, 0, $refWidth - 1);
+                    if ($fracY === 1) {
+                        $I = $refPlane[$this->clamp($intY + $j, 0, $refHeight - 1) * $refStride + $rx];
+                        $pred[$j][$i] = $avg($I, $V[$j][$i]);
+                    } elseif ($fracY === 2) {
+                        $pred[$j][$i] = $V[$j][$i];
+                    } else {
+                        $I_1 = $refPlane[$this->clamp($intY + $j + 1, 0, $refHeight - 1) * $refStride + $rx];
+                        $pred[$j][$i] = $avg($V[$j][$i], $I_1);
+                    }
+                }
+            }
+        } elseif ($fracX === 2) {
+            for ($j = 0; $j < $blockH; $j++) {
+                for ($i = 0; $i < $blockW; $i++) {
+                    if ($fracY === 1) {
+                        $pred[$j][$i] = $avg($H[$j + 2][$i], $C[$j][$i]);
+                    } elseif ($fracY === 2) {
+                        $pred[$j][$i] = $C[$j][$i];
+                    } else {
+                        $pred[$j][$i] = $avg($C[$j][$i], $H[$j + 3][$i]);
+                    }
+                }
+            }
+        } elseif ($fracY === 2) {
+            for ($j = 0; $j < $blockH; $j++) {
+                for ($i = 0; $i < $blockW; $i++) {
+                    if ($fracX === 1) {
+                        $pred[$j][$i] = $avg($V[$j][$i], $C[$j][$i]);
+                    } else {
+                        $pred[$j][$i] = $avg($C[$j][$i], $V[$j][$i + 1]);
+                    }
                 }
             }
         } else {
+            $hIdx = ($fracY === 1) ? 2 : 3;
+            $vIdx = ($fracX === 3) ? 1 : 0;
             for ($j = 0; $j < $blockH; $j++) {
                 for ($i = 0; $i < $blockW; $i++) {
-                    $pred[$j][$i] = $tmp[$j + 2][$i];
+                    $pred[$j][$i] = $avg($H[$j + $hIdx][$i], $V[$j][$i + $vIdx]);
                 }
+            }
+        }
+
+        for ($j = 0; $j < $blockH; $j++) {
+            for ($i = 0; $i < $blockW; $i++) {
+                $pred[$j][$i] = $this->clip255($pred[$j][$i]);
             }
         }
 

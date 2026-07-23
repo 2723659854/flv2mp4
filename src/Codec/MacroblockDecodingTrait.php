@@ -1012,6 +1012,15 @@ trait MacroblockDecodingTrait
     {
         $mbWidth = $this->picWidthInMbs;
 
+        if ($this->debugSliceIndex === 2 && $mbY === 13 && $mbX === 0) {
+            echo "\n[DEBUG_ROW] Frame 1 mbY=13 行 MB 类型:\n";
+        }
+        if ($this->debugSliceIndex === 2 && $mbY === 13) {
+            $typeNames = ['P_Skip', 'P_16x16', 'P_16x8', 'P_8x16', 'P_8x8', 'P_8x8ref0', 'I_*'];
+            $typeName = $typeNames[min($mbType, 6)] ?? '?';
+            echo "  MB($mbX,13): type=$mbType ($typeName)";
+            if ($mbX === 19) echo "\n";
+        }
         if (($this->debugSliceIndex === 3 && $mbX === 15 && $mbY === 13) ||
             ($this->debugSliceIndex === 3 && $mbX === 16 && $mbY === 13) ||
             ($this->debugSliceIndex === 2 && $mbX === 8 && $mbY === 10)) {
@@ -1045,6 +1054,9 @@ trait MacroblockDecodingTrait
         // P_8x8ref0 (mb_type 4)
         if ($mbType === 4) {
             //echo "[DECODER] MB($mbX,$mbY): P_8x8ref0\n";
+            if ($this->debugSliceIndex === 2 && $mbX === 1 && $mbY === 13) {
+                echo "[DEBUG_MB] MB(1,13) P_8x8ref0: 开始解码\n";
+            }
             return $this->decodeP_8x8ref0($mbX, $mbY, $sliceQp);
         }
 
@@ -2096,14 +2108,6 @@ trait MacroblockDecodingTrait
             }
         } else {
             $mvTopRight = $mvPart0;
-        }
-
-        if (($this->debugSliceIndex === 3 && $mbX === 15 && $mbY === 13) ||
-            ($this->debugSliceIndex === 3 && $mbX === 14 && $mbY === 13)) {
-            echo "[MVP_16x8] MB($mbX,$mbY) part=$partIdx:\n";
-            echo "  mvLeft=" . ($mvLeft ? "({$mvLeft[0]},{$mvLeft[1]},{$mvLeft[2]})" : "null") . "\n";
-            echo "  mvTop=" . ($mvTop ? "({$mvTop[0]},{$mvTop[1]},{$mvTop[2]})" : "null") . "\n";
-            echo "  mvTopRight=" . ($mvTopRight ? "({$mvTopRight[0]},{$mvTopRight[1]},{$mvTopRight[2]})" : "null") . "\n";
         }
 
         $primaryMv = null;
