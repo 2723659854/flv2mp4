@@ -1,150 +1,144 @@
 <?php
 /**
- * P帧解码测试脚本
- * 测试 baseline profile P 帧解码
+ * P帧编码测试
+ * 测试P帧编码质量和文件大小
  */
-require_once 'vendor/autoload.php';
 
-use Xiaosongshu\Flv2mp4\Codec\H264Decoder;
-use Xiaosongshu\Flv2mp4\Codec\NalUtil;
+require_once __DIR__ . '/vendor/autoload.php';
 
-$mp4File = 'test.mp4';
-$extractedH264 = 'test_pframe.h264';
-$decodedYuv = 'test_decoded_pframe.yuv';
-$refYuv = 'test_pframe_ref.yuv';
+use Xiaosongshu\Flv2mp4\Codec\H264Encoder;
 
-// 用 ffmpeg 生成 baseline profile 的测试序列（I+P帧，无B帧）
-echo "=== Step 1: 生成 Baseline profile 测试序列 (前5帧) ===\n";
-$cmd = sprintf(
-    'ffmpeg -y -f lavfi -i testsrc=duration=1:size=320x240:rate=30 -pix_fmt yuv420p '
-    . '-c:v libx264 -profile:v baseline '
-    . '-x264-params bframes=0:keyint=30:min-keyint=30 '
-    . '-preset veryfast -an -f h264 %s 2>&1',
-    escapeshellarg($extractedH264)
-);
-$result = shell_exec($cmd);
-echo $result . "\n";
+function generateMotionYUV(int $width, int $height, int $frameIdx, int $motionX = 2, int $motionY = 1): string
+{
+    $yuv = str_repeat("\x80", $width * $height * 3 / 2);
 
-if (!file_exists($extractedH264) || filesize($extractedH264) == 0) {
-    die("ERROR: 生成H264失败\n");
-}
-echo "生成成功，大小: " . filesize($extractedH264) . " bytes\n\n";
+    // Y plane - 带运动矢量的渐变
+    $offsetX = $frameIdx * $motionX;
+    $offsetY = $frameIdx * $motionY;
 
-// 生成参考YUV
-echo "=== Step 2: 生成FFmpeg参考YUV ===\n";
-$cmd = sprintf(
-    'ffmpeg -y -i %s -frames:v 5 -f rawvideo -pix_fmt yuv420p %s 2>&1',
-    escapeshellarg($extractedH264),
-    escapeshellarg($refYuv)
-);
-$result = shell_exec($cmd);
-echo $result . "\n";
-
-if (!file_exists($refYuv) || filesize($refYuv) == 0) {
-    die("ERROR: 生成参考YUV失败\n");
-}
-echo "参考YUV生成成功，大小: " . filesize($refYuv) . " bytes\n\n";
-
-// 使用PHP解码器解码
-echo "=== Step 3: 使用PHP解码器解码 ===\n";
-$h264Data = file_get_contents($extractedH264);
-$nalUnits = NalUtil::splitNalUnits($h264Data);
-echo "总NAL单元数量: " . count($nalUnits) . "\n";
-
-$decoder = new H264Decoder();
-// 添加宏块统计
-$decoder->enableMbStats = true;
-$result = $decoder->decode($nalUnits);
-
-if (!$result) {
-    die("ERROR: 解码失败\n");
-}
-
-echo "解码结果:\n";
-echo "  宽度: " . $result['width'] . "\n";
-echo "  高度: " . $result['height'] . "\n";
-echo "  像素格式: " . $result['pix_fmt'] . "\n";
-echo "  数据大小: " . strlen($result['data']) . " bytes\n";
-
-$frameSize = (int)($result['width'] * $result['height'] * 3 / 2);
-$numFrames = (int)(strlen($result['data']) / $frameSize);
-echo "  解码帧数: $numFrames\n\n";
-
-// 保存解码结果
-file_put_contents($decodedYuv, $result['data']);
-echo "已保存到 $decodedYuv\n\n";
-
-// 计算每帧的PSNR
-echo "=== Step 4: PSNR对比 ===\n";
-$width = $result['width'];
-$height = $result['height'];
-$ySize = $width * $height;
-$uvSize = (int)($ySize / 4);
-$frameSize = $ySize + 2 * $uvSize;
-
-$decData = file_get_contents($decodedYuv);
-$refData = file_get_contents($refYuv);
-
-for ($i = 0; $i < min($numFrames, 5); $i++) {
-    $decFrame = substr($decData, $i * $frameSize, $frameSize);
-    $refFrame = substr($refData, $i * $frameSize, $frameSize);
-
-    if (strlen($decFrame) < $frameSize || strlen($refFrame) < $frameSize) break;
-
-    // Y PSNR
-    $mseY = 0;
-    for ($j = 0; $j < $ySize; $j++) {
-        $diff = ord($decFrame[$j]) - ord($refFrame[$j]);
-        $mseY += $diff * $diff;
+    for ($y = 0; $y < $height; $y++) {
+        for ($x = 0; $x < $width; $x++) {
+            $idx = $y * $width + $x;
+            $val = 128 + (int)(sin(($x + $offsetX) * 0.05) * 40) + (int)(cos(($y + $offsetY) * 0.05) * 40);
+            $yuv[$idx] = chr(max(16, min(235, $val)));
+        }
     }
-    $mseY /= $ySize;
-    $psnrY = $mseY > 0 ? 10 * log10(255 * 255 / $mseY) : INF;
 
-    // U PSNR
-    $mseU = 0;
-    for ($j = 0; $j < $uvSize; $j++) {
-        $diff = ord($decFrame[$ySize + $j]) - ord($refFrame[$ySize + $j]);
-        $mseU += $diff * $diff;
+    // U/V planes
+    $chromaStart = $width * $height;
+    for ($i = $chromaStart; $i < strlen($yuv); $i++) {
+        $yuv[$i] = chr(128);
     }
-    $mseU /= $uvSize;
-    $psnrU = $mseU > 0 ? 10 * log10(255 * 255 / $mseU) : INF;
 
-    // V PSNR
-    $mseV = 0;
-    for ($j = 0; $j < $uvSize; $j++) {
-        $diff = ord($decFrame[$ySize + $uvSize + $j]) - ord($refFrame[$ySize + $uvSize + $j]);
-        $mseV += $diff * $diff;
-    }
-    $mseV /= $uvSize;
-    $psnrV = $mseV > 0 ? 10 * log10(255 * 255 / $mseV) : INF;
-
-    $avgPsnr = ($psnrY + $psnrU + $psnrV) / 3;
-    printf("Frame %d: Y=%.2fdB, U=%.2fdB, V=%.2fdB, Avg=%.2fdB\n", $i, $psnrY, $psnrU, $psnrV, $avgPsnr);
+    return $yuv;
 }
 
+function testPFrameEncoding(bool $enableInter): array
+{
+    $width = 320;
+    $height = 240;
+    $frameCount = 10;
 
-echo "\n=== Step 5: 将解码YUV重新编码为H.264 ===\n";
+    $encoder = new H264Encoder($width, $height, 25, 1000000);
+    $encoder->setQp(28);
+    $encoder->enableInter = $enableInter;
 
-$reencodedH264 = 'test_decoded_pframe_reencoded.h264';
-$width  = $result['width'];
-$height = $result['height'];
-// 假设帧率为 25 fps（可根据实际源视频调整，或从 ffprobe 获取）
-$fps = 30;
+    $nalUnits = [];
+    $yuvDataAll = '';
 
-$cmd = sprintf(
-    'ffmpeg -y -f rawvideo -pix_fmt yuv420p -s %dx%d -r %d -i %s -c:v libx264 -preset veryfast %s 2>&1',
-    $width,
-    $height,
-    $fps,
-    escapeshellarg($decodedYuv),
-    escapeshellarg($reencodedH264)
-);
-$reencodeResult = shell_exec($cmd);
-//echo $reencodeResult . "\n";
+    echo "编码" . ($enableInter ? "P帧+I帧" : "全部I帧") . " ($frameCount 帧)...\n";
 
-if (file_exists($reencodedH264) && filesize($reencodedH264) > 0) {
-    echo "重新编码成功，文件: $reencodedH264 (" . filesize($reencodedH264) . " bytes)\n";
-    echo "可以使用 ffplay -i $reencodedH264 播放\n";
+    // 第一帧包含SPS/PPS + IDR
+    for ($f = 0; $f < $frameCount; $f++) {
+        $yuvData = generateMotionYUV($width, $height, $f);
+        $yuvDataAll .= $yuvData;
+
+        $frameNals = $encoder->encodeFrame($yuvData, $f === 0);
+        $nalUnits = array_merge($nalUnits, $frameNals);
+        echo "  帧 $f 编码完成\n";
+    }
+
+    $h264Data = implode('', $nalUnits);
+    $h264File = tempnam(sys_get_temp_dir(), 'ptest_') . '.h264';
+    file_put_contents($h264File, $h264Data);
+
+    echo "  文件大小: " . strlen($h264Data) . " 字节\n";
+
+    // 使用ffprobe验证
+    $ffprobeOutput = shell_exec("ffprobe -v error -show_entries frame=pkt_size -of csv=p=0 $h264File 2>&1");
+    $frameSizes = array_filter(explode("\n", trim($ffprobeOutput)));
+    echo "  帧大小: " . implode(', ', $frameSizes) . "\n";
+
+    // 使用ffmpeg解码
+    $decodedYuv = tempnam(sys_get_temp_dir(), 'decoded_') . '.yuv';
+    exec("ffmpeg -y -i $h264File -f rawvideo -pix_fmt yuv420p $decodedYuv 2>&1", $ffmpegOutput, $returnCode);
+
+    $result = [
+        'success' => $returnCode === 0,
+        'file_size' => strlen($h264Data),
+        'frame_count' => $frameCount,
+    ];
+
+    if ($returnCode === 0 && file_exists($decodedYuv)) {
+        $decoded = file_get_contents($decodedYuv);
+        unlink($decodedYuv);
+
+        // 计算PSNR
+        $sseY = 0;
+        $ySize = $width * $height;
+        $uvSize = $ySize / 4;
+        $frameSize = $ySize * 1.5;
+
+        for ($f = 0; $f < $frameCount; $f++) {
+            $offset = (int)($f * $frameSize);
+            for ($i = 0; $i < $ySize; $i++) {
+                $idx1 = $offset + $i;
+                $diff = ord($decoded[$idx1]) - ord($yuvDataAll[$idx1]);
+                $sseY += $diff * $diff;
+            }
+        }
+
+        $mseY = $sseY / ($frameCount * $ySize);
+        $psnrY = ($mseY > 0) ? 10 * log10(255 * 255 / $mseY) : 999.0;
+        $result['psnr_y'] = round($psnrY, 2);
+    } else {
+        $result['psnr_y'] = 0;
+        // 提取ffmpeg错误
+        $error = '';
+        foreach ($ffmpegOutput as $line) {
+            if (stripos($line, 'error') !== false) {
+                $error .= $line . "\n";
+            }
+        }
+        $result['error'] = substr($error, 0, 200);
+    }
+
+    unlink($h264File);
+    return $result;
+}
+
+echo "=== P帧编码测试 ===\n\n";
+
+// 测试1: 全部I帧
+echo "测试1: 全部I帧\n";
+$resultI = testPFrameEncoding(false);
+if ($resultI['success']) {
+    echo sprintf("  成功! PSNR Y=%.2f dB, 文件大小=%d字节\n\n", $resultI['psnr_y'], $resultI['file_size']);
 } else {
-    echo "重新编码失败\n";
+    echo "  失败: " . ($resultI['error'] ?? '未知错误') . "\n\n";
 }
+
+// 测试2: I帧+P帧混合
+echo "测试2: I帧+P帧混合（I帧+P帧）\n";
+$resultP = testPFrameEncoding(true);
+if ($resultP['success']) {
+    echo sprintf("  成功! PSNR Y=%.2f dB, 文件大小=%d字节\n", $resultP['psnr_y'], $resultP['file_size']);
+    if ($resultI['success']) {
+        $ratio = $resultP['file_size'] / $resultI['file_size'];
+        echo sprintf("  P帧/I帧大小比: %.2f (%.1f%%)\n", $ratio, $ratio * 100);
+    }
+} else {
+    echo "  失败: " . ($resultP['error'] ?? '未知错误') . "\n";
+}
+
+echo "\n测试完成！\n";

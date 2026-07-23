@@ -292,6 +292,10 @@ class H264Encoder
 
     public const MB_TYPE_I16x16 = 0;
     public const MB_TYPE_I4x4 = 1;
+    public const MB_TYPE_P_16x16 = 2;
+    public const MB_TYPE_P_16x8 = 3;
+    public const MB_TYPE_P_8x16 = 4;
+    public const MB_TYPE_P_8x8 = 5;
 
     public $width = 640;
     public $height = 360;
@@ -309,6 +313,13 @@ class H264Encoder
     public $log2MaxPicOrderCntLsbMinus4 = 0;
 
     public $quantMatrix = [];
+
+    // P帧参考帧管理
+    public $refYPlane = null;      // 参考帧Y平面
+    public $refUPlane = null;      // 参考帧U平面
+    public $refVPlane = null;      // 参考帧V平面
+    public $enableInter = false;   // 是否启用P帧
+    public $numRefFrames = 1;      // 参考帧数量
 
     public function __construct(int $width = 0, int $height = 0, int $fps = 25, int $bitrate = 1000000)
     {
@@ -364,14 +375,19 @@ class H264Encoder
     {
         $nalUnits = [];
         if ($isKeyframe) {
+            // I帧：重置参考帧和计数器
+            $this->refYPlane = null;
+            $this->refUPlane = null;
+            $this->refVPlane = null;
+            $this->frameNum = 0;
+            $this->idrPicId++;
+            $this->poc = 0;
+
             $nalUnits[] = $this->generateSPS();
             $nalUnits[] = $this->generatePPS();
         }
-        $sliceData = $this->encodeSlice($yuvData, true);
+        $sliceData = $this->encodeSlice($yuvData, $isKeyframe);
         $nalUnits[] = $sliceData;
-        $this->frameNum = 0;
-        $this->idrPicId++;
-        $this->poc += 1;
         return $nalUnits;
     }
 
@@ -468,27 +484,23 @@ class H264Encoder
     {
         $bits = '';
 
-        $bits .= $this->ue(0);
-        $bits .= $this->ue(0);
-        $bits .= '0';
-        $bits .= '0';
+        $bits .= $this->ue(0);              // pic_parameter_set_id = 0
+        $bits .= $this->ue(0);              // seq_parameter_set_id = 0
+        $bits .= '0';                       // entropy_coding_mode_flag = 0 (CAVLC)
+        $bits .= '0';                       // bottom_field_pic_order_in_frame_present_flag = 0
+        $bits .= $this->ue(0);              // num_slice_groups_minus1 = 0
+        $bits .= $this->ue(0);              // num_ref_idx_l0_default_active_minus1 = 0
+        $bits .= $this->ue(0);              // num_ref_idx_l1_default_active_minus1 = 0
+        $bits .= '0';                       // weighted_pred_flag = 0
+        $bits .= '00';                      // weighted_bipred_idc = 0
+        $bits .= $this->se($this->qp - 26); // pic_init_qp_minus26
+        $bits .= $this->se(0);              // pic_init_qs_minus26
+        $bits .= $this->se($this->chromaQpIndexOffset); // chroma_qp_index_offset
+        $bits .= '0';                       // deblocking_filter_control_present_flag = 0
+        $bits .= '0';                       // constrained_intra_pred_flag = 0
+        $bits .= '0';                       // redundant_pic_cnt_present_flag = 0
 
-        $bits .= $this->ue(0);
-
-        $bits .= $this->ue(0);
-        $bits .= $this->ue(0);
-
-        $bits .= '000';
-
-        $bits .= $this->se($this->qp - 26);
-        $bits .= $this->se(0);
-        $bits .= $this->se($this->chromaQpIndexOffset);
-
-        $bits .= '0';
-        $bits .= '0';
-        $bits .= '0';
-
-        $bits .= '1';
+        $bits .= '1';                       // rbsp_stop_one_bit
         while (strlen($bits) % 8 != 0) $bits .= '0';
         return $this->rbspToNal($this->bitsToBytes($bits), 8);
     }
@@ -496,7 +508,15 @@ class H264Encoder
     public function encodeSlice(string $yuvData, bool $isKeyframe): string
     {
         $isIDR = $isKeyframe;
-        $sliceType = 2; // I_SLICE
+        // P_SLICE=0, I_SLICE=2 (slice_type 0和5都表示P帧)
+        $sliceType = 0; // P_SLICE
+
+        // 如果没有参考帧或禁用P帧，强制使用I帧
+        $usePFrame = $this->enableInter && !$isIDR && $this->refYPlane !== null;
+        if (!$usePFrame) {
+            $sliceType = 2; // I_SLICE
+        }
+
         $bits = '';
 
         $bits .= $this->ue(0);           // first_mb_in_slice
@@ -513,7 +533,8 @@ class H264Encoder
 
         // pic_order_cnt_lsb is present when pic_order_cnt_type == 0, regardless of IDR or not
         $log2MaxPicOrderCntLsb = $this->log2MaxPicOrderCntLsbMinus4 + 4;
-        $bits .= $this->u($this->poc & ((1 << $log2MaxPicOrderCntLsb) - 1), $log2MaxPicOrderCntLsb);
+        $pocLsb = $this->poc & ((1 << $log2MaxPicOrderCntLsb) - 1);
+        $bits .= $this->u($pocLsb, $log2MaxPicOrderCntLsb);
 
         // dec_ref_pic_marking() for IDR frames (nal_ref_idc != 0)
         if ($isIDR) {
@@ -521,10 +542,20 @@ class H264Encoder
             $bits .= '0'; // long_term_reference_flag
         }
 
-        $bits .= $this->se(0); // slice_qp_delta
+        // P帧需要编码num_ref_idx_active_override_flag和ref_pic_list_modification
+        if ($sliceType === 0) {
+            $bits .= '0'; // num_ref_idx_active_override_flag
+            // ref_pic_list_modification(): ref_pic_list_modification_flag_l0 = 0
+            $bits .= '0';
+        }
 
-        echo "DEBUG: Slice header bits: " . substr($bits, 0, 50) . "\n";
-        echo "DEBUG: Slice header length: " . strlen($bits) . "\n";
+        // dec_ref_pic_marking() for non-IDR frames
+        if (!$isIDR) {
+            // adaptive_ref_pic_marking_mode_flag = 0 (滑窗模式)
+            $bits .= '0';
+        }
+
+        $bits .= $this->se(0); // slice_qp_delta
 
         $mbWidth = (int)ceil($this->width / 16);
         $mbHeight = (int)ceil($this->height / 16);
@@ -539,12 +570,30 @@ class H264Encoder
         $leftNz = [0, 0, 0, 0, 0, 0, 0, 0];
         $leftIntra4x4Mode = [-1, -1, -1, -1];
         $topIntra4x4Mode = array_fill(0, $mbWidth * 4, -1);
+
         for ($mbY = 0; $mbY < $mbHeight; $mbY++) {
             $leftAvailable = false;
             $leftNz = [0, 0, 0, 0, 0, 0, 0, 0];
             $leftIntra4x4Mode = [-1, -1, -1, -1];
             for ($mbX = 0; $mbX < $mbWidth; $mbX++) {
-                $mbBits = $this->encodeMacroblock($mbX, $mbY, $yPlane, $uPlane, $vPlane, $leftAvailable, $leftNz, $mbY > 0, $topNzLuma, $topNzCb, $topNzCr, $leftIntra4x4Mode, $topIntra4x4Mode);
+                if ($sliceType === 0 && $this->refYPlane !== null) {
+                    // P帧编码
+                    $mbBits = $this->encodePMacroblock(
+                        $mbX, $mbY, $yPlane, $uPlane, $vPlane,
+                        $leftAvailable, $leftNz, $mbY > 0,
+                        $topNzLuma, $topNzCb, $topNzCr,
+                        $leftIntra4x4Mode, $topIntra4x4Mode,
+                        $this->refYPlane
+                    );
+                } else {
+                    // I帧编码
+                    $mbBits = $this->encodeMacroblock(
+                        $mbX, $mbY, $yPlane, $uPlane, $vPlane,
+                        $leftAvailable, $leftNz, $mbY > 0,
+                        $topNzLuma, $topNzCb, $topNzCr,
+                        $leftIntra4x4Mode, $topIntra4x4Mode
+                    );
+                }
                 $bits .= $mbBits;
                 $leftAvailable = true;
             }
@@ -553,7 +602,18 @@ class H264Encoder
         while (strlen($bits) % 8 != 0) $bits .= '0';
 
         $rbsp = $this->bitsToBytes($bits);
-        $nal = $this->rbspToNal($rbsp, $isIDR ? 5 : 1);
+        $nalType = 1; // 非IDR片
+        if ($isIDR) $nalType = 5; // IDR片
+        $nal = $this->rbspToNal($rbsp, $nalType);
+
+        // 保存当前帧作为下一帧的参考帧
+        $this->refYPlane = $yPlane;
+        $this->refUPlane = $uPlane;
+        $this->refVPlane = $vPlane;
+
+        // 更新帧序号
+        $this->frameNum++;
+        $this->poc += 2;
 
         return $nal;
     }
@@ -1220,20 +1280,6 @@ class H264Encoder
                 $intra4x4PredModes[$blkIdx] = $bestMode;
             }
         }
-        
-        if ($mbX === 0 && $mbY === 0) {
-            echo "DEBUG: MB(0,0) selected modes: ";
-            for ($i = 0; $i < 16; $i++) {
-                echo $intra4x4PredModes[$i] . ",";
-            }
-            echo "\n";
-            echo "DEBUG: MB(0,0) lumaAcScanOrder mapping:\n";
-            for ($scanIdx = 0; $scanIdx < 16; $scanIdx++) {
-                $rasterIdx = $lumaAcScanOrder[$scanIdx];
-                echo "  scanIdx=$scanIdx, rasterIdx=$rasterIdx, mode=" . $intra4x4PredModes[$rasterIdx] . "\n";
-            }
-        }
-
         $quant4x4Luma = array_fill(0, 16, array_fill(0, 16, 0));
         $nzCache = array_fill(0, 24, 0);
         $cbpLuma = 0;
@@ -2276,5 +2322,104 @@ class H264Encoder
             }
         }
         return "\x00\x00\x00\x01" . $header . $output;
+    }
+
+    /**
+     * 运动估计：在参考帧中搜索最佳匹配块
+     * @param array $currentBlock 当前16x16块
+     * @param string $refPlane 参考帧Y平面
+     * @param int $mbX 宏块X坐标
+     * @param int $mbY 宏块Y坐标
+     * @param int $searchRange 搜索范围（默认16像素）
+     * @return array [mvX, mvY, sad] 运动向量和SAD值
+     */
+    public function motionEstimate16x16(array $currentBlock, string $refPlane, int $mbX, int $mbY, int $searchRange = 16): array
+    {
+        $bestMV = [0, 0];
+        $bestSAD = PHP_INT_MAX;
+
+        $origX = $mbX * 16;
+        $origY = $mbY * 16;
+
+        // 简化版搜索：只在整数像素位置搜索
+        for ($dy = -$searchRange; $dy <= $searchRange; $dy++) {
+            for ($dx = -$searchRange; $dx <= $searchRange; $dx++) {
+                $rx = $origX + $dx;
+                $ry = $origY + $dy;
+
+                // 边界检查
+                if ($rx < 0 || $rx + 16 > $this->width || $ry < 0 || $ry + 16 > $this->height) {
+                    continue;
+                }
+
+                $sad = 0;
+                for ($y = 0; $y < 16; $y++) {
+                    for ($x = 0; $x < 16; $x++) {
+                        $refIdx = ($ry + $y) * $this->width + ($rx + $x);
+                        $ref = ord($refPlane[$refIdx]);
+                        $cur = $currentBlock[$y][$x];
+                        $sad += abs($cur - $ref);
+                    }
+                }
+
+                if ($sad < $bestSAD) {
+                    $bestSAD = $sad;
+                    $bestMV = [$dx, $dy];
+                }
+            }
+        }
+
+        return [$bestMV[0], $bestMV[1], $bestSAD];
+    }
+
+    /**
+     * 编码P帧宏块（使用P_Skip模式）
+     * P_Skip = mb_type=0 for P slice
+     * 含义：使用预测运动向量(0,0)，复制参考帧对应位置，无残差
+     */
+    public function encodePMacroblock(
+        int $mbX,
+        int $mbY,
+        string $yPlane,
+        string $uPlane,
+        string $vPlane,
+        bool $leftAvailable,
+        array &$leftNz,
+        bool $topAvailable,
+        array &$topNzLuma,
+        array &$topNzCb,
+        array &$topNzCr,
+        array &$leftIntra4x4Mode,
+        array &$topIntra4x4Mode,
+        string $refYPlane
+    ): string {
+        // P_Skip模式: mb_type = 0 (无残差，使用预测MV=(0,0))
+        $bits = '';
+        $bits .= $this->ue(0); // mb_type = 0 for P_Skip
+
+        // 更新邻居nz缓存（所有块都是0）
+        for ($by = 0; $by < 4; $by++) {
+            $leftNz[$by] = 0;
+        }
+        for ($bx = 0; $bx < 4; $bx++) {
+            $topBlkX = $mbX * 4 + $bx;
+            if ($topBlkX < count($topNzLuma)) {
+                $topNzLuma[$topBlkX] = 0;
+            }
+        }
+        $leftNz[4] = 0;
+        $leftNz[5] = 0;
+        // 同步U/V的nz
+        for ($bx = 0; $bx < 2; $bx++) {
+            $topBlkX = $mbX * 2 + $bx;
+            if ($topBlkX < count($topNzCb)) {
+                $topNzCb[$topBlkX] = 0;
+            }
+            if ($topBlkX < count($topNzCr)) {
+                $topNzCr[$topBlkX] = 0;
+            }
+        }
+
+        return $bits;
     }
 }
