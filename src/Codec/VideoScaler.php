@@ -2,6 +2,11 @@
 
 namespace Xiaosongshu\Flv2mp4\Codec;
 
+/**
+ * @purpose 视频缩放器
+ * @author yanglong
+ * @time 2026年7月23日15:28:20
+ */
 class VideoScaler
 {
     /**

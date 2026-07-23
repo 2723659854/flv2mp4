@@ -2,6 +2,11 @@
 
 namespace Xiaosongshu\Flv2mp4\Codec;
 
+/**
+ * @purpose nalu数据处理工具
+ * @author yanglong
+ * @time 2026年7月23日15:17:16
+ */
 class NalUtil
 {
     /**

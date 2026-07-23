@@ -2,6 +2,11 @@
 
 namespace Xiaosongshu\Flv2mp4\Codec;
 
+/**
+ * @purpose 逆离散余弦变换
+ * @author yanglong
+ * @time 2026年7月23日15:27:12
+ */
 trait TransformTrait
 {
     /**
@@ -18,7 +23,7 @@ trait TransformTrait
     }
 
     /**
-     * 4x4反量化 - 参考 Rust dequant.rs dequant_4x4
+     * 4x4反量化
      * 公式: (level * table[qp][pos] + 32) >> 6
      * table 已包含 INIT * scaling_matrix << (qp/6 + 2)
      * @param array $coeff 16个系数（raster顺序）
@@ -32,28 +37,16 @@ trait TransformTrait
         $qp = max(0, min(51, $qp));
         // type 0=intra Y (list 0), type 1=Cb (list 1), type 2=Cr (list 2)
         $listIdx = $type;
-
-        $dbg = false;
-        if ($qp === 27 && $type === 0 && $coeff[0] == 11) {
-            $dbg = true;
-            //echo "[DEQUANT_DBG] qp=$qp type=$type listIdx=$listIdx coeff[0]={$coeff[0]}\n";
-            //echo "[DEQUANT_DBG] table[0][27][0]={$this->dequant4Table[0][27][0]}\n";
-        }
-
         for ($i = 0; $i < 16; $i++) {
             if ($coeff[$i] == 0) continue;
-            // PHP的>>对负数是算术右移（向负无穷取整），与Rust/FFmpeg一致
             // intdiv是向0取整，对负数结果错误
             $out[$i] = ($coeff[$i] * $this->dequant4Table[$listIdx][$qp][$i] + 32) >> 6;
-            //if ($dbg && $i < 4) {
-                //echo "[DEQUANT_DBG]   i=$i coeff={$coeff[$i]} table={$this->dequant4Table[$listIdx][$qp][$i]} out={$out[$i]}\n";
-            //}
         }
         return $out;
     }
 
     /**
-     * 4x4 IDCT整数逆变换 (直接翻译自Rust idct.rs idct4x4_add)
+     * 4x4 IDCT整数逆变换
      * 变换顺序: 先行变换(混合列), 后列变换(混合行) + >>6
      * >>1截断不可交换, 顺序必须与Rust/FFmpeg一致
      */
@@ -96,7 +89,7 @@ trait TransformTrait
     }
 
     /**
-     * 亮度DC 4x4逆哈达玛+反量化 (参考Rust idct.rs luma_dc_dequant_idct)
+     * 亮度DC 4x4逆哈达玛+反量化
      * 输入: raster顺序的16个DC系数
      * 输出: raster顺序的16个反量化DC值
      * 变换: 先Hadamard，再乘qmul，最后 >> 8
@@ -147,7 +140,7 @@ trait TransformTrait
     }
 
     /**
-     * 色度DC 2x2逆哈达玛+反量化 (参考Rust idct.rs chroma_dc_dequant_idct)
+     * 色度DC 2x2逆哈达玛+反量化
      * output[i] = (hadamard_result * qmul) >> 7
      */
     public function chromaDcDequantIdct(array $dc2x2, int $qmul): array
@@ -162,7 +155,6 @@ trait TransformTrait
         $b = $c - $d;
         $c = $c + $d;
 
-        // 参考Rust idct.rs chroma_dc_dequant_idct: 直接乘qmul，然后 >> 7
         // 没有像亮度DC那样的+128舍入偏置
         // 使用intdiv确保负数算术右移
         $out = array_fill(0, 4, 0);

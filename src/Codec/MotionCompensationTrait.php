@@ -2,6 +2,11 @@
 
 namespace Xiaosongshu\Flv2mp4\Codec;
 
+/**
+ * @purpose 亮度色度运动补偿
+ * @author yanglong
+ * @time 2026年7月23日15:14:28
+ */
 trait MotionCompensationTrait
 {
     /**

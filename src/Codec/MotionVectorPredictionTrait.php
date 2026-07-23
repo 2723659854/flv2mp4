@@ -2,6 +2,11 @@
 
 namespace Xiaosongshu\Flv2mp4\Codec;
 
+/**
+ * @purpose 宏运动矢量预测
+ * @author yanglong
+ * @time 2026年7月23日15:15:58
+ */
 trait MotionVectorPredictionTrait
 {
     /**
@@ -59,7 +64,6 @@ trait MotionVectorPredictionTrait
 
     /**
      * P_Skip 宏块运动向量预测 (H.264 8.4.1.1节)
-     * 参考 WeDeo predict_mv_skip_full 实现
      * 特殊快速路径：A或B不可用时直接返回(0,0)；A或B为ref=0且mv=0时直接返回(0,0)
      * @param array|null $mvLeft 左邻居 [mvX, mvY, refIdx]，null表示不可用
      * @param array|null $mvTop 上邻居 [mvX, mvY, refIdx]，null表示不可用

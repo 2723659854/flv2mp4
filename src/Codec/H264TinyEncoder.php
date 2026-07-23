@@ -2,6 +2,11 @@
 
 namespace Xiaosongshu\Flv2mp4\Codec;
 
+/**
+ * @purpose 微型h264编辑器，只做尺寸缩放，并不会编码
+ * @author yanglong
+ * @time 2026年7月23日14:51:58
+ */
 class H264TinyEncoder {
     private $width;
     private $height;

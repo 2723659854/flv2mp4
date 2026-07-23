@@ -2,6 +2,11 @@
 
 namespace Xiaosongshu\Flv2mp4\Codec;
 
+/**
+ * @purpose 宏块解码器
+ * @author yanglong
+ * @time 2026年7月23日14:57:14
+ */
 trait MacroblockDecodingTrait
 {
     /**
@@ -10,25 +15,7 @@ trait MacroblockDecodingTrait
      */
     public function decodeMacroblock(int $mbX, int $mbY, int $sliceQp, int $sliceType): int
     {
-        //$bitBefore = $this->reader->getBitPosition();
-
-        //$dbgMb = ($mbX === 4 && $mbY === 0);
-//        if ($dbgMb) echo "[DBG_MB(4,0)] bitPosBeforeMbType=" . $this->reader->getBitPosition() . "\n";
-//        if (($mbX === 1 || $mbX === 2) && $mbY === 0) {
-//            echo "[DBG_MB($mbX,$mbY)] bitPosBeforeMbType=$bitBefore\n";
-//        }
         $mbType = $this->reader->readUe();
-        //echo "[DECODER] MB($mbX,$mbY): 读取 mb_type = {$mbType}\n";
-        //if ($dbgMb) echo "[DBG_MB(4,0)] bitPosAfterMbType=" . $this->reader->getBitPosition() . "\n";
-        //if (($mbX === 1 || $mbX === 2) && $mbY === 0) {
-            //echo "[DBG_MB($mbX,$mbY)] bitPosAfterMbType=" . $this->reader->getBitPosition() . " mb_type=$mbType\n";
-        //}
-
-        $isDebugSlice = ($this->debugTargetSlice > 0 && $this->debugSliceIndex === $this->debugTargetSlice);
-        if ($isDebugSlice && $this->debugMbTraceFh) {
-            fwrite($this->debugMbTraceFh, "MB($mbX,$mbY): mb_type=$mbType");
-        }
-
         $mbWidth = $this->picWidthInMbs;
         $mbIdx = $mbY * $mbWidth + $mbX;
         $this->mbTypeForDeblock[$mbIdx] = $mbType;
@@ -48,12 +35,8 @@ trait MacroblockDecodingTrait
         }
         // 其他类型（B帧等）暂时填充灰色
         else {
-            //echo "[DECODER] MB($mbX,$mbY): 不支持的sliceType={$sliceType}，填充灰色\n";
             $this->fillMacroblockGray($mbX, $mbY);
         }
-
-        //$bitAfter = $this->reader->getBitPosition();
-        //echo "[DECODER] MB($mbX,$mbY): bitPos before={$bitBefore} after={$bitAfter} consumed=" . ($bitAfter - $bitBefore) . "\n";
         return $mbQpDelta;
     }
 
@@ -113,14 +96,13 @@ trait MacroblockDecodingTrait
         $modes = array_fill(0, 16, 0);
         $modeCache = array_fill(0, 16, -1);
         $scanToRaster = [0, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15];
-        //$bitPosStart = $this->reader->getBitPosition();
 
         for ($scanIdx = 0; $scanIdx < 16; $scanIdx++) {
             $rasterIdx = $scanToRaster[$scanIdx];
             $blkX = $rasterIdx % 4;
             $blkY = (int)($rasterIdx / 4);
 
-            // 获取左边块的预测模式（参考wedeo cavlc.rs 第912-919行）
+            // 获取左边块的预测模式
             $leftMode = -1;
             if ($blkX > 0) {
                 $leftMode = $modeCache[$rasterIdx - 1];
@@ -128,7 +110,7 @@ trait MacroblockDecodingTrait
                 $leftMode = $this->intra4x4LeftModes[$blkY];
             }
 
-            // 获取上面块的预测模式（参考wedeo cavlc.rs 第922-929行）
+            // 获取上面块的预测模式
             $topMode = -1;
             if ($blkY > 0) {
                 $topMode = $modeCache[$rasterIdx - 4];
@@ -139,28 +121,17 @@ trait MacroblockDecodingTrait
 
             // H.264标准8.3.1.1节：如果任一邻居不可用(mode<0)，predicted=DC(2)
             // 否则 predicted=min(leftMode, topMode)
-            // 与FFmpeg pred_intra_mode()和wedeo cavlc.rs完全一致
             $minMode = min($leftMode, $topMode);
             $predicted = ($minMode < 0) ? 2 : $minMode;
-            //$bitPosBefore = $this->reader->getBitPosition();
             $prevFlag = $this->reader->readU(1);
             if ($prevFlag) {
                 $mode = $predicted;
-                $remMode = -1;
             } else {
                 $remMode = $this->reader->readU(3);
                 $mode = $remMode >= $predicted ? $remMode + 1 : $remMode;
             }
             $modeCache[$rasterIdx] = $mode;
             $modes[$rasterIdx] = $mode;
-            //if ($mbX === 2 && $mbY === 0) {
-                //$bitsRead = $prevFlag ? 1 : 4;
-                //echo "[DBG_MODE scan=$scanIdx raster=$rasterIdx blk($blkX,$blkY)] left=$leftMode top=$topMode pred=$predicted prev=$prevFlag rem=$remMode mode=$mode bitPos=$bitPosBefore bits=$bitsRead\n";
-            //}
-            //if ($mbX === 1 && $mbY === 0) {
-                //$bitsRead = $prevFlag ? 1 : 4;
-                //echo "[DBG_MODE_MB1 scan=$scanIdx raster=$rasterIdx blk($blkX,$blkY)] left=$leftMode top=$topMode pred=$predicted prev=$prevFlag rem=$remMode mode=$mode bitPos=$bitPosBefore bits=$bitsRead\n";
-            //}
         }
 
         // 更新跨宏块预测模式缓存
@@ -185,12 +156,6 @@ trait MacroblockDecodingTrait
             $mbQpDelta = $this->reader->readSe();
         }
         $qp = max(0, min(51, $sliceQp + $mbQpDelta));
-        //$bitPosEnd = $this->reader->getBitPosition();
-//        if ($mbX === 1 && $mbY === 1) {
-//            echo "[DBG_MB11] sliceQp=$sliceQp mbQpDelta=$mbQpDelta qp=$qp\n";
-//        }
-        //echo "[DECODER] MB($mbX,$mbY): I4x4 modes=" . implode(',', $modes) . " chromaPred=$chromaPredMode cbpCode=$cbpCode cbp=$cbp bits=" . ($bitPosEnd - $bitPosStart) . "\n";
-
         $yCoeffs = array_fill(0, 16, array_fill(0, 16, 0));
         $cbCoeffs = array_fill(0, 4, array_fill(0, 16, 0));
         $crCoeffs = array_fill(0, 4, array_fill(0, 16, 0));
@@ -226,19 +191,13 @@ trait MacroblockDecodingTrait
         $scanToRaster = [0, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15];
         $lumaCbp = $cbp & 0x0F;
 
-        // 按扫描顺序解码（与wedeo cavlc.rs第1379-1419行完全一致）
+        // 按扫描顺序解码
         // i8x8: 8x8块索引(0-3), i4x4: 8x8块内的4x4子块索引(0-3)
         for ($i8x8 = 0; $i8x8 < 4; $i8x8++) {
             if (($lumaCbp & (1 << $i8x8)) !== 0) {
-//                if ($mbX === 1 && $mbY === 0) {
-//                    echo "[DBG_CBP MB(1,0)] i8x8=$i8x8 (8x8块), bit=" . (1 << $i8x8) . ", cbp_bit_set=1\n";
-//                }
                 for ($i4x4 = 0; $i4x4 < 4; $i4x4++) {
                     $scanIdx = $i8x8 * 4 + $i4x4;
                     $rasterIdx = $scanToRaster[$scanIdx];
-//                    if ($mbX === 1 && $mbY === 0) {
-//                        echo "[DBG_CBP MB(1,0)]   i4x4=$i4x4, scanIdx=$scanIdx, rasterIdx=$rasterIdx\n";
-//                    }
                     $nc = $this->computeNc($rasterIdx, $mbX, $mbY, $nzCache, $leftNz, $topNz, $leftAvailable, $topAvailable);
                     $oldDbg = $this->debugResidual;
                     $isTargetBlk = ($mbX === 2 && $mbY === 0 && $rasterIdx === 2);
@@ -247,55 +206,18 @@ trait MacroblockDecodingTrait
                     $isMb11Any = ($mbX === 1 && $mbY === 1);
                     $isMb01Any = ($mbX === 0 && $mbY === 1);
                     if ($isTargetBlk || $isMb10 || $isMb11blk8 || $isMb11Any || $isMb01Any) {
-                        //$bp = $this->reader->getBitPosition();
-                        //$bits16 = $this->reader->peek(16);
-                        //echo "[DEBUG MB($mbX,$mbY) Blk$rasterIdx] before decode: bitPos=$bp nc=$nc peek16=0x" . sprintf('%04X', $bits16) . " (" . str_pad(decbin($bits16), 16, '0', STR_PAD_LEFT) . ")\n";
-                        //echo "[DEBUG MB($mbX,$mbY) Blk$rasterIdx] nzCache[0-7]=" . implode(',', array_slice($nzCache, 0, 8)) . " nzCache[8-15]=" . implode(',', array_slice($nzCache, 8, 8)) . "\n";
-                        //echo "[DEBUG MB($mbX,$mbY) Blk$rasterIdx] leftNz=" . implode(',', $leftNz) . "\n";
-                        $this->debugResidual = true;
+                       $this->debugResidual = true;
                     }
                     $coeffs = $this->decodeResidualBlock(16, $nc);
                     $this->debugResidual = $oldDbg;
-                    $totalCoeff = 0;
-                    for ($i = 0; $i < 16; $i++) if ($coeffs[$i] != 0) $totalCoeff++;
                     for ($i = 0; $i < 16; $i++) $yCoeffs[$rasterIdx][$i] = $coeffs[$i];
                     $yCoeffs[$rasterIdx] = $this->zigzagToRaster($yCoeffs[$rasterIdx]);
-//                    if ($mbX === 2 && $mbY === 0) {
-//                        echo "[DEBUG MB(2,0) Blk$rasterIdx] nc=$nc coeffs zigzag: " . implode(',', $coeffs) . "\n";
-//                    }
-//                    if ($isMb10) {
-//                        echo "[DEBUG MB(1,0) Blk$rasterIdx] nc=$nc coeffs zigzag: " . implode(',', $coeffs) . " nz=$totalCoeff\n";
-//                    }
-//                    if ($isMb11blk8) {
-//                        echo "[DEBUG MB(1,1) Blk8] nc=$nc coeffs zigzag: " . implode(',', $coeffs) . " nz=$totalCoeff\n";
-//                        echo "[DEBUG MB(1,1) Blk8] leftNz=" . implode(',', $leftNz) . " topNz[4..8]=" . implode(',', array_slice($topNz, 4, 4)) . "\n";
-//                    }
-//                    if ($mbX === 0 && $mbY === 0) {
-//                        echo "[DEBUG MB(0,0) Blk$rasterIdx] qp=$qp nc=$nc scanIdx=$scanIdx\n";
-//                        echo "[DEBUG MB(0,0) Blk$rasterIdx] coeffs zigzag: " . implode(',', $coeffs) . "\n";
-//                        echo "[DEBUG MB(0,0) Blk$rasterIdx] nzCount=" . ($totalCoeff ?? 0) . "\n";
-//                    }
                     $yCoeffs[$rasterIdx] = $this->dequantize4x4($yCoeffs[$rasterIdx], 0, $qp);
-//                    if ($mbX === 0 && $mbY === 0) {
-//                        echo "[DEBUG MB(0,0) Blk$rasterIdx] after dequant: " . implode(',', $yCoeffs[$rasterIdx]) . "\n";
-//                    }
-//                    if ($mbX === 2 && $mbY === 0 && $rasterIdx === 2) {
-//                        echo "[DEBUG MB(2,0) Blk2] after dequant: " . implode(',', $yCoeffs[$rasterIdx]) . "\n";
-//                    }
-//                    if ($isMb10) {
-//                        echo "[DEBUG MB(1,0) Blk$rasterIdx] after dequant: " . implode(',', $yCoeffs[$rasterIdx]) . "\n";
-//                    }
-//                    if ($isMb11blk8) {
-//                        echo "[DEBUG MB(1,1) Blk8] after dequant (raster): " . implode(',', $yCoeffs[$rasterIdx]) . " qp=$qp\n";
-//                    }
                     $nzCount = 0;
                     for ($i = 0; $i < 16; $i++) if ($coeffs[$i] != 0) $nzCount++;
                     $nzCache[$rasterIdx] = $nzCount;
                 }
             } else {
-//                if ($mbX === 1 && $mbY === 0) {
-//                    echo "[DBG_CBP MB(1,0)] i8x8=$i8x8 (8x8块), bit=" . (1 << $i8x8) . ", cbp_bit_set=0, all 4x4 blocks skipped\n";
-//                }
                 for ($i4x4 = 0; $i4x4 < 4; $i4x4++) {
                     $scanIdx = $i8x8 * 4 + $i4x4;
                     $rasterIdx = $scanToRaster[$scanIdx];
@@ -316,7 +238,7 @@ trait MacroblockDecodingTrait
         if ($chromaCbp > 0) {
             $cbDc = $this->decodeResidualBlock(4, -1);
             $crDc = $this->decodeResidualBlock(4, -1);
-            // 注意：不初始化nzCache[16-23]为DC计数，tinyh264的totalCoeff[16-23]只存AC计数
+            // 注意：不初始化nzCache[16-23]为DC计数，totalCoeff[16-23]只存AC计数
         }
 
         // 色度AC残差 - 条件是chromaCbp >= 2
@@ -333,7 +255,7 @@ trait MacroblockDecodingTrait
                 $cbCoeffs[$blk] = $this->zigzagToRaster($cbCoeffs[$blk]);
                 // 反量化AC系数（coeffs[0]保持为0，DC单独处理）
                 $cbCoeffs[$blk] = $this->dequantize4x4($cbCoeffs[$blk], 1, $chromaQp);
-                // AC-only count（参考tinyh264：totalCoeff只存AC计数）
+                // AC-only count
                 $nzCount = 0;
                 for ($i = 0; $i < 15; $i++) if ($ac[$i] != 0) $nzCount++;
                 $nzCache[$blockIdx] = $nzCount;
@@ -349,7 +271,7 @@ trait MacroblockDecodingTrait
                 $crCoeffs[$blk] = $this->zigzagToRaster($crCoeffs[$blk]);
                 // 反量化AC系数（coeffs[0]保持为0，DC单独处理）
                 $crCoeffs[$blk] = $this->dequantize4x4($crCoeffs[$blk], 2, $chromaQp);
-                // AC-only count（参考tinyh264：totalCoeff只存AC计数）
+                // AC-only count
                 $nzCount = 0;
                 for ($i = 0; $i < 15; $i++) if ($ac[$i] != 0) $nzCount++;
                 $nzCache[$blockIdx] = $nzCount;
@@ -390,14 +312,13 @@ trait MacroblockDecodingTrait
         }
 
         // 色度DC逆哈达玛 + AC IDCT
-        // 参考Rust mb.rs decode_chroma:
         //   - AC存在 (chromaCbp>=2): DC放入coeffs[0], 一次IDCT (单一+32偏置, >>6)
         //   - DC-only (chromaCbp==1): dc_add = (dc + 32) >> 6, 加到所有像素
         $uPixels = array_fill(0, 8, array_fill(0, 8, 0));
         $vPixels = array_fill(0, 8, array_fill(0, 8, 0));
 
         // 色度DC: 逆Hadamard + 反量化
-        // 参考Rust: qmul = dequant4Table[list_idx=1+plane_idx][chromaQp][0]
+        // qmul = dequant4Table[list_idx=1+plane_idx][chromaQp][0]
         // 输入为原始DC系数（不预反量化）
         $cbQmul = $this->dequant4Table[1][$chromaQp][0];
         $crQmul = $this->dequant4Table[2][$chromaQp][0];
@@ -462,7 +383,7 @@ trait MacroblockDecodingTrait
             }
         }
 
-        // 保存非零系数数供相邻宏块使用（参考wedeo Rust update_after_mb）
+        // 保存非零系数数供相邻宏块使用
         // 亮度raster布局：
         //  0  1  2  3
         //  4  5  6  7
@@ -506,9 +427,7 @@ trait MacroblockDecodingTrait
      */
     public function decodeIntra16x16(int $mbX, int $mbY, int $mbType, int $qp): int
     {
-        //echo "[DECODER] MB($mbX,$mbY): === Intra16x16 解码 ===\n";
-
-        // 参考 C语言编码器 cavlc_mb_header_i 的公式：
+        // C语言编码器 cavlc_mb_header_i 的公式：
         // mb_type = 1 + pred_mode + cbp_chroma * 4 + (cbp_luma == 0 ? 0 : 12)
         // pred_mode: 0=垂直, 1=水平, 2=DC, 3=平面
         // cbp_chroma: 0=none, 1=DC only, 2=DC+AC
@@ -520,27 +439,18 @@ trait MacroblockDecodingTrait
         $cbpChroma = intdiv(($mbType - 1 - $base), 4);
         $cbpLuma = $hasLumaAc ? 15 : 0;
 
-        //echo "[DECODER] MB($mbX,$mbY): mbType={$mbType}, predMode={$predMode}, cbpLuma={$cbpLuma}, cbpChroma={$cbpChroma}\n";
 
         // I_16x16宏块总是编码chroma_pred_mode（参考C语言编码器cavlc_mb_header_i）
         // chroma = CHROMA_FORMAT == CHROMA_420 || CHROMA_FORMAT == CHROMA_422，对于YUV420总是true
         // 编码顺序: mb_type -> chroma_pred_mode -> mb_qp_delta -> 亮度DC系数
-        //$bitBeforeChroma = $this->reader->getBitPosition();
         $chromaPredMode = $this->reader->readUe();
-        //$bitAfterChroma = $this->reader->getBitPosition();
         if ($chromaPredMode > 3) {
-            //echo "[DECODER] MB($mbX,$mbY): 错误 - chromaPredMode=$chromaPredMode 超出范围 (0-3) bitPos=$bitBeforeChroma consumed=" . ($bitAfterChroma - $bitBeforeChroma) . "\n";
-            // 打印接下来的16个比特用于调试
-            //$peek16 = $this->reader->peek(16);
-            //echo "[DECODER] MB($mbX,$mbY): next16bits=" . sprintf('%016b', $peek16) . " bitPos=" . $this->reader->getBitPosition() . "\n";
             $chromaPredMode = 0; // 回退到DC模式
         }
-        //echo "[DECODER] MB($mbX,$mbY): 读取 chromaPredMode = $chromaPredMode\n";
 
         // mb_qp_delta - I_16x16无论cbp如何都要读取（H.264标准 7.4.5.2）
         $mbQpDelta = $this->reader->readSe();
         $qp = max(0, min(51, $qp + $mbQpDelta));
-        //echo "[DECODER] MB($mbX,$mbY): 读取 mbQpDelta = $mbQpDelta, qp = $qp\n";
 
         // 亮度DC系数
         // 参考x264编码顺序: 亮度DC -> 亮度AC -> 色度DC -> 色度AC
@@ -569,7 +479,7 @@ trait MacroblockDecodingTrait
             for ($x = 0; $x < 2; $x++) $topNz[$this->picWidthInMbs * 4 + $this->picWidthInMbs * 2 + $mbX * 2 + $x] = $this->nzTopRowChroma[$this->picWidthInMbs * 2 + $mbX * 2 + $x];
         }
 
-        // Intra16x16总是解码亮度DC（参考tinyh264 h264bsd_macroblock_layer.c 第721-729行）
+        // Intra16x16总是解码亮度DC
         // 不论cbpLuma是否为0，DC系数总是存在
         $predNz = 0;
         $count = 0;
@@ -590,27 +500,10 @@ trait MacroblockDecodingTrait
             $avgNz = intdiv($predNz + intdiv($count, 2), $count);
             $yDcNc = min($avgNz, 16);
         }
-        //$dbgI16 = ($mbX === 3 && $mbY === 0);
-        //if ($dbgI16) {
-            //echo "[DBG_I16 MB(3,0)] leftNz=" . implode(',', array_slice($leftNz, 0, 4)) . " leftAvail=" . ($leftAvailable ? 1 : 0) . " topAvail=" . ($topAvailable ? 1 : 0) . "\n";
-            //echo "[DBG_I16 MB(3,0)] yDcNc=$yDcNc bitPosBefore=" . $this->reader->getBitPosition() . "\n";
-        //}
         if ($mbX === 0 && $mbY === 0) $this->debugResidual = true;
         if ($mbX === 3 && $mbY === 0) $this->debugResidual = true;
-        //$bitBeforeDc = $this->reader->getBitPosition();
         $yDcZigzag = $this->decodeResidualBlock(16, $yDcNc);
-        //$bitAfterDc = $this->reader->getBitPosition();
         $this->debugResidual = false;
-        
-        //$dcNzCount = 0;
-        //for ($i = 0; $i < 16; $i++) {
-            //if ($yDcZigzag[$i] != 0) $dcNzCount++;
-        //}
-        
-//        if ($dbgI16) {
-//            echo "[DBG_I16 MB(3,0)] yDcZigzag=" . implode(',', $yDcZigzag) . " nzCount=$dcNzCount\n";
-//            echo "[DBG_I16 MB(3,0)] bitPosAfter=$bitAfterDc dcConsumed=" . ($bitAfterDc - $bitBeforeDc) . "\n";
-//        }
         // decodeResidualBlock返回zig-zag顺序，需先转为raster顺序
         // raster顺序在宏块DC语境下对应4x4矩阵: row=block_row, col=block_col
         // 这是Hadamard变换所需的输入顺序
@@ -621,26 +514,18 @@ trait MacroblockDecodingTrait
         $qpClamped = max(0, min(51, $qp));
 
         // 亮度DC: 逆Hadamard + 反量化
-        // 参考Rust mb.rs: qmul = dequant4Table[list_idx=0][qp][0]
+        // qmul = dequant4Table[list_idx=0][qp][0]
         // 输入为raster顺序的原始DC系数（不预反量化），输出为raster顺序的反量化值
         $lumaQmul = $this->dequant4Table[0][$qpClamped][0];
         $yDcResultBlockOrder = $this->lumaDcDequantIdct($yDcRaster, $lumaQmul);
 
         if ($mbX === 0 && $mbY === 0) {
-            //echo "[DEBUG MB(0,0)] DC raster: " . implode(',', $yDcRaster) . "\n";
-            //echo "[DEBUG MB(0,0)] qp=$qp lumaQmul=$lumaQmul\n";
-            //echo "[DEBUG MB(0,0)] DC Hadamard (raster order): " . implode(',', $yDcResultBlockOrder) . "\n";
             $this->debugLastQp = $qp;
             $this->debugLastDcScan = $yDcRaster;
             $this->debugLastDcRaster = $yDcRaster;
             $this->debugLastQmul = $lumaQmul;
             $this->debugLastDcResult = $yDcResultBlockOrder;
         }
-//        if ($mbX === 1 && $mbY === 0) {
-//            echo "[DEBUG MB(1,0)] DC raster: " . implode(',', $yDcRaster) . "\n";
-//            echo "[DEBUG MB(1,0)] qp=$qp lumaQmul=$lumaQmul\n";
-//            echo "[DEBUG MB(1,0)] DC Hadamard (raster order): " . implode(',', $yDcResultBlockOrder) . "\n";
-//        }
 
         $yAcCoeffs = array_fill(0, 16, array_fill(0, 16, 0));
         $blockIndexToRaster = [0, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15];
@@ -658,14 +543,10 @@ trait MacroblockDecodingTrait
                 }
                 // 反量化AC系数（coeffs[0]保持为0，DC单独处理）
                 $yAcCoeffs[$rasterIdx] = $this->dequantize4x4($yAcCoeffs[$rasterIdx], 0, $qp);
-                // AC-only count（参考tinyh264：totalCoeff[blockIndex]只存AC计数，不包括DC）
+                // AC-only count（totalCoeff[blockIndex]只存AC计数，不包括DC）
                 $nzCount = 0;
                 for ($i = 0; $i < 15; $i++) if ($ac[$i] != 0) $nzCount++;
                 $nzCache[$rasterIdx] = $nzCount;
-//                if ($mbX === 0 && $mbY === 0 && $blkIdx === 0) {
-//                    echo "[DEBUG MB(0,0) Blk0] nc=$nc AC scan: " . implode(',', $ac) . "\n";
-//                    echo "[DEBUG MB(0,0) Blk0] AC raster+dequant: " . implode(',', $yAcCoeffs[$rasterIdx]) . "\n";
-//                }
             }
         }
 
@@ -681,7 +562,7 @@ trait MacroblockDecodingTrait
         }
 
         // 色度DC: 逆Hadamard + 反量化
-        // 参考Rust mb.rs decode_chroma: qmul = dequant4Table[list_idx=1+plane_idx][chromaQp][0]
+        // qmul = dequant4Table[list_idx=1+plane_idx][chromaQp][0]
         // 输入为原始DC系数（不预反量化），输出为raster顺序的反量化值
         // Cb用list_idx=1, Cr用list_idx=2 (都是intra scaling matrix)
         $cbQmul = $this->dequant4Table[1][$chromaQp][0];
@@ -695,7 +576,7 @@ trait MacroblockDecodingTrait
         // 色度AC残差 - 条件是cbpChroma >= 2
         // DC残差不进入IDCT，直接加到像素上；AC残差单独处理（coeffs[0]保持为0）
         if ($cbpChroma >= 2) {
-            // Cb块空间布局（根据tinyh264 N_A_4x4B/N_B_4x4B表）：
+            // Cb块空间布局
             //   16 17  (上行)
             //   18 19  (下行)
             // 按递增顺序解码：16,17,18,19
@@ -730,7 +611,7 @@ trait MacroblockDecodingTrait
         }
 
         // 亮度预测 + 残差
-        // 参考Rust mb.rs decode_intra16x16:
+        // decode_intra16x16:
         //   - AC存在: DC放入coeffs[0], 一次IDCT (单一+32偏置, >>6)
         //   - DC-only: dc_add = (dc + 32) >> 6, 加到所有像素
         $lumaPred = $this->intra16x16Prediction($mbX, $mbY, $predMode);
@@ -782,7 +663,7 @@ trait MacroblockDecodingTrait
         }
 
         // 色度预测+残差
-        // 参考Rust mb.rs decode_chroma:
+        // decode_chroma:
         //   - AC存在 (cbpChroma>=2): DC放入coeffs[0], 一次IDCT (单一+32偏置, >>6)
         //   - DC-only (cbpChroma==1): dc_add = (dc + 32) >> 6, 加到所有像素
         $cbPred = $this->intraChromaPrediction($mbX, $mbY, $chromaPredMode, 0);
@@ -858,7 +739,7 @@ trait MacroblockDecodingTrait
             }
         }
 
-        // 保存非零系数数供相邻宏块使用（参考wedeo Rust update_after_mb）
+        // 保存非零系数数供相邻宏块使用
         // 亮度raster布局：
         //  0  1  2  3
         //  4  5  6  7
@@ -895,7 +776,6 @@ trait MacroblockDecodingTrait
         $this->nzTopRowChroma[$this->picWidthInMbs * 2 + $mbX * 2 + 1] = $nzCache[23];
 
         // Intra16x16宏块传递DC_PRED(2)给相邻宏块
-        // 参考wedeo mb.rs第1230-1249行和FFmpeg fill_decode_caches(h264_mvpred.h第645-648行)
         // H.264 spec 8.3.1.1: 当邻居不是Intra_4x4时，其预测模式推断为DC_PRED(2)
         // 存储2而不是-1的原因：如果存储-1，当左边是-1但上边是有效模式(如1)时，
         // min(-1, 1) = -1会导致predicted=DC_PRED(2)，但正确行为应该是min(2, 1) = 1
@@ -954,7 +834,7 @@ trait MacroblockDecodingTrait
                 $this->vPlane[$baseIdx + $cx] = 128;
             }
         }
-        // 非I帧宏块传递DC_PRED(2)给相邻宏块（参考wedeo mb.rs第1248行）
+        // 非I帧宏块传递DC_PRED(2)给相邻宏块
         $this->intra4x4LeftModes = array_fill(0, 4, 2);
         $baseLuma = $mbX * 4;
         $this->intra4x4TopModes[$baseLuma + 0] = 2;
@@ -1010,7 +890,6 @@ trait MacroblockDecodingTrait
      */
     private function decodePInterMacroblock(int $mbX, int $mbY, int $mbType, int $sliceQp): int
     {
-        $mbWidth = $this->picWidthInMbs;
 
         if ($this->debugSliceIndex === 2 && $mbY === 13 && $mbX === 0) {
             echo "\n[DEBUG_ROW] Frame 1 mbY=13 行 MB 类型:\n";
@@ -1029,41 +908,32 @@ trait MacroblockDecodingTrait
 
         // P_L0_16x16 (mb_type 0)
         if ($mbType === 0) {
-            //echo "[DECODER] MB($mbX,$mbY): P_L0_16x16\n";
             return $this->decodePL0_16x16($mbX, $mbY, $sliceQp);
         }
 
         // P_L0_L0_16x8 (mb_type 1)
         if ($mbType === 1) {
-            //echo "[DECODER] MB($mbX,$mbY): P_L0_L0_16x8\n";
             return $this->decodePL0_16x8($mbX, $mbY, $sliceQp);
         }
 
         // P_L0_L0_8x16 (mb_type 2)
         if ($mbType === 2) {
-            //echo "[DECODER] MB($mbX,$mbY): P_L0_L0_8x16\n";
             return $this->decodePL0_8x16($mbX, $mbY, $sliceQp);
         }
 
         // P_8x8 (mb_type 3)
         if ($mbType === 3) {
-            //echo "[DECODER] MB($mbX,$mbY): P_8x8\n";
             return $this->decodeP_8x8($mbX, $mbY, $sliceQp);
         }
 
         // P_8x8ref0 (mb_type 4)
         if ($mbType === 4) {
-            //echo "[DECODER] MB($mbX,$mbY): P_8x8ref0\n";
-            if ($this->debugSliceIndex === 2 && $mbX === 1 && $mbY === 13) {
-                echo "[DEBUG_MB] MB(1,13) P_8x8ref0: 开始解码\n";
-            }
             return $this->decodeP_8x8ref0($mbX, $mbY, $sliceQp);
         }
 
         // Intra 模式 (mb_type >= 5, 即 mb_type - 5 对应 I_4x4..I_PCM)
         if ($mbType >= 5 && $mbType <= 30) {
             $intraMbType = $mbType - 5;
-            //echo "[DECODER] MB($mbX,$mbY): P帧Intra宏块, intra_mb_type=$intraMbType\n";
             $mbQpDelta = $this->decodeIntraMacroblock($mbX, $mbY, $intraMbType, $sliceQp);
             $this->mvLeftCol = [null, null, null, null];
             $this->mvTopRow[$mbX * 4 + 0] = null;
@@ -1072,8 +942,6 @@ trait MacroblockDecodingTrait
             $this->mvTopRow[$mbX * 4 + 3] = null;
             return $mbQpDelta;
         }
-
-        //echo "[DECODER] MB($mbX,$mbY): 未知P帧mb_type={$mbType}，填充灰色\n";
         $this->fillMacroblockGray($mbX, $mbY);
         return 0;
     }
@@ -1089,17 +957,6 @@ trait MacroblockDecodingTrait
 
         $mvX = $predMvX;
         $mvY = $predMvY;
-
-        // Debug: Frame 1 MB(8,10) and Frame 2 MB(8,10)
-        if (($this->debugSliceIndex === 2 && $mbX === 8 && $mbY === 10) ||
-            ($this->debugSliceIndex === 3 && $mbX === 8 && $mbY === 10)) {
-            echo "[DEBUG_MB] MB($mbX,$mbY) P_Skip: pred_mv=($predMvX,$predMvY) mv=($mvX,$mvY) refIdx=$refIdx\n";
-        }
-
-        $isDebugSlice = ($this->debugTargetSlice > 0 && $this->debugSliceIndex === $this->debugTargetSlice);
-        if ($isDebugSlice && $this->debugMbTraceFh) {
-            fwrite($this->debugMbTraceFh, " [P_Skip] mv=($mvX,$mvY) refIdx=$refIdx");
-        }
 
         $this->performMotionCompensation16x16($mbX, $mbY, $mvX, $mvY, $refIdx);
 
@@ -1150,136 +1007,51 @@ trait MacroblockDecodingTrait
     {
         $isDebugSlice = ($this->debugTargetSlice > 0 && $this->debugSliceIndex === $this->debugTargetSlice);
         $isDebugMb = $isDebugSlice && $mbY === 0 && $mbX <= 5;
-        if ($isDebugMb && $this->debugMbTraceFh) {
-            fwrite($this->debugMbTraceFh, "\n  [DBG] bitPos at func start: " . $this->reader->getBitPosition());
-        }
+
         $refIdx = 0;
         if ($this->numRefIdxL0Active > 1) {
             $refIdx = $this->reader->readUe();
         }
-        if ($isDebugMb && $this->debugMbTraceFh) {
-            fwrite($this->debugMbTraceFh, "\n  [DBG] bitPos after ref_idx: " . $this->reader->getBitPosition() . " refIdx=$refIdx");
-        }
+
         $mvdL0X = $this->reader->readSe();
-        if ($isDebugMb && $this->debugMbTraceFh) {
-            fwrite($this->debugMbTraceFh, "\n  [DBG] bitPos after mvd_x: " . $this->reader->getBitPosition() . " mvdL0X=$mvdL0X");
-        }
+
         $mvdL0Y = $this->reader->readSe();
-        if ($isDebugMb && $this->debugMbTraceFh) {
-            fwrite($this->debugMbTraceFh, "\n  [DBG] bitPos after mvd_y: " . $this->reader->getBitPosition() . " mvdL0Y=$mvdL0Y");
-        }
+
 
         list($predMvX, $predMvY) = $this->getP16x16MvPrediction($mbX, $mbY, $refIdx);
         $mvX = $predMvX + $mvdL0X;
         $mvY = $predMvY + $mvdL0Y;
 
-        if (($this->debugSliceIndex === 3 && $mbX === 16 && $mbY === 13) ||
-            ($this->debugSliceIndex === 2 && $mbX === 8 && $mbY === 10)) {
-            echo "[DEBUG_MB] MB($mbX,$mbY) P_16x16:\n";
-            echo "  pred_mv=($predMvX,$predMvY), mvd=($mvdL0X,$mvdL0Y), mv=($mvX,$mvY), ref=$refIdx\n";
-        }
-
-        // Debug: Frame 2 first few MBs
-        //if ($this->debugSliceIndex === 3 && $mbY === 0 && $mbX <= 5) {
-            //echo "[MV_DEBUG] MB($mbX,$mbY) P_16x16: mvd=($mvdL0X,$mvdL0Y) pred_mv=($predMvX,$predMvY) mv=($mvX,$mvY) refIdx=$refIdx\n";
-            //echo "[MV_DEBUG]   bitBeforeMvdX=$bitBeforeMvdX bitBeforeMvdY=$bitBeforeMvdY bitAfterMvd=$bitAfterMvd\n";
-            //echo "[MV_DEBUG]   mvdX_bits=" . ($bitBeforeMvdY - $bitBeforeMvdX) . " mvdY_bits=" . ($bitAfterMvd - $bitBeforeMvdY) . "\n";
-            //echo "[MV_DEBUG]   mvLeftCol[0]=" . ($this->mvLeftCol[0] ? "({$this->mvLeftCol[0][0]},{$this->mvLeftCol[0][1]},{$this->mvLeftCol[0][2]})" : "null") . "\n";
-            //$topMv = $this->mvTopRow[$mbX * 4] ?? null;
-            //echo "[MV_DEBUG]   mvTopRow[mbX*4]=" . ($topMv ? "({$topMv[0]},{$topMv[1]},{$topMv[2]})" : "null") . "\n";
-            //$topRightMv = $this->mvTopRow[($mbX + 1) * 4] ?? null;
-            //echo "[MV_DEBUG]   mvTopRow[(mbX+1)*4]=" . ($topRightMv ? "({$topRightMv[0]},{$topRightMv[1]},{$topRightMv[2]})" : "null") . "\n";
-        //}
-
-        //echo "[DECODER] MB($mbX,$mbY): refIdx=$refIdx mvd=($mvdL0X,$mvdL0Y) pred_mv=($predMvX,$predMvY) mv=($mvX,$mvY)\n";
-
         if ($isDebugSlice && $this->debugMbTraceFh) {
             fwrite($this->debugMbTraceFh, " [P_L0_16x16] refIdx=$refIdx mvd=($mvdL0X,$mvdL0Y) pred_mv=($predMvX,$predMvY) mv=($mvX,$mvY)");
         }
-
-        //todo 为什么要强制使用 MV=(-2,0)
         if ($mbX === 2 && $mbY === 0) {
-            //echo "[DBG_MB20] bitBeforeMvdX=$bitBeforeMvdX bitBeforeMvdY=$bitBeforeMvdY bitAfterMvd=$bitAfterMvd\n";
-            //echo "[DBG_MB20] mvdX_bits=" . ($bitBeforeMvdY - $bitBeforeMvdX) . " mvdY_bits=" . ($bitAfterMvd - $bitBeforeMvdY) . "\n";
-            //echo "[DBG_MB20] mvd=($mvdL0X,$mvdL0Y) pred_mv=($predMvX,$predMvY) mv=($mvX,$mvY)\n";
             // 临时测试：强制使用 MV=(-2,0)
             if (property_exists($this, 'forceMvMb20') && $this->forceMvMb20) {
                 $mvX = -2;
                 $mvY = 0;
-                //echo "[DBG_MB20] 强制 MV=(-2,0)\n";
             }
         }
-        //if ($mbX === 1 && $mbY === 0) {
-            //echo "[DBG_MB10] bitBeforeMvdX=$bitBeforeMvdX bitBeforeMvdY=$bitBeforeMvdY bitAfterMvd=$bitAfterMvd\n";
-            //echo "[DBG_MB10] mvdX_bits=" . ($bitBeforeMvdY - $bitBeforeMvdX) . " mvdY_bits=" . ($bitAfterMvd - $bitBeforeMvdY) . "\n";
-            //echo "[DBG_MB10] mvd=($mvdL0X,$mvdL0Y) pred_mv=($predMvX,$predMvY) mv=($mvX,$mvY)\n";
-        //}
-
         $this->performMotionCompensation16x16($mbX, $mbY, $mvX, $mvY, $refIdx);
-
-        if ($isDebugMb && $this->debugMbTraceFh) {
-            fwrite($this->debugMbTraceFh, "\n  [MC] Motion compensated prediction (Y, first 4 rows):");
-            for ($yy = 0; $yy < 4; $yy++) {
-                $line = "\n    row $yy: ";
-                $py = $mbY * 16 + $yy;
-                $baseIdx = $py * $this->width + $mbX * 16;
-                for ($xx = 0; $xx < 16; $xx++) {
-                    $line .= $this->yPlane[$baseIdx + $xx] . " ";
-                }
-                fwrite($this->debugMbTraceFh, $line);
-            }
-        }
-
         $cbpCode = $this->reader->readUe();
         $codedBlockPattern = self::GOLOMB_TO_INTER_CBP[$cbpCode] ?? 0;
-        if (($this->debugSliceIndex === 3 && $mbX === 16 && $mbY === 13) ||
-            ($this->debugSliceIndex === 2 && $mbX === 8 && $mbY === 10)) {
-            echo "[DEBUG_MB] MB($mbX,$mbY) cbp_code=$cbpCode, cbp=0x" . dechex($codedBlockPattern) . "\n";
-        }
-        if ($isDebugMb && $this->debugMbTraceFh) {
-            fwrite($this->debugMbTraceFh, "\n  [DBG] bitPos after cbp: " . $this->reader->getBitPosition() . " cbpCode=$cbpCode cbp=$codedBlockPattern");
-        }
         $mbQpDelta = 0;
         if ($codedBlockPattern !== 0) {
             $mbQpDelta = $this->reader->readSe();
             $qp = $sliceQp + $mbQpDelta;
             $qp = max(0, min(51, $qp));
-            if ($isDebugMb && $this->debugMbTraceFh) {
-                fwrite($this->debugMbTraceFh, "\n  [DBG] bitPos after mb_qp_delta: " . $this->reader->getBitPosition() . " mbQpDelta=$mbQpDelta qp=$qp");
-            }
             $this->decodeResidualAndAdd($mbX, $mbY, $codedBlockPattern, $qp, 0);
-            if ($isDebugMb && $this->debugMbTraceFh) {
-                fwrite($this->debugMbTraceFh, "\n  [DBG] bitPos after residual: " . $this->reader->getBitPosition());
-                fwrite($this->debugMbTraceFh, "\n  [OUT] Decoded pixels after residual (Y, first 4 rows):");
-                for ($yy = 0; $yy < 4; $yy++) {
-                    $line = "\n    row $yy: ";
-                    $py = $mbY * 16 + $yy;
-                    $baseIdx = $py * $this->width + $mbX * 16;
-                    for ($xx = 0; $xx < 16; $xx++) {
-                        $line .= $this->yPlane[$baseIdx + $xx] . " ";
-                    }
-                    fwrite($this->debugMbTraceFh, $line);
-                }
-            }
         }
-
-        if ($isDebugSlice && $this->debugMbTraceFh) {
-            fwrite($this->debugMbTraceFh, " cbp=$codedBlockPattern");
-        }
-
         if ($codedBlockPattern === 0) {
             $this->updateNzCountZero($mbX, $mbY);
         }
-
         $this->saveMvForPrediction($mbX, $mbY, $mvX, $mvY, $refIdx);
-
         $mbWidth = $this->picWidthInMbs;
         $mbIdx = $mbY * $mbWidth + $mbX;
         for ($i = 0; $i < 16; $i++) {
             $this->mbMvForDeblock[$mbIdx][$i] = [$mvX, $mvY];
             $this->mbRefForDeblock[$mbIdx][$i] = $refIdx;
         }
-
         return $mbQpDelta;
     }
 
@@ -1313,50 +1085,8 @@ trait MacroblockDecodingTrait
         $this->performMotionCompensation16x8($mbX, $mbY, 0, $mv0X, $mv0Y, $refIdx0);
         $this->performMotionCompensation16x8($mbX, $mbY, 1, $mv1X, $mv1Y, $refIdx1);
 
-        if ($this->debugSliceIndex === 3 && $mbX === 15 && $mbY === 13) {
-            echo "[DEBUG_MB] MB(15,13) P_16x8:\n";
-            echo "  part0 (top): pred_mv=($predMv0X,$predMv0Y), mvd=($mvd0X,$mvd0Y), mv=($mv0X,$mv0Y), ref=$refIdx0\n";
-            echo "  part1 (bottom): pred_mv=($predMv1X,$predMv1Y), mvd=($mvd1X,$mvd1Y), mv=($mv1X,$mv1Y), ref=$refIdx1\n";
-            $lumaRefX1 = $mbX * 64 + $mv1X;
-            $lumaRefY1 = $mbY * 64 + $mv1Y + 8 * 4;
-            echo "  part1 lumaRefX=$lumaRefX1, lumaRefY=$lumaRefY1, intX=" . ($lumaRefX1 >> 2) . ", fracX=" . ($lumaRefX1 & 3) . "\n";
-            // 输出参考帧中的整像素值
-            $intX = $lumaRefX1 >> 2;
-            $intY = $lumaRefY1 >> 2;
-            echo "  参考帧整像素值 (x=$intX-2 到 x=$intX+5, y=$intY 到 y=$intY+2):\n";
-            echo "  [DEBUG] before loop, refFrameY is array: " . is_array($this->refFrameY) . ", count=" . count($this->refFrameY) . "\n";
-            for ($dy = 0; $dy < 3; $dy++) {
-                $refVals = [];
-                for ($x = -2; $x <= 5; $x++) {
-                    $rx = max(0, min($this->refWidthY - 1, $intX + $x));
-                    $ry = max(0, min($this->refHeightY - 1, $intY + $dy));
-                    $idx = $ry * $this->refStrideY + $rx;
-                    $v = isset($this->refFrameY[$idx]) ? $this->refFrameY[$idx] : -1;
-                    $refVals[] = sprintf("%3d", $v);
-                }
-                echo "    y=" . ($intY + $dy) . ": " . implode(" ", $refVals) . "\n";
-            }
-            echo "  [DEBUG] after loop\n";
-            echo "  预测值（运动补偿后，残差前）下半部分第0-3列:\n";
-            for ($y = 8; $y < 11; $y++) {
-                $line = "    y=$y: ";
-                for ($x = 0; $x < 4; $x++) {
-                    $px = $mbX * 16 + $x;
-                    $py = $mbY * 16 + $y;
-                    $idx = $py * $this->width + $px;
-                    $v = $this->yPlane[$idx];
-                    $line .= sprintf("%3d ", $v);
-                }
-                echo $line . "\n";
-            }
-        }
-
         $cbpCode = $this->reader->readUe();
         $codedBlockPattern = self::GOLOMB_TO_INTER_CBP[$cbpCode] ?? 0;
-
-        if ($this->debugSliceIndex === 3 && $mbX === 15 && $mbY === 13) {
-            echo "[DEBUG_MB] MB(15,13) cbp_code=$cbpCode, cbp=" . sprintf("0x%03x", $codedBlockPattern) . "\n";
-        }
 
         $mbQpDelta = 0;
         if ($codedBlockPattern !== 0) {
@@ -1413,21 +1143,8 @@ trait MacroblockDecodingTrait
         $mv1X = $predMv1X + $mvd1X;
         $mv1Y = $predMv1Y + $mvd1Y;
 
-        // Debug: Frame 2 first few MBs
-        //if ($this->debugSliceIndex === 3 && $mbY === 0 && $mbX <= 5) {
-            //echo "[MV_DEBUG] MB($mbX,$mbY) P_8x16: part0 mv=($mv0X,$mv0Y) ref=$refIdx0, part1 mv=($mv1X,$mv1Y) ref=$refIdx1\n";
-            //echo "[MV_DEBUG]   pred0=($predMv0X,$predMv0Y) mvd0=($mvd0X,$mvd0Y)\n";
-            //echo "[MV_DEBUG]   pred1=($predMv1X,$predMv1Y) mvd1=($mvd1X,$mvd1Y)\n";
-        //}
-
         $this->performMotionCompensation8x16($mbX, $mbY, 0, $mv0X, $mv0Y, $refIdx0);
         $this->performMotionCompensation8x16($mbX, $mbY, 1, $mv1X, $mv1Y, $refIdx1);
-
-        if ($this->debugSliceIndex === 3 && $mbX === 14 && $mbY === 13) {
-            echo "[DEBUG_MB] MB(14,13) P_8x16:\n";
-            echo "  part0 (left): pred_mv=($predMv0X,$predMv0Y), mvd=($mvd0X,$mvd0Y), mv=($mv0X,$mv0Y), ref=$refIdx0\n";
-            echo "  part1 (right): pred_mv=($predMv1X,$predMv1Y), mvd=($mvd1X,$mvd1Y), mv=($mv1X,$mv1Y), ref=$refIdx1\n";
-        }
 
         $cbpCode = $this->reader->readUe();
         $codedBlockPattern = self::GOLOMB_TO_INTER_CBP[$cbpCode] ?? 0;
@@ -1464,14 +1181,9 @@ trait MacroblockDecodingTrait
     /**
      * P_8x8 宏块解码
      * 码流顺序: 先所有4个sub_mb_type, 再所有4个ref_idx, 最后所有sub-partition的mvd
-     * 参考 FFmpeg h264_cavlc.c 和 wedeo cavlc.rs
      */
     private function decodeP_8x8(int $mbX, int $mbY, int $sliceQp): int
     {
-        //echo "[DECODER] MB($mbX,$mbY): P_8x8\n";
-
-        $mbWidth = $this->picWidthInMbs;
-
         $mbMvs = array_fill(0, 4, array_fill(0, 4, null));
 
         $subMbScan = [[0, 0], [1, 0], [0, 1], [1, 1]];
@@ -1487,9 +1199,6 @@ trait MacroblockDecodingTrait
 
         for ($i = 0; $i < 4; $i++) {
             $subMbTypes[$i] = $this->reader->readUe();
-            //$blkX = $subMbScan[$i][0];
-            //$blkY = $subMbScan[$i][1];
-            //echo "[DECODER] MB($mbX,$mbY) sub($blkX,$blkY): sub_mb_type={$subMbTypes[$i]}\n";
         }
 
         for ($i = 0; $i < 4; $i++) {
@@ -1603,7 +1312,6 @@ trait MacroblockDecodingTrait
                 }
 
             } else {
-                //echo "[DECODER] MB($mbX,$mbY): 未知sub_mb_type=$subMbType\n";
                 break;
             }
         }
@@ -1631,13 +1339,9 @@ trait MacroblockDecodingTrait
      * P_8x8ref0 宏块解码（ref_idx固定为0）
      * 码流顺序: 先所有4个sub_mb_type, 再所有sub-partition的mvd (ref_idx固定为0)
      * 4x4子块粒度，每个子划分独立预测MV
-     * 参考 FFmpeg h264_cavlc.c 和 wedeo cavlc.rs
      */
     private function decodeP_8x8ref0(int $mbX, int $mbY, int $sliceQp): int
     {
-        //echo "[DECODER] MB($mbX,$mbY): P_8x8ref0\n";
-
-        $mbWidth = $this->picWidthInMbs;
         $refIdx = 0;
 
         $mbMvs = array_fill(0, 4, array_fill(0, 4, null));
@@ -1654,9 +1358,6 @@ trait MacroblockDecodingTrait
 
         for ($i = 0; $i < 4; $i++) {
             $subMbTypes[$i] = $this->reader->readUe();
-            //$blkX = $subMbScan[$i][0];
-            //$blkY = $subMbScan[$i][1];
-            //echo "[DECODER] MB($mbX,$mbY) sub($blkX,$blkY): sub_mb_type={$subMbTypes[$i]} (ref0)\n";
         }
 
         for ($i = 0; $i < 4; $i++) {
@@ -1761,7 +1462,6 @@ trait MacroblockDecodingTrait
                 }
 
             } else {
-                //echo "[DECODER] MB($mbX,$mbY): 未知sub_mb_type=$subMbType\n";
                 break;
             }
         }
@@ -1991,7 +1691,6 @@ trait MacroblockDecodingTrait
     /**
      * 获取P帧16x16宏块的运动向量预测值
      * C邻居（top-right）不可用时，回退到top-left（D邻居）
-     * 参考wedeo MvContext::neighbor_c_16x16 和 H.264 8.4.1.2.1节
      */
     private function getP16x16MvPrediction(int $mbX, int $mbY, int $refIdx): array
     {
@@ -2020,22 +1719,6 @@ trait MacroblockDecodingTrait
                 $mvC = $this->mvTopRow[($mbX - 1) * 4 + 3] ?? null;
             }
         }
-
-        if ($this->debugSliceIndex === 3 && $mbX === 16 && $mbY === 13) {
-            echo "[MVP_16x16] MB(16,13):\n";
-            echo "  mvLeft=" . ($mvLeft ? "({$mvLeft[0]},{$mvLeft[1]},{$mvLeft[2]})" : "null") . "\n";
-            echo "  mvTop=" . ($mvTop ? "({$mvTop[0]},{$mvTop[1]},{$mvTop[2]})" : "null") . "\n";
-            echo "  mvC=" . ($mvC ? "({$mvC[0]},{$mvC[1]},{$mvC[2]})" : "null") . "\n";
-        }
-
-        // 调试：Frame 2 第一行前6个MB
-//        if ($this->debugSliceIndex === 3 && $mbY === 0 && $mbX <= 5) {
-//            echo "[PRED16x16] MB($mbX,$mbY): mvLeft=" . ($mvLeft ? "({$mvLeft[0]},{$mvLeft[1]},{$mvLeft[2]})" : "null") .
-//                 " mvTop=" . ($mvTop ? "({$mvTop[0]},{$mvTop[1]},{$mvTop[2]})" : "null") .
-//                 " mvC=" . ($mvC ? "({$mvC[0]},{$mvC[1]},{$mvC[2]})" : "null") .
-//                 " refIdx=$refIdx\n";
-//            echo "[PRED16x16]   mvLeftCol[0]=" . ($this->mvLeftCol[0] ? "({$this->mvLeftCol[0][0]},{$this->mvLeftCol[0][1]},{$this->mvLeftCol[0][2]})" : "null") . "\n";
-//        }
 
         return $this->predictMvP16x16($mvLeft, $mvTop, $mvC, $refIdx);
     }
@@ -2409,7 +2092,6 @@ trait MacroblockDecodingTrait
 
     /**
      * 解码残差并加到预测值上（Inter帧方式，与Intra4x4类似）
-     * 参考 wedeo cavlc.rs decode_residual_blocks (非Intra16x16路径)
      */
     private function decodeResidualAndAdd(int $mbX, int $mbY, int $codedBlockPattern, int $qp, int $mbType): void
     {
@@ -2450,16 +2132,7 @@ trait MacroblockDecodingTrait
                     $scanIdx = $i8x8 * 4 + $i4x4;
                     $rasterIdx = $scanToRaster[$scanIdx];
                     $nc = $this->computeNc($rasterIdx, $mbX, $mbY, $nzCache, $leftNz, $topNz, $leftAvailable, $topAvailable);
-                    $isDebugSlice = ($this->debugTargetSlice > 0 && $this->debugSliceIndex === $this->debugTargetSlice);
-                    $isDebugMb = $isDebugSlice && $mbY === 0 && ($mbX === 1 || $mbX === 2);
-                    $bpBefore = $this->reader->getBitPosition();
                     $coeffs = $this->decodeResidualBlock(16, $nc);
-                    $bpAfter = $this->reader->getBitPosition();
-                    if ($isDebugMb && $this->debugMbTraceFh) {
-                        $nz = 0;
-                        for ($i = 0; $i < 16; $i++) if ($coeffs[$i] != 0) $nz++;
-                        fwrite($this->debugMbTraceFh, "\n    [RES] luma blk scan=$scanIdx raster=$rasterIdx nc=$nc nz=$nz bits=" . ($bpAfter - $bpBefore) . " (from $bpBefore to $bpAfter)");
-                    }
                     for ($i = 0; $i < 16; $i++) $yCoeffs[$rasterIdx][$i] = $coeffs[$i];
                     $yCoeffs[$rasterIdx] = $this->zigzagToRaster($yCoeffs[$rasterIdx]);
                     $yCoeffs[$rasterIdx] = $this->dequantize4x4($yCoeffs[$rasterIdx], 0, $qp);
@@ -2489,23 +2162,8 @@ trait MacroblockDecodingTrait
         $isDebugMb = $isDebugSlice && $mbY === 0 && ($mbX === 1 || $mbX === 2);
 
         if ($chromaCbp >= 1) {
-            if ($isDebugMb && $this->debugMbTraceFh) {
-                fwrite($this->debugMbTraceFh, "\n    [RES] chroma DC start, bitPos=" . $this->reader->getBitPosition() . " chromaCbp=$chromaCbp");
-            }
-            $bpBefore = $this->reader->getBitPosition();
             $cbDc = $this->decodeResidualBlock(4, -1);
-            $bpAfter = $this->reader->getBitPosition();
-            if ($isDebugMb && $this->debugMbTraceFh) {
-                $nz = 0; for ($i = 0; $i < 4; $i++) if ($cbDc[$i] != 0) $nz++;
-                fwrite($this->debugMbTraceFh, "\n    [RES] chroma Cb DC: nc=-1 nz=$nz bits=" . ($bpAfter - $bpBefore) . " (from $bpBefore to $bpAfter) coeffs=[" . implode(",", $cbDc) . "]");
-            }
-            $bpBefore = $this->reader->getBitPosition();
             $crDc = $this->decodeResidualBlock(4, -1);
-            $bpAfter = $this->reader->getBitPosition();
-            if ($isDebugMb && $this->debugMbTraceFh) {
-                $nz = 0; for ($i = 0; $i < 4; $i++) if ($crDc[$i] != 0) $nz++;
-                fwrite($this->debugMbTraceFh, "\n    [RES] chroma Cr DC: nc=-1 nz=$nz bits=" . ($bpAfter - $bpBefore) . " (from $bpBefore to $bpAfter) coeffs=[" . implode(",", $crDc) . "]");
-            }
         }
 
         $cbQmul = $this->dequant4Table[1][$chromaQp][0];
@@ -2518,13 +2176,7 @@ trait MacroblockDecodingTrait
             foreach ($cbScanOrder as $blockIdx) {
                 $blk = $blockIdx - 16;
                 $nc = $this->computeNc($blockIdx, $mbX, $mbY, $nzCache, $leftNz, $topNz, $leftAvailable, $topAvailable);
-                $bpBefore = $this->reader->getBitPosition();
                 $ac = $this->decodeResidualBlock(15, $nc);
-                $bpAfter = $this->reader->getBitPosition();
-                if ($isDebugMb && $this->debugMbTraceFh) {
-                    $nzCnt = 0; for ($i = 0; $i < 15; $i++) if ($ac[$i] != 0) $nzCnt++;
-                    fwrite($this->debugMbTraceFh, "\n    [RES] chroma Cb AC blk=$blk blockIdx=$blockIdx nc=$nc nz=$nzCnt bits=" . ($bpAfter - $bpBefore) . " (from $bpBefore to $bpAfter)");
-                }
                 $nzCnt = 0; for ($i = 0; $i < 15; $i++) if ($ac[$i] != 0) $nzCnt++;
                 for ($i = 1; $i < 16; $i++) $cbAcCoeffs[$blk][$i] = $ac[$i - 1];
                 $cbAcCoeffs[$blk] = $this->zigzagToRaster($cbAcCoeffs[$blk]);
@@ -2535,13 +2187,8 @@ trait MacroblockDecodingTrait
             foreach ($crScanOrder as $blockIdx) {
                 $blk = $blockIdx - 20;
                 $nc = $this->computeNc($blockIdx, $mbX, $mbY, $nzCache, $leftNz, $topNz, $leftAvailable, $topAvailable);
-                $bpBefore = $this->reader->getBitPosition();
                 $ac = $this->decodeResidualBlock(15, $nc);
-                $bpAfter = $this->reader->getBitPosition();
-                if ($isDebugMb && $this->debugMbTraceFh) {
-                    $nzCnt = 0; for ($i = 0; $i < 15; $i++) if ($ac[$i] != 0) $nzCnt++;
-                    fwrite($this->debugMbTraceFh, "\n    [RES] chroma Cr AC blk=$blk blockIdx=$blockIdx nc=$nc nz=$nzCnt bits=" . ($bpAfter - $bpBefore) . " (from $bpBefore to $bpAfter)");
-                }
+
                 $nzCnt = 0; for ($i = 0; $i < 15; $i++) if ($ac[$i] != 0) $nzCnt++;
                 for ($i = 1; $i < 16; $i++) $crAcCoeffs[$blk][$i] = $ac[$i - 1];
                 $crAcCoeffs[$blk] = $this->zigzagToRaster($crAcCoeffs[$blk]);

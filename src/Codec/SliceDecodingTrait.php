@@ -2,6 +2,11 @@
 
 namespace Xiaosongshu\Flv2mp4\Codec;
 
+/**
+ * @purpose slice分片解析器
+ * @author yanglong
+ * @time 2026年7月23日15:21:48
+ */
 trait SliceDecodingTrait
 {
     /**
@@ -10,63 +15,42 @@ trait SliceDecodingTrait
     public function decodeSlice(string $rbsp, bool $isIDR, int $nalRefIdc): void
     {
         $this->reader = new BitReader($rbsp);
-
-        //echo "[SLICE HDR] start bitPos=0\n";
         $firstMbInSlice = $this->reader->readUe();
-        //echo "[SLICE HDR] first_mb_in_slice=$firstMbInSlice bitPos=" . $this->reader->getBitPosition() . "\n";
-
         $sliceTypeRaw = $this->reader->readUe();
         $sliceType = $sliceTypeRaw % 5;
         $this->currentSliceType = $sliceType;
-        //echo "[SLICE HDR] slice_type_raw=$sliceTypeRaw slice_type=$sliceType bitPos=" . $this->reader->getBitPosition() . "\n";
-
         $ppsId = $this->reader->readUe();
-        //echo "[SLICE HDR] pps_id=$ppsId bitPos=" . $this->reader->getBitPosition() . "\n";
-
         $frameNumBits = $this->log2MaxFrameNumMinus4 + 4;
         $frameNum = $this->reader->readU($frameNumBits);
-        //echo "[SLICE HDR] frame_num=$frameNum ($frameNumBits bits) bitPos=" . $this->reader->getBitPosition() . "\n";
-
         if (!$this->frameMbsOnlyFlag) {
             $fieldPicFlag = $this->reader->readU(1);
-            //echo "[SLICE HDR] field_pic_flag=$fieldPicFlag bitPos=" . $this->reader->getBitPosition() . "\n";
             if ($fieldPicFlag) {
                 $this->reader->skip(1);
-                //echo "[SLICE HDR] bottom_field_pic_flag bitPos=" . $this->reader->getBitPosition() . "\n";
             }
-        } else {
-            //echo "[SLICE HDR] frame_mbs_only_flag=true, skip field coding bitPos=" . $this->reader->getBitPosition() . "\n";
         }
 
         if ($isIDR) {
             $idrPicId = $this->reader->readUe();
-            //echo "[SLICE HDR] idr_pic_id=$idrPicId bitPos=" . $this->reader->getBitPosition() . "\n";
         }
 
         if ($this->picOrderCntType === 0) {
             $pocLsb = $this->reader->readU($this->log2MaxPicOrderCntLsb);
-            //echo "[SLICE HDR] pic_order_cnt_lsb=$pocLsb (" . $this->log2MaxPicOrderCntLsb . " bits) bitPos=" . $this->reader->getBitPosition() . "\n";
             if ($this->bottomFieldPicOrderInFramePresent) {
                 $deltaBottom = $this->reader->readSe();
-                //echo "[SLICE HDR] delta_pic_order_cnt_bottom=$deltaBottom bitPos=" . $this->reader->getBitPosition() . "\n";
             }
         }
         if ($this->picOrderCntType === 1) {
             $delta0 = $this->reader->readSe();
-            //echo "[SLICE HDR] delta_pic_order_cnt[0]=$delta0 bitPos=" . $this->reader->getBitPosition() . "\n";
             if ($this->bottomFieldPicOrderInFramePresent) {
                 $delta1 = $this->reader->readSe();
-                //echo "[SLICE HDR] delta_pic_order_cnt[1]=$delta1 bitPos=" . $this->reader->getBitPosition() . "\n";
             }
         }
 
         if ($this->redundantPicCntPresent) {
             $redPicCnt = $this->reader->readUe();
-            //echo "[SLICE HDR] redundant_pic_cnt=$redPicCnt bitPos=" . $this->reader->getBitPosition() . "\n";
         }
         if ($sliceType === 1) {
             $this->reader->skip(1);
-            //echo "[SLICE HDR] direct_spatial_mv_pred_flag (B slice) bitPos=" . $this->reader->getBitPosition() . "\n";
         }
 
         $numRefIdxL0Active = $this->numRefIdxL0DefaultActive;
@@ -75,14 +59,11 @@ trait SliceDecodingTrait
         if ($sliceType !== 2 && $sliceType !== 4) {
             $numRefIdxActiveOverrideFlag = $this->reader->readU(1);
             $this->numRefIdxActiveOverrideFlag = (bool)$numRefIdxActiveOverrideFlag;
-            //echo "[SLICE HDR] num_ref_idx_active_override_flag=$numRefIdxActiveOverrideFlag bitPos=" . $this->reader->getBitPosition() . "\n";
             if ($numRefIdxActiveOverrideFlag) {
                 $numRefIdxL0Active = $this->reader->readUe() + 1;
                 $this->numRefIdxL0Active = $numRefIdxL0Active;
-                //echo "[SLICE HDR] num_ref_idx_l0_active=$numRefIdxL0Active bitPos=" . $this->reader->getBitPosition() . "\n";
                 if ($sliceType === 1) {
                     $numRefIdxL1Active = $this->reader->readUe() + 1;
-                    //echo "[SLICE HDR] num_ref_idx_l1_active=$numRefIdxL1Active bitPos=" . $this->reader->getBitPosition() . "\n";
                 }
             } else {
                 $this->numRefIdxL0Active = $this->numRefIdxL0DefaultActive;
@@ -149,7 +130,6 @@ trait SliceDecodingTrait
             if ($isIDR) {
                 $noOutputPrior = $this->reader->readU(1);
                 $longTermRef = $this->reader->readU(1);
-                //echo "[SLICE HDR] IDR dec_ref_pic_marking: no_output_of_prior_pics=$noOutputPrior long_term_reference_flag=$longTermRef bitPos=" . $this->reader->getBitPosition() . "\n";
             } else {
                 $adaptiveRefPicMarkingModeFlag = $this->reader->readU(1);
                 if ($adaptiveRefPicMarkingModeFlag) {
@@ -167,29 +147,11 @@ trait SliceDecodingTrait
 
         if ($this->entropyCodingModeFlag && $sliceType !== 2 && $sliceType !== 4) {
             $cabacInitIdc = $this->reader->readUe();
-            //echo "[SLICE HDR] cabac_init_idc=$cabacInitIdc bitPos=" . $this->reader->getBitPosition() . "\n";
-        } else {
-            //echo "[SLICE HDR] cabac_init_idc skipped (CABAC=" . ($this->entropyCodingModeFlag ? '1' : '0') . ", sliceType=$sliceType) bitPos=" . $this->reader->getBitPosition() . "\n";
         }
 
         $sliceQpDelta = $this->reader->readSe();
         $qp = $this->picInitQp + $sliceQpDelta;
         $qp = max(0, min(51, $qp));
-        $isDebugSlice = ($this->debugTargetSlice > 0 && $this->debugSliceIndex === $this->debugTargetSlice);
-        if ($isDebugSlice && $this->debugMbTraceFh) {
-            fwrite($this->debugMbTraceFh, "=== Slice Header ===\n");
-            fwrite($this->debugMbTraceFh, "  first_mb_in_slice=$firstMbInSlice\n");
-            fwrite($this->debugMbTraceFh, "  slice_type=$sliceType\n");
-            fwrite($this->debugMbTraceFh, "  pic_parameter_set_id=$ppsId\n");
-            fwrite($this->debugMbTraceFh, "  frame_num=$frameNum\n");
-            fwrite($this->debugMbTraceFh, "  picInitQp={$this->picInitQp}\n");
-            fwrite($this->debugMbTraceFh, "  slice_qp_delta=$sliceQpDelta\n");
-            fwrite($this->debugMbTraceFh, "  initial_qp=$qp\n");
-            fwrite($this->debugMbTraceFh, "  idr_pic_id=" . (isset($idrPicId) ? $idrPicId : 'N/A') . "\n");
-            fwrite($this->debugMbTraceFh, "  bitPos at end of header: " . $this->reader->getBitPosition() . "\n");
-            fwrite($this->debugMbTraceFh, "===================\n");
-        }
-
         if ($sliceType === 3 || $sliceType === 4) {
             if ($sliceType === 3) $this->reader->skip(1);
             $this->reader->readSe();
@@ -197,12 +159,10 @@ trait SliceDecodingTrait
 
         if ($this->deblockingFilterParametersPresent) {
             $deblockingFilterIdc = $this->reader->readUe();
-            //echo "[SLICE HDR] deblocking_filter_idc=$deblockingFilterIdc bitPos=" . $this->reader->getBitPosition() . "\n";
             $this->disableDeblockingFilterIdc = $deblockingFilterIdc;
             if ($deblockingFilterIdc !== 1) {
                 $alphaOffset = $this->reader->readSe();
                 $betaOffset = $this->reader->readSe();
-                //echo "[SLICE HDR] alpha_offset_div2=$alphaOffset beta_offset_div2=$betaOffset bitPos=" . $this->reader->getBitPosition() . "\n";
                 $this->sliceAlphaC0Offset = $alphaOffset * 2;
                 $this->sliceBetaOffset = $betaOffset * 2;
             }
@@ -217,8 +177,6 @@ trait SliceDecodingTrait
         $totalMbs = $mbWidth * $mbHeight;
         $startMbIdx = $firstMbInSlice;
         $endMbIdx = $totalMbs;
-
-        //echo "[DECODER]   Decoding {$totalMbs} macroblocks ({$mbWidth}x{$mbHeight}), firstMbInSlice={$firstMbInSlice}, sliceType={$sliceType}..." . PHP_EOL;
 
         // 初始化宏块间非零系数计数
         $this->nzTopRowLuma = array_fill(0, $mbWidth * 4, 0);
@@ -252,44 +210,27 @@ trait SliceDecodingTrait
             }
 
             if ($mbIdx % 2 === 0 || $mbIdx === $endMbIdx - 1) {
-                $progress = ($mbIdx - $startMbIdx + 1) / ($endMbIdx - $startMbIdx) * 100;
-                //echo "[DECODER]     MB progress: {$mbIdx}/{$totalMbs} (row {$mbY}, col {$mbX}) - " . number_format($progress, 1) . "%\r\n";
                 flush();
             }
 
             if (($sliceType === 0 || $sliceType === 5) && !$this->entropyCodingModeFlag) {
                 if ($mbSkipRun < 0) {
                     $mbSkipRun = $this->reader->readUe();
-                    //echo "[DECODER] MB($mbX,$mbY): mb_skip_run=$mbSkipRun\n";
-                    if ($isDebugSlice && $this->debugMbTraceFh) {
-                        fwrite($this->debugMbTraceFh, "MB($mbX,$mbY): mb_skip_run=$mbSkipRun\n");
-                    }
                 }
                 if ($mbSkipRun > 0) {
                     $mbSkipRun--;
                     $this->decodePSkip($mbX, $mbY);
                     $this->mbTypeForDeblock[$mbIdx] = 0;
                     $this->mbQpForDeblock[$mbIdx] = $qp;
-                    if ($isDebugSlice && $this->debugMbTraceFh) {
-                        fwrite($this->debugMbTraceFh, "  SKIP, qp=$qp\n");
-                    }
                     continue;
                 } else {
                     $mbSkipRun = -1;
                 }
             }
-
-            $bitBeforeMb = $this->reader->getBitPosition();
             $mbQpDelta = $this->decodeMacroblock($mbX, $mbY, $qp, $sliceType);
-            $bitAfterMb = $this->reader->getBitPosition();
             $qp = max(0, min(51, $qp + $mbQpDelta));
             $this->mbQpForDeblock[$mbIdx] = $qp;
-
-            if ($isDebugSlice && $this->debugMbTraceFh) {
-                fwrite($this->debugMbTraceFh, "  bitPos=$bitBeforeMb..$bitAfterMb (" . ($bitAfterMb - $bitBeforeMb) . " bits), qp=$qp\n");
-            }
         }
-        //echo PHP_EOL . "[DECODER]   Macroblocks decoded" . PHP_EOL;
 
         $this->applyDeblockingFilter();
     }

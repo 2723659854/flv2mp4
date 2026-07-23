@@ -2,6 +2,11 @@
 
 namespace Xiaosongshu\Flv2mp4\Codec;
 
+/**
+ * @purpose 亮度色度残差解码
+ * @author yanglong
+ * @time 2026年7月23日15:18:35
+ */
 trait ResidualDecodingTrait
 {
     /**
@@ -27,7 +32,7 @@ trait ResidualDecodingTrait
         $suffixLen = ($totalCoeff > 10 && $trailingOnes < 3) ? 1 : 0;
         $rem = $totalCoeff - $trailingOnes;
         $revStart = $lastNz - $trailingOnes;
-        // H.264 suffix_length 更新阈值表 (参考 FFmpeg SUFFIX_LIMIT / wedeo cavlc.rs)
+        // H.264 suffix_length 更新阈值表
         $suffixLimit = [0, 3, 6, 12, 24, 48, PHP_INT_MAX];
 
         for ($i = $revStart; $i >= 0 && $rem > 0; $i--) {
@@ -35,7 +40,7 @@ trait ResidualDecodingTrait
             $pre = 0;
             // 防止死循环：最多读取32位前缀 (level_prefix = 连续0的个数)
             while ($pre < 32 && $this->reader->readU(1) === 0) $pre++;
-            // 计算 level_code (严格参考 wedeo cavlc.rs decode_residual / FFmpeg h264_cavlc.c)
+            // 计算 level_code
             $levelCode = 0;
             if ($isFirst && $suffixLen === 0) {
                 // 第一个系数且 suffix_length==0 的特殊VLC结构
@@ -773,8 +778,6 @@ trait ResidualDecodingTrait
      * 解码AC残差块CAVLC（15个AC）
      * 注意：对于 AC 系数，nC 通常根据上邻和左邻宏块的非零系数数量计算
      * 对于 DC 系数（luma DC 16/4 或 chroma DC 4），nC = -1
-     *
-     * 完全参考 tinyh264 (h264bsd_cavlc.c) 的实现
      */
     public function decodeResidualBlock(int $maxCoef, int $nC = -1): array
     {
@@ -791,8 +794,6 @@ trait ResidualDecodingTrait
         $totalCoeff = min($totalCoeff, $maxCoef);
         // trailingOnes不能超过totalCoeff
         $trailingOnes = min($trailingOnes, $totalCoeff);
-
-        //if ($dbg) echo "[DBG CAVLC] maxCoef=$maxCoef nC=$nC totalCoeff=$totalCoeff trailingOnes=$trailingOnes\n";
 
         if ($totalCoeff === 0) {
             return $coeffs;
@@ -864,8 +865,6 @@ trait ResidualDecodingTrait
                 $absLevel = $absLevelMinus1 + 1;
                 $levels[$levelIdx] = $sign ? -$absLevel : $absLevel;
 
-                //if ($dbg) echo "[DBG CAVLC] level[$levelIdx] prefix=$prefix suffixLen=$suffixLength levelCode=$levelCode absLevel=$absLevel sign=$sign => level={$levels[$levelIdx]}\n";
-
                 // Update suffix_length
                 $absLevel = abs($levels[$levelIdx]);
                 if ($isFirst) {
@@ -879,16 +878,12 @@ trait ResidualDecodingTrait
             }
         }
 
-        //if ($dbg) echo "[DBG CAVLC] levels: " . implode(',', array_slice($levels, 0, $totalCoeff)) . "\n";
-
         // 3. Read total_zeros
         if ($totalCoeff < $maxCoef) {
             $totalZeros = $this->readTotalZeros($totalCoeff, $maxCoef);
         } else {
             $totalZeros = 0;
         }
-
-        //if ($dbg) echo "[DBG CAVLC] totalZeros=$totalZeros\n";
 
         // 4. Read run_before and place coefficients
         $zerosLeft = $totalZeros;
@@ -905,8 +900,6 @@ trait ResidualDecodingTrait
                 $run = $zerosLeft;
             }
 
-            //if ($dbg) echo "[DBG CAVLC] run_before[$i] run=$run zerosLeft=$zerosLeft coeffIdx=$coeffIdx level={$levels[$i]}\n";
-
             if ($coeffIdx >= 0 && $coeffIdx < $maxCoef) {
                 $coeffs[$coeffIdx] = $levels[$i];
             }
@@ -917,9 +910,6 @@ trait ResidualDecodingTrait
                 $coeffIdx -= (1 + $run);
             }
         }
-
-        //if ($dbg) echo "[DBG CAVLC] coeffs: " . implode(',', $coeffs) . "\n";
-
         return $coeffs;
     }
 }

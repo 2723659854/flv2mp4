@@ -2,6 +2,11 @@
 
 namespace Xiaosongshu\Flv2mp4\Codec;
 
+/**
+ * @purpose bit读取器
+ * @author yanglong
+ * @time 2026年7月23日14:37:33
+ */
 class BitReader
 {
     private string $bits;

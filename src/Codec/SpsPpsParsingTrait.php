@@ -2,6 +2,11 @@
 
 namespace Xiaosongshu\Flv2mp4\Codec;
 
+/**
+ * @purpose spspps解析器
+ * @author yanglong
+ * @time 2026年7月23日15:25:17
+ */
 trait SpsPpsParsingTrait
 {
     /**
@@ -121,8 +126,6 @@ trait SpsPpsParsingTrait
         $this->reader->readUe();
         $this->numRefIdxL0DefaultActive = $this->reader->readUe() + 1;
         $this->numRefIdxL1DefaultActive = $this->reader->readUe() + 1;
-        //echo "[PPS] num_ref_idx_l0_default_active_minus1=" . ($this->numRefIdxL0DefaultActive - 1) . "\n";
-        //echo "[PPS] num_ref_idx_l1_default_active_minus1=" . ($this->numRefIdxL1DefaultActive - 1) . "\n";
         $this->weightedPredFlag = (bool)$this->reader->readU(1);
         $this->weightedBipredIdc = $this->reader->readU(2);
 

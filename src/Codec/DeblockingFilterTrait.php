@@ -2,6 +2,11 @@
 
 namespace Xiaosongshu\Flv2mp4\Codec;
 
+/**
+ * @purpose 去块滤波器
+ * @author yanglong
+ * @time 2026年7月23日14:39:31
+ */
 trait DeblockingFilterTrait
 {
     private const ALPHA_TABLE = [

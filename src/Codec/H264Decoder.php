@@ -3,8 +3,9 @@
 namespace Xiaosongshu\Flv2mp4\Codec;
 
 /**
- * H.264解码器 - 支持 baseline profile (I帧 + P帧)
- * 修复：PHP字符串下标性能bug（改用数组存像素）、边界越界、IDCT4x4、逆哈达玛DC、CAVLC、色度QP范围、NAL仿真三字节兼容
+ * @purpose H.264解码器 - 支持 baseline profile (I帧 + P帧)
+ * @author yanglong
+ * @time 2026年7月23日14:41:47
  */
 class H264Decoder
 {
@@ -98,11 +99,11 @@ class H264Decoder
     public int $debugTargetSlice = 0;
     public $debugMbTraceFh = null;
 
-    // DC系数映射表：DC数组索引 -> 块索引（参考tinyh264 h264bsd_macroblock_layer.c 第79-80行）
+    // DC系数映射表：DC数组索引 -> 块索引
     public static array $dcCoeffIndex = [0, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15];
 
-    // 色度QP映射表（H.264标准Table 8-15，参考FFmpeg ff_h264_chroma_qp）
-    // 用于将luma QP映射到chroma QP，与wedeo CHROMA_QP_TABLE完全一致
+    // 色度QP映射表
+    // 用于将luma QP映射到chroma QP
     public const CHROMA_QP_TABLE = [
         0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
         16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29,
@@ -110,15 +111,15 @@ class H264Decoder
         37, 38, 38, 38, 39, 39, 39, 39,
     ];
 
-    // Inter宏块CBP映射表（golomb code -> CBP），参考wedeo GOLOMB_TO_INTER_CBP
-    // H.264标准Table 9-4, FFmpeg ff_h264_golomb_to_inter_cbp
+    // Inter宏块CBP映射表（golomb code -> CBP）
+    // H.264标准Table 9-4
     public const GOLOMB_TO_INTER_CBP = [
         0, 16, 1, 2, 4, 8, 32, 3, 5, 10, 12, 15, 47, 7, 11, 13, 14, 6, 9, 31, 35, 37, 42, 44, 33, 34,
         36, 40, 39, 43, 45, 46, 17, 18, 20, 24, 19, 21, 26, 28, 23, 27, 29, 30, 22, 25, 38, 41,
     ];
 
     // FFmpeg scan8数组（参考h264_parse.h），用于将块索引映射到缓存位置
-    // 用于pred_non_zero_count计算，与wedeo一致
+    // 用于pred_non_zero_count计算
     public const SCAN8 = [
         12, 13, 20, 21,
         14, 15, 22, 23,
@@ -200,7 +201,7 @@ class H264Decoder
         [10, 14, 20, 24, 14, 20, 24, 27, 20, 24, 27, 30, 24, 27, 30, 34],
     ];
 
-    // 参考tinyh264 ZIGZAG_SCAN_4X4
+    // ZIGZAG_SCAN_4X4
     public const ZIGZAG_SCAN_4X4 = [0, 1, 4, 8, 5, 2, 3, 6, 9, 12, 13, 10, 7, 11, 14, 15];
 
     public function initQuantMatrix(): void
@@ -208,7 +209,6 @@ class H264Decoder
         // H.264标准7.4.2.1节：当SPS/PPS都没有scaling_matrix_present_flag时，
         // scaling_matrix4使用Flat_4x4_16（全16），而不是默认的intra/inter scaling matrix。
         // 默认intra/inter scaling matrix只在显式指定scaling matrix但某个list缺失时作为fallback。
-        // 参考 Rust wedeo-codec-h264 的实现（与FFmpeg完全一致）
         $flatScaling4 = array_fill(0, 16, 16);
 
         $scalingMatrices = [
@@ -218,7 +218,7 @@ class H264Decoder
 
         $this->quantMatrix = $scalingMatrices;
 
-        // 构建反量化表 (参考 Rust dequant.rs Dequant4Table::new)
+        // 构建反量化表
         // table[qp][x] = INIT[qp%6][scale_idx] * scaling_matrix[x] << (qp/6 + 2)
         // scale_idx = (x & 1) + ((x >> 2) & 1) = posClass[x]
         $posClass = [0, 1, 0, 1, 1, 2, 1, 2, 0, 1, 0, 1, 1, 2, 1, 2];
@@ -302,7 +302,6 @@ class H264Decoder
         //echo "[DECODER] Step 3: Decoding slices..." . PHP_EOL;
         $sliceCount = 0;
         $outputData = '';
-        $this->debugTargetSlice = 3; // 第3个slice = 第2个P帧 (1=IDR, 2=P1, 3=P2)
         foreach ($nalUnits as $nal) {
             $nalType = $nal['type'];
             if ($nalType === 1 || $nalType === 5) {
@@ -311,41 +310,6 @@ class H264Decoder
                 $sliceCount++;
                 $this->debugSliceIndex = $sliceCount;
                 //echo "[DECODER]   Decoding slice {$sliceCount} (type=" . ($nalType === 5 ? 'IDR' : 'P') . ", data size=" . strlen($nal['data']) . ")" . PHP_EOL;
-                if ($sliceCount === $this->debugTargetSlice) {
-                    $this->debugMbTraceFh = fopen('php_mb_trace.txt', 'w');
-                    fwrite($this->debugMbTraceFh, "=== PHP Decoder MB Trace - Slice $sliceCount ===\n");
-                    fwrite($this->debugMbTraceFh, "  nalType=$nalType, nalRefIdc=$nalRefIdc\n");
-                    fwrite($this->debugMbTraceFh, "  Reference frame available: " . ($this->refFrameY !== null ? "yes" : "no") . "\n");
-                    if ($this->refFrameY !== null) {
-                        fwrite($this->debugMbTraceFh, "  refWidthY={$this->refWidthY}, refHeightY={$this->refHeightY}, refStrideY={$this->refStrideY}\n");
-                        fwrite($this->debugMbTraceFh, "  refWidthUv={$this->refWidthUv}, refHeightUv={$this->refHeightUv}, refStrideUv={$this->refStrideUv}\n");
-                        fwrite($this->debugMbTraceFh, "  First 16 rows of Y (first 48 pixels each):\n");
-                        for ($yy = 0; $yy < 16; $yy++) {
-                            $line = "    row $yy: ";
-                            for ($xx = 0; $xx < 48; $xx++) {
-                                $line .= $this->refFrameY[$yy * $this->refStrideY + $xx] . " ";
-                            }
-                            fwrite($this->debugMbTraceFh, $line . "\n");
-                        }
-                        fwrite($this->debugMbTraceFh, "  First 8 rows of U (first 24 pixels each):\n");
-                        for ($yy = 0; $yy < 8; $yy++) {
-                            $line = "    row $yy: ";
-                            for ($xx = 0; $xx < 24; $xx++) {
-                                $line .= $this->refFrameU[$yy * $this->refStrideUv + $xx] . " ";
-                            }
-                            fwrite($this->debugMbTraceFh, $line . "\n");
-                        }
-                        fwrite($this->debugMbTraceFh, "  First 8 rows of V (first 24 pixels each):\n");
-                        for ($yy = 0; $yy < 8; $yy++) {
-                            $line = "    row $yy: ";
-                            for ($xx = 0; $xx < 24; $xx++) {
-                                $line .= $this->refFrameV[$yy * $this->refStrideUv + $xx] . " ";
-                            }
-                            fwrite($this->debugMbTraceFh, $line . "\n");
-                        }
-                    }
-                }
-
                 // 每帧重新初始化像素平面
                 $this->yPlane = array_fill(0, $ySize, 128);
                 $this->uPlane = array_fill(0, $uvSize, 128);
@@ -425,7 +389,6 @@ class H264Decoder
 
     /**
      * Dequant coefficient init table (H.264 标准)
-     * 来自 FFmpeg ff_h264_dequant4_coeff_init
      */
     private const DEQUANT4_COEFF_INIT = [
         [10, 13, 16],

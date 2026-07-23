@@ -2,6 +2,11 @@
 
 namespace Xiaosongshu\Flv2mp4\Codec;
 
+/**
+ * @purpose yuv重建h264
+ * @author yanglong
+ * @time 2026年7月23日14:48:28
+ */
 class H264Encoder
 {
     public const DEQUANT4_COEFF_INIT = [
@@ -14,7 +19,7 @@ class H264Encoder
     ];
 
     /**
-     * openh264 g_kiQuantMF[52][8] - 量化乘法因子表
+     * 量化乘法因子表
      * 索引: QP (0-51), j = position & 7
      */
     public const QUANT_MF = [
@@ -73,7 +78,7 @@ class H264Encoder
     ];
 
     /**
-     * openh264 g_kiQuantInterFF[58][8] - 量化偏移因子表
+     * g_kiQuantInterFF[58][8] - 量化偏移因子表
      * Inter: 索引 = QP (0-51)
      * Intra: 索引 = QP + 6 (g_iQuantIntraFF = g_kiQuantInterFF + 6)
      */
@@ -1143,7 +1148,7 @@ class H264Encoder
     }
 
     /**
-     * 4x4系数扫描 (匹配openh264 WelsScan4x4DcAc_c)
+     * 4x4系数扫描
      * 将raster顺序的16个系数转换为zigzag扫描顺序
      * 用于I16x16 DC系数和I4x4全部系数
      */
@@ -1157,7 +1162,7 @@ class H264Encoder
     }
 
     /**
-     * 4x4 AC系数扫描 (匹配openh264 WelsScan4x4Ac_c)
+     * 4x4 AC系数扫描
      * 跳过DC(位置0),将raster顺序的AC系数(位置1-15)转换为zigzag扫描顺序
      * 输出15个AC系数,用于I16x16 AC和chroma AC
      */
@@ -1244,7 +1249,7 @@ class H264Encoder
     }
 
     /**
-     * 2x2 chroma DC Hadamard变换 (匹配openh264 WelsHadamardQuant2x2_c的Hadamard部分)
+     * 2x2 chroma DC Hadamard变换
      * 不做缩放,输出原始Hadamard系数
      */
     public function forwardChromaHadamard2x2(array $c): array
@@ -1261,7 +1266,7 @@ class H264Encoder
     }
 
     /**
-     * 4x4 AC系数量化 (匹配openh264 WelsQuant4x4_c)
+     * 4x4 AC系数量化
      * 公式: level = sign(coeff) * abs(((FF[j] + |coeff|) * MF[j]) >> 16)
      * Intra FF索引 = QP + 6
      */
@@ -1285,7 +1290,7 @@ class H264Encoder
     }
 
     /**
-     * 4x4 chroma AC系数量化 (匹配openh264 WelsQuant4x4_c, 使用chroma QP)
+     * 4x4 chroma AC系数量化
      */
     public function quantizeChroma(array $block, int $qp): array
     {
@@ -1306,7 +1311,7 @@ class H264Encoder
     }
 
     /**
-     * 4x4 luma DC量化 (匹配openh264 WelsQuant4x4Dc_c)
+     * 4x4 luma DC量化
      * DC使用: iFF = pFF[0] << 1, iMF = pMF[0] >> 1
      * 公式: level = sign(coeff) * abs(((iFF + |coeff|) * iMF) >> 16)
      */
@@ -1329,7 +1334,7 @@ class H264Encoder
     }
 
     /**
-     * 2x2 chroma DC量化 (匹配openh264 WelsHadamardQuant2x2_c的量化部分)
+     * 2x2 chroma DC量化
      * DC使用: iFF = pFF[0] << 1, iMF = pMF[0] >> 1
      */
     public function quantizeChromaDC(array $coeffs, int $chromaQp): array
