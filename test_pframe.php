@@ -169,7 +169,7 @@ function encodeYUVWithPHP(array $videoInfo, bool $enablePFrame = true): array
         $frameNals = $encoder->encodeFrame($frames[$f], $isKeyframe);
         $nalUnits = array_merge($nalUnits, $frameNals);
 
-        if (($f + 1) % 10 === 0 || $f === $frameCount - 1) {
+        if (($f + 1) % 2 === 0 || $f === $frameCount - 1) {
             echo "  进度: " . ($f + 1) . "/$frameCount 帧\n";
         }
     }
@@ -180,6 +180,7 @@ function encodeYUVWithPHP(array $videoInfo, bool $enablePFrame = true): array
     // 保存H.264文件
     $h264File = tempnam(sys_get_temp_dir(), 'h264_') . '.h264';
     file_put_contents($h264File, $h264Data);
+    file_put_contents(time().'.h264', $h264Data);
 
     $result = [
         'h264_file' => $h264File,
@@ -258,7 +259,7 @@ function analyzeH264File(string $h264File): array
 // ==================== 主程序 ====================
 
 echo "=== FLV YUV提取 + PHP H.264编码测试 ===\n";
-echo str_repeat('=', 50) . "\n\n";
+echo str_repeat('=', 10) . "\n\n";
 
 $flvFile = __DIR__ . '/test.flv';
 
