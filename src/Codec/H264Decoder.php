@@ -69,6 +69,7 @@ class H264Decoder
     public array $mbMvForDeblock = [];
     public array $mbRefForDeblock = [];
     public int $currentSliceType = 0;
+    public bool $forceDisableDeblock = false;
 
     // P帧参考帧控制
     public bool $numRefIdxActiveOverrideFlag = false;

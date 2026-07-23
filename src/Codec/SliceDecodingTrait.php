@@ -193,6 +193,9 @@ trait SliceDecodingTrait
         // 初始化去块滤波所需的宏块信息
         $this->mbTypeForDeblock = array_fill(0, $totalMbs, -1);
         $this->mbQpForDeblock = array_fill(0, $totalMbs, $qp);
+        // 每帧必须重置NZ缓存，否则P_Skip宏块会使用前一帧的过期数据导致边界强度计算错误
+        $emptyNz = array_fill(0, 24, 0);
+        $this->mbNnzForDeblock = array_fill(0, $totalMbs, $emptyNz);
 
         $mbSkipRun = -1;
 

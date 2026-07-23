@@ -1715,26 +1715,41 @@ trait MacroblockDecodingTrait
     {
         $mbWidth = $this->picWidthInMbs;
 
+        $leftExists = ($mbX > 0);
+        $topExists = ($mbY > 0);
+
         $mvLeft = null;
         $mvTop = null;
         $mvC = null;
 
-        if ($mbX > 0) {
+        if ($leftExists) {
             if (isset($this->mvLeftCol[0])) {
                 $mvLeft = $this->mvLeftCol[0];
+            } else {
+                $mvLeft = [0, 0, -1];
             }
         }
 
-        if ($mbY > 0) {
+        if ($topExists) {
             $mvTop = $this->mvTopRow[$mbX * 4] ?? null;
+            if ($mvTop === null) {
+                $mvTop = [0, 0, -1];
+            }
         }
 
-        if ($mbY > 0) {
-            if ($mbX + 1 < $mbWidth) {
+        if ($topExists) {
+            $topRightExists = ($mbX + 1 < $mbWidth);
+            if ($topRightExists) {
                 $mvC = $this->mvTopRow[($mbX + 1) * 4] ?? null;
+                if ($mvC === null) {
+                    $mvC = [0, 0, -1];
+                }
             }
             if ($mvC === null && $mbX > 0) {
                 $mvC = $this->mvTopRow[($mbX - 1) * 4 + 3] ?? null;
+                if ($mvC === null) {
+                    $mvC = [0, 0, -1];
+                }
             }
         }
 
@@ -1770,42 +1785,29 @@ trait MacroblockDecodingTrait
         }
 
         if ($partIdx === 0) {
+            // part0: C = top-right of current mb (topright 宏块的左下角)
             if ($mbX + 1 < $mbWidth && $mbY > 0) {
                 $mvTopRight = $this->mvTopRow[($mbX + 1) * 4] ?? null;
             }
         } else {
-            $mvTopRight = $mvPart0;
+            // part1: C 位置 (scan8[8]-8+part_width=24) 未被填充，回退到
+            // D = scan8[8]-8-1 = left of (0,1) = mvLeftCol[1] (左宏块 (3,1) 位置)
+            if ($mbX > 0 && isset($this->mvLeftCol[1])) {
+                $mvTopRight = $this->mvLeftCol[1];
+            }
         }
 
-        $primaryMv = null;
-        $otherMv = null;
-
+        // 标准 FFmpeg pred_16x8_motion (h264_mvpred.h):
+        //   part0: 若 top 可用且 top_ref == ref，直接返回 top_mv
+        //   part1: 若 left 可用且 left_ref == ref，直接返回 left_mv
+        //   否则调用 pred_motion (median)
         if ($partIdx === 0) {
             if ($mvTop !== null && $mvTop[2] === $refIdx) {
-                $primaryMv = $mvTop;
-            }
-            if ($mvLeft !== null && $mvLeft[2] === $refIdx) {
-                $otherMv = $mvLeft;
+                return [$mvTop[0], $mvTop[1]];
             }
         } else {
             if ($mvLeft !== null && $mvLeft[2] === $refIdx) {
-                $primaryMv = $mvLeft;
-            }
-            if ($mvTop !== null && $mvTop[2] === $refIdx) {
-                $otherMv = $mvTop;
-            }
-        }
-
-        if ($primaryMv !== null) {
-            if ($otherMv !== null) {
-                $dx = abs($primaryMv[0] - $otherMv[0]);
-                $dy = abs($primaryMv[1] - $otherMv[1]);
-                $threshold = 11;
-                if ($dx < $threshold && $dy < $threshold) {
-                    return [$primaryMv[0], $primaryMv[1]];
-                }
-            } else {
-                return [$primaryMv[0], $primaryMv[1]];
+                return [$mvLeft[0], $mvLeft[1]];
             }
         }
 
