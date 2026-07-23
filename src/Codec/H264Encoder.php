@@ -2638,6 +2638,28 @@ class H264Encoder
         // P_16x16模式: mb_type = 1 (P_L0_16x16)
         $bits .= $this->ue(1); // mb_type = 1 for P_L0_16x16
 
+        // 运动向量预测(MVP)
+        $leftMV = [0, 0];
+        if ($leftAvailable && isset($this->mvLeftCol[$mbY])) {
+            $leftMV = $this->mvLeftCol[$mbY];
+        }
+        $topMV = [0, 0];
+        if ($topAvailable && isset($this->mvTopRow[$mbX])) {
+            $topMV = $this->mvTopRow[$mbX];
+        }
+        $topRightMV = [0, 0];
+        if ($topAvailable && isset($this->mvTopRow[$mbX + 1])) {
+            $topRightMV = $this->mvTopRow[$mbX + 1];
+        }
+        $mvpX = $this->median3($leftMV[0], $topMV[0], $topRightMV[0]);
+        $mvpY = $this->median3($leftMV[1], $topMV[1], $topRightMV[1]);
+
+        // MVD = MV - MVP (1/4像素单位)
+        $mvdX = $mvX - $mvpX;
+        $mvdY = $mvY - $mvpY;
+        $bits .= $this->se($mvdX);
+        $bits .= $this->se($mvdY);
+
         // CBP编码（P帧使用Inter映射表）
         // Inter模式CBP映射表 (codeNum -> cbp)
         $interCbpMap = [
