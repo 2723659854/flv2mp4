@@ -898,38 +898,114 @@ class H264Encoder
 
         $chromaPredU = array_fill(0, 8, array_fill(0, 8, 128));
         $chromaPredV = array_fill(0, 8, array_fill(0, 8, 128));
-        for ($y = 0; $y < 8; $y++) {
-            for ($x = 0; $x < 8; $x++) {
-                switch ($chromaPredMode) {
-                    case 0:
-                        if ($chromaCntL && $chromaCntT) {
-                            $chromaPredU[$y][$x] = ($chromaTopSumU + $chromaLeftSumU + 8) >> 4;
-                            $chromaPredV[$y][$x] = ($chromaTopSumV + $chromaLeftSumV + 8) >> 4;
-                        } elseif ($chromaCntL) {
-                            $chromaPredU[$y][$x] = ($chromaLeftSumU + 4) >> 3;
-                            $chromaPredV[$y][$x] = ($chromaLeftSumV + 4) >> 3;
-                        } elseif ($chromaCntT) {
-                            $chromaPredU[$y][$x] = ($chromaTopSumU + 4) >> 3;
-                            $chromaPredV[$y][$x] = ($chromaTopSumV + 4) >> 3;
-                        } else {
-                            $chromaPredU[$y][$x] = 128;
-                            $chromaPredV[$y][$x] = 128;
-                        }
-                        break;
-                    case 1:
+
+        $hasTop = $chromaCntT > 0;
+        $hasLeft = $chromaCntL > 0;
+
+        switch ($chromaPredMode) {
+            case 0:
+                if ($hasTop && $hasLeft) {
+                    $dc0U = 0; $dc1U = 0; $dc2U = 0;
+                    $dc0V = 0; $dc1V = 0; $dc2V = 0;
+                    for ($i = 0; $i < 4; $i++) {
+                        $dc0U += $chromaTopU[$i] + $chromaLeftU[$i];
+                        $dc1U += $chromaTopU[4 + $i];
+                        $dc2U += $chromaLeftU[4 + $i];
+                        $dc0V += $chromaTopV[$i] + $chromaLeftV[$i];
+                        $dc1V += $chromaTopV[4 + $i];
+                        $dc2V += $chromaLeftV[4 + $i];
+                    }
+                    $dc0ValU = ($dc0U + 4) >> 3;
+                    $dc1ValU = ($dc1U + 2) >> 2;
+                    $dc2ValU = ($dc2U + 2) >> 2;
+                    $dc3ValU = ($dc1U + $dc2U + 4) >> 3;
+                    $dc0ValV = ($dc0V + 4) >> 3;
+                    $dc1ValV = ($dc1V + 2) >> 2;
+                    $dc2ValV = ($dc2V + 2) >> 2;
+                    $dc3ValV = ($dc1V + $dc2V + 4) >> 3;
+                } elseif (!$hasTop && $hasLeft) {
+                    $dc0U = 0; $dc2U = 0;
+                    $dc0V = 0; $dc2V = 0;
+                    for ($i = 0; $i < 4; $i++) {
+                        $dc0U += $chromaLeftU[$i];
+                        $dc2U += $chromaLeftU[4 + $i];
+                        $dc0V += $chromaLeftV[$i];
+                        $dc2V += $chromaLeftV[4 + $i];
+                    }
+                    $dc0ValU = ($dc0U + 2) >> 2;
+                    $dc1ValU = $dc0ValU;
+                    $dc2ValU = ($dc2U + 2) >> 2;
+                    $dc3ValU = $dc2ValU;
+                    $dc0ValV = ($dc0V + 2) >> 2;
+                    $dc1ValV = $dc0ValV;
+                    $dc2ValV = ($dc2V + 2) >> 2;
+                    $dc3ValV = $dc2ValV;
+                } elseif ($hasTop && !$hasLeft) {
+                    $dc0U = 0; $dc1U = 0;
+                    $dc0V = 0; $dc1V = 0;
+                    for ($i = 0; $i < 4; $i++) {
+                        $dc0U += $chromaTopU[$i];
+                        $dc1U += $chromaTopU[4 + $i];
+                        $dc0V += $chromaTopV[$i];
+                        $dc1V += $chromaTopV[4 + $i];
+                    }
+                    $dc0ValU = ($dc0U + 2) >> 2;
+                    $dc1ValU = ($dc1U + 2) >> 2;
+                    $dc2ValU = $dc0ValU;
+                    $dc3ValU = $dc1ValU;
+                    $dc0ValV = ($dc0V + 2) >> 2;
+                    $dc1ValV = ($dc1V + 2) >> 2;
+                    $dc2ValV = $dc0ValV;
+                    $dc3ValV = $dc1ValV;
+                } else {
+                    $dc0ValU = $dc1ValU = $dc2ValU = $dc3ValU = 128;
+                    $dc0ValV = $dc1ValV = $dc2ValV = $dc3ValV = 128;
+                }
+                for ($y = 0; $y < 4; $y++) {
+                    for ($x = 0; $x < 4; $x++) {
+                        $chromaPredU[$y][$x] = $dc0ValU;
+                        $chromaPredV[$y][$x] = $dc0ValV;
+                    }
+                    for ($x = 4; $x < 8; $x++) {
+                        $chromaPredU[$y][$x] = $dc1ValU;
+                        $chromaPredV[$y][$x] = $dc1ValV;
+                    }
+                }
+                for ($y = 4; $y < 8; $y++) {
+                    for ($x = 0; $x < 4; $x++) {
+                        $chromaPredU[$y][$x] = $dc2ValU;
+                        $chromaPredV[$y][$x] = $dc2ValV;
+                    }
+                    for ($x = 4; $x < 8; $x++) {
+                        $chromaPredU[$y][$x] = $dc3ValU;
+                        $chromaPredV[$y][$x] = $dc3ValV;
+                    }
+                }
+                break;
+            case 1:
+                for ($y = 0; $y < 8; $y++) {
+                    for ($x = 0; $x < 8; $x++) {
                         $chromaPredU[$y][$x] = $chromaLeftU[$y];
                         $chromaPredV[$y][$x] = $chromaLeftV[$y];
-                        break;
-                    case 2:
+                    }
+                }
+                break;
+            case 2:
+                for ($y = 0; $y < 8; $y++) {
+                    for ($x = 0; $x < 8; $x++) {
                         $chromaPredU[$y][$x] = $chromaTopU[$x];
                         $chromaPredV[$y][$x] = $chromaTopV[$x];
-                        break;
-                    default:
+                    }
+                }
+                break;
+            default:
+                for ($y = 0; $y < 8; $y++) {
+                    for ($x = 0; $x < 8; $x++) {
                         $chromaPredU[$y][$x] = 128;
                         $chromaPredV[$y][$x] = 128;
-                        break;
+                    }
                 }
-            }
+                break;
         }
 
         for ($by = 0; $by < 2; $by++) {
@@ -1776,38 +1852,114 @@ class H264Encoder
         $chromaPredMode = 0;
         $chromaPredU = array_fill(0, 8, array_fill(0, 8, 128));
         $chromaPredV = array_fill(0, 8, array_fill(0, 8, 128));
-        for ($y = 0; $y < 8; $y++) {
-            for ($x = 0; $x < 8; $x++) {
-                switch ($chromaPredMode) {
-                    case 0:
-                        if ($chromaCntL && $chromaCntT) {
-                            $chromaPredU[$y][$x] = ($chromaTopSumU + $chromaLeftSumU + 8) >> 4;
-                            $chromaPredV[$y][$x] = ($chromaTopSumV + $chromaLeftSumV + 8) >> 4;
-                        } elseif ($chromaCntL) {
-                            $chromaPredU[$y][$x] = ($chromaLeftSumU + 4) >> 3;
-                            $chromaPredV[$y][$x] = ($chromaLeftSumV + 4) >> 3;
-                        } elseif ($chromaCntT) {
-                            $chromaPredU[$y][$x] = ($chromaTopSumU + 4) >> 3;
-                            $chromaPredV[$y][$x] = ($chromaTopSumV + 4) >> 3;
-                        } else {
-                            $chromaPredU[$y][$x] = 128;
-                            $chromaPredV[$y][$x] = 128;
-                        }
-                        break;
-                    case 1:
+
+        $hasTop = $chromaCntT > 0;
+        $hasLeft = $chromaCntL > 0;
+
+        switch ($chromaPredMode) {
+            case 0:
+                if ($hasTop && $hasLeft) {
+                    $dc0U = 0; $dc1U = 0; $dc2U = 0;
+                    $dc0V = 0; $dc1V = 0; $dc2V = 0;
+                    for ($i = 0; $i < 4; $i++) {
+                        $dc0U += $chromaTopU[$i] + $chromaLeftU[$i];
+                        $dc1U += $chromaTopU[4 + $i];
+                        $dc2U += $chromaLeftU[4 + $i];
+                        $dc0V += $chromaTopV[$i] + $chromaLeftV[$i];
+                        $dc1V += $chromaTopV[4 + $i];
+                        $dc2V += $chromaLeftV[4 + $i];
+                    }
+                    $dc0ValU = ($dc0U + 4) >> 3;
+                    $dc1ValU = ($dc1U + 2) >> 2;
+                    $dc2ValU = ($dc2U + 2) >> 2;
+                    $dc3ValU = ($dc1U + $dc2U + 4) >> 3;
+                    $dc0ValV = ($dc0V + 4) >> 3;
+                    $dc1ValV = ($dc1V + 2) >> 2;
+                    $dc2ValV = ($dc2V + 2) >> 2;
+                    $dc3ValV = ($dc1V + $dc2V + 4) >> 3;
+                } elseif (!$hasTop && $hasLeft) {
+                    $dc0U = 0; $dc2U = 0;
+                    $dc0V = 0; $dc2V = 0;
+                    for ($i = 0; $i < 4; $i++) {
+                        $dc0U += $chromaLeftU[$i];
+                        $dc2U += $chromaLeftU[4 + $i];
+                        $dc0V += $chromaLeftV[$i];
+                        $dc2V += $chromaLeftV[4 + $i];
+                    }
+                    $dc0ValU = ($dc0U + 2) >> 2;
+                    $dc1ValU = $dc0ValU;
+                    $dc2ValU = ($dc2U + 2) >> 2;
+                    $dc3ValU = $dc2ValU;
+                    $dc0ValV = ($dc0V + 2) >> 2;
+                    $dc1ValV = $dc0ValV;
+                    $dc2ValV = ($dc2V + 2) >> 2;
+                    $dc3ValV = $dc2ValV;
+                } elseif ($hasTop && !$hasLeft) {
+                    $dc0U = 0; $dc1U = 0;
+                    $dc0V = 0; $dc1V = 0;
+                    for ($i = 0; $i < 4; $i++) {
+                        $dc0U += $chromaTopU[$i];
+                        $dc1U += $chromaTopU[4 + $i];
+                        $dc0V += $chromaTopV[$i];
+                        $dc1V += $chromaTopV[4 + $i];
+                    }
+                    $dc0ValU = ($dc0U + 2) >> 2;
+                    $dc1ValU = ($dc1U + 2) >> 2;
+                    $dc2ValU = $dc0ValU;
+                    $dc3ValU = $dc1ValU;
+                    $dc0ValV = ($dc0V + 2) >> 2;
+                    $dc1ValV = ($dc1V + 2) >> 2;
+                    $dc2ValV = $dc0ValV;
+                    $dc3ValV = $dc1ValV;
+                } else {
+                    $dc0ValU = $dc1ValU = $dc2ValU = $dc3ValU = 128;
+                    $dc0ValV = $dc1ValV = $dc2ValV = $dc3ValV = 128;
+                }
+                for ($y = 0; $y < 4; $y++) {
+                    for ($x = 0; $x < 4; $x++) {
+                        $chromaPredU[$y][$x] = $dc0ValU;
+                        $chromaPredV[$y][$x] = $dc0ValV;
+                    }
+                    for ($x = 4; $x < 8; $x++) {
+                        $chromaPredU[$y][$x] = $dc1ValU;
+                        $chromaPredV[$y][$x] = $dc1ValV;
+                    }
+                }
+                for ($y = 4; $y < 8; $y++) {
+                    for ($x = 0; $x < 4; $x++) {
+                        $chromaPredU[$y][$x] = $dc2ValU;
+                        $chromaPredV[$y][$x] = $dc2ValV;
+                    }
+                    for ($x = 4; $x < 8; $x++) {
+                        $chromaPredU[$y][$x] = $dc3ValU;
+                        $chromaPredV[$y][$x] = $dc3ValV;
+                    }
+                }
+                break;
+            case 1:
+                for ($y = 0; $y < 8; $y++) {
+                    for ($x = 0; $x < 8; $x++) {
                         $chromaPredU[$y][$x] = $chromaLeftU[$y];
                         $chromaPredV[$y][$x] = $chromaLeftV[$y];
-                        break;
-                    case 2:
+                    }
+                }
+                break;
+            case 2:
+                for ($y = 0; $y < 8; $y++) {
+                    for ($x = 0; $x < 8; $x++) {
                         $chromaPredU[$y][$x] = $chromaTopU[$x];
                         $chromaPredV[$y][$x] = $chromaTopV[$x];
-                        break;
-                    default:
+                    }
+                }
+                break;
+            default:
+                for ($y = 0; $y < 8; $y++) {
+                    for ($x = 0; $x < 8; $x++) {
                         $chromaPredU[$y][$x] = 128;
                         $chromaPredV[$y][$x] = 128;
-                        break;
+                    }
                 }
-            }
+                break;
         }
 
         for ($by = 0; $by < 2; $by++) {
