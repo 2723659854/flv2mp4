@@ -608,8 +608,8 @@ class H264Encoder
             $leftAvailable = false;
             $leftNz = [0, 0, 0, 0, 0, 0, 0, 0];
             $leftIntra4x4Mode = [-1, -1, -1, -1];
-            // 每行开始时清空mvTopRow（新的顶行）
-            $this->mvTopRow = [];
+            // 注意: 不清空mvTopRow，保留上一行的MV作为top预测参考
+            // mvTopRow[$mbX]会在处理当前宏块时被覆写为当前行的MV
             for ($mbX = 0; $mbX < $mbWidth; $mbX++) {
                 if ($isPSlice) {
                     // P帧编码
@@ -1850,14 +1850,15 @@ class H264Encoder
         $bits .= $this->ue($chromaPredMode);
 
         // 4. 编码CBP (coded_block_pattern)
-        // I_4x4的CBP映射表
+        // I_4x4的CBP映射表 (codeNum -> cbp)，与解码器golombToIntraCbp完全一致
         $intra4x4CbpMap = [
             47, 31, 15, 0, 23, 27, 29, 30, 7, 11, 13, 14, 39, 43, 45, 46,
-            16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
-            32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47
+            16, 3, 5, 10, 12, 19, 21, 26, 28, 35, 37, 42, 44, 1, 2, 4, 8,
+            17, 18, 20, 24, 6, 9, 22, 25, 32, 33, 34, 36, 40, 38, 41,
         ];
         $cbpValue = ($cbpChroma << 4) | $cbpLuma;
-        $cbpCode = $intra4x4CbpMap[$cbpValue] ?? 0;
+        $cbpCode = array_search($cbpValue, $intra4x4CbpMap);
+        if ($cbpCode === false) $cbpCode = 0;
         $bits .= $this->ue($cbpCode);
 
         // 5. 编码mb_qp_delta (如果CBP > 0)
@@ -2277,13 +2278,14 @@ class H264Encoder
     /**
      * 4x4 AC系数量化
      * 公式: level = sign(coeff) * abs(((FF[j] + |coeff|) * MF[j]) >> 16)
-     * Intra FF索引 = QP + 6
+     * Intra FF索引 = QP + 6, Inter FF索引 = QP
      */
-    public function quantize(array $block, int $isChroma): array
+    public function quantize(array $block, int $isChroma, bool $isInter = false): array
     {
         $qp = $this->qp;
         $mf = self::QUANT_MF[$qp];
-        $ff = self::QUANT_INTER_FF[$qp + 6];
+        $ffIdx = $isInter ? $qp : $qp + 6;
+        $ff = self::QUANT_INTER_FF[$ffIdx];
         $out = array_fill(0, 4, array_fill(0, 4, 0));
         for ($y = 0; $y < 4; $y++) {
             for ($x = 0; $x < 4; $x++) {
@@ -2784,7 +2786,7 @@ class H264Encoder
                 }
 
                 $dctBlock = $this->dct($blk4x4);
-                $quantBlock = $this->quantize($dctBlock, 0);
+                $quantBlock = $this->quantize($dctBlock, 0, true);
 
                 $nz = 0;
                 $quantResidual[$blkIdx] = array_fill(0, 16, 0);
@@ -2801,6 +2803,16 @@ class H264Encoder
                 $subX = $blkIdx % 4;
                 $block8x8Idx = intdiv($subY, 2) * 2 + intdiv($subX, 2);
                 if ($nz > 0) $cbpLuma |= (1 << $block8x8Idx);
+            }
+        }
+
+        // 对于未编码的8x8块，nzCache必须置0（与解码器一致）
+        for ($blkIdx = 0; $blkIdx < 16; $blkIdx++) {
+            $subY = intdiv($blkIdx, 4);
+            $subX = $blkIdx % 4;
+            $block8x8Idx = intdiv($subY, 2) * 2 + intdiv($subX, 2);
+            if (!($cbpLuma & (1 << $block8x8Idx))) {
+                $nzCache[$blkIdx] = 0;
             }
         }
 
@@ -2868,11 +2880,11 @@ class H264Encoder
         $bits .= $this->se($mvdY);
 
         // CBP编码（P帧使用Inter映射表）
-        // Inter模式CBP映射表 (codeNum -> cbp)
+        // Inter模式CBP映射表 (codeNum -> cbp)，必须与解码器GOLOMB_TO_INTER_CBP完全一致
         $interCbpMap = [
             0, 16, 1, 2, 4, 8, 32, 3, 5, 10, 12, 15, 47, 7, 11, 13,
-            14, 6, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 63, 60,
-            61, 62, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31
+            14, 6, 9, 31, 35, 37, 42, 44, 33, 34, 36, 40, 39, 43, 45, 46,
+            17, 18, 20, 24, 19, 21, 26, 28, 23, 27, 29, 30, 22, 25, 38, 41,
         ];
         // 查找cbp对应的codeNum
         $cbpFull = $cbpLuma;
