@@ -571,10 +571,16 @@ class H264Encoder
         $leftIntra4x4Mode = [-1, -1, -1, -1];
         $topIntra4x4Mode = array_fill(0, $mbWidth * 4, -1);
 
+        // 重置MV缓存
+        $this->mvLeftCol = [];
+        $this->mvTopRow = [];
+
         for ($mbY = 0; $mbY < $mbHeight; $mbY++) {
             $leftAvailable = false;
             $leftNz = [0, 0, 0, 0, 0, 0, 0, 0];
             $leftIntra4x4Mode = [-1, -1, -1, -1];
+            // 每行开始时清空mvTopRow（新的顶行）
+            $this->mvTopRow = [];
             for ($mbX = 0; $mbX < $mbWidth; $mbX++) {
                 if ($sliceType === 0 && $this->refYPlane !== null) {
                     // P帧编码
@@ -2372,10 +2378,13 @@ class H264Encoder
         return [$bestMV[0], $bestMV[1], $bestSAD];
     }
 
+    // P帧运动向量缓存（用于MVP预测）
+    public $mvLeftCol = [];      // 左边宏块列的MV
+    public $mvTopRow = [];       // 上边宏块行的MV
+
     /**
-     * 编码P帧宏块（使用P_Skip模式）
-     * P_Skip = mb_type=0 for P slice
-     * 含义：使用预测运动向量(0,0)，复制参考帧对应位置，无残差
+     * 编码P帧宏块（P_16x16模式）
+     * 包含运动估计、MVP预测、MVD编码、残差编码
      */
     public function encodePMacroblock(
         int $mbX,
@@ -2393,33 +2402,182 @@ class H264Encoder
         array &$topIntra4x4Mode,
         string $refYPlane
     ): string {
-        // P_Skip模式: mb_type = 0 (无残差，使用预测MV=(0,0))
         $bits = '';
-        $bits .= $this->ue(0); // mb_type = 0 for P_Skip
 
-        // 更新邻居nz缓存（所有块都是0）
+        // 提取当前宏块像素
+        $lumaPixels = array_fill(0, 16, array_fill(0, 16, 128));
+        for ($y = 0; $y < 16; $y++) {
+            $py = $mbY * 16 + $y;
+            if ($py >= $this->height) break;
+            for ($x = 0; $x < 16; $x++) {
+                $px = $mbX * 16 + $x;
+                if ($px >= $this->width) break;
+                $idx = $py * $this->width + $px;
+                $lumaPixels[$y][$x] = ord($yPlane[$idx]);
+            }
+        }
+
+        // 运动估计
+        list($mvX, $mvY, $sad) = $this->motionEstimate16x16($lumaPixels, $refYPlane, $mbX, $mbY);
+
+        // 简化：P帧始终使用P_L0_16x16模式，不回退到Intra
+        // （在P slice中编码Intra需要不同的mb_type值）
+
+        // P_16x16模式: mb_type = 0 (P_L0_16x16)
+        $bits .= $this->ue(0); // mb_type = 0 for P_L0_16x16
+
+        // 运动向量预测(MVP)
+        $mvpX = 0;
+        $mvpY = 0;
+
+        // 获取左邻居MV
+        $leftMV = [0, 0];
+        if ($leftAvailable && isset($this->mvLeftCol[$mbY])) {
+            $leftMV = $this->mvLeftCol[$mbY];
+        }
+
+        // 获取上邻居MV
+        $topMV = [0, 0];
+        if ($topAvailable && isset($this->mvTopRow[$mbX])) {
+            $topMV = $this->mvTopRow[$mbX];
+        }
+
+        // 获取右上邻居MV
+        $topRightMV = [0, 0];
+        if ($topAvailable && isset($this->mvTopRow[$mbX + 1])) {
+            $topRightMV = $this->mvTopRow[$mbX + 1];
+        }
+
+        // MVP = median(leftMV, topMV, topRightMV)
+        $mvpX = $this->median3($leftMV[0], $topMV[0], $topRightMV[0]);
+        $mvpY = $this->median3($leftMV[1], $topMV[1], $topRightMV[1]);
+
+        // MVD = MV - MVP
+        $mvdX = $mvX - $mvpX;
+        $mvdY = $mvY - $mvpY;
+
+        $bits .= $this->se($mvdX);
+        $bits .= $this->se($mvdY);
+
+        // 生成预测块
+        $predBlock = array_fill(0, 16, array_fill(0, 16, 128));
+        $refX = $mbX * 16 + $mvX;
+        $refY = $mbY * 16 + $mvY;
+
+        for ($y = 0; $y < 16; $y++) {
+            for ($x = 0; $x < 16; $x++) {
+                $ry = $refY + $y;
+                $rx = $refX + $x;
+                if ($ry >= 0 && $ry < $this->height && $rx >= 0 && $rx < $this->width) {
+                    $idx = $ry * $this->width + $rx;
+                    $predBlock[$y][$x] = ord($refYPlane[$idx]);
+                } else {
+                    $predBlock[$y][$x] = 128;
+                }
+            }
+        }
+
+        // 计算残差
+        $residual = array_fill(0, 16, array_fill(0, 16, 0));
+        for ($y = 0; $y < 16; $y++) {
+            for ($x = 0; $x < 16; $x++) {
+                $residual[$y][$x] = $lumaPixels[$y][$x] - $predBlock[$y][$x];
+            }
+        }
+
+        // DCT和量化
+        $nzCache = array_fill(0, 24, 0);
+        $cbpLuma = 0;
+        $quantResidual = [];
+
         for ($by = 0; $by < 4; $by++) {
-            $leftNz[$by] = 0;
+            for ($bx = 0; $bx < 4; $bx++) {
+                $blkIdx = $by * 4 + $bx;
+                $blk4x4 = array_fill(0, 4, array_fill(0, 4, 0));
+
+                for ($y = 0; $y < 4; $y++) {
+                    for ($x = 0; $x < 4; $x++) {
+                        $blk4x4[$y][$x] = $residual[$by * 4 + $y][$bx * 4 + $x];
+                    }
+                }
+
+                $dctBlock = $this->dct($blk4x4);
+                $quantBlock = $this->quantize($dctBlock, 0);
+
+                $nz = 0;
+                $quantResidual[$blkIdx] = array_fill(0, 16, 0);
+                for ($y = 0; $y < 4; $y++) {
+                    for ($x = 0; $x < 4; $x++) {
+                        $quantResidual[$blkIdx][$y * 4 + $x] = $quantBlock[$y][$x];
+                        if ($quantBlock[$y][$x] != 0) $nz++;
+                    }
+                }
+
+                $nzCache[$blkIdx] = min(15, $nz);
+                // cbpLuma: 4位，每个位对应一个8x8块
+                $subY = intdiv($blkIdx, 4);
+                $subX = $blkIdx % 4;
+                $block8x8Idx = intdiv($subY, 2) * 2 + intdiv($subX, 2);
+                if ($nz > 0) $cbpLuma |= (1 << $block8x8Idx);
+            }
+        }
+
+        // CBP编码
+        $interCbpMap = [
+            0,  2,  3,  7,  4,  8, 17, 13,  5, 18,  9, 14, 10, 15, 16, 11,
+            1, 32, 33, 36, 34, 37, 44, 40, 35, 45, 38, 41, 39, 42, 43, 19,
+            6, 24, 25, 20, 26, 21, 46, 28, 27, 47, 22, 29, 23, 30, 31, 12
+        ];
+        $cbpCode = $interCbpMap[$cbpLuma] ?? 0;
+        $bits .= $this->ue($cbpCode);
+
+        // mb_qp_delta
+        if ($cbpLuma > 0) {
+            $bits .= $this->se(0);
+        }
+
+        // 编码残差
+        if ($cbpLuma > 0) {
+            $scanOrder = [0, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15];
+            foreach ($scanOrder as $rasterIdx) {
+                $by = (int)($rasterIdx / 4);
+                $bx = $rasterIdx % 4;
+
+                $ac = $this->scan4x4DcAc($quantResidual[$rasterIdx]);
+                $acNc = $this->computeNC($rasterIdx, $mbX, $bx, $by, $leftAvailable, $leftNz, $topAvailable, $topNzLuma, $nzCache);
+                $bits .= $this->writeBlockResidualCavlc($ac, 15, false, $acNc);
+            }
+        }
+
+        // 更新邻居缓存
+        for ($by = 0; $by < 4; $by++) {
+            $leftNz[$by] = $nzCache[$by * 4 + 3];
         }
         for ($bx = 0; $bx < 4; $bx++) {
             $topBlkX = $mbX * 4 + $bx;
             if ($topBlkX < count($topNzLuma)) {
-                $topNzLuma[$topBlkX] = 0;
-            }
-        }
-        $leftNz[4] = 0;
-        $leftNz[5] = 0;
-        // 同步U/V的nz
-        for ($bx = 0; $bx < 2; $bx++) {
-            $topBlkX = $mbX * 2 + $bx;
-            if ($topBlkX < count($topNzCb)) {
-                $topNzCb[$topBlkX] = 0;
-            }
-            if ($topBlkX < count($topNzCr)) {
-                $topNzCr[$topBlkX] = 0;
+                $topNzLuma[$topBlkX] = $nzCache[$bx + 12];
             }
         }
 
+        // 保存当前MV供后续宏块预测
+        $this->mvLeftCol[$mbY] = [$mvX, $mvY];
+        $this->mvTopRow[$mbX] = [$mvX, $mvY];
+
+        if (($mbY == 11 && $mbX >= 18) || ($mbY == 12 && $mbX <= 2)) {
+            error_log("DEBUG MB($mbX,$mbY): MV=($mvX,$mvY), MVP=($mvpX,$mvpY), MVD=($mvdX,$mvdY), bits_len=" . strlen($bits) . ", cbpLuma=$cbpLuma");
+        }
+
         return $bits;
+    }
+
+    /**
+     * 中值滤波（用于MVP计算）
+     */
+    private function median3(int $a, int $b, int $c): int
+    {
+        $arr = [$a, $b, $c];
+        sort($arr);
+        return $arr[1];
     }
 }
