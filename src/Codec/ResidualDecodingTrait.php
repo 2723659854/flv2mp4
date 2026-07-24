@@ -341,18 +341,32 @@ trait ResidualDecodingTrait
     {
         $coeffs = array_fill(0, 4, 0);
 
+        // 色度DC coeff_token VLC表 (与FFmpeg h264_cavlc.c chroma_dc_coeff_token一致)
+        // 索引方式: [totalCoeff][trailingOnes] -> [bits_value, length]
+        // 来源: FFmpeg chroma_dc_coeff_token_len / chroma_dc_coeff_token_bits
         static $chromaDcTokenMap = [
-            '01' => [0, 0], '000001' => [1, 0], '1' => [1, 1],
-            '000011' => [2, 0], '0000011' => [2, 1], '001' => [2, 2],
-            '000111' => [3, 0], '0000111' => [3, 1], '0001111' => [3, 2], '000010' => [3, 3],
-            '00111' => [4, 0], '00110' => [4, 1], '001111' => [4, 2], '001011' => [4, 3],
+            '01'       => [0, 0],  // TotalCoeff=0, TrailingOnes=0 (len=2)
+            '000111'   => [1, 0],  // TotalCoeff=1, TrailingOnes=0 (len=6)
+            '1'        => [1, 1],  // TotalCoeff=1, TrailingOnes=1 (len=1)
+            '000100'   => [2, 0],  // TotalCoeff=2, TrailingOnes=0 (len=6)
+            '000110'   => [2, 1],  // TotalCoeff=2, TrailingOnes=1 (len=6)
+            '001'      => [2, 2],  // TotalCoeff=2, TrailingOnes=2 (len=3)
+            '000011'   => [3, 0],  // TotalCoeff=3, TrailingOnes=0 (len=6)
+            '0000011'  => [3, 1],  // TotalCoeff=3, TrailingOnes=1 (len=7)
+            '0000010'  => [3, 2],  // TotalCoeff=3, TrailingOnes=2 (len=7)
+            '000101'   => [3, 3],  // TotalCoeff=3, TrailingOnes=3 (len=6)
+            '000010'   => [4, 0],  // TotalCoeff=4, TrailingOnes=0 (len=6)
+            '00000011' => [4, 1],  // TotalCoeff=4, TrailingOnes=1 (len=8)
+            '00000010' => [4, 2],  // TotalCoeff=4, TrailingOnes=2 (len=8)
+            '0000000'  => [4, 3],  // TotalCoeff=4, TrailingOnes=3 (len=7)
         ];
 
         $bits = '';
         $totalCoeff = 0;
         $trailingOnes = 0;
 
-        for ($i = 0; $i < 7; $i++) {
+        // 最长码字为8位 ("00000011" / "00000010")
+        for ($i = 0; $i < 8; $i++) {
             $bits .= $this->reader->readU(1);
             if (isset($chromaDcTokenMap[$bits])) {
                 list($totalCoeff, $trailingOnes) = $chromaDcTokenMap[$bits];
@@ -364,38 +378,52 @@ trait ResidualDecodingTrait
 
         $lastNz = $totalCoeff - 1;
 
+        // trailing_ones: 从高频端开始读取符号位
         for ($i = 0; $i < $trailingOnes; $i++) {
             $idx = $lastNz - $i;
             $sign = $this->reader->readU(1);
             $coeffs[$idx] = $sign ? -1 : 1;
         }
 
+        // level解码: 与readCoeffsCAVLC使用完全相同的逻辑
         $suffixLen = ($totalCoeff > 10 && $trailingOnes < 3) ? 1 : 0;
         $rem = $totalCoeff - $trailingOnes;
         $revStart = $lastNz - $trailingOnes;
+        $suffixLimit = [0, 3, 6, 12, 24, 48, PHP_INT_MAX];
 
         for ($i = $revStart; $i >= 0 && $rem > 0; $i--) {
+            $isFirst = ($rem === $totalCoeff - $trailingOnes);
             $pre = 0;
             while ($pre < 32 && $this->reader->readU(1) === 0) $pre++;
 
-            $isFirst = ($rem === $totalCoeff - $trailingOnes);
-
             $levelCode = 0;
             if ($isFirst && $suffixLen === 0) {
+                // 第一个level且suffix_length==0的特殊VLC
                 if ($pre < 14) {
                     $levelCode = $pre;
                 } elseif ($pre === 14) {
                     $suffix = $this->reader->readU(4);
                     $levelCode = 14 + $suffix;
                 } else {
-                    $suffixBits = $pre - 3;
-                    $suffix = $this->reader->readU($suffixBits);
-                    $levelCode = 30 + $suffix;
+                    $lc = 30;
+                    if ($pre >= 16) {
+                        $lc += (1 << ($pre - 3)) - 4096;
+                    }
+                    $suffix = $this->reader->readU($pre - 3);
+                    $levelCode = $lc + $suffix;
                 }
             } else {
-                $levelCode = (1 << $pre);
-                if ($suffixLen > 0) {
-                    $levelCode += $this->reader->readU($suffixLen);
+                // 后续level 或 第一个且suffix_length>0
+                if ($pre < 15) {
+                    $suffix = ($suffixLen > 0) ? $this->reader->readU($suffixLen) : 0;
+                    $levelCode = $pre * (1 << $suffixLen) + $suffix;
+                } else {
+                    $lc = 15 * (1 << $suffixLen);
+                    if ($pre >= 16) {
+                        $lc += (1 << ($pre - 3)) - 4096;
+                    }
+                    $suffix = $this->reader->readU($pre - 3);
+                    $levelCode = $lc + $suffix;
                 }
             }
 
@@ -407,32 +435,47 @@ trait ResidualDecodingTrait
             $level = $level - $mask;
             $coeffs[$i] = $level;
 
+            // 更新suffix_length (与readCoeffsCAVLC一致, 参考FFmpeg SUFFIX_LIMIT表)
             $absLvl = abs($level);
-
+            if ($isFirst) {
+                $suffixLen = ($absLvl > 3) ? 2 : 1;
+            } else {
+                if ($suffixLen < 6 && $absLvl > $suffixLimit[$suffixLen]) {
+                    $suffixLen++;
+                }
+            }
             $rem--;
-
-            if ($suffixLen === 0) $suffixLen = 1;
-            while ($suffixLen < 6 && $absLvl >= (1 << ($suffixLen + 1))) $suffixLen++;
         }
 
+        // total_zeros + run_before (与readCoeffsCAVLC完全相同的逻辑)
         if ($totalCoeff < 4) {
             $totalZeros = $this->readTotalZeros($totalCoeff, 4);
             $zl = $totalZeros;
-            $lastPos = $lastNz;
+            $coeffIdx = $totalCoeff + $totalZeros - 1;
 
             $tmpCoeffs = array_fill(0, 4, 0);
             $nzIdx = $lastNz;
 
             for ($i = 0; $i < $totalCoeff; $i++) {
-                if ($zl > 0) {
+                $isLast = ($i == $totalCoeff - 1);
+                $rb = 0;
+                if (!$isLast && $zl > 0) {
                     $rb = $this->readRunBefore($zl);
-                    $lastPos -= ($rb + 1);
-                    $zl -= $rb;
+                } elseif (!$isLast) {
+                    $rb = 0;
+                } else {
+                    // 最后一个系数: 消费所有剩余零, 不读取run_before
+                    $rb = $zl;
                 }
 
-                $tmpCoeffs[$lastPos] = $coeffs[$nzIdx];
-                $nzIdx--;
-                if ($lastPos > 0) $lastPos--;
+                $tmpCoeffs[$coeffIdx] = $coeffs[$nzIdx];
+
+                $zl -= $rb;
+
+                if (!$isLast) {
+                    $coeffIdx -= ($rb + 1);
+                    $nzIdx--;
+                }
             }
 
             $coeffs = $tmpCoeffs;
