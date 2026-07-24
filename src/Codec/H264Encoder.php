@@ -3195,11 +3195,9 @@ class H264Encoder
         // 运动估计（返回1/4像素单位的MV）
         list($mvX, $mvY, $sad) = $this->motionEstimate16x16($lumaPixels, $refYPlane, $mbX, $mbY);
 
-        // 亮度MC预测（整数像素位置，边缘钳位到mbAligned尺寸，与解码器mcLuma一致）
-        $intMvX = $mvX >> 2; // 1/4像素 -> 整数像素
-        $intMvY = $mvY >> 2;
-        $refX = $mbX * 16 + $intMvX;
-        $refY = $mbY * 16 + $intMvY;
+        // 亮度MC预测（1/4像素精度，边缘钳位到mbAligned尺寸，与解码器mcLuma一致）
+        $refX = $mbX * 64 + $mvX;
+        $refY = $mbY * 64 + $mvY;
         $predBlock = $this->mcLumaBlock($refYPlane, $refX, $refY, $this->mbAlignedWidth, $this->mbAlignedHeight);
 
         // 计算残差
@@ -3296,9 +3294,9 @@ class H264Encoder
             }
 
             // P_Skip色度重建: 使用与解码器一致的1/8像素双线性插值MC
-            // chromaRefX = mbX*64 + mvX (1/8像素单位，与解码器一致)
-            $chromaRefX = $mbX * 64 + $skipMvpX;
-            $chromaRefY = $mbY * 64 + $skipMvpY;
+            // chromaRefX = mbX*64 + mvX*2 (mvX是1/4像素单位，需要乘以2转换为1/8像素单位)
+            $chromaRefX = $mbX * 64 + $skipMvpX * 2;
+            $chromaRefY = $mbY * 64 + $skipMvpY * 2;
             $cbPred = $this->mcChromaBlock($this->refUPlane, $chromaRefX, $chromaRefY, $chromaW, $chromaH);
             $crPred = $this->mcChromaBlock($this->refVPlane, $chromaRefX, $chromaRefY, $chromaW, $chromaH);
             for ($y = 0; $y < 8; $y++) {
@@ -3425,9 +3423,9 @@ class H264Encoder
 
         // === P帧色度本地解码重建 ===
         // P帧cbpChroma=0, 解码器直接做色度MC(无残差)
-        // chromaRefX = mbX*64 + mvX (1/8像素单位，与解码器performMotionCompensation16x16一致)
-        $chromaRefX = $mbX * 64 + $mvX;
-        $chromaRefY = $mbY * 64 + $mvY;
+        // chromaRefX = mbX*64 + mvX*2 (mvX是1/4像素单位，需要乘以2转换为1/8像素单位)
+        $chromaRefX = $mbX * 64 + $mvX * 2;
+        $chromaRefY = $mbY * 64 + $mvY * 2;
         $cbPred = $this->mcChromaBlock($this->refUPlane, $chromaRefX, $chromaRefY, $chromaW, $chromaH);
         $crPred = $this->mcChromaBlock($this->refVPlane, $chromaRefX, $chromaRefY, $chromaW, $chromaH);
         for ($y = 0; $y < 8; $y++) {
@@ -3645,11 +3643,60 @@ class H264Encoder
     private function mcLumaBlock(string $refPlane, int $refX, int $refY, int $w, int $h): array
     {
         $pred = array_fill(0, 16, array_fill(0, 16, 0));
-        for ($y = 0; $y < 16; $y++) {
-            for ($x = 0; $x < 16; $x++) {
-                $pred[$y][$x] = $this->getClampedPixel($refPlane, $refX + $x, $refY + $y, $w, $h);
+        
+        $fracX = $refX & 3;
+        $fracY = $refY & 3;
+        $intX = $refX >> 2;
+        $intY = $refY >> 2;
+        
+        if ($fracX === 0 && $fracY === 0) {
+            for ($y = 0; $y < 16; $y++) {
+                for ($x = 0; $x < 16; $x++) {
+                    $pred[$y][$x] = $this->getClampedPixel($refPlane, $intX + $x, $intY + $y, $w, $h);
+                }
+            }
+            return $pred;
+        }
+        
+        $H = null;
+        if ($fracX !== 0) {
+            $H = array_fill(0, 16, array_fill(0, 16, 0));
+            for ($y = 0; $y < 16; $y++) {
+                $ry = max(0, min($h - 1, $intY + $y));
+                for ($x = 0; $x < 16; $x++) {
+                    $px0 = $this->getClampedPixel($refPlane, $intX + $x - 2, $ry, $w, $h);
+                    $px1 = $this->getClampedPixel($refPlane, $intX + $x - 1, $ry, $w, $h);
+                    $px2 = $this->getClampedPixel($refPlane, $intX + $x, $ry, $w, $h);
+                    $px3 = $this->getClampedPixel($refPlane, $intX + $x + 1, $ry, $w, $h);
+                    $px4 = $this->getClampedPixel($refPlane, $intX + $x + 2, $ry, $w, $h);
+                    $px5 = $this->getClampedPixel($refPlane, $intX + $x + 3, $ry, $w, $h);
+                    $hVal = ($px0 - 5 * $px1 + 20 * $px2 + 20 * $px3 - 5 * $px4 + $px5 + 16) >> 5;
+                    $H[$y][$x] = max(0, min(255, $hVal));
+                }
             }
         }
+        
+        if ($fracY !== 0) {
+            for ($y = 0; $y < 16; $y++) {
+                for ($x = 0; $x < 16; $x++) {
+                    $p0 = $H !== null ? $H[max(0, $y - 2)][$x] : $this->getClampedPixel($refPlane, $intX + $x, max(0, min($h - 1, $intY + $y - 2)), $w, $h);
+                    $p1 = $H !== null ? $H[max(0, $y - 1)][$x] : $this->getClampedPixel($refPlane, $intX + $x, max(0, min($h - 1, $intY + $y - 1)), $w, $h);
+                    $p2 = $H !== null ? $H[$y][$x] : $this->getClampedPixel($refPlane, $intX + $x, max(0, min($h - 1, $intY + $y)), $w, $h);
+                    $p3 = $H !== null ? $H[min(15, $y + 1)][$x] : $this->getClampedPixel($refPlane, $intX + $x, max(0, min($h - 1, $intY + $y + 1)), $w, $h);
+                    $p4 = $H !== null ? $H[min(15, $y + 2)][$x] : $this->getClampedPixel($refPlane, $intX + $x, max(0, min($h - 1, $intY + $y + 2)), $w, $h);
+                    $p5 = $H !== null ? $H[min(15, $y + 3)][$x] : $this->getClampedPixel($refPlane, $intX + $x, max(0, min($h - 1, $intY + $y + 3)), $w, $h);
+                    $vVal = ($p0 - 5 * $p1 + 20 * $p2 + 20 * $p3 - 5 * $p4 + $p5 + 16) >> 5;
+                    $pred[$y][$x] = max(0, min(255, $vVal));
+                }
+            }
+        } else {
+            for ($y = 0; $y < 16; $y++) {
+                for ($x = 0; $x < 16; $x++) {
+                    $pred[$y][$x] = $H[$y][$x];
+                }
+            }
+        }
+        
         return $pred;
     }
 }
