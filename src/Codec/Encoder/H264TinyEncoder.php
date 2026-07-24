@@ -1,6 +1,6 @@
 <?php
 
-namespace Xiaosongshu\Flv2mp4\Codec;
+namespace Xiaosongshu\Flv2mp4\Codec\Encoder;
 
 /**
  * @purpose 微型h264编辑器，只做尺寸缩放，并不会编码

@@ -4,7 +4,7 @@ namespace Xiaosongshu\Flv2mp4\Pipeline;
 
 use Xiaosongshu\Flv2mp4\Codec\H264Decoder;
 use Xiaosongshu\Flv2mp4\Codec\H264Encoder;
-use Xiaosongshu\Flv2mp4\Codec\VideoScaler;
+use Xiaosongshu\Flv2mp4\Codec\Scaler\VideoScaler;
 
 class TranscodePipeline
 {

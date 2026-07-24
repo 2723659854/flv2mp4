@@ -1,6 +1,6 @@
 <?php
 
-namespace Xiaosongshu\Flv2mp4\Codec;
+namespace Xiaosongshu\Flv2mp4\Codec\Decoder;
 
 /**
  * @purpose 宏运动矢量预测

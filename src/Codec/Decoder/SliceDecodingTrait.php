@@ -1,6 +1,8 @@
 <?php
 
-namespace Xiaosongshu\Flv2mp4\Codec;
+namespace Xiaosongshu\Flv2mp4\Codec\Decoder;
+
+use Xiaosongshu\Flv2mp4\Codec\BitReader;
 
 /**
  * @purpose slice分片解析器
