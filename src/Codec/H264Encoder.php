@@ -2853,12 +2853,14 @@ class H264Encoder
 
     /**
      * 获取参考帧中指定位置的像素值（带边界处理）
+     * 使用mbAlignedWidth/mbAlignedHeight作为stride，与参考帧存储格式一致
      */
     private function getRefPixel(string $refPlane, int $x, int $y): int
     {
-        $x = max(0, min($this->width - 1, $x));
-        $y = max(0, min($this->height - 1, $y));
-        return ord($refPlane[$y * $this->width + $x]);
+        $stride = $this->mbAlignedWidth;
+        $x = max(0, min($stride - 1, $x));
+        $y = max(0, min($this->mbAlignedHeight - 1, $y));
+        return ord($refPlane[$y * $stride + $x]);
     }
 
     /**
