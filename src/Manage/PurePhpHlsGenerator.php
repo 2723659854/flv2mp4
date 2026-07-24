@@ -48,8 +48,8 @@ class PurePhpHlsGenerator
     /** 解码器 */
     private H264Decoder $decoder;
 
-    /** 编码器 */
-    private H264Encoder $encoder;
+    /** 编码器（每个profile独立一个，避免参考帧互相污染） */
+    private array $encoders = [];
 
     /** 视频尺寸缩放器 */
     private VideoScaler $scaler;
@@ -84,10 +84,10 @@ class PurePhpHlsGenerator
         $this->outputDir = rtrim($outputDir, '/');
 
         $this->decoder = new H264Decoder();
-        $this->encoder = new H264Encoder();
         $this->scaler = new VideoScaler();
 
         foreach ($this->profiles as $name => $profile) {
+            $this->encoders[$name] = new H264Encoder();
             $dir = "{$this->outputDir}/{$name}/";
             if (!is_dir($dir)) mkdir($dir, 0777, true);
 
@@ -253,12 +253,14 @@ class PurePhpHlsGenerator
                 if (isset($this->decodedFrameCache[$cacheKey])) {
                     /** 取出被缩放的yuv */
                     $scaledYuv = $this->decodedFrameCache[$cacheKey];
-                    $this->encoder->setResolution($profile['width'], $profile['height']);
-                    $this->encoder->setBitrate($profile['bitrate']);
-                    $this->encoder->setFps($profile['fps']);
-                    $this->encoder->setQp($profile['qp'] ?? 30);
+                    /** 使用该profile专属的编码器，避免多码率间参考帧污染 */
+                    $encoder = $this->encoders[$name];
+                    $encoder->setResolution($profile['width'], $profile['height']);
+                    $encoder->setBitrate($profile['bitrate']);
+                    $encoder->setFps($profile['fps']);
+                    $encoder->setQp($profile['qp'] ?? 30);
                     /** 将被缩放后的yuv重新编码为h264 */
-                    $encodedNals = $this->encoder->encodeFrame($scaledYuv, $isKeyFrame);
+                    $encodedNals = $encoder->encodeFrame($scaledYuv, $isKeyFrame);
 
                     $outputData = '';
                     $outputSpsPps = '';
