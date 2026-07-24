@@ -2,53 +2,404 @@
 
 namespace Xiaosongshu\Flv2mp4\Codec;
 
+use Xiaosongshu\Flv2mp4\Codec\Encoder\BitWriterTrait;
+use Xiaosongshu\Flv2mp4\Codec\Encoder\SpsPpsEncodingTrait;
+use Xiaosongshu\Flv2mp4\Codec\Encoder\TransformEncodingTrait;
+use Xiaosongshu\Flv2mp4\Codec\Encoder\CavlcEncodingTrait;
+use Xiaosongshu\Flv2mp4\Codec\Encoder\IntraEncodingTrait;
+use Xiaosongshu\Flv2mp4\Codec\Encoder\InterEncodingTrait;
+use Xiaosongshu\Flv2mp4\Codec\Encoder\SliceEncodingTrait;
+
+/**
+ * @purpose yuv重建h264
+ * @author yanglong
+ * @time 2026年7月23日14:48:28
+ */
 class H264Encoder
 {
-    private int $width = 640;
-    private int $height = 360;
-    private int $fps = 30;
-    private int $bitrate = 500000;
-    private int $qp = 28;
+    use BitWriterTrait;
+    use SpsPpsEncodingTrait;
+    use TransformEncodingTrait;
+    use CavlcEncodingTrait;
+    use IntraEncodingTrait;
+    use InterEncodingTrait;
+    use SliceEncodingTrait;
 
-    private int $frameNum = 0;
-    private int $idrPicId = 0;
 
-    private array $quantMatrix = [];
+    public const DEQUANT4_COEFF_INIT = [
+        [10, 13, 16],
+        [11, 14, 18],
+        [13, 16, 20],
+        [14, 18, 23],
+        [16, 20, 25],
+        [18, 23, 29],
+    ];
 
-    public function __construct()
+    /**
+     * 色度QP映射表（H.264标准）
+     * 编码器和解码器必须使用相同的映射
+     */
+    public const CHROMA_QP_TABLE = [
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+        16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29,
+        29, 30, 31, 32, 32, 33, 34, 34, 35, 35, 36, 36, 37, 37,
+        37, 38, 38, 38, 39, 39, 39, 39,
+    ];
+
+    /**
+     * 量化乘法因子表
+     * 索引: QP (0-51), j = position & 7
+     */
+    public const QUANT_MF = [
+        [26214, 16132, 26214, 16132, 16132, 10486, 16132, 10486],
+        [23832, 14980, 23832, 14980, 14980,  9320, 14980,  9320],
+        [20164, 13108, 20164, 13108, 13108,  8388, 13108,  8388],
+        [18724, 11650, 18724, 11650, 11650,  7294, 11650,  7294],
+        [16384, 10486, 16384, 10486, 10486,  6710, 10486,  6710],
+        [14564,  9118, 14564,  9118,  9118,  5786,  9118,  5786],
+        [13107,  8066, 13107,  8066,  8066,  5243,  8066,  5243],
+        [11916,  7490, 11916,  7490,  7490,  4660,  7490,  4660],
+        [10082,  6554, 10082,  6554,  6554,  4194,  6554,  4194],
+        [ 9362,  5825,  9362,  5825,  5825,  3647,  5825,  3647],
+        [ 8192,  5243,  8192,  5243,  5243,  3355,  5243,  3355],
+        [ 7282,  4559,  7282,  4559,  4559,  2893,  4559,  2893],
+        [ 6554,  4033,  6554,  4033,  4033,  2622,  4033,  2622],
+        [ 5958,  3745,  5958,  3745,  3745,  2330,  3745,  2330],
+        [ 5041,  3277,  5041,  3277,  3277,  2097,  3277,  2097],
+        [ 4681,  2913,  4681,  2913,  2913,  1824,  2913,  1824],
+        [ 4096,  2622,  4096,  2622,  2622,  1678,  2622,  1678],
+        [ 3641,  2280,  3641,  2280,  2280,  1447,  2280,  1447],
+        [ 3277,  2017,  3277,  2017,  2017,  1311,  2017,  1311],
+        [ 2979,  1873,  2979,  1873,  1873,  1165,  1873,  1165],
+        [ 2521,  1639,  2521,  1639,  1639,  1049,  1639,  1049],
+        [ 2341,  1456,  2341,  1456,  1456,   912,  1456,   912],
+        [ 2048,  1311,  2048,  1311,  1311,   839,  1311,   839],
+        [ 1821,  1140,  1821,  1140,  1140,   723,  1140,   723],
+        [ 1638,  1008,  1638,  1008,  1008,   655,  1008,   655],
+        [ 1490,   936,  1490,   936,   936,   583,   936,   583],
+        [ 1260,   819,  1260,   819,   819,   524,   819,   524],
+        [ 1170,   728,  1170,   728,   728,   456,   728,   456],
+        [ 1024,   655,  1024,   655,   655,   419,   655,   419],
+        [  910,   570,   910,   570,   570,   362,   570,   362],
+        [  819,   504,   819,   504,   504,   328,   504,   328],
+        [  745,   468,   745,   468,   468,   291,   468,   291],
+        [  630,   410,   630,   410,   410,   262,   410,   262],
+        [  585,   364,   585,   364,   364,   228,   364,   228],
+        [  512,   328,   512,   328,   328,   210,   328,   210],
+        [  455,   285,   455,   285,   285,   181,   285,   181],
+        [  410,   252,   410,   252,   252,   164,   252,   164],
+        [  372,   234,   372,   234,   234,   146,   234,   146],
+        [  315,   205,   315,   205,   205,   131,   205,   131],
+        [  293,   182,   293,   182,   182,   114,   182,   114],
+        [  256,   164,   256,   164,   164,   105,   164,   105],
+        [  228,   142,   228,   142,   142,    90,   142,    90],
+        [  205,   126,   205,   126,   126,    82,   126,    82],
+        [  186,   117,   186,   117,   117,    73,   117,    73],
+        [  158,   102,   158,   102,   102,    66,   102,    66],
+        [  146,    91,   146,    91,    91,    57,    91,    57],
+        [  128,    82,   128,    82,    82,    52,    82,    52],
+        [  114,    71,   114,    71,    71,    45,    71,    45],
+        [  102,    63,   102,    63,    63,    41,    63,    41],
+        [   93,    59,    93,    59,    59,    36,    59,    36],
+        [   79,    51,    79,    51,    51,    33,    51,    33],
+        [   73,    46,    73,    46,    46,    28,    46,    28],
+    ];
+
+    /**
+     * g_kiQuantInterFF[58][8] - 量化偏移因子表
+     * Inter: 索引 = QP (0-51)
+     * Intra: 索引 = QP + 6 (g_iQuantIntraFF = g_kiQuantInterFF + 6)
+     */
+    public const QUANT_INTER_FF = [
+        [  0,   1,   0,   1,   1,   1,   1,   1],
+        [  0,   1,   0,   1,   1,   1,   1,   1],
+        [  1,   1,   1,   1,   1,   1,   1,   1],
+        [  1,   1,   1,   1,   1,   1,   1,   1],
+        [  1,   1,   1,   1,   1,   2,   1,   2],
+        [  1,   1,   1,   1,   1,   2,   1,   2],
+        [  1,   1,   1,   1,   1,   2,   1,   2],
+        [  1,   1,   1,   1,   1,   2,   1,   2],
+        [  1,   2,   1,   2,   2,   3,   2,   3],
+        [  1,   2,   1,   2,   2,   3,   2,   3],
+        [  1,   2,   1,   2,   2,   3,   2,   3],
+        [  1,   2,   1,   2,   2,   4,   2,   4],
+        [  2,   3,   2,   3,   3,   4,   3,   4],
+        [  2,   3,   2,   3,   3,   5,   3,   5],
+        [  2,   3,   2,   3,   3,   5,   3,   5],
+        [  2,   4,   2,   4,   4,   6,   4,   6],
+        [  3,   4,   3,   4,   4,   7,   4,   7],
+        [  3,   5,   3,   5,   5,   8,   5,   8],
+        [  3,   5,   3,   5,   5,   8,   5,   8],
+        [  4,   6,   4,   6,   6,   9,   6,   9],
+        [  4,   7,   4,   7,   7,  10,   7,  10],
+        [  5,   8,   5,   8,   8,  12,   8,  12],
+        [  5,   8,   5,   8,   8,  13,   8,  13],
+        [  6,  10,   6,  10,  10,  15,  10,  15],
+        [  7,  11,   7,  11,  11,  17,  11,  17],
+        [  7,  12,   7,  12,  12,  19,  12,  19],
+        [  9,  13,   9,  13,  13,  21,  13,  21],
+        [  9,  15,   9,  15,  15,  24,  15,  24],
+        [ 11,  17,  11,  17,  17,  26,  17,  26],
+        [ 12,  19,  12,  19,  19,  30,  19,  30],
+        [ 13,  22,  13,  22,  22,  33,  22,  33],
+        [ 15,  23,  15,  23,  23,  38,  23,  38],
+        [ 17,  27,  17,  27,  27,  42,  27,  42],
+        [ 19,  30,  19,  30,  30,  48,  30,  48],
+        [ 21,  33,  21,  33,  33,  52,  33,  52],
+        [ 24,  38,  24,  38,  38,  60,  38,  60],
+        [ 27,  43,  27,  43,  43,  67,  43,  67],
+        [ 29,  47,  29,  47,  47,  75,  47,  75],
+        [ 35,  53,  35,  53,  53,  83,  53,  83],
+        [ 37,  60,  37,  60,  60,  96,  60,  96],
+        [ 43,  67,  43,  67,  67, 104,  67, 104],
+        [ 48,  77,  48,  77,  77, 121,  77, 121],
+        [ 53,  87,  53,  87,  87, 133,  87, 133],
+        [ 59,  93,  59,  93,  93, 150,  93, 150],
+        [ 69, 107,  69, 107, 107, 167, 107, 167],
+        [ 75, 120,  75, 120, 120, 192, 120, 192],
+        [ 85, 133,  85, 133, 133, 208, 133, 208],
+        [ 96, 153,  96, 153, 153, 242, 153, 242],
+        [107, 173, 107, 173, 173, 267, 173, 267],
+        [117, 187, 117, 187, 187, 300, 187, 300],
+        [139, 213, 139, 213, 213, 333, 213, 333],
+        [149, 240, 149, 240, 240, 383, 240, 383],
+        [171, 267, 171, 267, 267, 417, 267, 417],
+        [192, 307, 192, 307, 307, 483, 307, 483],
+        [213, 347, 213, 347, 347, 533, 347, 533],
+        [235, 373, 235, 373, 373, 600, 373, 600],
+        [277, 427, 277, 427, 427, 667, 427, 667],
+        [299, 480, 299, 480, 480, 767, 480, 767],
+    ];
+
+    public const ZIGZAG_SCAN_4X4 = [0, 1, 4, 8, 5, 2, 3, 6, 9, 12, 13, 10, 7, 11, 14, 15];
+
+    public const CT_INDEX = [0, 0, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3, 3];
+
+    public const ENC_NC_MAP_TABLE = [0, 0, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3, 3, 4];
+
+    public const VLC_COEFF_TOKEN = [
+        [
+            //0<=nc<2
+            [[1,1],[0,0],[0,0],[0,0]],
+            [[5,6],[1,2],[0,0],[0,0]],
+            [[7,8],[4,6],[1,3],[0,0]],
+            [[7,9],[6,8],[5,7],[3,5]],
+            [[7,10],[6,9],[5,8],[3,6]],
+            [[7,11],[6,10],[5,9],[4,7]],
+            [[15,13],[6,11],[5,10],[4,8]],
+            [[11,13],[14,13],[5,11],[4,9]],
+            [[8,13],[10,13],[13,13],[4,10]],
+            [[15,14],[14,14],[9,13],[4,11]],
+            [[11,14],[10,14],[13,14],[12,13]],
+            [[15,15],[14,15],[9,14],[12,14]],
+            [[11,15],[10,15],[13,15],[8,14]],
+            [[15,16],[1,15],[9,15],[12,15]],
+            [[11,16],[14,16],[13,16],[8,15]],
+            [[7,16],[10,16],[9,16],[12,16]],
+            [[4,16],[6,16],[5,16],[8,16]],
+        ],
+        [
+            //2<=nc<4
+            [[3,2],[0,0],[0,0],[0,0]],
+            [[11,6],[2,2],[0,0],[0,0]],
+            [[7,6],[7,5],[3,3],[0,0]],
+            [[7,7],[10,6],[9,6],[5,4]],
+            [[7,8],[6,6],[5,6],[4,4]],
+            [[4,8],[6,7],[5,7],[6,5]],
+            [[7,9],[6,8],[5,8],[8,6]],
+            [[15,11],[6,9],[5,9],[4,6]],
+            [[11,11],[14,11],[13,11],[4,7]],
+            [[15,12],[10,11],[9,11],[4,9]],
+            [[11,12],[14,12],[13,12],[12,11]],
+            [[8,12],[10,12],[9,12],[8,11]],
+            [[15,13],[14,13],[13,13],[12,12]],
+            [[11,13],[10,13],[9,13],[12,13]],
+            [[7,13],[11,14],[6,13],[8,13]],
+            [[9,14],[8,14],[10,14],[1,13]],
+            [[7,14],[6,14],[5,14],[4,14]],
+        ],
+        [
+            //4<=nc<8
+            [[15,4],[0,0],[0,0],[0,0]],
+            [[15,6],[14,4],[0,0],[0,0]],
+            [[11,6],[15,5],[13,4],[0,0]],
+            [[8,6],[12,5],[14,5],[12,4]],
+            [[15,7],[10,5],[11,5],[11,4]],
+            [[11,7],[8,5],[9,5],[10,4]],
+            [[9,7],[14,6],[13,6],[9,4]],
+            [[8,7],[10,6],[9,6],[8,4]],
+            [[15,8],[14,7],[13,7],[13,5]],
+            [[11,8],[14,8],[10,7],[12,6]],
+            [[15,9],[10,8],[13,8],[12,7]],
+            [[11,9],[14,9],[9,8],[12,8]],
+            [[8,9],[10,9],[13,9],[8,8]],
+            [[13,10],[7,9],[9,9],[12,9]],
+            [[9,10],[12,10],[11,10],[10,10]],
+            [[5,10],[8,10],[7,10],[6,10]],
+            [[1,10],[4,10],[3,10],[2,10]],
+        ],
+        [
+            //8<=nc
+            [[3,6],[0,0],[0,0],[0,0]],
+            [[0,6],[1,6],[0,0],[0,0]],
+            [[4,6],[5,6],[6,6],[0,0]],
+            [[8,6],[9,6],[10,6],[11,6]],
+            [[12,6],[13,6],[14,6],[15,6]],
+            [[16,6],[17,6],[18,6],[19,6]],
+            [[20,6],[21,6],[22,6],[23,6]],
+            [[24,6],[25,6],[26,6],[27,6]],
+            [[28,6],[29,6],[30,6],[31,6]],
+            [[32,6],[33,6],[34,6],[35,6]],
+            [[36,6],[37,6],[38,6],[39,6]],
+            [[40,6],[41,6],[42,6],[43,6]],
+            [[44,6],[45,6],[46,6],[47,6]],
+            [[48,6],[49,6],[50,6],[51,6]],
+            [[52,6],[53,6],[54,6],[55,6]],
+            [[56,6],[57,6],[58,6],[59,6]],
+            [[60,6],[61,6],[62,6],[63,6]],
+        ],
+        [
+            //nc == -1 (chroma DC)
+            [[1,2],[0,0],[0,0],[0,0]],
+            [[7,6],[1,1],[0,0],[0,0]],
+            [[4,6],[6,6],[1,3],[0,0]],
+            [[3,6],[3,7],[2,7],[5,6]],
+            [[2,6],[3,8],[2,8],[0,7]],
+            [[0,0],[0,0],[0,0],[0,0]],
+            [[0,0],[0,0],[0,0],[0,0]],
+            [[0,0],[0,0],[0,0],[0,0]],
+            [[0,0],[0,0],[0,0],[0,0]],
+            [[0,0],[0,0],[0,0],[0,0]],
+            [[0,0],[0,0],[0,0],[0,0]],
+            [[0,0],[0,0],[0,0],[0,0]],
+            [[0,0],[0,0],[0,0],[0,0]],
+            [[0,0],[0,0],[0,0],[0,0]],
+            [[0,0],[0,0],[0,0],[0,0]],
+            [[0,0],[0,0],[0,0],[0,0]],
+            [[0,0],[0,0],[0,0],[0,0]],
+        ],
+    ];
+
+    public const VLC_TOTAL_ZEROS = [
+        [[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0]],
+        [[1,1],[3,3],[2,3],[3,4],[2,4],[3,5],[2,5],[3,6],[2,6],[3,7],[2,7],[3,8],[2,8],[3,9],[2,9],[1,9]],
+        [[7,3],[6,3],[5,3],[4,3],[3,3],[5,4],[4,4],[3,4],[2,4],[3,5],[2,5],[3,6],[2,6],[1,6],[0,6],[0,0]],
+        [[5,4],[7,3],[6,3],[5,3],[4,4],[3,4],[4,3],[3,3],[2,4],[3,5],[2,5],[1,6],[1,5],[0,6],[0,0],[0,0]],
+        [[3,5],[7,3],[5,4],[4,4],[6,3],[5,3],[4,3],[3,4],[3,3],[2,4],[2,5],[1,5],[0,5],[0,0],[0,0],[0,0]],
+        [[5,4],[4,4],[3,4],[7,3],[6,3],[5,3],[4,3],[3,3],[2,4],[1,5],[1,4],[0,5],[0,0],[0,0],[0,0],[0,0]],
+        [[1,6],[1,5],[7,3],[6,3],[5,3],[4,3],[3,3],[2,3],[1,4],[1,3],[0,6],[0,0],[0,0],[0,0],[0,0],[0,0]],
+        [[1,6],[1,5],[5,3],[4,3],[3,3],[3,2],[2,3],[1,4],[1,3],[0,6],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0]],
+        [[1,6],[1,4],[1,5],[3,3],[3,2],[2,2],[2,3],[1,3],[0,6],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0]],
+        [[1,6],[0,6],[1,4],[3,2],[2,2],[1,3],[1,2],[1,5],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0]],
+        [[1,5],[0,5],[1,3],[3,2],[2,2],[1,2],[1,4],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0]],
+        [[0,4],[1,4],[1,3],[2,3],[1,1],[3,3],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0]],
+        [[0,4],[1,4],[1,2],[1,1],[1,3],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0]],
+        [[0,3],[1,3],[1,1],[1,2],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0]],
+        [[0,2],[1,2],[1,1],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0]],
+        [[0,1],[1,1],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0]],
+    ];
+
+    public const VLC_TOTAL_ZEROS_CHROMA_DC = [
+        [[0,0],[0,0],[0,0],[0,0]],
+        [[1,1],[1,2],[1,3],[0,3]],
+        [[1,1],[1,2],[0,2],[0,0]],
+        [[1,1],[0,1],[0,0],[0,0]],
+    ];
+
+    public const VLC_RUN_BEFORE = [
+        [[1,1],[0,1],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0]],
+        [[1,1],[1,2],[0,2],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0]],
+        [[3,2],[2,2],[1,2],[0,2],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0]],
+        [[3,2],[2,2],[1,2],[1,3],[0,3],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0]],
+        [[3,2],[2,2],[3,3],[2,3],[1,3],[0,3],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0]],
+        [[3,2],[0,3],[1,3],[3,3],[2,3],[5,3],[4,3],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0]],
+        [[7,3],[6,3],[5,3],[4,3],[3,3],[2,3],[1,3],[1,4],[1,5],[1,6],[1,7],[1,8],[1,9],[1,10],[1,11]],
+    ];
+
+    public const ZERO_LEFT_MAP = [0, 0, 1, 2, 3, 4, 5, 6, 6, 6, 6, 6, 6, 6, 6, 6];
+
+    public const MB_TYPE_I16x16 = 0;
+    public const MB_TYPE_I4x4 = 1;
+    public const MB_TYPE_P_16x16 = 2;
+    public const MB_TYPE_P_16x8 = 3;
+    public const MB_TYPE_P_8x16 = 4;
+    public const MB_TYPE_P_8x8 = 5;
+
+    public $width = 640;
+    public $height = 360;
+    public $fps = 30;
+    public $bitrate = 500000;
+    public $qp = 22;
+    public $chromaQpIndexOffset = 0;
+    public $mbType = self::MB_TYPE_I16x16;
+
+    // 宏块对齐尺寸（与解码器一致，用于重建帧和参考帧）
+    // 解码器使用mbAlignedWidth/Height存储参考帧，编码器必须匹配
+    public int $mbAlignedWidth = 0;
+    public int $mbAlignedHeight = 0;
+
+    public $frameNum = 0;
+    public $idrPicId = 0;
+    public $poc = 0;
+
+    public $log2MaxFrameNumMinus4 = 0;
+    public $log2MaxPicOrderCntLsbMinus4 = 0;
+
+    public $quantMatrix = [];
+
+    // 反量化表（用于本地解码重建参考帧）
+    public $dequant4Table = [];
+
+    // P帧参考帧管理
+    public $refYPlane = null;      // 参考帧Y平面（重建后的）
+    public $refUPlane = null;      // 参考帧U平面
+    public $refVPlane = null;      // 参考帧V平面
+    public $refInts = null;        // 参考帧Y平面整数数组缓存（优化运动估计速度）
+    public $enableInter = true;   // 是否启用P帧
+    public $numRefFrames = 1;      // 参考帧数量
+
+    // 本地解码重建帧（用于正确更新参考帧，避免编解码器失配）
+    public $reconYPlane = '';
+    public $reconUPlane = '';
+    public $reconVPlane = '';
+    private int $picWidthInMbs;
+    /**
+     * @var array|mixed
+     */
+    private mixed $mvTopRow;
+    /**
+     * @var array|null[]
+     */
+    private array $mvLeftCol;
+    private bool $lastMbWasSkip;
+
+
+    public function __construct(int $width = 0, int $height = 0, int $fps = 25, int $bitrate = 1000000)
     {
+        $this->width = $width;
+        $this->height = $height;
+        $this->fps = $fps;
+        $this->bitrate = $bitrate;
+        $this->refInts = null;
         $this->initQuantMatrix();
-    }
-
-    private function initQuantMatrix(): void
-    {
-        $this->quantMatrix[0] = [
-            16, 11, 10, 16, 24, 40, 51, 61,
-            12, 12, 14, 19, 26, 58, 60, 55,
-            14, 13, 16, 24, 40, 57, 69, 56,
-            14, 17, 22, 29, 51, 87, 80, 62,
-            18, 22, 37, 56, 68, 109, 103, 77,
-            24, 35, 55, 64, 81, 104, 113, 92,
-            49, 64, 78, 87, 103, 121, 120, 101,
-            72, 92, 95, 98, 112, 100, 103, 99
-        ];
-
-        $this->quantMatrix[1] = [
-            17, 18, 24, 47, 99, 99, 99, 99,
-            18, 21, 26, 66, 99, 99, 99, 99,
-            24, 26, 56, 99, 99, 99, 99, 99,
-            47, 66, 99, 99, 99, 99, 99, 99,
-            99, 99, 99, 99, 99, 99, 99, 99,
-            99, 99, 99, 99, 99, 99, 99, 99,
-            99, 99, 99, 99, 99, 99, 99, 99,
-            99, 99, 99, 99, 99, 99, 99, 99
-        ];
     }
 
     public function setResolution(int $width, int $height): void
     {
         $this->width = $width;
         $this->height = $height;
+    }
+
+    public function setQp(int $qp): void
+    {
+        if ($qp < 0) $qp = 0;
+        if ($qp > 51) $qp = 51;
+        $this->qp = $qp;
+    }
+
+    public function setMbType(int $type): void
+    {
+        $this->mbType = $type;
     }
 
     public function setFps(int $fps): void
@@ -59,511 +410,33 @@ class H264Encoder
     public function setBitrate(int $bitrate): void
     {
         $this->bitrate = $bitrate;
-        $this->qp = max(10, min(51, 40 - (int)log($bitrate / 500000, 2)));
+        $logBitrate = log(max(100000, $bitrate));
+        $logRef = log(100000);
+        $logMax = log(10000000);
+        $qpRange = 38 - 18;
+        $ratio = ($logBitrate - $logRef) / ($logMax - $logRef);
+        $this->qp = (int)round(38 - $ratio * $qpRange);
+        $this->qp = max(18, min(38, $this->qp));
     }
 
     public function encodeFrame(string $yuvData, bool $isKeyframe = false): array
     {
         $nalUnits = [];
-
         if ($isKeyframe) {
+            // I帧：重置参考帧和计数器
+            $this->refYPlane = null;
+            $this->refUPlane = null;
+            $this->refVPlane = null;
+            $this->frameNum = 0;
+            $this->idrPicId++;
+            $this->poc = 0;
+
             $nalUnits[] = $this->generateSPS();
             $nalUnits[] = $this->generatePPS();
-            $this->frameNum = 0;
-            $this->idrPicId = 0;
         }
-
         $sliceData = $this->encodeSlice($yuvData, $isKeyframe);
         $nalUnits[] = $sliceData;
-
-        $this->frameNum++;
-        $this->idrPicId++;
-
         return $nalUnits;
     }
 
-    public function generateSPS(): string
-    {
-        $profileIdc = 66;
-        $levelIdc = 30;
-
-        $picWidthInMbs = (int)ceil($this->width / 16);
-        $picHeightInMbs = (int)ceil($this->height / 16);
-
-        $bits = '';
-        $bits .= $this->u($profileIdc, 8);
-        $bits .= '1';
-        $bits .= '0';
-        $bits .= '0';
-        $bits .= '0';
-        $bits .= '0';
-        $bits .= '0';
-        $bits .= '00';
-        $bits .= $this->u($levelIdc, 8);
-        $bits .= $this->ue(0);
-        $bits .= $this->ue(0);
-        $bits .= $this->ue(2);
-        $bits .= $this->ue(0);
-        $bits .= '0';
-        $bits .= $this->ue($picWidthInMbs - 1);
-        $bits .= $this->ue($picHeightInMbs - 1);
-        $bits .= '1';
-        $bits .= '1';
-        $bits .= '0';
-        $bits .= '0';
-
-        $bits .= '1';
-        while (strlen($bits) % 8 != 0) $bits .= '0';
-
-        return $this->rbspToNal($this->bitsToBytes($bits), 7);
-    }
-
-    public function generatePPS(): string
-    {
-        $bits = '';
-        $bits .= $this->ue(0);
-        $bits .= $this->ue(0);
-        $bits .= '0';
-        $bits .= '0';
-        $bits .= $this->ue(0);
-        $bits .= $this->ue(0);
-        $bits .= $this->ue(0);
-        $bits .= '0';
-        $bits .= '00';
-        $bits .= $this->se($this->qp - 26);
-        $bits .= $this->se(0);
-        $bits .= $this->se(0);
-        $bits .= '0';
-        $bits .= '0';
-        $bits .= '0';
-
-        $bits .= '1';
-        while (strlen($bits) % 8 != 0) $bits .= '0';
-
-        return $this->rbspToNal($this->bitsToBytes($bits), 8);
-    }
-
-    private function encodeSlice(string $yuvData, bool $isKeyframe): string
-    {
-        $bits = '';
-        $bits .= $this->ue(0);
-        $bits .= $this->ue(7);
-        $bits .= $this->ue(0);
-        $bits .= $this->u($this->frameNum, 8);
-
-        $bits .= $this->ue($this->idrPicId);
-        $bits .= '0';
-        $bits .= '0';
-
-        $bits .= $this->se(0);
-        $bits .= $this->ue(1);
-        $bits .= $this->se(0);
-        $bits .= $this->se(0);
-
-        $mbWidth = (int)ceil($this->width / 16);
-        $mbHeight = (int)ceil($this->height / 16);
-
-        $ySize = $this->width * $this->height;
-        $uvSize = (int)($ySize / 4);
-        $yPlane = substr($yuvData, 0, $ySize);
-        $uPlane = substr($yuvData, $ySize, $uvSize);
-        $vPlane = substr($yuvData, $ySize + $uvSize, $uvSize);
-
-        for ($mbY = 0; $mbY < $mbHeight; $mbY++) {
-            for ($mbX = 0; $mbX < $mbWidth; $mbX++) {
-                $bits .= $this->encodeMacroblock($mbX, $mbY, $yPlane, $uPlane, $vPlane);
-            }
-        }
-
-        $bits .= '1';
-        while (strlen($bits) % 8 != 0) $bits .= '0';
-
-        return $this->rbspToNal($this->bitsToBytes($bits), 5);
-    }
-
-    private function encodeMacroblock(int $mbX, int $mbY, string $yPlane, string $uPlane, string $vPlane): string
-    {
-        $bits = '';
-
-        $bits .= $this->ue(1);
-        $bits .= $this->ue(2);
-        $bits .= $this->u(0x3F, 6);
-        $bits .= $this->se(0);
-
-        // --- Luma DC ---
-        $lumaDC = array_fill(0, 4, array_fill(0, 4, 0));
-        $lumaAC = [];
-
-        for ($by = 0; $by < 4; $by++) {
-            for ($bx = 0; $bx < 4; $bx++) {
-                $block = $this->getBlock($mbX, $mbY, $bx, $by, $yPlane, false);
-                $pred = $this->predictI16x16($mbX, $mbY, $yPlane);
-                $residual = $this->subtractBlock($block, $pred, $bx, $by);
-                $dct = $this->dct($residual);
-                $lumaDC[$by][$bx] = $dct[0][0];
-                $dct[0][0] = 0;
-                $lumaAC[$by][$bx] = $dct;
-            }
-        }
-
-        $dcHadamard = $this->hadamard($lumaDC);
-        $dcQuantized = $this->quantizeDC($dcHadamard, 0);
-        $dcZigzag = $this->zigzag($dcQuantized);
-        $bits .= $this->encodeCavlc($dcZigzag);
-
-        // --- Luma AC ---
-        for ($by = 0; $by < 4; $by++) {
-            for ($bx = 0; $bx < 4; $bx++) {
-                $acQuantized = $this->quantize($lumaAC[$by][$bx], 0);
-                $acZigzag = $this->zigzag($acQuantized);
-                $bits .= $this->encodeCavlc($acZigzag);
-            }
-        }
-
-        // --- Chroma ---
-        foreach ([$uPlane, $vPlane] as $chromaPlane) {
-            $chromaDC = array_fill(0, 2, array_fill(0, 2, 0));
-            $chromaAC = [];
-
-            for ($by = 0; $by < 2; $by++) {
-                for ($bx = 0; $bx < 2; $bx++) {
-                    $block = $this->getBlock($mbX, $mbY, $bx, $by, $chromaPlane, true);
-                    $dct = $this->dct($block);
-                    $chromaDC[$by][$bx] = $dct[0][0];
-                    $dct[0][0] = 0;
-                    $chromaAC[$by][$bx] = $dct;
-                }
-            }
-
-            // 2x2 Hadamard and embed into 4x4
-            $dcH = array_fill(0, 4, array_fill(0, 4, 0));
-            $dcH[0][0] = $chromaDC[0][0] + $chromaDC[0][1] + $chromaDC[1][0] + $chromaDC[1][1];
-            $dcH[0][1] = $chromaDC[0][0] - $chromaDC[0][1] + $chromaDC[1][0] - $chromaDC[1][1];
-            $dcH[1][0] = $chromaDC[0][0] + $chromaDC[0][1] - $chromaDC[1][0] - $chromaDC[1][1];
-            $dcH[1][1] = $chromaDC[0][0] - $chromaDC[0][1] - $chromaDC[1][0] + $chromaDC[1][1];
-
-            $dcQuantized = $this->quantizeDC($dcH, 1);
-            $dcZigzag = $this->zigzag($dcQuantized);
-            $bits .= $this->encodeCavlc($dcZigzag);
-
-            for ($by = 0; $by < 2; $by++) {
-                for ($bx = 0; $bx < 2; $bx++) {
-                    $acQuantized = $this->quantize($chromaAC[$by][$bx], 1);
-                    $acZigzag = $this->zigzag($acQuantized);
-                    $bits .= $this->encodeCavlc($acZigzag);
-                }
-            }
-        }
-
-        return $bits;
-    }
-
-    private function getBlock(int $mbX, int $mbY, int $bx, int $by, string $plane, bool $chroma): array
-    {
-        $step = $chroma ? 8 : 16;
-        $pw = $chroma ? (int)($this->width / 2) : $this->width;
-        $pixels = array_fill(0, 4, array_fill(0, 4, 0));
-        for ($y = 0; $y < 4; $y++) {
-            for ($x = 0; $x < 4; $x++) {
-                $px = $mbX * $step + $bx * 4 + $x;
-                $py = $mbY * $step + $by * 4 + $y;
-                $idx = $py * $pw + $px;
-                if ($idx >= 0 && $idx < strlen($plane)) {
-                    $pixels[$y][$x] = ord($plane[$idx]) - 128;
-                }
-            }
-        }
-        return $pixels;
-    }
-
-    private function predictI16x16(int $mbX, int $mbY, string $plane): array
-    {
-        $pred = array_fill(0, 16, array_fill(0, 16, 0));
-
-        $sum = 0;
-        $cnt = 0;
-
-        if ($mbY > 0) {
-            $refY = ($mbY - 1) * 16 + 15;
-            for ($x = 0; $x < 16; $x++) {
-                $refX = $mbX * 16 + $x;
-                if ($refX < $this->width) {
-                    $idx = $refY * $this->width + $refX;
-                    if ($idx < strlen($plane)) {
-                        $sum += ord($plane[$idx]) - 128;
-                        $cnt++;
-                    }
-                }
-            }
-        }
-
-        if ($mbX > 0) {
-            $refX = ($mbX - 1) * 16 + 15;
-            for ($y = 0; $y < 16; $y++) {
-                $refY = $mbY * 16 + $y;
-                $idx = $refY * $this->width + $refX;
-                if ($idx < strlen($plane)) {
-                    $sum += ord($plane[$idx]) - 128;
-                    $cnt++;
-                }
-            }
-        }
-
-        $avg = $cnt > 0 ? (int)round($sum / $cnt) : 0;
-
-        for ($y = 0; $y < 16; $y++) {
-            for ($x = 0; $x < 16; $x++) {
-                $pred[$y][$x] = $avg;
-            }
-        }
-
-        return $pred;
-    }
-
-    private function subtractBlock(array $original, array $pred, int $bx, int $by): array
-    {
-        $residual = array_fill(0, 4, array_fill(0, 4, 0));
-        for ($y = 0; $y < 4; $y++) {
-            for ($x = 0; $x < 4; $x++) {
-                $residual[$y][$x] = $original[$y][$x] - $pred[$by * 4 + $y][$bx * 4 + $x];
-            }
-        }
-        return $residual;
-    }
-
-    private function dct(array $block): array
-    {
-        $t = array_fill(0, 4, array_fill(0, 4, 0));
-        for ($i = 0; $i < 4; $i++) {
-            $a = $block[$i][0] + $block[$i][3];
-            $b = $block[$i][1] + $block[$i][2];
-            $c = $block[$i][1] - $block[$i][2];
-            $d = $block[$i][0] - $block[$i][3];
-            $t[$i][0] = $a + $b;
-            $t[$i][1] = (int)round(($d + $c) * 0.707);
-            $t[$i][2] = $a - $b;
-            $t[$i][3] = (int)round(($d - $c) * 0.707);
-        }
-
-        $r = array_fill(0, 4, array_fill(0, 4, 0));
-        for ($i = 0; $i < 4; $i++) {
-            $a = $t[0][$i] + $t[3][$i];
-            $b = $t[1][$i] + $t[2][$i];
-            $c = $t[1][$i] - $t[2][$i];
-            $d = $t[0][$i] - $t[3][$i];
-            $r[0][$i] = (int)round(($a + $b) * 0.5);
-            $r[1][$i] = (int)round(($d + $c) * 0.354);
-            $r[2][$i] = (int)round(($a - $b) * 0.5);
-            $r[3][$i] = (int)round(($d - $c) * 0.354);
-        }
-
-        return $r;
-    }
-
-    private function hadamard(array $block): array
-    {
-        $t = array_fill(0, 4, array_fill(0, 4, 0));
-        for ($i = 0; $i < 4; $i++) {
-            $a = $block[$i][0] + $block[$i][3];
-            $b = $block[$i][1] + $block[$i][2];
-            $c = $block[$i][1] - $block[$i][2];
-            $d = $block[$i][0] - $block[$i][3];
-            $t[$i][0] = $a + $b;
-            $t[$i][1] = $c + $d;
-            $t[$i][2] = $a - $b;
-            $t[$i][3] = $c - $d;
-        }
-
-        $r = array_fill(0, 4, array_fill(0, 4, 0));
-        for ($i = 0; $i < 4; $i++) {
-            $a = $t[0][$i] + $t[3][$i];
-            $b = $t[1][$i] + $t[2][$i];
-            $c = $t[1][$i] - $t[2][$i];
-            $d = $t[0][$i] - $t[3][$i];
-            $r[0][$i] = (int)round(($a + $b) * 0.5);
-            $r[1][$i] = (int)round(($c + $d) * 0.5);
-            $r[2][$i] = (int)round(($a - $b) * 0.5);
-            $r[3][$i] = (int)round(($c - $d) * 0.5);
-        }
-
-        return $r;
-    }
-
-    private function quantize(array $block, int $chroma): array
-    {
-        $r = array_fill(0, 4, array_fill(0, 4, 0));
-        $mf = 1 << (int)($this->qp / 6);
-        $rem = $this->qp % 6;
-
-        for ($y = 0; $y < 4; $y++) {
-            for ($x = 0; $x < 4; $x++) {
-                $qm = $this->quantMatrix[$chroma][$y * 4 + $x];
-                $q = $qm * $mf;
-                if ($rem) $q = (int)round($q * pow(1.122, $rem));
-                if ($q == 0) $q = 1;
-                $r[$y][$x] = (int)round($block[$y][$x] / $q);
-            }
-        }
-        return $r;
-    }
-
-    private function quantizeDC(array $block, int $chroma): array
-    {
-        $r = array_fill(0, 4, array_fill(0, 4, 0));
-        $mf = 1 << (int)($this->qp / 6);
-        $rem = $this->qp % 6;
-
-        for ($y = 0; $y < 4; $y++) {
-            for ($x = 0; $x < 4; $x++) {
-                $qm = $this->quantMatrix[$chroma][$y * 4 + $x];
-                $q = $qm * $mf;
-                if ($rem) $q = (int)round($q * pow(1.122, $rem));
-                if ($x == 0 && $y == 0) $q = (int)round($q * 0.25);
-                if ($q == 0) $q = 1;
-                $r[$y][$x] = (int)round($block[$y][$x] / $q);
-            }
-        }
-        return $r;
-    }
-
-    private function zigzag(array $block): array
-    {
-        $order = [
-            [0,0],[0,1],[1,0],[2,0],[1,1],[0,2],[0,3],[1,2],
-            [2,1],[3,0],[3,1],[2,2],[1,3],[2,3],[3,2],[3,3]
-        ];
-        $r = [];
-        foreach ($order as $p) {
-            $r[] = $block[$p[0]][$p[1]];
-        }
-        return $r;
-    }
-
-    private function encodeCavlc(array $coeffs): string
-    {
-        $last = -1;
-        $tc = 0;
-        for ($i = 0; $i < 16; $i++) {
-            if ($coeffs[$i] != 0) {
-                $tc++;
-                $last = $i;
-            }
-        }
-
-        if ($tc == 0) {
-            return '1';
-        }
-
-        $t1 = 0;
-        for ($i = $last; $i >= max(0, $last - 2); $i--) {
-            if (abs($coeffs[$i]) == 1) {
-                $t1++;
-            } else {
-                break;
-            }
-        }
-
-        $bits = $this->ue($tc * 4 + $t1);
-
-        for ($i = $last; $i > $last - $t1; $i--) {
-            $bits .= ($coeffs[$i] > 0) ? '0' : '1';
-        }
-
-        $levels = [];
-        for ($i = $last - $t1; $i >= 0; $i--) {
-            if ($coeffs[$i] != 0) {
-                $levels[] = abs($coeffs[$i]);
-            }
-        }
-
-        foreach ($levels as $idx => $level) {
-            if ($idx == 0 && $t1 < 3) {
-                $level = max(1, $level - 2);
-            }
-            $bits .= $this->levelBits($level);
-            $origIdx = $last - $t1 - $idx;
-            if ($origIdx >= 0 && $origIdx < 16) {
-                $bits .= ($coeffs[$origIdx] > 0) ? '0' : '1';
-            }
-        }
-
-        $tz = $last + 1 - $tc;
-        if ($tz > 0 && $last < 15) {
-            $bits .= $this->ue($tz);
-        }
-
-        $zl = $tz;
-        for ($i = $last; $i > 0 && $zl > 0; $i--) {
-            $rb = 0;
-            $pos = $i - 1;
-            while ($pos >= 0 && $coeffs[$pos] == 0 && $rb < $zl) {
-                $rb++;
-                $pos--;
-            }
-            if ($rb > 0) {
-                $bits .= $this->ue($rb);
-                $zl -= $rb;
-                $i = $pos + 1;
-            }
-        }
-
-        return $bits;
-    }
-
-    private function levelBits(int $level): string
-    {
-        if ($level == 0) return '1';
-        if ($level < 14) {
-            $prefix = (int)floor(log($level + 1, 2));
-            $suffix = $level - (1 << $prefix) + 1;
-            return str_repeat('1', $prefix) . '0' .
-                str_pad(decbin($suffix), $prefix, '0', STR_PAD_LEFT);
-        }
-        return str_repeat('1', 14) . '0' .
-            str_pad(decbin($level - 14), 4, '0', STR_PAD_LEFT);
-    }
-
-    private function ue(int $v): string
-    {
-        if ($v == 0) return '1';
-        $bin = decbin($v + 1);
-        return str_repeat('0', strlen($bin) - 1) . $bin;
-    }
-
-    private function se(int $v): string
-    {
-        return $this->ue($v <= 0 ? -$v * 2 : $v * 2 - 1);
-    }
-
-    private function u(int $v, int $n): string
-    {
-        return str_pad(decbin($v), $n, '0', STR_PAD_LEFT);
-    }
-
-    private function bitsToBytes(string $bits): string
-    {
-        $bytes = '';
-        for ($i = 0; $i < strlen($bits); $i += 8) {
-            $bytes .= chr(bindec(str_pad(substr($bits, $i, 8), 8, '0')));
-        }
-        return $bytes;
-    }
-
-    private function rbspToNal(string $rbsp, int $type): string
-    {
-        $ref = ($type == 5) ? 3 : (in_array($type, [1, 2]) ? 2 : 3);
-        $header = chr(($ref << 5) | $type);
-        $escaped = '';
-        $z = 0;
-        for ($i = 0; $i < strlen($rbsp); $i++) {
-            $b = ord($rbsp[$i]);
-            if ($z >= 2 && $b <= 3) {
-                $escaped .= chr(0x03);
-                $z = 0;
-            }
-            $escaped .= chr($b);
-            $z = ($b == 0) ? $z + 1 : 0;
-        }
-        return $header . $escaped;
-    }
 }
