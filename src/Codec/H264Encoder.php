@@ -3294,9 +3294,9 @@ class H264Encoder
             }
 
             // P_Skip色度重建: 使用与解码器一致的1/8像素双线性插值MC
-            // chromaRefX = mbX*64 + mvX*2 (mvX是1/4像素单位，需要乘以2转换为1/8像素单位)
-            $chromaRefX = $mbX * 64 + $skipMvpX * 2;
-            $chromaRefY = $mbY * 64 + $skipMvpY * 2;
+            // chromaMV = floor(lumaMV / 2)，右移一位实现向下取整（符合H.264标准）
+            $chromaRefX = $mbX * 64 + ($skipMvpX >> 1);
+            $chromaRefY = $mbY * 64 + ($skipMvpY >> 1);
             $cbPred = $this->mcChromaBlock($this->refUPlane, $chromaRefX, $chromaRefY, $chromaW, $chromaH);
             $crPred = $this->mcChromaBlock($this->refVPlane, $chromaRefX, $chromaRefY, $chromaW, $chromaH);
             for ($y = 0; $y < 8; $y++) {
@@ -3423,9 +3423,9 @@ class H264Encoder
 
         // === P帧色度本地解码重建 ===
         // P帧cbpChroma=0, 解码器直接做色度MC(无残差)
-        // chromaRefX = mbX*64 + mvX*2 (mvX是1/4像素单位，需要乘以2转换为1/8像素单位)
-        $chromaRefX = $mbX * 64 + $mvX * 2;
-        $chromaRefY = $mbY * 64 + $mvY * 2;
+        // chromaMV = floor(lumaMV / 2)，右移一位实现向下取整（符合H.264标准）
+        $chromaRefX = $mbX * 64 + ($mvX >> 1);
+        $chromaRefY = $mbY * 64 + ($mvY >> 1);
         $cbPred = $this->mcChromaBlock($this->refUPlane, $chromaRefX, $chromaRefY, $chromaW, $chromaH);
         $crPred = $this->mcChromaBlock($this->refVPlane, $chromaRefX, $chromaRefY, $chromaW, $chromaH);
         for ($y = 0; $y < 8; $y++) {

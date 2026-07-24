@@ -1507,8 +1507,8 @@ trait MacroblockDecodingTrait
         }
 
         // 色度：8x8亮度对应4x4色度
-        $chromaRefX = $mbX * 64 + $blkX * 32 + $mvX * 2;
-        $chromaRefY = $mbY * 64 + $blkY * 32 + $mvY * 2;
+        $chromaRefX = $mbX * 64 + $blkX * 32 + ($mvX >> 1);
+        $chromaRefY = $mbY * 64 + $blkY * 32 + ($mvY >> 1);
 
         $cbPred = $this->mcChroma(
             $this->refFrameU, $this->refStrideUv,
@@ -1554,8 +1554,8 @@ trait MacroblockDecodingTrait
         }
 
         // 色度
-        $chromaRefX = $mbX * 64 + $blkX * 32 + $mvX * 2;
-        $chromaRefY = $mbY * 64 + $blkY * 32 + $yOffset * 4 + $mvY * 2;
+        $chromaRefX = $mbX * 64 + $blkX * 32 + ($mvX >> 1);
+        $chromaRefY = $mbY * 64 + $blkY * 32 + $yOffset * 4 + ($mvY >> 1);
 
         $cbPred = $this->mcChroma(
             $this->refFrameU, $this->refStrideUv,
@@ -1601,8 +1601,8 @@ trait MacroblockDecodingTrait
         }
 
         // 色度
-        $chromaRefX = $mbX * 64 + $blkX * 32 + $xOffset * 4 + $mvX * 2;
-        $chromaRefY = $mbY * 64 + $blkY * 32 + $mvY * 2;
+        $chromaRefX = $mbX * 64 + $blkX * 32 + $xOffset * 4 + ($mvX >> 1);
+        $chromaRefY = $mbY * 64 + $blkY * 32 + ($mvY >> 1);
 
         $cbPred = $this->mcChroma(
             $this->refFrameU, $this->refStrideUv,
@@ -1648,8 +1648,8 @@ trait MacroblockDecodingTrait
             }
         }
 
-        $chromaRefX = $mbX * 64 + $blkX * 32 + $subX * 16 + $mvX * 2;
-        $chromaRefY = $mbY * 64 + $blkY * 32 + $subY * 16 + $mvY * 2;
+        $chromaRefX = $mbX * 64 + $blkX * 32 + $subX * 16 + ($mvX >> 1);
+        $chromaRefY = $mbY * 64 + $blkY * 32 + $subY * 16 + ($mvY >> 1);
 
         $cbPred = $this->mcChroma(
             $this->refFrameU, $this->refStrideUv,
@@ -1952,8 +1952,8 @@ trait MacroblockDecodingTrait
             }
         }
 
-        $chromaRefX = $mbX * 64 + $mvX * 2;
-        $chromaRefY = $mbY * 64 + $mvY * 2;
+        $chromaRefX = $mbX * 64 + ($mvX >> 1);
+        $chromaRefY = $mbY * 64 + ($mvY >> 1);
 
         $cbPred = $this->mcChroma(
             $this->refFrameU, $this->refStrideUv,
@@ -2002,8 +2002,8 @@ trait MacroblockDecodingTrait
             }
         }
 
-        $chromaRefX = $mbX * 64 + $mvX * 2;
-        $chromaRefY = $mbY * 64 + $mvY * 2 + $yOffset * 4;
+        $chromaRefX = $mbX * 64 + ($mvX >> 1);
+        $chromaRefY = $mbY * 64 + ($mvY >> 1) + $yOffset * 4;
 
         $cbPred = $this->mcChroma(
             $this->refFrameU, $this->refStrideUv,
@@ -2053,8 +2053,8 @@ trait MacroblockDecodingTrait
             }
         }
 
-        $chromaRefX = $mbX * 64 + $mvX * 2 + $xOffset * 4;
-        $chromaRefY = $mbY * 64 + $mvY * 2;
+        $chromaRefX = $mbX * 64 + ($mvX >> 1) + $xOffset * 4;
+        $chromaRefY = $mbY * 64 + ($mvY >> 1);
 
         $cbPred = $this->mcChroma(
             $this->refFrameU, $this->refStrideUv,
