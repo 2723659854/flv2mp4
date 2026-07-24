@@ -326,6 +326,7 @@ class H264Encoder
     public $refYPlane = null;      // 参考帧Y平面（重建后的）
     public $refUPlane = null;      // 参考帧U平面
     public $refVPlane = null;      // 参考帧V平面
+    public $refInts = null;        // 参考帧Y平面整数数组缓存（优化运动估计速度）
     public $enableInter = true;   // 是否启用P帧
     public $numRefFrames = 1;      // 参考帧数量
 
@@ -340,6 +341,7 @@ class H264Encoder
         $this->height = $height;
         $this->fps = $fps;
         $this->bitrate = $bitrate;
+        $this->refInts = null;
         $this->initQuantMatrix();
     }
 
@@ -681,6 +683,7 @@ class H264Encoder
         $this->refYPlane = $this->reconYPlane;
         $this->refUPlane = $this->reconUPlane;
         $this->refVPlane = $this->reconVPlane;
+        $this->refInts = null;
 
         // 更新帧序号
         $this->frameNum++;
@@ -2948,52 +2951,49 @@ class H264Encoder
      */
     public function motionEstimate16x16(array $currentBlock, string $refPlane, int $mbX, int $mbY, int $searchRange = 16): array
     {
-        $refStride = $this->mbAlignedWidth;
-        $refW = $this->mbAlignedWidth;
-        $refH = $this->mbAlignedHeight;
+        if (!isset($this->refInts) || $this->refInts === null) {
+            $this->refInts = unpack('C*', $refPlane);
+        }
+
+        $curFlat = [];
+        foreach ($currentBlock as $row) {
+            foreach ($row as $val) {
+                $curFlat[] = $val;
+            }
+        }
 
         $origX = $mbX * 16;
         $origY = $mbY * 16;
-
         $blockW = min(16, $this->width - $origX);
         $blockH = min(16, $this->height - $origY);
+        $refStride = $this->mbAlignedWidth;
 
-        $computeSAD = function(int $dx, int $dy) use ($currentBlock, $refPlane, $origX, $origY, $refStride, $refW, $refH, $blockW, $blockH) {
-            $rx = $origX + $dx;
-            $ry = $origY + $dy;
-            if ($rx < 0 || $rx + $blockW > $refW || $ry < 0 || $ry + $blockH > $refH) {
-                return PHP_INT_MAX;
-            }
-            $sad = 0;
-            for ($y = 0; $y < $blockH; $y++) {
-                $refRow = ($ry + $y) * $refStride + $rx;
-                for ($x = 0; $x < $blockW; $x++) {
-                    $sad += abs($currentBlock[$y][$x] - ord($refPlane[$refRow + $x]));
-                }
-            }
-            return $sad;
-        };
-
-        $bestDX = 0;
-        $bestDY = 0;
-        $bestSAD = $computeSAD(0, 0);
+        $minDx = max(-$searchRange, -$origX);
+        $maxDx = min($searchRange, $this->mbAlignedWidth - $origX - $blockW);
+        $minDy = max(-$searchRange, -$origY);
+        $maxDy = min($searchRange, $this->mbAlignedHeight - $origY - $blockH);
 
         $ldspPattern = [
             [-2, 0], [2, 0], [0, -2], [0, 2],
             [-1, -1], [1, -1], [-1, 1], [1, 1],
         ];
-
         $sdspPattern = [
             [-1, 0], [1, 0], [0, -1], [0, 1],
         ];
 
-        for ($iter = 0; $iter < $searchRange; $iter++) {
+        $bestDX = 0;
+        $bestDY = 0;
+        $bestSAD = $this->computeSADFast($curFlat, $origX, $origY, 0, 0, $blockW, $blockH, $refStride);
+
+        for ($iter = 0; $iter < 10; $iter++) {
             $foundBetter = false;
             foreach ($ldspPattern as [$px, $py]) {
                 $dx = $bestDX + $px;
                 $dy = $bestDY + $py;
-                if (abs($dx) > $searchRange || abs($dy) > $searchRange) continue;
-                $sad = $computeSAD($dx, $dy);
+                if ($dx < $minDx || $dx > $maxDx || $dy < $minDy || $dy > $maxDy) {
+                    continue;
+                }
+                $sad = $this->computeSADFast($curFlat, $origX, $origY, $dx, $dy, $blockW, $blockH, $refStride);
                 if ($sad < $bestSAD) {
                     $bestSAD = $sad;
                     $bestDX = $dx;
@@ -3009,8 +3009,10 @@ class H264Encoder
             foreach ($sdspPattern as [$px, $py]) {
                 $dx = $bestDX + $px;
                 $dy = $bestDY + $py;
-                if (abs($dx) > $searchRange || abs($dy) > $searchRange) continue;
-                $sad = $computeSAD($dx, $dy);
+                if ($dx < $minDx || $dx > $maxDx || $dy < $minDy || $dy > $maxDy) {
+                    continue;
+                }
+                $sad = $this->computeSADFast($curFlat, $origX, $origY, $dx, $dy, $blockW, $blockH, $refStride);
                 if ($sad < $bestSAD) {
                     $bestSAD = $sad;
                     $bestDX = $dx;
@@ -3022,6 +3024,27 @@ class H264Encoder
         }
 
         return [$bestDX * 4, $bestDY * 4, $bestSAD];
+    }
+
+    private function computeSADFast(array $curFlat, int $origX, int $origY, int $dx, int $dy, int $blockW, int $blockH, int $refStride): int
+    {
+        $rx = $origX + $dx;
+        $ry = $origY + $dy;
+        $refStart = $ry * $refStride + $rx + 1;
+        $sad = 0;
+        $pos = 0;
+        $refInts = $this->refInts;
+
+        for ($y = 0; $y < $blockH; $y++) {
+            $rowOffset = $refStart + $y * $refStride;
+            for ($x = 0; $x < $blockW; $x++) {
+                $diff = $curFlat[$pos] - $refInts[$rowOffset + $x];
+                if ($diff < 0) $diff = -$diff;
+                $sad += $diff;
+                $pos++;
+            }
+        }
+        return $sad;
     }
 
     /**

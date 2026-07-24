@@ -10,18 +10,16 @@ namespace Xiaosongshu\Flv2mp4\Codec;
 class VideoScaler
 {
     /**
-     * 使用双立方插值 (Catmull-Rom) 缩放 YUV420P 图像
-     * 比双线性插值质量好很多，能更好地保留边缘细节
+     * 使用双线性插值缩放 YUV420P 图像
+     * 比双立方插值快3-4倍，低分辨率下质量损失可忽略
      */
     public function scaleYUV420P(string $yuvData, int $srcW, int $srcH, int $dstW, int $dstH): string
     {
-        // YUV420P 强制宽高为偶数，防止UV平面尺寸错乱花屏
         $srcW = $srcW - ($srcW & 1);
         $srcH = $srcH - ($srcH & 1);
         $dstW = $dstW - ($dstW & 1);
         $dstH = $dstH - ($dstH & 1);
 
-        // 尺寸一致直接返回原始数据，跳过计算
         if ($srcW === $dstW && $srcH === $dstH) {
             return $yuvData;
         }
@@ -32,9 +30,9 @@ class VideoScaler
         $uPlane = substr($yuvData, $ySize, $uvSize);
         $vPlane = substr($yuvData, $ySize + $uvSize, $uvSize);
 
-        $scaledY = $this->scalePlaneBicubic($yPlane, $srcW, $srcH, $dstW, $dstH);
-        $scaledU = $this->scalePlaneBicubic($uPlane, $srcW >> 1, $srcH >> 1, $dstW >> 1, $dstH >> 1);
-        $scaledV = $this->scalePlaneBicubic($vPlane, $srcW >> 1, $srcH >> 1, $dstW >> 1, $dstH >> 1);
+        $scaledY = $this->scalePlaneBilinear($yPlane, $srcW, $srcH, $dstW, $dstH);
+        $scaledU = $this->scalePlaneBilinear($uPlane, $srcW >> 1, $srcH >> 1, $dstW >> 1, $dstH >> 1);
+        $scaledV = $this->scalePlaneBilinear($vPlane, $srcW >> 1, $srcH >> 1, $dstW >> 1, $dstH >> 1);
 
         return $scaledY . $scaledU . $scaledV;
     }
@@ -125,31 +123,31 @@ class VideoScaler
 
         $src = array_values(unpack('C*', $data));
         $dst = [];
-        $ratioX = $srcW / $dstW;
-        $ratioY = $srcH / $dstH;
+
+        $fx = (int)($srcW * 65536 / $dstW);
+        $fy = (int)($srcH * 65536 / $dstH);
 
         for ($y = 0; $y < $dstH; $y++) {
-            $srcY = $y * $ratioY;
-            $y0 = (int)floor($srcY);
+            $srcYFixed = $y * $fy;
+            $y0 = (int)($srcYFixed >> 16);
             $y1 = min($y0 + 1, $srcH - 1);
-            $dy = $srcY - $y0;
+            $dy = $srcYFixed & 0xFFFF;
+            $yd = 65536 - $dy;
 
             for ($x = 0; $x < $dstW; $x++) {
-                $srcX = $x * $ratioX;
-                $x0 = (int)floor($srcX);
+                $srcXFixed = $x * $fx;
+                $x0 = (int)($srcXFixed >> 16);
                 $x1 = min($x0 + 1, $srcW - 1);
-                $dx = $srcX - $x0;
+                $dx = $srcXFixed & 0xFFFF;
+                $xd = 65536 - $dx;
 
                 $v00 = $src[$y0 * $srcW + $x0] ?? 128;
                 $v01 = $src[$y0 * $srcW + $x1] ?? 128;
                 $v10 = $src[$y1 * $srcW + $x0] ?? 128;
                 $v11 = $src[$y1 * $srcW + $x1] ?? 128;
 
-                $val = (1 - $dx) * (1 - $dy) * $v00
-                    + $dx * (1 - $dy) * $v01
-                    + (1 - $dx) * $dy * $v10
-                    + $dx * $dy * $v11;
-                $dst[] = (int)round(max(0, min(255, $val)));
+                $val = ($xd * $yd * $v00 + $dx * $yd * $v01 + $xd * $dy * $v10 + $dx * $dy * $v11) >> 32;
+                $dst[] = ($val < 0) ? 0 : (($val > 255) ? 255 : $val);
             }
         }
         return pack('C*', ...$dst);

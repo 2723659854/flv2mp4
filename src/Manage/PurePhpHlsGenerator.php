@@ -55,6 +55,7 @@ class PurePhpHlsGenerator
     private VideoScaler $scaler;
     // 多分辨率解码帧缓存，避免多profile覆盖
     private array $decodedFrameCache = [];
+    private string $frameCacheKey = '';
 
     private int $srcWidth = 0;
     private int $srcHeight = 0;
@@ -215,8 +216,11 @@ class PurePhpHlsGenerator
         if ($cts & 0x800000) $cts -= 0x1000000;
         $avcData = $avc['data'];
 
-        // 每帧开始前清空解码缓存，确保不同帧不会复用
-        $this->decodedFrameCache = [];
+        $cacheKey = md5($avcData);
+        if (!isset($this->frameCacheKey) || $this->frameCacheKey !== $cacheKey) {
+            $this->decodedFrameCache = [];
+            $this->frameCacheKey = $cacheKey;
+        }
 
         foreach ($this->profiles as $name => $profile) {
             $writer = &$this->segmentWriters[$name];
