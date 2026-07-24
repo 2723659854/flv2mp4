@@ -2756,11 +2756,20 @@ class H264Encoder
         return $out;
     }
 
+    private static $ueCache = [];
+
     public function ue(int $v): string
     {
+        if (isset(self::$ueCache[$v])) {
+            return self::$ueCache[$v];
+        }
         $bin = decbin($v + 1);
         $zeros = strlen($bin) - 1;
-        return str_repeat('0', $zeros) . $bin;
+        $result = str_repeat('0', $zeros) . $bin;
+        if ($v < 100) {
+            self::$ueCache[$v] = $result;
+        }
+        return $result;
     }
 
     public function se(int $v): string
