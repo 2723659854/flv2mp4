@@ -1,8 +1,6 @@
 <?php
 
-namespace Xiaosongshu\Flv2mp4\Codec\Decoder;
-
-use Xiaosongshu\Flv2mp4\Codec\BitReader;
+namespace Xiaosongshu\Flv2mp4\Codec;
 
 /**
  * @purpose spspps解析器

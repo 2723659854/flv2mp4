@@ -1,6 +1,6 @@
 <?php
 
-namespace Xiaosongshu\Flv2mp4\Codec\Decoder;
+namespace Xiaosongshu\Flv2mp4\Codec;
 
 /**
  * @purpose 去块滤波器

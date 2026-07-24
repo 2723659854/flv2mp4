@@ -1,6 +1,6 @@
 <?php
 
-namespace Xiaosongshu\Flv2mp4\Codec\Scaler;
+namespace Xiaosongshu\Flv2mp4\Codec;
 
 /**
  * @purpose 视频缩放器

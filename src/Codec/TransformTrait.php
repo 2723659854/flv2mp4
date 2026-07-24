@@ -1,6 +1,6 @@
 <?php
 
-namespace Xiaosongshu\Flv2mp4\Codec\Decoder;
+namespace Xiaosongshu\Flv2mp4\Codec;
 
 /**
  * @purpose 逆离散余弦变换

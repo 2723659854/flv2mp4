@@ -2,11 +2,11 @@
 
 namespace Xiaosongshu\Flv2mp4\Manage;
 
+use Xiaosongshu\Flv2mp4\Flv\FlvParse;
 use Xiaosongshu\Flv2mp4\Codec\H264Decoder;
 use Xiaosongshu\Flv2mp4\Codec\H264Encoder;
+use Xiaosongshu\Flv2mp4\Codec\VideoScaler;
 use Xiaosongshu\Flv2mp4\Codec\NalUtil;
-use Xiaosongshu\Flv2mp4\Codec\Scaler\VideoScaler;
-use Xiaosongshu\Flv2mp4\Flv\FlvParse;
 
 /**
  * @purpose flv转hls多码率
