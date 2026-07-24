@@ -1,44 +1,51 @@
-# FLV ↔ MP4 / HLS Conversion Tool
+# FLV ↔ MP4 / HLS Conversion Toolkit
 
 <p align="center">
   <a href="./README.cn.md"><strong>🇨🇳 中文</strong></a> •
   <a href="./README.md"><strong>🇬🇧 English</strong></a>
 </p>
 
-A lightweight media processing toolkit implemented in pure PHP 8.1+, with **zero external dependencies (no FFmpeg required)**.  
-Supports bidirectional conversion between FLV and FMP4 / MP4 / HLS, live stream forwarding, pushing, pulling, and relaying, making it easy to integrate into automated pipelines.
+A lightweight media processing toolkit implemented in pure PHP 8.1+, **zero external dependencies (no FFmpeg required)**.  
+Supports FLV, FMP4, MP4, HLS interconversion, live streaming gateway, pushing, pulling, relaying, and **H.264 decoding + scaling + re-encoding** (Baseline Profile).
+
+---
 
 ## 🎯 Core Features
 
-| Feature                     | Direction                                    | Description                                                                                   |
-|-----------------------------|----------------------------------------------|-----------------------------------------------------------------------------------------------|
-| Transcoding / Muxing        | FLV → MP4 / FMP4                             | Generate standard MP4 or separate fMP4 segments (suitable for MSE)                            |
-| Segment Distribution        | FLV → HLS                                    | Generate M3U8 + TS segments, compatible with hls.js, VLC, etc.                                |
-| Reverse Restoration         | HLS → FLV                                    | Merge HLS segments back into a single FLV file                                                |
-| Format Conversion           | MP4 → FLV                                    | Transcode an MP4 file into FLV container format                                               |
-| Format Conversion           | FMP4 → FLV                                   | Transcode an FMP4 file into FLV container format                                              |
-| Live Gateway                | FLV Gateway                                  | High-performance multi-level forwarding, supporting high concurrency                          |
-| File Server                 | HTTP File Gateway                            | Lightweight static file server with directory listing support                                 |
-| Push Client                 | FLV / MP4 → RTMP                             | Push static files as pseudo-live streams to an RTMP server (HTTP-FLV / WS-FLV also supported) |
-| Pull Client                 | HTTP-FLV / WS-FLV / RTMP → FLV               | Pull a live stream and save it as a local FLV file                                            |
-| Relay Client                | Multi-protocol input → Multi-protocol output | Pull a live stream and forward it to multiple target addresses simultaneously                 |
+| Feature | Direction | Description |
+|---------|-----------|-------------|
+| Container Conversion | FLV ↔ MP4 / FMP4 | Generate standard MP4 or separate fMP4 segments (MSE-compatible) |
+| HLS Packaging | FLV → HLS | Generate M3U8 + TS segments, compatible with hls.js, VLC, etc. |
+| HLS Reversal | HLS → FLV | Merge HLS segments back into a single FLV file |
+| MP4 ↔ FLV | MP4 → FLV / FMP4 → FLV | Multi-container format interconversion |
+| Live Gateway | FLV Gateway | High-performance multi-level forwarding with high concurrency support |
+| Static File Service | HTTP File Gateway | Lightweight file server with directory listing support |
+| Push Client | FLV / MP4 → RTMP/HTTP-FLV/WS-FLV | Push static files as pseudo-live streams |
+| Pull Client | RTMP/HTTP-FLV/WS-FLV → FLV | Pull live streams and save as local FLV files |
+| Relay Client | Multi-protocol input → Multi-protocol output | One pull, multiple push targets |
+| **H.264 Re-encoding** | Decode → Scale → Encode | Baseline Profile support, core engine for multi-bitrate HLS |
 
-## Prerequisites
+---
 
-| Dependency      | Description                                                      |
-|-----------------|------------------------------------------------------------------|
-| PHP             | ≥ 8.1 (**CLI command-line mode only**, not for web environments) |
-| `sockets` extension | **Required**, provides low-level socket communication capabilities |
+## Requirements
 
-> 💡 All features are built with native PHP – no need to install FFmpeg or any third-party binaries.
+| Dependency | Description |
+|------------|-------------|
+| PHP | ≥ 8.1 (**CLI mode only**) |
+| `sockets` extension | **Required**, provides underlying Socket communication |
+| `bcmath` extension | Optional, for high-precision arithmetic optimization |
+
+💡 **No FFmpeg, no third-party binaries — all pure PHP.**
+
+---
 
 ## 🚀 Installation
-
-Install via Composer:
 
 ```bash
 composer require xiaosongshu/flv2mp4
 ```
+
+---
 
 ## 📚 Quick Start
 
@@ -46,289 +53,204 @@ composer require xiaosongshu/flv2mp4
 <?php
 
 declare(strict_types=1);
-
 require_once __DIR__ . '/vendor/autoload.php';
 
-// Increase memory limit for large files
 ini_set('memory_limit', '512M');
 
 $file = __DIR__ . '/test.flv';
 
-// 1. FLV → mixed audio/video fMP4 segments
-$result = \Xiaosongshu\Flv2mp4\Client::runFlv2Fmp4Mixed($file, __DIR__ . '/output_merge');
+// 1. FLV → mixed fMP4 segments
+\Xiaosongshu\Flv2mp4\Client::runFlv2Fmp4Mixed($file, __DIR__ . '/output_merge');
 
-// 2. FLV → separate audio/video fMP4 segments
-$result = \Xiaosongshu\Flv2mp4\Client::runFlv2Fmp4Separate($file, __DIR__ . '/output_separate');
+// 2. FLV → separate fMP4 segments (audio/video independent)
+\Xiaosongshu\Flv2mp4\Client::runFlv2Fmp4Separate($file, __DIR__ . '/output_separate');
 
 // 3. FLV → HLS
-$result = \Xiaosongshu\Flv2mp4\Client::runFlv2Hls($file, __DIR__ . '/hls');
+\Xiaosongshu\Flv2mp4\Client::runFlv2Hls($file, __DIR__ . '/hls');
 
 // 4. HLS → FLV
-$result = \Xiaosongshu\Flv2mp4\Client::runHls2Flv(__DIR__ . "/hls/abc/index.m3u8", __DIR__ . '/output.flv');
+\Xiaosongshu\Flv2mp4\Client::runHls2Flv(__DIR__ . '/hls/index.m3u8', __DIR__ . '/output.flv');
 
 // 5. MP4 → FLV
-$result = \Xiaosongshu\Flv2mp4\Client::runMp42Flv(__DIR__ . '/test.mp4', __DIR__ . '/output.flv');
+\Xiaosongshu\Flv2mp4\Client::runMp42Flv(__DIR__ . '/test.mp4', __DIR__ . '/output.flv');
 
 // 6. FLV → MP4
-$result = \Xiaosongshu\Flv2mp4\Client::runFlv2Mp4($mp4File, __DIR__ . '/output.mp4');
+\Xiaosongshu\Flv2mp4\Client::runFlv2Mp4($file, __DIR__ . '/output.mp4');
 
-// 7. separate audio/video fMP4 segments → FLV
-$result = \Xiaosongshu\Flv2mp4\Client::runFmp42Flv(__DIR__."/output_separate/index.m3u8", __DIR__ . "/004.flv");
-
-// 8 . mixed audio/video fMP4 segments  → FLV
-$result = \Xiaosongshu\Flv2mp4\Client::runFmp42Flv(__DIR__."/output_merge/index.m3u8", __DIR__ . "/004.flv");
+// 7. fMP4 → FLV (supports both mixed and separate)
+\Xiaosongshu\Flv2mp4\Client::runFmp42Flv(__DIR__ . '/output_merge/index.m3u8', __DIR__ . '/output.flv');
 ```
+
+---
 
 ## 🌐 Advanced Features
 
 ### FLV Live Gateway
 
-Supports multi-level cascading deployment, enabling high-concurrency live stream forwarding through proxying.
+Supports multi-level proxy deployment for high-concurrency live stream forwarding.
 
 ```php
-<?php
-
-require_once __DIR__ . '/vendor/autoload.php';
-
 $gateway = new \Xiaosongshu\Flv2mp4\manage\FlvGateway(8080, 'http://127.0.0.1:8501');
 $gateway->debug = true;
 $gateway->start();
 ```
 
-Command-line examples:
-
 ```bash
-# Level 1 gateway (direct to origin)
+# Level 1 gateway
 php flvGateway.php 8080 http://127.0.0.1:8501
-
-# Level 2 gateway (proxy for level 1)
+# Level 2 gateway
 php flvGateway.php 8081 http://127.0.0.1:8080
-
 # Playback URL: http://127.0.0.1:8081/{app}/{stream}.flv
 ```
 
 ### Static File Gateway
 
-A high-performance HTTP file server for quickly sharing directory contents, with a toggle for directory listing.
+Lightweight HTTP file server with directory listing toggle.
 
 ```php
-<?php
-
-require_once __DIR__ . '/vendor/autoload.php';
-
 $server = new \Xiaosongshu\Flv2mp4\manage\FileGateway(
     host: '0.0.0.0',
     port: 8100,
     documentRoot: __DIR__,
-    enableDirListing: false   // It is recommended to disable directory listing in production
+    enableDirListing: false
 );
 $server->debug = true;
 $server->start();
 ```
 
-```bash
-php fileGateway.php
-```
-
 ### Push Client
 
-#### Command-line Arguments
-
-| Argument         | Description                                        | Default Value                       |
-|------------------|----------------------------------------------------|-------------------------------------|
-| `file`           | Path to the source FLV / MP4 file                   | **Required**                        |
-| `push_url`       | Target push URL (HTTP / WS / RTMP)                  | `http://127.0.0.1:8501/live/stream` |
-| `speed`          | Push speed multiplier (0.1 – 10.0)                  | `1.0`                               |
-| `--no-reconnect` | Disable automatic reconnection                     | Reconnection enabled by default     |
-
-#### HTTP / WebSocket Push
-
-```php
-<?php
-
-require_once __DIR__ . '/vendor/autoload.php';
-
-// FLV push
-$pusher = new \Xiaosongshu\Flv2mp4\manage\FLVPusherAll(
-    flvFile: 'test.flv',
-    pushUrl: 'http://127.0.0.1:8501/live/stream',
-    speed: 1.0,
-    autoReconnect: true
-);
-$pusher->start();
-
-// MP4 push
-$mp4Pusher = new \Xiaosongshu\Flv2mp4\Manage\Mp4PusherAll(
-    mp4File: 'test.mp4',
-    pushUrl: 'http://127.0.0.1:8501/live/stream',
-    speed: 2.0
-);
-$mp4Pusher->start();
-```
-
-Command-line examples:
+Supports HTTP-FLV, WS-FLV, RTMP protocols with speed control and auto-reconnect.
 
 ```bash
 # HTTP-FLV push
 php flv_pusher.php test.flv http://127.0.0.1:8501/live/stream
 
-# WebSocket push
-php flv_pusher.php test.flv ws://127.0.0.1:8501/live/stream
+# 2x speed + disable reconnect
+php flv_pusher.php test.flv http://127.0.0.1:8501/live/stream 2.0 --no-reconnect
 
-# Push at 2x speed
-php flv_pusher.php test.flv http://127.0.0.1:8501/live/stream 2.0
+# RTMP push
+php rtmp_pusher.php test.mp4 rtmp://127.0.0.1:1935/live/stream
 
-# Disable automatic reconnection
-php flv_pusher.php test.flv http://127.0.0.1:8501/live/stream 1.0 --no-reconnect
-
-# Push MP4 file
+# MP4 push (2x speed)
 php mp4_pusher.php test.mp4 http://127.0.0.1:8501/live/stream 2.0
 ```
 
-#### RTMP Push
+### Pull Client
 
-```php
-<?php
-
-require_once __DIR__ . '/vendor/autoload.php';
-
-use Xiaosongshu\Flv2mp4\SabreAMF\RtmpPushFlvClient;
-use Xiaosongshu\Flv2mp4\SabreAMF\RtmpPushMp4Client;
-
-ini_set('memory_limit', '2048M');
-
-$filePath    = $argv[1];
-$rtmpUrl     = $argv[2] ?? 'rtmp://127.0.0.1:1935/live/stream';
-$speed       = (float) ($argv[3] ?? 1.0);
-$autoReconnect = !in_array('--no-reconnect', $argv);
-
-$extension = strtolower(pathinfo($filePath, PATHINFO_EXTENSION));
-
-$pusher = match ($extension) {
-    'mp4'    => new RtmpPushMp4Client($filePath, $rtmpUrl, $speed, $autoReconnect),
-    default  => new RtmpPushFlvClient($filePath, $rtmpUrl, $speed, $autoReconnect),
-};
-
-$pusher->start();
-```
-
-Command-line examples:
+Pull live streams and save as local FLV files, suitable for recording or debugging.
 
 ```bash
-# FLV RTMP push
-php rtmp_pusher.php test.flv rtmp://127.0.0.1:1935/live/stream
-
-# MP4 RTMP push (2x speed)
-php rtmp_pusher.php test.mp4 rtmp://127.0.0.1:1935/live/stream 2.0
-
-# Disable automatic reconnection
-php rtmp_pusher.php test.flv rtmp://127.0.0.1:1935/live/stream 1.0 --no-reconnect
-```
-
-This project supports HTTP-FLV, WS-FLV, and RTMP push protocols. For more usage details, refer to [xiaosongshu/rtmp_server](https://github.com/2723659854/rtmp-server).
-
----
-
-### PHP Pull Client (Test Tool)
-
-Pull data from a live stream and save it as a local FLV file, suitable for long-term recording or functionality verification.
-
-```php
-require_once __DIR__ . '/vendor/autoload.php';
-
-use Xiaosongshu\Flv2mp4\Manage\PullerManager;
-
-ini_set('memory_limit', '2048M');
-
-$pullUrl        = $argv[1];
-$outputFlv      = __DIR__ . '/record/' . $argv[2];
-$duration       = $argv[3] ?? 0;   // 0 means unlimited duration
-$autoReconnect  = !in_array('--no-reconnect', $argv);
-
-$puller = new PullerManager($pullUrl, $outputFlv, $duration, $autoReconnect);
-$puller->start();
-```
-
-Usage examples:
-
-```bash
-# HTTP-FLV pull
 php puller.php http://127.0.0.1:8501/live/stream.flv output.flv 0 --no-reconnect
-
-# WebSocket pull
-php puller.php ws://127.0.0.1:8501/live/stream.flv output.flv 0 --no-reconnect
-
-# RTMP pull
-php puller.php rtmp://127.0.0.1:1935/live/stream output.flv 0 --no-reconnect
 ```
 
-Supported pull protocols: RTMP, HTTP-FLV, WS-FLV. For more information, see [xiaosongshu/rtmp_server](https://github.com/2723659854/rtmp-server).
+### Live Relay
 
----
-
-### PHP Live Forwarding (Relay) Tool
-
-Forward a single live stream to multiple target addresses simultaneously, with support for mixed protocols, facilitating cross-platform distribution.
-
-```php
-require_once __DIR__ . '/vendor/autoload.php';
-
-use Xiaosongshu\Flv2mp4\Flv\FlvForwardClient;
-
-ini_set('memory_limit', '2048M');
-
-$pullUrl      = $argv[1];
-$pushUrls     = array_map('trim', explode(',', $argv[2]));
-$duration     = $argv[3] ?? 0;
-$autoReconnect = !in_array('--no-reconnect', $argv);
-
-$forwarder = new FlvForwardClient($pullUrl, $pushUrls, $duration, $autoReconnect);
-$forwarder->start();
-```
-
-Usage example:
+Pull one stream and forward to multiple targets simultaneously (supports mixed protocols).
 
 ```bash
 php forward.php http://127.0.0.1:8501/a/b.flv \
   "rtmp://127.0.0.1:1935/c/d,ws://127.0.0.1:8501/c/e,http://127.0.0.1:8501/c/f"
 ```
 
-Supports RTMP, HTTP-FLV, and WS-FLV for both input and output. See [xiaosongshu/rtmp_server](https://github.com/2723659854/rtmp-server) for detailed configuration.
+---
 
-## 🧪 Testing and Playback
+## 🧪 Testing & Playback
 
-| Output Format   | Recommended Player        | Reference File      |
-|-----------------|---------------------------|---------------------|
-| Regular MP4     | HTML5 `<video>`           | `index.html`        |
-| fMP4 Segments   | MSE player                | `play_merge.html`,`mse.html`   |
-| HLS (TS)        | hls.js / Safari           | `play.html`         |
-| Merged FLV      | flv.js                    | `flv.html`          |
+| Output Format | Recommended Player | Reference File |
+|---------------|-------------------|----------------|
+| MP4 | HTML5 `<video>` | `index.html` |
+| fMP4 | MSE Player | `play_merge.html`, `mse.html` |
+| HLS (TS) | hls.js / Safari | `play.html` |
+| FLV | flv.js | `flv.html` |
+
+---
 
 ## 🎯 Use Cases
 
-- **Live Recording** — Convert RTMP/FLV live streams into FMP4 or HLS in real time
-- **Video Playback** — Watch recorded streams on demand at any time
-- **Stream Forwarding** — Multi-level gateways for load balancing and edge acceleration
-- **Offline Batch Processing** — Batch convert FLV file formats
-- **Pseudo-live Push** — Push on-demand files as if they were live streams
-- **Cross-platform Relaying** — Pull once and forward to multiple platforms simultaneously
-- **Automation Integration** — Pure PHP implementation with no external dependencies, seamlessly embedding into existing PHP workflows
+- **Live Recording**: RTMP/FLV live streams saved as fMP4 / HLS in real-time
+- **Video Playback**: On-demand playback of recorded streams
+- **Stream Relaying**: Multi-level gateways for load balancing and edge acceleration
+- **Offline Batch Processing**: Batch conversion of FLV / MP4 formats
+- **Pseudo-live Streaming**: Push VOD files as live streams
+- **Cross-platform Relaying**: One pull, multiple push destinations
+- **Multi-bitrate HLS**: Pure PHP H.264 re-encoding for adaptive bitrate HLS
+
+---
+
+## 🔥 H.264 Decoding + Scaling + Re-encoding
+
+Supports Baseline Profile H.264 decoding, scaling, and re-encoding, providing core capabilities for the following scenarios:
+
+| Use Case | Description |
+|----------|-------------|
+| **Multi-bitrate HLS** | Transcode a single FLV into multi-resolution HLS segments (adaptive bitrate) |
+| **FLV Re-encoding** | Modify resolution/bitrate and re-encode to FLV |
+| **MP4 Re-encoding** | Modify resolution/bitrate and re-encode to MP4 |
+| **Format Conversion** | Re-encode during FLV ↔ MP4 conversion (not just remuxing) |
+| **Watermark Overlay** | Decode YUV → overlay PNG/text watermark → re-encode output |
+| **Quality Enhancement** | Apply filters (sharpening, denoising, etc.) after decoding → re-encode |
+| **Resolution Adaptation** | Downsample high-resolution video to multiple output resolutions |
+| **Bitrate Control** | Re-encode high-bitrate video to a specified target bitrate |
+
+**Technical Positioning**: This is a complete **H.264 pixel processing pipeline** (Decode → Process → Encode), implemented in pure PHP with no FFmpeg dependency.
+
+---
+
+Below is a multi-bitrate HLS example:
+
+```php
+<?php
+
+require_once __DIR__ . '/vendor/autoload.php';
+ini_set('memory_limit', '2048M');
+
+$profiles = [
+    '1080p' => ['width' => 1920, 'height' => 1080, 'bitrate' => 5000000],
+    '720p'  => ['width' => 1280, 'height' => 720,  'bitrate' => 2500000],
+    '480p'  => ['width' => 854,  'height' => 480,  'bitrate' => 1200000],
+    '360p'  => ['width' => 640,  'height' => 360,  'bitrate' => 600000],
+];
+
+$generator = new PurePhpHlsGenerator($profiles, __DIR__ . '/hls/output');
+$generator->processFlv(__DIR__ . '/test.flv');
+
+echo "All processing complete!\n";
+```
+
+For other features, please implement custom logic using the encoder.
+
+---
+
+### Supported Re-encoding Features
+
+- [x] **I-frame Decoding & Encoding** (fully precise, INF dB)
+- [x] **P-frame Decoding & Encoding** (Baseline Profile)
+- [x] **Intra Prediction**: 4x4 (9 modes) + 16x16 (4 modes)
+- [x] **Inter Prediction**: P-frame motion estimation (Diamond Search optimized)
+- [x] **1/4-pixel Precision**: 6-tap filter interpolation
+- [x] **CAVLC Entropy Coding** (Baseline Profile)
+- [x] **Resolution Scaling** (YUV scaling after decoding → re-encoding)
+- [x] **Bitrate Control** (via QP parameter adjustment)
+- [ ] **B-frame Support** (planned, requires bidirectional prediction handling)
+- [ ] **CABAC Entropy Coding** (planned, for Main Profile support)
+
+---
 
 ## 🔧 Technical Notes
 
-This project is a companion tool for [xiaosongshu/rtmp_server](https://github.com/2723659854/rtmp-server), focusing on live stream recording, playback, and format conversion. All feature demonstration code can be found in the `rtmp_server` project.
-
 - Pure PHP 8.1+ implementation, no FFmpeg dependency
-- It is recommended to use [PHPStan](https://phpstan.org/) (Level 8) for static analysis to ensure code quality
+- Companion to [xiaosongshu/rtmp_server](https://github.com/2723659854/rtmp-server)
+- Recommended static analysis with [PHPStan](https://phpstan.org/) Level 8
 
-## License
+---
 
-This project is open-sourced under the [Apache License 2.0](http://www.apache.org/licenses/LICENSE-2.0).  
-You are free to use, modify, and distribute the code, including for commercial purposes. Please refer to the [LICENSE](LICENSE) file for the full terms.
+## License & Disclaimer
 
-### Disclaimer
+This project is open-sourced under the [Apache License 2.0](http://www.apache.org/licenses/LICENSE-2.0). You are free to use, modify, and distribute the code, including for commercial purposes.  
+The code is provided "AS IS", without warranty of any kind, express or implied. The author shall not be liable for any damages arising from the use of this software.
 
-The code in this project is provided "AS IS", without warranty of any kind, express or implied, including but not limited to the warranties of merchantability, fitness for a particular purpose, and noninfringement. In no event shall the authors be liable for any direct, indirect, incidental, special, punitive, or consequential damages arising from the use of this software, even if advised of the possibility of such damages. See the [LICENSE](LICENSE) file for the complete disclaimer.
+---
 
 ## 📧 Contact
 
