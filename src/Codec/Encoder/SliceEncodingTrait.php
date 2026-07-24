@@ -2,6 +2,10 @@
 
 namespace Xiaosongshu\Flv2mp4\Codec\Encoder;
 
+/**
+ * @purpose 条带编码
+ * @author yanglong
+ */
 trait SliceEncodingTrait
 {
     public function encodeSlice(string $yuvData, bool $isKeyframe): string

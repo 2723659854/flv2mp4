@@ -2,6 +2,10 @@
 
 namespace Xiaosongshu\Flv2mp4\Codec\Encoder;
 
+/**
+ * @purpose sps/pps编码器
+ * @author yanglong
+ */
 trait SpsPpsEncodingTrait
 {
     public function generateSPS(): string

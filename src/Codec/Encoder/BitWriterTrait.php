@@ -2,6 +2,10 @@
 
 namespace Xiaosongshu\Flv2mp4\Codec\Encoder;
 
+/**
+ * @purpose 字节写入器
+ * @author yanglong
+ */
 trait BitWriterTrait
 {
     private static $ueCache = [];

@@ -2,6 +2,10 @@
 
 namespace Xiaosongshu\Flv2mp4\Codec\Encoder;
 
+/**
+ * @purpose 变换编码
+ * @author yanglong
+ */
 trait TransformEncodingTrait
 {
     public function initQuantMatrix(): void

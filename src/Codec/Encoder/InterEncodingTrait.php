@@ -2,6 +2,10 @@
 
 namespace Xiaosongshu\Flv2mp4\Codec\Encoder;
 
+/**
+ * @purpose 帧间预测
+ * @author yanglong
+ */
 trait InterEncodingTrait
 {
     private function getRefPixel(string $refPlane, int $x, int $y): int
