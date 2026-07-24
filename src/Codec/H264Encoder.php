@@ -19,6 +19,17 @@ class H264Encoder
     ];
 
     /**
+     * 色度QP映射表（H.264标准）
+     * 编码器和解码器必须使用相同的映射
+     */
+    public const CHROMA_QP_TABLE = [
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+        16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29,
+        29, 30, 31, 32, 32, 33, 34, 34, 35, 35, 36, 36, 37, 37,
+        37, 38, 38, 38, 39, 39, 39, 39,
+    ];
+
+    /**
      * 量化乘法因子表
      * 索引: QP (0-51), j = position & 7
      */
@@ -841,7 +852,8 @@ class H264Encoder
 
         $u8x8 = array_fill(0, 8, array_fill(0, 8, 128));
         $v8x8 = array_fill(0, 8, array_fill(0, 8, 128));
-        $chromaQp = max(0, min(51, $this->qp + $this->chromaQpIndexOffset));
+        $chromaQpIndex = max(0, min(51, $this->qp + $this->chromaQpIndexOffset));
+        $chromaQp = self::CHROMA_QP_TABLE[$chromaQpIndex];
         $hasChromaAc = false;
         $quantCb4x4 = array_fill(0, 4, array_fill(0, 16, 0));
         $quantCr4x4 = array_fill(0, 4, array_fill(0, 16, 0));
@@ -1797,7 +1809,8 @@ class H264Encoder
 
         $u8x8 = array_fill(0, 8, array_fill(0, 8, 128));
         $v8x8 = array_fill(0, 8, array_fill(0, 8, 128));
-        $chromaQp = max(0, min(51, $this->qp + $this->chromaQpIndexOffset));
+        $chromaQpIndex = max(0, min(51, $this->qp + $this->chromaQpIndexOffset));
+        $chromaQp = self::CHROMA_QP_TABLE[$chromaQpIndex];
         $hasChromaAc = false;
         $quantCb4x4 = array_fill(0, 4, array_fill(0, 16, 0));
         $quantCr4x4 = array_fill(0, 4, array_fill(0, 16, 0));
