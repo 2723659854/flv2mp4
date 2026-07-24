@@ -326,7 +326,7 @@ class H264Encoder
     public $refYPlane = null;      // 参考帧Y平面（重建后的）
     public $refUPlane = null;      // 参考帧U平面
     public $refVPlane = null;      // 参考帧V平面
-    public $enableInter = false;   // 是否启用P帧
+    public $enableInter = true;   // 是否启用P帧
     public $numRefFrames = 1;      // 参考帧数量
 
     // 本地解码重建帧（用于正确更新参考帧，避免编解码器失配）
@@ -2329,21 +2329,55 @@ class H264Encoder
                 $levelCode = 0;
             }
 
-            $levelPrefix = $levelCode >> $suffixLength;
-            $levelSuffixSize = $suffixLength;
-            $levelSuffix = $levelCode - ($levelPrefix << $suffixLength);
-
-            if ($levelPrefix >= 14 && $levelPrefix < 30 && $suffixLength == 0) {
-                $levelPrefix = 14;
-                $levelSuffix = $levelCode - $levelPrefix;
-                $levelSuffixSize = 4;
-            } elseif ($levelPrefix >= 15) {
-                $levelPrefix = 15;
-                $levelSuffix = $levelCode - ($levelPrefix << $suffixLength);
-                if ($suffixLength == 0) {
-                    $levelSuffix -= 15;
+            if ($isFirst && $suffixLength === 0) {
+                if ($levelCode < 14) {
+                    $levelPrefix = $levelCode;
+                    $levelSuffix = 0;
+                    $levelSuffixSize = 0;
+                } elseif ($levelCode < 30) {
+                    $levelPrefix = 14;
+                    $levelSuffix = $levelCode - 14;
+                    $levelSuffixSize = 4;
+                } else {
+                    $remaining = $levelCode - 30;
+                    $pre = 15;
+                    while (true) {
+                        $suffixBits = $pre - 3;
+                        $maxSuffixVal = (1 << $suffixBits) - 1;
+                        if ($remaining <= $maxSuffixVal) {
+                            break;
+                        }
+                        $remaining -= ($maxSuffixVal + 1);
+                        $pre++;
+                        if ($pre > 32) break;
+                    }
+                    $levelPrefix = $pre;
+                    $levelSuffix = $remaining;
+                    $levelSuffixSize = $pre - 3;
                 }
-                $levelSuffixSize = 12;
+            } else {
+                $levelPrefix = $levelCode >> $suffixLength;
+                $levelSuffixSize = $suffixLength;
+                $levelSuffix = $levelCode - ($levelPrefix << $suffixLength);
+
+                if ($levelPrefix >= 15) {
+                    $baseCode = 15 * (1 << $suffixLength);
+                    $remaining = $levelCode - $baseCode;
+                    $pre = 15;
+                    while (true) {
+                        $suffixBits = $pre - 3;
+                        $maxSuffixVal = (1 << $suffixBits) - 1;
+                        if ($remaining <= $maxSuffixVal) {
+                            break;
+                        }
+                        $remaining -= ($maxSuffixVal + 1);
+                        $pre++;
+                        if ($pre > 32) break;
+                    }
+                    $levelPrefix = $pre;
+                    $levelSuffix = $remaining;
+                    $levelSuffixSize = $pre - 3;
+                }
             }
 
             $n = $levelPrefix + 1 + $levelSuffixSize;
