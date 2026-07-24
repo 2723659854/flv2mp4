@@ -2943,7 +2943,7 @@ class H264Encoder
     }
 
     /**
-     * 运动估计：整数像素搜索
+     * 运动估计：整数像素搜索，菱形搜索
      * @return array [mvX, mvY, sad] 运动向量和SAD值（mvX/mvY为1/4像素单位）
      */
     public function motionEstimate16x16(array $currentBlock, string $refPlane, int $mbX, int $mbY, int $searchRange = 16): array
@@ -3022,6 +3022,99 @@ class H264Encoder
         }
 
         return [$bestDX * 4, $bestDY * 4, $bestSAD];
+    }
+
+    /**
+     * 运动估计：二级搜索（粗搜+精搜）备份实现
+     * 速度较慢但搜索更充分，可用于质量敏感场景
+     * @return array [mvX, mvY, sad] 运动向量和SAD值（mvX/mvY为1/4像素单位）
+     */
+    public function motionEstimate16x16TwoLevel(array $currentBlock, string $refPlane, int $mbX, int $mbY, int $searchRange = 16): array
+    {
+        $refStride = $this->mbAlignedWidth;
+        $refW = $this->mbAlignedWidth;
+        $refH = $this->mbAlignedHeight;
+
+        $bestMV = [0, 0];
+        $bestSAD = PHP_INT_MAX;
+
+        $origX = $mbX * 16;
+        $origY = $mbY * 16;
+
+        $blockW = min(16, $this->width - $origX);
+        $blockH = min(16, $this->height - $origY);
+
+        // 先检查(0,0)位置
+        $sad00 = 0;
+        for ($y = 0; $y < $blockH; $y++) {
+            for ($x = 0; $x < $blockW; $x++) {
+                $refIdx = ($origY + $y) * $refStride + ($origX + $x);
+                $sad00 += abs($currentBlock[$y][$x] - ord($refPlane[$refIdx]));
+            }
+        }
+        $bestSAD = $sad00;
+        $bestDX = 0;
+        $bestDY = 0;
+
+        // 大步长粗搜索（步长=4）
+        $coarseStep = 4;
+        for ($dy = -$searchRange; $dy <= $searchRange; $dy += $coarseStep) {
+            for ($dx = -$searchRange; $dx <= $searchRange; $dx += $coarseStep) {
+                if ($dx == 0 && $dy == 0) continue;
+                $rx = $origX + $dx;
+                $ry = $origY + $dy;
+
+                if ($rx < 0 || $rx + $blockW > $refW || $ry < 0 || $ry + $blockH > $refH) {
+                    continue;
+                }
+
+                $sad = 0;
+                for ($y = 0; $y < $blockH; $y++) {
+                    for ($x = 0; $x < $blockW; $x++) {
+                        $refIdx = ($ry + $y) * $refStride + ($rx + $x);
+                        $sad += abs($currentBlock[$y][$x] - ord($refPlane[$refIdx]));
+                    }
+                }
+
+                if ($sad < $bestSAD) {
+                    $bestSAD = $sad;
+                    $bestDX = $dx;
+                    $bestDY = $dy;
+                }
+            }
+        }
+
+        // 小步长精搜索（在粗搜索最佳点周围±3，步长=1）
+        $refineRange = 3;
+        for ($dy = $bestDY - $refineRange; $dy <= $bestDY + $refineRange; $dy++) {
+            for ($dx = $bestDX - $refineRange; $dx <= $bestDX + $refineRange; $dx++) {
+                if ($dx == 0 && $dy == 0 && $bestDX == 0 && $bestDY == 0) continue;
+                if (abs($dx) > $searchRange || abs($dy) > $searchRange) continue;
+                $rx = $origX + $dx;
+                $ry = $origY + $dy;
+
+                if ($rx < 0 || $rx + $blockW > $refW || $ry < 0 || $ry + $blockH > $refH) {
+                    continue;
+                }
+
+                $sad = 0;
+                for ($y = 0; $y < $blockH; $y++) {
+                    for ($x = 0; $x < $blockW; $x++) {
+                        $refIdx = ($ry + $y) * $refStride + ($rx + $x);
+                        $sad += abs($currentBlock[$y][$x] - ord($refPlane[$refIdx]));
+                    }
+                }
+
+                if ($sad < $bestSAD) {
+                    $bestSAD = $sad;
+                    $bestDX = $dx;
+                    $bestDY = $dy;
+                }
+            }
+        }
+
+        $bestMV = [$bestDX * 4, $bestDY * 4];
+        return [$bestMV[0], $bestMV[1], $bestSAD];
     }
 
     // P帧运动向量缓存（与解码器一致的4x4子块粒度存储）
