@@ -497,8 +497,8 @@ trait InterPredTrait
 
         $H = null;
         if ($fracX !== 0) {
-            $H = array_fill(0, 16, array_fill(0, 16, 0));
-            for ($y = 0; $y < 16; $y++) {
+            $H = array_fill(0, 21, array_fill(0, 16, 0));
+            for ($y = -2; $y < 19; $y++) {
                 $ry = max(0, min($h - 1, $intY + $y));
                 for ($x = 0; $x < 16; $x++) {
                     $px0 = $this->getClampedPixel($refPlane, $intX + $x - 2, $ry, $w, $h);
@@ -508,7 +508,7 @@ trait InterPredTrait
                     $px4 = $this->getClampedPixel($refPlane, $intX + $x + 2, $ry, $w, $h);
                     $px5 = $this->getClampedPixel($refPlane, $intX + $x + 3, $ry, $w, $h);
                     $hVal = ($px0 - 5 * $px1 + 20 * $px2 + 20 * $px3 - 5 * $px4 + $px5 + 16) >> 5;
-                    $H[$y][$x] = max(0, min(255, $hVal));
+                    $H[$y + 2][$x] = $hVal;
                 }
             }
         }
@@ -516,12 +516,21 @@ trait InterPredTrait
         if ($fracY !== 0) {
             for ($y = 0; $y < 16; $y++) {
                 for ($x = 0; $x < 16; $x++) {
-                    $p0 = $H !== null ? $H[max(0, $y - 2)][$x] : $this->getClampedPixel($refPlane, $intX + $x, max(0, min($h - 1, $intY + $y - 2)), $w, $h);
-                    $p1 = $H !== null ? $H[max(0, $y - 1)][$x] : $this->getClampedPixel($refPlane, $intX + $x, max(0, min($h - 1, $intY + $y - 1)), $w, $h);
-                    $p2 = $H !== null ? $H[$y][$x] : $this->getClampedPixel($refPlane, $intX + $x, max(0, min($h - 1, $intY + $y)), $w, $h);
-                    $p3 = $H !== null ? $H[min(15, $y + 1)][$x] : $this->getClampedPixel($refPlane, $intX + $x, max(0, min($h - 1, $intY + $y + 1)), $w, $h);
-                    $p4 = $H !== null ? $H[min(15, $y + 2)][$x] : $this->getClampedPixel($refPlane, $intX + $x, max(0, min($h - 1, $intY + $y + 2)), $w, $h);
-                    $p5 = $H !== null ? $H[min(15, $y + 3)][$x] : $this->getClampedPixel($refPlane, $intX + $x, max(0, min($h - 1, $intY + $y + 3)), $w, $h);
+                    if ($H !== null) {
+                        $p0 = $H[$y][$x];
+                        $p1 = $H[$y + 1][$x];
+                        $p2 = $H[$y + 2][$x];
+                        $p3 = $H[$y + 3][$x];
+                        $p4 = $H[$y + 4][$x];
+                        $p5 = $H[$y + 5][$x];
+                    } else {
+                        $p0 = $this->getClampedPixel($refPlane, $intX + $x, max(0, min($h - 1, $intY + $y - 2)), $w, $h);
+                        $p1 = $this->getClampedPixel($refPlane, $intX + $x, max(0, min($h - 1, $intY + $y - 1)), $w, $h);
+                        $p2 = $this->getClampedPixel($refPlane, $intX + $x, max(0, min($h - 1, $intY + $y)), $w, $h);
+                        $p3 = $this->getClampedPixel($refPlane, $intX + $x, max(0, min($h - 1, $intY + $y + 1)), $w, $h);
+                        $p4 = $this->getClampedPixel($refPlane, $intX + $x, max(0, min($h - 1, $intY + $y + 2)), $w, $h);
+                        $p5 = $this->getClampedPixel($refPlane, $intX + $x, max(0, min($h - 1, $intY + $y + 3)), $w, $h);
+                    }
                     $vVal = ($p0 - 5 * $p1 + 20 * $p2 + 20 * $p3 - 5 * $p4 + $p5 + 16) >> 5;
                     $pred[$y][$x] = max(0, min(255, $vVal));
                 }
@@ -529,7 +538,7 @@ trait InterPredTrait
         } else {
             for ($y = 0; $y < 16; $y++) {
                 for ($x = 0; $x < 16; $x++) {
-                    $pred[$y][$x] = $H[$y][$x];
+                    $pred[$y][$x] = max(0, min(255, $H[$y + 2][$x]));
                 }
             }
         }

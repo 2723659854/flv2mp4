@@ -1,6 +1,6 @@
 <?php
 
-namespace Xiaosongshu\Flv2mp4\Codec\Decode;
+namespace Xiaosongshu\Flv2mp4\Codec;
 
 /**
  * @purpose 亮度色度运动补偿
@@ -75,7 +75,7 @@ trait MotionCompensationTrait
                     $px4 = $refPlane[$ry * $refStride + $this->clamp($intX + $i + 2, 0, $refWidth - 1)];
                     $px5 = $refPlane[$ry * $refStride + $this->clamp($intX + $i + 3, 0, $refWidth - 1)];
                     $h = ($px0 - 5 * $px1 + 20 * $px2 + 20 * $px3 - 5 * $px4 + $px5 + 16) >> 5;
-                    $H[$j - $hStart][$i] = $h;
+                    $H[$j - $hStart][$i] = $this->clip255($h);
                 }
             }
         }
@@ -93,7 +93,7 @@ trait MotionCompensationTrait
                     $px4 = $refPlane[$this->clamp($intY + $j + 2, 0, $refHeight - 1) * $refStride + $rx];
                     $px5 = $refPlane[$this->clamp($intY + $j + 3, 0, $refHeight - 1) * $refStride + $rx];
                     $h = ($px0 - 5 * $px1 + 20 * $px2 + 20 * $px3 - 5 * $px4 + $px5 + 16) >> 5;
-                    $V[$j][$i] = $h;
+                    $V[$j][$i] = $this->clip255($h);
                 }
             }
         }
@@ -110,7 +110,7 @@ trait MotionCompensationTrait
                     $px4 = $H[$j + 4][$i];
                     $px5 = $H[$j + 5][$i];
                     $h = ($px0 - 5 * $px1 + 20 * $px2 + 20 * $px3 - 5 * $px4 + $px5 + 16) >> 5;
-                    $C[$j][$i] = $h;
+                    $C[$j][$i] = $this->clip255($h);
                 }
             }
         }

@@ -244,6 +244,21 @@ class PurePhpHlsGenerator
                     /** 解码h264为yuv */
                     $rawYuv = $this->decodeNaluToYuv($avcData);
                     if ($rawYuv !== null) {
+                        static $debugDecodedFrame = 0;
+                        $debugDecodedFrame++;
+                        if ($debugDecodedFrame >= 55 && $debugDecodedFrame <= 65) {
+                            $ySize = $this->srcWidth * $this->srcHeight;
+                            $sum = 0;
+                            $count128 = 0;
+                            for ($k = 0; $k < $ySize; $k++) {
+                                $v = ord($rawYuv[$k]);
+                                $sum += $v;
+                                if ($v === 128) $count128++;
+                            }
+                            $avgY = $sum / $ySize;
+                            $percent128 = ($count128 / $ySize) * 100;
+                            echo "DECODER Frame $debugDecodedFrame: avgY=$avgY, key=$isKeyFrame, count128=$count128 ($percent128%)\n";
+                        }
                         /** 缩放尺寸 */
                         $scaledYuv = $this->scaler->scaleYUV420P($rawYuv, $this->srcWidth, $this->srcHeight, $profile['width'], $profile['height']);
                         $this->decodedFrameCache[$cacheKey] = $scaledYuv;
@@ -260,14 +275,45 @@ class PurePhpHlsGenerator
                     $encoder->setFps($profile['fps']);
                     $encoder->setQp($profile['qp'] ?? 30);
                     // DEBUG: 保存第一帧编码前的YUV
-//                    static $debugYuvSaved = false;
-//                    if (!$debugYuvSaved) {
-//                        file_put_contents('d:\php\flv2mp4\debug_before_encode.yuv', $scaledYuv);
-//                        echo "DEBUG: Saved YUV before encode, size=" . strlen($scaledYuv) . ", srcW={$this->srcWidth}, srcH={$this->srcHeight}\n";
-//                        $debugYuvSaved = true;
-//                    }
+                    static $debugYuvSaved = false;
+                    if (!$debugYuvSaved) {
+                        file_put_contents('d:\php\flv2mp4\debug_before_encode.yuv', $scaledYuv);
+                        echo "DEBUG: Saved YUV before encode, size=" . strlen($scaledYuv) . ", srcW={$this->srcWidth}, srcH={$this->srcHeight}\n";
+                        $debugYuvSaved = true;
+                    }
                     /** 将被缩放后的yuv重新编码为h264 */
                     $encodedNals = $encoder->encodeFrame($scaledYuv, $isKeyFrame);
+
+                    static $debugFrameCount2 = 0;
+                    $debugFrameCount2++;
+                    if ($debugFrameCount2 % 10 === 0 || $debugFrameCount2 === 1) {
+                        $mbW = $encoder->mbAlignedWidth;
+                        $origY = substr($scaledYuv, 0, $profile['width'] * $profile['height']);
+                        $reconY = $encoder->reconYPlane;
+                        $totalDiff = 0;
+                        $posCount = 0;
+                        $negCount = 0;
+                        $maxDiff = 0;
+                        $maxPosDiff = 0;
+                        $maxNegDiff = 0;
+                        for ($yy = 0; $yy < $profile['height']; $yy++) {
+                            for ($xx = 0; $xx < $profile['width']; $xx++) {
+                                $oIdx = $yy * $profile['width'] + $xx;
+                                $rIdx = $yy * $mbW + $xx;
+                                $o = ord($origY[$oIdx]);
+                                $r = ord($reconY[$rIdx]);
+                                $d = $r - $o;
+                                $totalDiff += $d;
+                                if ($d > 0) $posCount++;
+                                if ($d < 0) $negCount++;
+                                if (abs($d) > $maxDiff) $maxDiff = abs($d);
+                                if ($d > $maxPosDiff) $maxPosDiff = $d;
+                                if ($d < $maxNegDiff) $maxNegDiff = $d;
+                            }
+                        }
+                        $avgDiff = $totalDiff / ($profile['width'] * $profile['height']);
+                        echo "DEBUG Frame $debugFrameCount2 (key=$isKeyFrame): avg=$avgDiff, max=$maxDiff, maxPos=$maxPosDiff, maxNeg=$maxNegDiff, pos=$posCount, neg=$negCount\n";
+                    }
 
                     $outputData = '';
                     $outputSpsPps = '';
