@@ -158,7 +158,7 @@ class H264Encoder
 
     public const CT_INDEX = [0, 0, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3, 3];
 
-    public const ENC_NC_MAP_TABLE = [0, 0, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3, 3, 4];
+    public const ENC_NC_MAP_TABLE = [0, 0, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3, 4];
 
     public const VLC_COEFF_TOKEN = [
         [
@@ -673,6 +673,9 @@ class H264Encoder
                         $topNzLuma, $topNzCb, $topNzCr,
                         $leftIntra4x4Mode, $topIntra4x4Mode
                     );
+                    if ($mbY == 5 && $mbX >= 15 && $mbX <= 20) {
+                        echo "ENCODE SLICE MB({$mbX},{$mbY}): before=" . strlen($bits) . ", mbBits=" . strlen($mbBits) . ", after=" . (strlen($bits) + strlen($mbBits)) . "\n";
+                    }
                     $bits .= $mbBits;
                 }
                 $leftAvailable = true;
@@ -765,7 +768,15 @@ class H264Encoder
             }
         }
 
-        $lumaPredMode = 2;
+        if (!$topAvailable && !$leftAvailable) {
+            $lumaPredMode = 2;
+        } elseif (!$topAvailable) {
+            $lumaPredMode = 1;
+        } elseif (!$leftAvailable) {
+            $lumaPredMode = 0;
+        } else {
+            $lumaPredMode = 2;
+        }
 
         $predPixels = array_fill(0, 16, array_fill(0, 16, 128));
         for ($y = 0; $y < 16; $y++) {
@@ -847,6 +858,9 @@ class H264Encoder
             }
         }
         if ($hasLumaDc && $cbpLuma === 0) {
+            $cbpLuma = 15;
+        }
+        if ($cbpLuma > 0 && $cbpLuma < 15) {
             $cbpLuma = 15;
         }
 
@@ -1079,15 +1093,46 @@ class H264Encoder
         $i16Mode = $mapModeI16x16[$lumaPredMode];
         $chromaMode = $mapModeChroma[$chromaPredMode];
 
-        $mbTypeValue = 1 + $i16Mode + ($cbpChroma << 2) + ($cbpLuma == 0 ? 0 : 12);
+        $cbpIdx = ($cbpLuma == 0 ? 0 : 3) + $cbpChroma;
+        $mbTypeValue = 1 + $i16Mode + ($cbpIdx << 2);
+        $debugThisMb = ($mbX == 4 && $mbY == 0);
+        $debugTargetMb = ($mbX == 4 && $mbY == 0);
+        if ($debugTargetMb) {
+            echo "=== DEBUG MB(4,0) START ===\n";
+            echo "  i16Mode={$i16Mode}, cbpChroma={$cbpChroma}, cbpLuma={$cbpLuma}, mbTypeValue={$mbTypeValue}\n";
+            echo "  chromaMode={$chromaMode}\n";
+            echo "  topAvailable=" . ($topAvailable ? 'true' : 'false') . ", leftAvailable=" . ($leftAvailable ? 'true' : 'false') . "\n";
+            echo "  lumaPredMode={$lumaPredMode}\n";
+            echo "  bit len before mb_type: " . strlen($bits) . "\n";
+        }
         $bits .= $this->ue($mbTypeValue);
+        if ($debugTargetMb) {
+            echo "  bit len after mb_type: " . strlen($bits) . "\n";
+        }
 
         $bits .= $this->ue($chromaMode);
 
         $bits .= $this->se(0);
 
+        // DEBUG
+        if ($debugThisMb || $debugTargetMb) {
+            $prefix = $debugTargetMb ? "  MB(0,0)" : "  DEBUG MB(0,0)";
+            echo "{$prefix} header done, total bits: " . strlen($bits) . "\n";
+        }
+
+        if ($debugTargetMb) {
+            echo "  leftNz = [" . implode(',', $leftNz) . "]\n";
+            echo "  leftAvailable=" . ($leftAvailable ? 'true' : 'false') . "\n";
+        }
         $dcNc = $this->computeNC(-1, $mbX, 0, 0, $leftAvailable, $leftNz, $topAvailable, $topNzLuma, $nzCache);
+        $beforeDc = strlen($bits);
+        if ($debugThisMb) {
+            echo "  Luma DC coeffs: " . implode(',', $dcZigzag) . "\n";
+        }
         $bits .= $this->writeBlockResidualCavlc($dcZigzag, 15, false, $dcNc);
+        if ($debugThisMb) {
+            echo "  Luma DC: " . (strlen($bits) - $beforeDc) . " bits, dcNc={$dcNc}\n";
+        }
 
         $lumaAcScanOrder = [0, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15];
         $nzCacheNew = array_fill(0, 24, 0);
@@ -1097,11 +1142,14 @@ class H264Encoder
                 $bx = $rasterIdx % 4;
                 $acNc = $this->computeNC($rasterIdx, $mbX, $bx, $by, $leftAvailable, $leftNz, $topAvailable, $topNzLuma, $nzCacheNew);
                 $ac = $this->scan4x4Ac($quant4x4Luma[$rasterIdx]);
+                $beforeAc = strlen($bits);
                 $bits .= $this->writeBlockResidualCavlc($ac, 14, false, $acNc);
+                if ($debugThisMb) {
+                    echo "  Luma AC block {$rasterIdx}: " . (strlen($bits) - $beforeAc) . " bits, acNc={$acNc}\n";
+                }
                 $nzCacheNew[$rasterIdx] = $nzCache[$rasterIdx];
             }
         }
-
         for ($by = 0; $by < 4; $by++) $leftNz[$by] = $nzCache[$by * 4 + 3];
         for ($bx = 0; $bx < 4; $bx++) {
             $topBlkX = $mbX * 4 + $bx;
@@ -1109,8 +1157,16 @@ class H264Encoder
         }
 
         if ($cbpChroma > 0) {
+            $beforeCbDc = strlen($bits);
             $bits .= $this->writeBlockResidualCavlc($qCbDc, 3, true, -1);
+            if ($debugThisMb) {
+                echo "  Chroma Cb DC: " . (strlen($bits) - $beforeCbDc) . " bits\n";
+            }
+            $beforeCrDc = strlen($bits);
             $bits .= $this->writeBlockResidualCavlc($qCrDc, 3, true, -1);
+            if ($debugThisMb) {
+                echo "  Chroma Cr DC: " . (strlen($bits) - $beforeCrDc) . " bits\n";
+            }
 
             if ($cbpChroma === 2) {
                 $cbScanOrder = [16, 17, 18, 19];
@@ -1120,7 +1176,11 @@ class H264Encoder
                     $bx = $blk % 2;
                     $acNc = $this->computeNC($blockIdx, $mbX, $bx, $by, $leftAvailable, $leftNz, $topAvailable, $topNzCb, $nzCacheNew);
                     $acCb = $this->scan4x4Ac($quantCb4x4[$blk]);
+                    $beforeAc = strlen($bits);
                     $bits .= $this->writeBlockResidualCavlc($acCb, 14, false, $acNc);
+                    if ($debugThisMb) {
+                        echo "  Chroma Cb AC block {$blk} (raster {$blockIdx}): " . (strlen($bits) - $beforeAc) . " bits, acNc={$acNc}\n";
+                    }
                     $nzCacheNew[$blockIdx] = $nzCache[$blockIdx];
                 }
                 $crScanOrder = [20, 21, 22, 23];
@@ -1130,7 +1190,11 @@ class H264Encoder
                     $bx = $blk % 2;
                     $acNc = $this->computeNC($blockIdx, $mbX, $bx, $by, $leftAvailable, $leftNz, $topAvailable, $topNzCr, $nzCacheNew);
                     $acCr = $this->scan4x4Ac($quantCr4x4[$blk]);
+                    $beforeAc = strlen($bits);
                     $bits .= $this->writeBlockResidualCavlc($acCr, 14, false, $acNc);
+                    if ($debugThisMb) {
+                        echo "  Chroma Cr AC block {$blk} (raster {$blockIdx}): " . (strlen($bits) - $beforeAc) . " bits, acNc={$acNc}\n";
+                    }
                     $nzCacheNew[$blockIdx] = $nzCache[$blockIdx];
                 }
             }
@@ -1264,6 +1328,11 @@ class H264Encoder
                     }
                 }
             }
+        }
+
+        // DEBUG
+        if ($mbY <= 3 && $mbX <= 5) {
+            echo "DEBUG MB({$mbX},{$mbY}): " . strlen($bits) . " bits, cbpLuma={$cbpLuma}, cbpChroma={$cbpChroma}, chromaMode={$chromaMode}\n";
         }
 
         return $bits;
@@ -2247,7 +2316,11 @@ class H264Encoder
         }
 
         $avgNz = $count > 0 ? intdiv($predNz + intdiv($count, 2), $count) : 0;
-        return min($avgNz, 16);
+        $result = min($avgNz, 16);
+        if (isset($GLOBALS['debugNc']) && $GLOBALS['debugNc'] && $blockIdx >= 16) {
+            echo "    ENCODER computeNC(blockIdx={$blockIdx}, mbX={$mbX}, bx={$bx}, by={$by}): predNz={$predNz}, count={$count}, result={$result}\n";
+        }
+        return $result;
     }
 
     public function writeBlockResidualCavlc(array $coeffs, int $endIdx, bool $isChromaDc, int $iNC): string

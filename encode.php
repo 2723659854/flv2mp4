@@ -65,6 +65,7 @@ $generator = new \Xiaosongshu\Flv2mp4\Manage\PurePhpHlsGenerator(
     $profiles,
     __DIR__ . '/hls/output'
 );
+$generator->setMaxFrames(50);
 $startTime = time();
 // 测试baseline profile 转码
 //todo 这个有错误

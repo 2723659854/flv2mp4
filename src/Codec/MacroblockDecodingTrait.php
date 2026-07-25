@@ -15,7 +15,16 @@ trait MacroblockDecodingTrait
      */
     public function decodeMacroblock(int $mbX, int $mbY, int $sliceQp, int $sliceType): int
     {
+        $bitPosBefore = $this->reader->getBitPosition();
         $mbType = $this->reader->readUe();
+        if ($mbY <= 4 && $mbX <= 3) {
+            echo "DECODER MB({$mbX},{$mbY}): start bit={$bitPosBefore}, mbType={$mbType}\n";
+        }
+        if ($sliceType === 2 || $sliceType === 4) {
+            if ($mbType < 0 || $mbType > 25) {
+                echo "DECODER WARNING: invalid mb_type={$mbType} at MB({$mbX},{$mbY})\n";
+            }
+        }
         $mbWidth = $this->picWidthInMbs;
         $mbIdx = $mbY * $mbWidth + $mbX;
         $this->mbTypeForDeblock[$mbIdx] = $mbType;
@@ -438,6 +447,10 @@ trait MacroblockDecodingTrait
         $base = $hasLumaAc ? 12 : 0;
         $cbpChroma = intdiv(($mbType - 1 - $base), 4);
         $cbpLuma = $hasLumaAc ? 15 : 0;
+        $debugThisMb = ($mbX == 2 && $mbY == 2);
+        if ($debugThisMb) {
+            echo "  DECODER MB(2,2): mbType={$mbType}, predMode={$predMode}, cbpChroma={$cbpChroma}, cbpLuma={$cbpLuma}\n";
+        }
 
 
         // I_16x16宏块总是编码chroma_pred_mode（参考C语言编码器cavlc_mb_header_i）
@@ -500,10 +513,14 @@ trait MacroblockDecodingTrait
             $avgNz = intdiv($predNz + intdiv($count, 2), $count);
             $yDcNc = min($avgNz, 16);
         }
-        if ($mbX === 0 && $mbY === 0) $this->debugResidual = true;
-        if ($mbX === 3 && $mbY === 0) $this->debugResidual = true;
+        $debugThisMb = ($mbX == 2 && $mbY == 2);
+        if ($debugThisMb) {
+            echo "  DECODER MB(2,2): Luma DC, nc={$yDcNc}, before bit pos=" . $this->reader->getBitPosition() . "\n";
+        }
         $yDcZigzag = $this->decodeResidualBlock(16, $yDcNc);
-        $this->debugResidual = false;
+        if ($debugThisMb) {
+            echo "  DECODER MB(2,2): Luma DC done, after bit pos=" . $this->reader->getBitPosition() . "\n";
+        }
         // decodeResidualBlock返回zig-zag顺序，需先转为raster顺序
         // raster顺序在宏块DC语境下对应4x4矩阵: row=block_row, col=block_col
         // 这是Hadamard变换所需的输入顺序
@@ -536,7 +553,13 @@ trait MacroblockDecodingTrait
             for ($blkIdx = 0; $blkIdx < 16; $blkIdx++) {
                 $rasterIdx = $blockIndexToRaster[$blkIdx];
                 $nc = $this->computeNc($rasterIdx, $mbX, $mbY, $nzCache, $leftNz, $topNz, $leftAvailable, $topAvailable);
+                if ($debugThisMb) {
+                    echo "  DECODER MB(2,2): Luma AC block {$rasterIdx}, nc={$nc}, before=" . $this->reader->getBitPosition() . "\n";
+                }
                 $ac = $this->decodeResidualBlock(15, $nc);
+                if ($debugThisMb) {
+                    echo "  DECODER MB(2,2): Luma AC block {$rasterIdx} done, after=" . $this->reader->getBitPosition() . "\n";
+                }
                 // 直接用 ZIGZAG_SCAN_4X4 表映射AC系数到raster位置，跳过位置0（DC）
                 for ($scanPos = 0; $scanPos < 15; $scanPos++) {
                     $yAcCoeffs[$rasterIdx][self::ZIGZAG_SCAN_4X4[$scanPos + 1]] = $ac[$scanPos];
@@ -557,8 +580,20 @@ trait MacroblockDecodingTrait
         $crDc = array_fill(0, 4, 0);
 
         if ($cbpChroma != 0) {
+            if ($debugThisMb) {
+                echo "  DECODER MB(2,2): Cb DC, before=" . $this->reader->getBitPosition() . "\n";
+            }
             $cbDc = $this->decodeResidualBlock(4, -1);
+            if ($debugThisMb) {
+                echo "  DECODER MB(2,2): Cb DC done, after=" . $this->reader->getBitPosition() . "\n";
+            }
+            if ($debugThisMb) {
+                echo "  DECODER MB(2,2): Cr DC, before=" . $this->reader->getBitPosition() . "\n";
+            }
             $crDc = $this->decodeResidualBlock(4, -1);
+            if ($debugThisMb) {
+                echo "  DECODER MB(2,2): Cr DC done, after=" . $this->reader->getBitPosition() . "\n";
+            }
         }
 
         // 色度DC: 逆Hadamard + 反量化
@@ -576,6 +611,9 @@ trait MacroblockDecodingTrait
         // 色度AC残差 - 条件是cbpChroma >= 2
         // DC残差不进入IDCT，直接加到像素上；AC残差单独处理（coeffs[0]保持为0）
         if ($cbpChroma >= 2) {
+            if ($debugThisMb) {
+                echo "  DECODER MB(2,2): Chroma AC start, cbpChroma={$cbpChroma}, bit pos=" . $this->reader->getBitPosition() . "\n";
+            }
             // Cb块空间布局
             //   16 17  (上行)
             //   18 19  (下行)
@@ -584,7 +622,13 @@ trait MacroblockDecodingTrait
             foreach ($cbScanOrder as $blockIdx) {
                 $blk = $blockIdx - 16;
                 $nc = $this->computeNc($blockIdx, $mbX, $mbY, $nzCache, $leftNz, $topNz, $leftAvailable, $topAvailable);
+                if ($debugThisMb) {
+                    echo "  DECODER MB(2,2): Cb AC block {$blk} (raster {$blockIdx}), nc={$nc}, before=" . $this->reader->getBitPosition() . "\n";
+                }
                 $ac = $this->decodeResidualBlock(15, $nc);
+                if ($debugThisMb) {
+                    echo "  DECODER MB(2,2): Cb AC block {$blk} done, after=" . $this->reader->getBitPosition() . "\n";
+                }
                 $nzCnt = 0; for ($i = 0; $i < 15; $i++) if ($ac[$i] != 0) $nzCnt++;
                 for ($i = 1; $i < 16; $i++) $cbAcCoeffs[$blk][$i] = $ac[$i - 1];
                 $cbAcCoeffs[$blk] = $this->zigzagToRaster($cbAcCoeffs[$blk]);
@@ -600,7 +644,13 @@ trait MacroblockDecodingTrait
             foreach ($crScanOrder as $blockIdx) {
                 $blk = $blockIdx - 20;
                 $nc = $this->computeNc($blockIdx, $mbX, $mbY, $nzCache, $leftNz, $topNz, $leftAvailable, $topAvailable);
+                if ($debugThisMb) {
+                    echo "  DECODER MB(2,2): Cr AC block {$blk} (raster {$blockIdx}), nc={$nc}, before=" . $this->reader->getBitPosition() . "\n";
+                }
                 $ac = $this->decodeResidualBlock(15, $nc);
+                if ($debugThisMb) {
+                    echo "  DECODER MB(2,2): Cr AC block {$blk} done, after=" . $this->reader->getBitPosition() . "\n";
+                }
                 $nzCnt = 0; for ($i = 0; $i < 15; $i++) if ($ac[$i] != 0) $nzCnt++;
                 for ($i = 1; $i < 16; $i++) $crAcCoeffs[$blk][$i] = $ac[$i - 1];
                 $crAcCoeffs[$blk] = $this->zigzagToRaster($crAcCoeffs[$blk]);
@@ -785,6 +835,11 @@ trait MacroblockDecodingTrait
         $this->intra4x4TopModes[$baseLuma + 1] = 2;
         $this->intra4x4TopModes[$baseLuma + 2] = 2;
         $this->intra4x4TopModes[$baseLuma + 3] = 2;
+
+        // DEBUG
+        if ($mbX == 2 && $mbY == 2) {
+            echo "DECODER DEBUG MB(2,2) end: bit pos=" . $this->reader->getBitPosition() . "\n";
+        }
 
         return $mbQpDelta;
     }

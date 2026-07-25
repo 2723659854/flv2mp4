@@ -557,12 +557,25 @@ trait ResidualDecodingTrait
         }
 
         if ($left !== null && $top !== null) {
-            return (int)(($left + $top + 1) >> 1);
+            $result = (int)(($left + $top + 1) >> 1);
+            if (isset($GLOBALS['debugNc']) && $GLOBALS['debugNc']) {
+                echo "    computeNc(rasterIdx={$rasterIdx}, mbX={$mbX}, mbY={$mbY}): left={$left}, top={$top}, result={$result}\n";
+            }
+            return $result;
         } elseif ($left !== null) {
+            if (isset($GLOBALS['debugNc']) && $GLOBALS['debugNc']) {
+                echo "    computeNc(rasterIdx={$rasterIdx}, mbX={$mbX}, mbY={$mbY}): left={$left}, top=null, result={$left}\n";
+            }
             return (int)$left;
         } elseif ($top !== null) {
+            if (isset($GLOBALS['debugNc']) && $GLOBALS['debugNc']) {
+                echo "    computeNc(rasterIdx={$rasterIdx}, mbX={$mbX}, mbY={$mbY}): left=null, top={$top}, result={$top}\n";
+            }
             return (int)$top;
         } else {
+            if (isset($GLOBALS['debugNc']) && $GLOBALS['debugNc']) {
+                echo "    computeNc(rasterIdx={$rasterIdx}, mbX={$mbX}, mbY={$mbY}): left=null, top=null, result=0\n";
+            }
             return 0;
         }
     }
