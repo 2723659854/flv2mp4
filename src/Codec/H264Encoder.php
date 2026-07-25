@@ -158,7 +158,7 @@ class H264Encoder
 
     public const CT_INDEX = [0, 0, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3, 3];
 
-    public const ENC_NC_MAP_TABLE = [0, 0, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3, 4];
+    public const ENC_NC_MAP_TABLE = [0, 0, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3, 3, 4];
 
     public const VLC_COEFF_TOKEN = [
         [
@@ -290,6 +290,7 @@ class H264Encoder
     ];
 
     public const VLC_RUN_BEFORE = [
+        [[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0]],
         [[1,1],[0,1],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0]],
         [[1,1],[1,2],[0,2],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0]],
         [[3,2],[2,2],[1,2],[0,2],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0]],
@@ -299,7 +300,7 @@ class H264Encoder
         [[7,3],[6,3],[5,3],[4,3],[3,3],[2,3],[1,3],[1,4],[1,5],[1,6],[1,7],[1,8],[1,9],[1,10],[1,11]],
     ];
 
-    public const ZERO_LEFT_MAP = [0, 0, 1, 2, 3, 4, 5, 6, 6, 6, 6, 6, 6, 6, 6, 6];
+    public const ZERO_LEFT_MAP = [0, 1, 2, 3, 4, 5, 6, 7, 7, 7, 7, 7, 7, 7, 7, 7];
 
     public const MB_TYPE_I16x16 = 0;
     public const MB_TYPE_I4x4 = 1;
@@ -340,6 +341,8 @@ class H264Encoder
     public $refInts = null;        // 参考帧Y平面整数数组缓存（优化运动估计速度）
     public $enableInter = true;   // 是否启用P帧
     public $numRefFrames = 1;      // 参考帧数量
+    public $debugStopMbX = -1;     // 调试：编码到此宏块列后停止
+    public $debugStopMbY = -1;     // 调试：编码到此宏块行后停止
 
     // 本地解码重建帧（用于正确更新参考帧，避免编解码器失配）
     public $reconYPlane = '';
@@ -647,6 +650,12 @@ class H264Encoder
             // 不清空mvTopRow：保留上一行的MV作为top预测参考
             $this->mvLeftCol = [null, null, null, null];
             for ($mbX = 0; $mbX < $mbWidth; $mbX++) {
+                // DEBUG: 提前终止宏块编码用于二分定位
+                if ($this->debugStopMbY >= 0 && $this->debugStopMbX >= 0) {
+                    if ($mbY > $this->debugStopMbY || ($mbY == $this->debugStopMbY && $mbX > $this->debugStopMbX)) {
+                        break 2;
+                    }
+                }
                 if ($isPSlice) {
                     // P帧编码
                     $mbBits = $this->encodePMacroblock(
@@ -673,7 +682,7 @@ class H264Encoder
                         $topNzLuma, $topNzCb, $topNzCr,
                         $leftIntra4x4Mode, $topIntra4x4Mode
                     );
-                    if ($mbY == 5 && $mbX >= 15 && $mbX <= 20) {
+                    if ($mbY == 5 && $mbX >= 10 && $mbX <= 15) {
                         echo "ENCODE SLICE MB({$mbX},{$mbY}): before=" . strlen($bits) . ", mbBits=" . strlen($mbBits) . ", after=" . (strlen($bits) + strlen($mbBits)) . "\n";
                     }
                     $bits .= $mbBits;
@@ -714,9 +723,17 @@ class H264Encoder
     )
     {
         if ($this->mbType === self::MB_TYPE_I16x16) {
-            return $this->encodeMacroblockI16x16($mbX, $mbY, $yPlane, $uPlane, $vPlane, $leftAvailable, $leftNz, $topAvailable, $topNzLuma, $topNzCb, $topNzCr);
+            $result = $this->encodeMacroblockI16x16($mbX, $mbY, $yPlane, $uPlane, $vPlane, $leftAvailable, $leftNz, $topAvailable, $topNzLuma, $topNzCb, $topNzCr);
+            if ($mbY == 5 && ($mbX == 12 || $mbX == 13)) {
+                echo "  MB({$mbX},{$mbY}): I16x16, total bits=" . strlen($result) . "\n";
+            }
+            return $result;
         } else {
-            return $this->encodeMacroblockI4x4($mbX, $mbY, $yPlane, $uPlane, $vPlane, $leftAvailable, $leftNz, $topAvailable, $topNzLuma, $topNzCb, $topNzCr, $leftIntra4x4Mode, $topIntra4x4Mode);
+            $result = $this->encodeMacroblockI4x4($mbX, $mbY, $yPlane, $uPlane, $vPlane, $leftAvailable, $leftNz, $topAvailable, $topNzLuma, $topNzCb, $topNzCr, $leftIntra4x4Mode, $topIntra4x4Mode);
+            if ($mbY == 5 && ($mbX == 12 || $mbX == 13)) {
+                echo "  MB({$mbX},{$mbY}): I4x4, total bits=" . strlen($result) . "\n";
+            }
+            return $result;
         }
     }
 
@@ -1095,14 +1112,14 @@ class H264Encoder
 
         $cbpIdx = ($cbpLuma == 0 ? 0 : 3) + $cbpChroma;
         $mbTypeValue = 1 + $i16Mode + ($cbpIdx << 2);
-        $debugThisMb = ($mbX == 4 && $mbY == 0);
-        $debugTargetMb = ($mbX == 4 && $mbY == 0);
+        $debugThisMb = ($mbY == 5 && ($mbX == 12 || $mbX == 13));
+        $debugTargetMb = ($mbY == 5 && ($mbX == 12 || $mbX == 13));
         if ($debugTargetMb) {
-            echo "=== DEBUG MB(4,0) START ===\n";
-            echo "  i16Mode={$i16Mode}, cbpChroma={$cbpChroma}, cbpLuma={$cbpLuma}, mbTypeValue={$mbTypeValue}\n";
+            echo "=== DEBUG MB({$mbX},{$mbY}) I16x16 START ===\n";
+            echo "  i16Mode={$i16Mode}, cbpChroma={$cbpChroma}, cbpLuma={$cbpLuma}, cbpIdx={$cbpIdx}, mbTypeValue={$mbTypeValue}\n";
             echo "  chromaMode={$chromaMode}\n";
             echo "  topAvailable=" . ($topAvailable ? 'true' : 'false') . ", leftAvailable=" . ($leftAvailable ? 'true' : 'false') . "\n";
-            echo "  lumaPredMode={$lumaPredMode}\n";
+            echo "  lumaPredMode={$lumaPredMode}, chromaPredMode={$chromaPredMode}\n";
             echo "  bit len before mb_type: " . strlen($bits) . "\n";
         }
         $bits .= $this->ue($mbTypeValue);
@@ -1150,10 +1167,14 @@ class H264Encoder
                 $nzCacheNew[$rasterIdx] = $nzCache[$rasterIdx];
             }
         }
-        for ($by = 0; $by < 4; $by++) $leftNz[$by] = $nzCache[$by * 4 + 3];
+        for ($by = 0; $by < 4; $by++) {
+            $leftNz[$by] = ($cbpLuma > 0) ? $nzCache[$by * 4 + 3] : 0;
+        }
         for ($bx = 0; $bx < 4; $bx++) {
             $topBlkX = $mbX * 4 + $bx;
-            if ($topBlkX < count($topNzLuma)) $topNzLuma[$topBlkX] = $nzCache[$bx + 12];
+            if ($topBlkX < count($topNzLuma)) {
+                $topNzLuma[$topBlkX] = ($cbpLuma > 0) ? $nzCache[$bx + 12] : 0;
+            }
         }
 
         if ($cbpChroma > 0) {
@@ -1211,6 +1232,19 @@ class H264Encoder
                 $topNzCb[$topCbx1] = $nzCache[19];
                 $topNzCr[$topCbx0] = $nzCache[22];
                 $topNzCr[$topCbx1] = $nzCache[23];
+            }
+        } else {
+            for ($by = 0; $by < 2; $by++) {
+                $leftNz[4 + $by] = 0;
+                $leftNz[6 + $by] = 0;
+            }
+            $topCbx0 = $mbX * 2 + 0;
+            $topCbx1 = $mbX * 2 + 1;
+            if ($topCbx1 < count($topNzCb)) {
+                $topNzCb[$topCbx0] = 0;
+                $topNzCb[$topCbx1] = 0;
+                $topNzCr[$topCbx0] = 0;
+                $topNzCr[$topCbx1] = 0;
             }
         }
 
@@ -2196,14 +2230,24 @@ class H264Encoder
         }
 
         $nzCacheNew = array_fill(0, 24, 0);
-        if ($cbpLuma > 0) {
-            foreach ($lumaAcScanOrder as $rasterIdx) {
-                $by = (int)($rasterIdx / 4);
-                $bx = $rasterIdx % 4;
-                $acNc = $this->computeNC($rasterIdx, $mbX, $bx, $by, $leftAvailable, $leftNz, $topAvailable, $topNzLuma, $nzCacheNew);
-                $ac = $this->scan4x4DcAc($quant4x4Luma[$rasterIdx]);
-                $bits .= $this->writeBlockResidualCavlc($ac, 15, false, $acNc);
-                $nzCacheNew[$rasterIdx] = $nzCache[$rasterIdx];
+        for ($i8x8 = 0; $i8x8 < 4; $i8x8++) {
+            if ($cbpLuma & (1 << $i8x8)) {
+                for ($i4x4 = 0; $i4x4 < 4; $i4x4++) {
+                    $scanIdx = $i8x8 * 4 + $i4x4;
+                    $rasterIdx = $lumaAcScanOrder[$scanIdx];
+                    $by = (int)($rasterIdx / 4);
+                    $bx = $rasterIdx % 4;
+                    $acNc = $this->computeNC($rasterIdx, $mbX, $bx, $by, $leftAvailable, $leftNz, $topAvailable, $topNzLuma, $nzCacheNew);
+                    $ac = $this->scan4x4DcAc($quant4x4Luma[$rasterIdx]);
+                    $bits .= $this->writeBlockResidualCavlc($ac, 15, false, $acNc);
+                    $nzCacheNew[$rasterIdx] = $nzCache[$rasterIdx];
+                }
+            } else {
+                for ($i4x4 = 0; $i4x4 < 4; $i4x4++) {
+                    $scanIdx = $i8x8 * 4 + $i4x4;
+                    $rasterIdx = $lumaAcScanOrder[$scanIdx];
+                    $nzCacheNew[$rasterIdx] = 0;
+                }
             }
         }
 
@@ -2246,6 +2290,19 @@ class H264Encoder
                 $topNzCb[$topCbx1] = $nzCache[19];
                 $topNzCr[$topCbx0] = $nzCache[22];
                 $topNzCr[$topCbx1] = $nzCache[23];
+            }
+        } else {
+            for ($by = 0; $by < 2; $by++) {
+                $leftNz[4 + $by] = 0;
+                $leftNz[6 + $by] = 0;
+            }
+            $topCbx0 = $mbX * 2 + 0;
+            $topCbx1 = $mbX * 2 + 1;
+            if ($topCbx1 < count($topNzCb)) {
+                $topNzCb[$topCbx0] = 0;
+                $topNzCb[$topCbx1] = 0;
+                $topNzCr[$topCbx0] = 0;
+                $topNzCr[$topCbx1] = 0;
             }
         }
 
@@ -2399,86 +2456,39 @@ class H264Encoder
 
         $suffixLength = ($totalCoeffs > 10 && $trailingOnes < 3) ? 1 : 0;
 
-        $suffixLimit = [0, 3, 6, 12, 24, 48, PHP_INT_MAX];
-
         for ($i = $trailingOnes; $i < $totalCoeffs; $i++) {
             $val = $level[$i];
-            $absVal = abs($val);
-            $isFirst = ($i == $trailingOnes);
 
-            if ($val > 0) {
-                $levelCode = 2 * ($val - 1);
-            } else {
-                $levelCode = 2 * (-$val) - 1;
-            }
-            if ($isFirst && ($trailingOnes < 3) && ($absVal > 1)) {
-                $levelCode -= 2;
-            }
-            if ($levelCode < 0) {
-                $levelCode = 0;
-            }
+            $levelCode = ($val - 1) * 2;
+            $sign = $levelCode >> 31;
+            $levelCode = ($levelCode ^ $sign) + ($sign << 1);
+            $levelCode -= (($i == $trailingOnes) && ($trailingOnes < 3)) << 1;
 
-            if ($isFirst && $suffixLength === 0) {
-                if ($levelCode < 14) {
-                    $levelPrefix = $levelCode;
-                    $levelSuffix = 0;
-                    $levelSuffixSize = 0;
-                } elseif ($levelCode < 30) {
-                    $levelPrefix = 14;
-                    $levelSuffix = $levelCode - 14;
-                    $levelSuffixSize = 4;
-                } else {
-                    $remaining = $levelCode - 30;
-                    $pre = 15;
-                    while (true) {
-                        $suffixBits = $pre - 3;
-                        $maxSuffixVal = (1 << $suffixBits) - 1;
-                        if ($remaining <= $maxSuffixVal) {
-                            break;
-                        }
-                        $remaining -= ($maxSuffixVal + 1);
-                        $pre++;
-                        if ($pre > 32) break;
-                    }
-                    $levelPrefix = $pre;
-                    $levelSuffix = $remaining;
-                    $levelSuffixSize = $pre - 3;
-                }
-            } else {
-                $levelPrefix = $levelCode >> $suffixLength;
-                $levelSuffixSize = $suffixLength;
+            $levelPrefix = $levelCode >> $suffixLength;
+            $levelSuffixSize = $suffixLength;
+            $levelSuffix = $levelCode - ($levelPrefix << $suffixLength);
+
+            if ($levelPrefix >= 14 && $levelPrefix < 30 && $suffixLength == 0) {
+                $levelPrefix = 14;
+                $levelSuffix = $levelCode - $levelPrefix;
+                $levelSuffixSize = 4;
+            } else if ($levelPrefix >= 15) {
+                $levelPrefix = 15;
                 $levelSuffix = $levelCode - ($levelPrefix << $suffixLength);
-
-                if ($levelPrefix >= 15) {
-                    $baseCode = 15 * (1 << $suffixLength);
-                    $remaining = $levelCode - $baseCode;
-                    $pre = 15;
-                    while (true) {
-                        $suffixBits = $pre - 3;
-                        $maxSuffixVal = (1 << $suffixBits) - 1;
-                        if ($remaining <= $maxSuffixVal) {
-                            break;
-                        }
-                        $remaining -= ($maxSuffixVal + 1);
-                        $pre++;
-                        if ($pre > 32) break;
-                    }
-                    $levelPrefix = $pre;
-                    $levelSuffix = $remaining;
-                    $levelSuffixSize = $pre - 3;
+                if ($suffixLength == 0) {
+                    $levelSuffix -= 15;
                 }
+                $levelSuffixSize = 12;
             }
 
             $n = $levelPrefix + 1 + $levelSuffixSize;
             $value = ((1 << $levelSuffixSize) | $levelSuffix);
             $bits .= $this->u($value, $n);
 
-            if ($isFirst) {
-                $suffixLength = ($absVal > 3) ? 2 : 1;
-            } else {
-                if ($suffixLength < 6 && $absVal > $suffixLimit[$suffixLength]) {
-                    $suffixLength++;
-                }
+            $suffixLength += ($suffixLength == 0) ? 1 : 0;
+            $threshold = 3 << ($suffixLength - 1);
+            if (($val > $threshold || $val < -$threshold) && $suffixLength < 6) {
+                $suffixLength++;
             }
         }
 

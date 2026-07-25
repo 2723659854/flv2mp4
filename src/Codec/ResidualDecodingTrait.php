@@ -912,14 +912,17 @@ trait ResidualDecodingTrait
                     }
                 }
 
-                // 从 levelCode 中提取符号和绝对值（H.264 标准：最低位是符号位，0=正，1=负）
-                $sign = $levelCode & 1;
-                $absLevelMinus1 = $levelCode >> 1;
+                // Apply trailing_ones < 3 offset for first level
+                $adjustedCode = $levelCode;
                 if ($isFirst && $trailingOnes < 3) {
-                    $absLevelMinus1 += 1;
+                    $adjustedCode += 2;
                 }
-                $absLevel = $absLevelMinus1 + 1;
-                $levels[$levelIdx] = $sign ? -$absLevel : $absLevel;
+                // Convert level_code to signed level value
+                // Even codes => negative, odd codes => positive
+                $mask = -($adjustedCode & 1);
+                $level = (($adjustedCode + 2) >> 1) ^ $mask;
+                $level = $level - $mask;
+                $levels[$levelIdx] = $level;
 
                 // Update suffix_length
                 $absLevel = abs($levels[$levelIdx]);

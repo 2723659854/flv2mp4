@@ -259,6 +259,13 @@ class PurePhpHlsGenerator
                     $encoder->setBitrate($profile['bitrate']);
                     $encoder->setFps($profile['fps']);
                     $encoder->setQp($profile['qp'] ?? 30);
+                    // DEBUG: 保存第一帧编码前的YUV
+                    static $debugYuvSaved = false;
+                    if (!$debugYuvSaved) {
+                        file_put_contents('d:\php\flv2mp4\debug_before_encode.yuv', $scaledYuv);
+                        echo "DEBUG: Saved YUV before encode, size=" . strlen($scaledYuv) . ", srcW={$this->srcWidth}, srcH={$this->srcHeight}\n";
+                        $debugYuvSaved = true;
+                    }
                     /** 将被缩放后的yuv重新编码为h264 */
                     $encodedNals = $encoder->encodeFrame($scaledYuv, $isKeyFrame);
 
@@ -296,6 +303,13 @@ class PurePhpHlsGenerator
                     $annexb = $prefixNal . $annexb;
                 }
                 $this->segmentFirstFrame[$name] = false;
+                // DEBUG: 保存第一帧数据
+                static $debugSaved = false;
+                if (!$debugSaved) {
+                    file_put_contents('d:\php\flv2mp4\debug_first_frame.h264', $annexb);
+                    echo "DEBUG: Saved first frame, size=" . strlen($annexb) . ", isTranscoded=" . ($isTranscoded ? 'true' : 'false') . ", hasOutputSpsPps=" . ($outputSpsPps !== '' ? 'true' : 'false') . "\n";
+                    $debugSaved = true;
+                }
             }
 
             $pes = $this->createPES(0xE0, $annexb, $pts, ($pts !== $dts) ? $dts : null);
