@@ -32,14 +32,14 @@ $profiles = [
 //    ],
 
 
-    '360p' => [
-        'width' => 640,
-        'height' => 360,
-        'bitrate' => 600000,   // 600 Kbps
-        'fps' => 24,
-        'audioBitrate' => 64000,
-        'qp'=>30
-    ],
+//    '360p' => [
+//        'width' => 640,
+//        'height' => 360,
+//        'bitrate' => 600000,   // 600 Kbps
+//        'fps' => 24,
+//        'audioBitrate' => 64000,
+//        'qp'=>30
+//    ],
 
 //    '240p' => [
 //        'width' => 426,      // 或 424，保持 16:9 比例即可
@@ -50,14 +50,14 @@ $profiles = [
 //        'qp' => 30,          // 保持 30 以确保稳定性
 //    ],
 
-//    '180p' => [
-//        'width' => 320,
-//        'height' => 180,
-//        'bitrate' => 150000, // 150 Kbps
-//        'fps' => 15,         // 帧率可以降一半，肉眼在极低分辨率下察觉不到
-//        'audioBitrate' => 32000,
-//        'qp' => 30,
-//    ],
+    '180p' => [
+        'width' => 320,
+        'height' => 180,
+        'bitrate' => 150000, // 150 Kbps
+        'fps' => 15,         // 帧率可以降一半，肉眼在极低分辨率下察觉不到
+        'audioBitrate' => 32000,
+        'qp' => 30,
+    ],
 ];
 
 // 生成 HLS
@@ -65,7 +65,7 @@ $generator = new \Xiaosongshu\Flv2mp4\Manage\PurePhpHlsGenerator(
     $profiles,
     __DIR__ . '/hls/output'
 );
-$generator->setMaxFrames(50);
+$generator->setMaxFrames(200);
 $startTime = time();
 // 测试baseline profile 转码
 //todo 这个有错误
