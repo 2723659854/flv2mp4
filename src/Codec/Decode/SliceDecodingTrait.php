@@ -59,15 +59,12 @@ trait SliceDecodingTrait
         $numRefIdxL1Active = $this->numRefIdxL1DefaultActive;
 
         if ($sliceType !== 2 && $sliceType !== 4) {
-            $overrideBitPos = $this->reader->getBitPosition();
             $numRefIdxActiveOverrideFlag = $this->reader->readU(1);
             $this->numRefIdxActiveOverrideFlag = (bool)$numRefIdxActiveOverrideFlag;
-            echo "  SLICE_OVERRIDE: flag={$numRefIdxActiveOverrideFlag} at bit={$overrideBitPos}\n";
             if ($numRefIdxActiveOverrideFlag) {
                 $numRefL0Val = $this->reader->readUe();
                 $numRefIdxL0Active = $numRefL0Val + 1;
                 $this->numRefIdxL0Active = $numRefIdxL0Active;
-                echo "  SLICE_OVERRIDE: num_ref_idx_l0_active_minus1={$numRefL0Val}, active={$numRefIdxL0Active}\n";
                 if ($sliceType === 1) {
                     $numRefIdxL1Active = $this->reader->readUe() + 1;
                 }
@@ -184,8 +181,6 @@ trait SliceDecodingTrait
         $startMbIdx = $firstMbInSlice;
         $endMbIdx = $totalMbs;
 
-        echo "SLICE: type={$sliceType}, first_mb={$firstMbInSlice}, numRefIdxL0Active={$this->numRefIdxL0Active}, default={$this->numRefIdxL0DefaultActive}\n";
-
         // 初始化宏块间非零系数计数
         $this->nzTopRowLuma = array_fill(0, $mbWidth * 4, 0);
         $this->nzTopRowChroma = array_fill(0, $mbWidth * 4, 0);
@@ -207,10 +202,6 @@ trait SliceDecodingTrait
 
         $mbSkipRun = -1;
 
-        echo "SLICE_HEADER_END: bit=" . $this->reader->getBitPosition() . ", sliceType={$sliceType}, numRefIdxL0Active={$this->numRefIdxL0Active}\n";
-
-        $isDebugSlice = ($this->debugTargetSlice > 0 && $this->debugSliceIndex === $this->debugTargetSlice);
-
         for ($mbIdx = $startMbIdx; $mbIdx < $endMbIdx; $mbIdx++) {
             $mbX = $mbIdx % $mbWidth;
             $mbY = (int)($mbIdx / $mbWidth);
@@ -228,11 +219,7 @@ trait SliceDecodingTrait
 
             if (($sliceType === 0 || $sliceType === 5) && !$this->entropyCodingModeFlag) {
                 if ($mbSkipRun < 0) {
-                    $skipBitPos = $this->reader->getBitPosition();
                     $mbSkipRun = $this->reader->readUe();
-                    if ($mbY <= 1) {
-                        echo "DECODER_SKIP MB({$mbX},{$mbY}): read mb_skip_run={$mbSkipRun} at bit={$skipBitPos}\n";
-                    }
                 }
                 if ($mbSkipRun > 0) {
                     $mbSkipRun--;

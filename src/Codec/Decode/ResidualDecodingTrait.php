@@ -837,18 +837,13 @@ trait ResidualDecodingTrait
      */
     public function decodeResidualBlock(int $maxCoef, int $nC = -1): array
     {
-        // Direct translation of Rust decode_residual (cavlc.rs:344-542)
         $dbg = $this->debugResidual;
         $coeffs = array_fill(0, $maxCoef, 0);
-        $startBit = $this->reader->getBitPosition();
 
         // 1. Read coeff_token
         $totalCoeff = 0;
         $trailingOnes = 0;
         $this->readCoeffToken($totalCoeff, $trailingOnes, $nC);
-        if ($maxCoef === 4 && $nC === -1) {
-            echo "        DC_BLOCK: start={$startBit}, totalCoeff={$totalCoeff}, trailingOnes={$trailingOnes}, after_token_bit=" . $this->reader->getBitPosition() . "\n";
-        }
 
         // 根据H.264标准，如果totalCoeff超过maxCoef，限制为maxCoef
         $totalCoeff = min($totalCoeff, $maxCoef);
