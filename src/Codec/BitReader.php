@@ -80,6 +80,18 @@ class BitReader
         }
     }
 
+    public function readTe(int $range): int
+    {
+        if ($range === 1) {
+            return 0;
+        }
+        if ($range === 2) {
+            $bit = $this->readU(1);
+            return $bit ^ 1;
+        }
+        return $this->readUe();
+    }
+
     public function getPos(): int
     {
         return $this->pos;

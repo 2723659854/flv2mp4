@@ -17,7 +17,7 @@ trait MacroblockDecodingTrait
     {
         $bitPosBefore = $this->reader->getBitPosition();
         $mbType = $this->reader->readUe();
-        if ($mbY <= 4 && $mbX <= 3) {
+        if ($mbY <= 1) {
             echo "DECODER MB({$mbX},{$mbY}): start bit={$bitPosBefore}, mbType={$mbType}\n";
         }
         if ($sliceType === 2 || $sliceType === 4) {
@@ -934,17 +934,25 @@ trait MacroblockDecodingTrait
 
     /**
      * P帧宏块解码
-     * P slice mb_type:
-     *   0 = P_Skip
-     *   1 = P_L0_16x16
-     *   2 = P_L0_L0_16x8
-     *   3 = P_L0_L0_8x16
-     *   4 = P_8x8
-     *   5 = P_8x8ref0
-     *   6..31 = Intra_16x16 / I_4x4 / I_PCM (与I帧对应关系: mb_type - 1)
+     * P slice mb_type 映射取决于 num_ref_idx_l0_active_minus1:
+     * - 单参考帧 (numRefIdxL0Active = 1):
+     *   0 = P_L0_16x16
+     *   1 = P_L0_L0_16x8
+     *   2 = P_L0_L0_8x16
+     *   3 = P_8x8
+     *   4..29 = Intra (intraMbType = mb_type - 4)
+     * - 多参考帧 (numRefIdxL0Active > 1):
+     *   0 = P_L0_16x16
+     *   1 = P_L0_L0_16x8
+     *   2 = P_L0_L0_8x16
+     *   3 = P_8x8
+     *   4 = P_8x8ref0
+     *   5..30 = Intra (intraMbType = mb_type - 5)
      */
     private function decodePInterMacroblock(int $mbX, int $mbY, int $mbType, int $sliceQp): int
     {
+        $debugPrint = ($mbY <= 1 && $mbX <= 10);
+
         // P_L0_16x16 (mb_type 0)
         if ($mbType === 0) {
             return $this->decodePL0_16x16($mbX, $mbY, $sliceQp);
@@ -967,13 +975,16 @@ trait MacroblockDecodingTrait
 
         // P_8x8ref0 (mb_type 4)
         if ($mbType === 4) {
+            if ($debugPrint) echo "  P_8x8ref0 MB({$mbX},{$mbY}): start bit=" . $this->reader->getBitPosition() . "\n";
             return $this->decodeP_8x8ref0($mbX, $mbY, $sliceQp);
         }
 
         // Intra 模式 (mb_type >= 5, 即 mb_type - 5 对应 I_4x4..I_PCM)
         if ($mbType >= 5 && $mbType <= 30) {
             $intraMbType = $mbType - 5;
+            if ($debugPrint) echo "  INTRA_P MB({$mbX},{$mbY}): mbType={$mbType}, intraMbType={$intraMbType}, start bit=" . $this->reader->getBitPosition() . "\n";
             $mbQpDelta = $this->decodeIntraMacroblock($mbX, $mbY, $intraMbType, $sliceQp);
+            if ($debugPrint) echo "  INTRA_P MB({$mbX},{$mbY}): end bit=" . $this->reader->getBitPosition() . "\n";
             $this->mvLeftCol = [null, null, null, null];
             $this->mvTopRow[$mbX * 4 + 0] = null;
             $this->mvTopRow[$mbX * 4 + 1] = null;
@@ -981,6 +992,8 @@ trait MacroblockDecodingTrait
             $this->mvTopRow[$mbX * 4 + 3] = null;
             return $mbQpDelta;
         }
+
+        if ($debugPrint) echo "  UNKNOWN MB({$mbX},{$mbY}): mbType={$mbType}, filling gray\n";
         $this->fillMacroblockGray($mbX, $mbY);
         return 0;
     }
@@ -1047,14 +1060,20 @@ trait MacroblockDecodingTrait
         $isDebugSlice = ($this->debugTargetSlice > 0 && $this->debugSliceIndex === $this->debugTargetSlice);
         $isDebugMb = $isDebugSlice && $mbY === 0 && $mbX <= 5;
 
+        $debugPrint = ($mbY <= 1 && $mbX <= 10);
+        if ($debugPrint) echo "  PL0_16x16 MB({$mbX},{$mbY}): start bit=" . $this->reader->getBitPosition() . ", numRefIdxL0Active={$this->numRefIdxL0Active}\n";
+
         $refIdx = 0;
         if ($this->numRefIdxL0Active > 1) {
-            $refIdx = $this->reader->readUe();
+            $refIdx = $this->reader->readTe($this->numRefIdxL0Active);
         }
+        if ($debugPrint) echo "    after refIdx: bit=" . $this->reader->getBitPosition() . ", refIdx={$refIdx}\n";
 
         $mvdL0X = $this->reader->readSe();
+        if ($debugPrint) echo "    after mvdX: bit=" . $this->reader->getBitPosition() . ", mvdX={$mvdL0X}\n";
 
         $mvdL0Y = $this->reader->readSe();
+        if ($debugPrint) echo "    after mvdY: bit=" . $this->reader->getBitPosition() . ", mvdY={$mvdL0Y}\n";
 
 
         list($predMvX, $predMvY) = $this->getP16x16MvPrediction($mbX, $mbY, $refIdx);
@@ -1072,14 +1091,19 @@ trait MacroblockDecodingTrait
             }
         }
         $this->performMotionCompensation16x16($mbX, $mbY, $mvX, $mvY, $refIdx);
+        if ($debugPrint) echo "    after motion comp: bit=" . $this->reader->getBitPosition() . "\n";
         $cbpCode = $this->reader->readUe();
+        if ($debugPrint) echo "    after cbpCode: bit=" . $this->reader->getBitPosition() . ", cbpCode={$cbpCode}\n";
         $codedBlockPattern = self::GOLOMB_TO_INTER_CBP[$cbpCode] ?? 0;
         $mbQpDelta = 0;
         if ($codedBlockPattern !== 0) {
             $mbQpDelta = $this->reader->readSe();
+            if ($debugPrint) echo "    after mbQpDelta: bit=" . $this->reader->getBitPosition() . ", mbQpDelta={$mbQpDelta}\n";
             $qp = $sliceQp + $mbQpDelta;
             $qp = max(0, min(51, $qp));
+            if ($debugPrint) echo "    before residual: bit=" . $this->reader->getBitPosition() . "\n";
             $this->decodeResidualAndAdd($mbX, $mbY, $codedBlockPattern, $qp, 0);
+            if ($debugPrint) echo "    after residual: bit=" . $this->reader->getBitPosition() . "\n";
         }
         if ($codedBlockPattern === 0) {
             $this->updateNzCountZero($mbX, $mbY);
@@ -1102,13 +1126,11 @@ trait MacroblockDecodingTrait
         $refIdx0 = 0;
         $refIdx1 = 0;
         if ($this->numRefIdxL0Active > 1) {
-            $refIdx0 = $this->reader->readUe();
+            $refIdx0 = $this->reader->readTe($this->numRefIdxL0Active);
+            $refIdx1 = $this->reader->readTe($this->numRefIdxL0Active);
         }
         $mvd0X = $this->reader->readSe();
         $mvd0Y = $this->reader->readSe();
-        if ($this->numRefIdxL0Active > 1) {
-            $refIdx1 = $this->reader->readUe();
-        }
         $mvd1X = $this->reader->readSe();
         $mvd1Y = $this->reader->readSe();
 
@@ -1163,13 +1185,11 @@ trait MacroblockDecodingTrait
         $refIdx0 = 0;
         $refIdx1 = 0;
         if ($this->numRefIdxL0Active > 1) {
-            $refIdx0 = $this->reader->readUe();
+            $refIdx0 = $this->reader->readTe($this->numRefIdxL0Active);
+            $refIdx1 = $this->reader->readTe($this->numRefIdxL0Active);
         }
         $mvd0X = $this->reader->readSe();
         $mvd0Y = $this->reader->readSe();
-        if ($this->numRefIdxL0Active > 1) {
-            $refIdx1 = $this->reader->readUe();
-        }
         $mvd1X = $this->reader->readSe();
         $mvd1Y = $this->reader->readSe();
 
@@ -1242,7 +1262,7 @@ trait MacroblockDecodingTrait
 
         for ($i = 0; $i < 4; $i++) {
             if ($this->numRefIdxL0Active > 1) {
-                $refIdxs[$i] = $this->reader->readUe();
+                $refIdxs[$i] = $this->reader->readTe($this->numRefIdxL0Active);
             } else {
                 $refIdxs[$i] = 0;
             }
@@ -2139,6 +2159,8 @@ trait MacroblockDecodingTrait
         $cbp = $codedBlockPattern;
         $lumaCbp = $cbp & 0x0F;
         $chromaCbp = ($cbp >> 4) & 0x03;
+        $isDebugMb = ($mbY <= 4 && $mbX <= 3);
+        if ($isDebugMb) echo "    RESIDUAL MB({$mbX},{$mbY}): cbp={$cbp}, luma={$lumaCbp}, chroma={$chromaCbp}\n";
 
         $mbWidth = $this->picWidthInMbs;
         $leftAvailable = ($mbX > 0);
@@ -2200,11 +2222,14 @@ trait MacroblockDecodingTrait
         $crAcCoeffs = array_fill(0, 4, array_fill(0, 16, 0));
 
         $isDebugSlice = ($this->debugTargetSlice > 0 && $this->debugSliceIndex === $this->debugTargetSlice);
-        $isDebugMb = $isDebugSlice && $mbY === 0 && ($mbX === 1 || $mbX === 2);
+        $isDebugMb = ($mbY <= 4 && $mbX <= 3);
 
         if ($chromaCbp >= 1) {
+            if ($isDebugMb) echo "      chroma DC: before Cb, bit=" . $this->reader->getBitPosition() . "\n";
             $cbDc = $this->decodeResidualBlock(4, -1);
+            if ($isDebugMb) echo "      chroma DC: after Cb, bit=" . $this->reader->getBitPosition() . "\n";
             $crDc = $this->decodeResidualBlock(4, -1);
+            if ($isDebugMb) echo "      chroma DC: after Cr, bit=" . $this->reader->getBitPosition() . "\n";
         }
 
         $cbQmul = $this->dequant4Table[1][$chromaQp][0];
