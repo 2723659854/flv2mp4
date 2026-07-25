@@ -1,6 +1,6 @@
 <?php
 
-namespace Xiaosongshu\Flv2mp4\Codec;
+namespace Xiaosongshu\Flv2mp4\Codec\Decode;
 
 /**
  * @purpose 亮度色度运动补偿

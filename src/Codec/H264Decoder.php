@@ -2,6 +2,16 @@
 
 namespace Xiaosongshu\Flv2mp4\Codec;
 
+use Xiaosongshu\Flv2mp4\Codec\Decode\DeblockingFilterTrait;
+use Xiaosongshu\Flv2mp4\Codec\Decode\IntraPredictionTrait;
+use Xiaosongshu\Flv2mp4\Codec\Decode\MacroblockDecodingTrait;
+use Xiaosongshu\Flv2mp4\Codec\Decode\MotionCompensationTrait;
+use Xiaosongshu\Flv2mp4\Codec\Decode\MotionVectorPredictionTrait;
+use Xiaosongshu\Flv2mp4\Codec\Decode\ResidualDecodingTrait;
+use Xiaosongshu\Flv2mp4\Codec\Decode\SliceDecodingTrait;
+use Xiaosongshu\Flv2mp4\Codec\Decode\SpsPpsParsingTrait;
+use Xiaosongshu\Flv2mp4\Codec\Decode\TransformTrait;
+
 /**
  * @purpose H.264解码器 - 支持 baseline profile (I帧 + P帧)
  * @author yanglong

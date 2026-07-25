@@ -1,6 +1,6 @@
 <?php
 
-namespace Xiaosongshu\Flv2mp4\Codec;
+namespace Xiaosongshu\Flv2mp4\Codec\Decode;
 
 /**
  * @purpose 帧内预测核心模块
