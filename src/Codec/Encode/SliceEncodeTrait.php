@@ -35,24 +35,28 @@ trait SliceEncodeTrait
         $pocLsb = $this->poc & ((1 << $log2MaxPicOrderCntLsb) - 1);
         $bits .= $this->u($pocLsb, $log2MaxPicOrderCntLsb);
 
-        // dec_ref_pic_marking() for IDR frames (nal_ref_idc != 0)
+        // Slice header 语法顺序符合H.264标准（与FFmpeg cbs_h264_syntax_template.c一致）：
+        // num_ref_idx_active_override_flag → ref_pic_list_modification() → pred_weight_table → dec_ref_pic_marking()
+        
+        if ($sliceType === 0) {
+            // P帧：num_ref_idx_active_override_flag
+            $bits .= '0'; // num_ref_idx_active_override_flag = 0 (使用默认值)
+            // ref_pic_list_modification(): ref_pic_list_modification_flag_l0 = 0 (无修改)
+            $bits .= '0';
+        }
+        
+        // pred_weight_table() 不需要，因为PPS中weighted_pred_flag=0, weighted_bipred_idc=0
+        
+        // dec_ref_pic_marking() - 所有nal_ref_idc != 0的帧都需要（在ref_pic_list_modification之后）
         if ($isIDR) {
             $bits .= '0'; // no_output_of_prior_pics_flag
             $bits .= '0'; // long_term_reference_flag
-        }
-
-        // P帧需要编码num_ref_idx_active_override_flag和ref_pic_list_modification
-        if ($sliceType === 0) {
-            $bits .= '0'; // num_ref_idx_active_override_flag
-            // ref_pic_list_modification(): ref_pic_list_modification_flag_l0 = 0
+        } else {
+            // 非IDR参考帧：adaptive_ref_pic_marking_mode_flag = 0 (滑窗模式，FIFO)
             $bits .= '0';
         }
-
-        // dec_ref_pic_marking() for non-IDR frames
-        if (!$isIDR) {
-            // adaptive_ref_pic_marking_mode_flag = 0 (滑窗模式)
-            $bits .= '0';
-        }
+        
+        // cabac_init_idc 不需要，因为PPS中entropy_coding_mode_flag=0 (CAVLC)
 
         $bits .= $this->se(0); // slice_qp_delta
 
