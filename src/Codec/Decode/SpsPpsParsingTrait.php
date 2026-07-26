@@ -141,7 +141,7 @@ trait SpsPpsParsingTrait
         }
 
         $this->deblockingFilterParametersPresent = (bool)$this->reader->readU(1);
-        $this->reader->skip(1);
+        $this->reader->skip(1); // constrained_intra_pred_flag
         $this->redundantPicCntPresent = (bool)$this->reader->readU(1);
     }
 }

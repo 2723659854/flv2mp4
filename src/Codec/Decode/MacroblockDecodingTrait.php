@@ -18,6 +18,7 @@ trait MacroblockDecodingTrait
         $mbType = $this->reader->readUe();
         $mbWidth = $this->picWidthInMbs;
         $mbIdx = $mbY * $mbWidth + $mbX;
+        
         $this->mbTypeForDeblock[$mbIdx] = $mbType;
         $this->mbNnzForDeblock[$mbIdx] = array_fill(0, 24, 0);
         $this->mbMvForDeblock[$mbIdx] = array_fill(0, 16, [0, 0]);
@@ -427,11 +428,16 @@ trait MacroblockDecodingTrait
      */
     public function decodeIntra16x16(int $mbX, int $mbY, int $mbType, int $qp): int
     {
-        // C语言编码器 cavlc_mb_header_i 的公式：
-        // mb_type = 1 + pred_mode + cbp_chroma * 4 + (cbp_luma == 0 ? 0 : 12)
-        // pred_mode: 0=垂直, 1=水平, 2=DC, 3=平面
-        // cbp_chroma: 0=none, 1=DC only, 2=DC+AC
-        // cbp_luma: 0=no coeff, 15=has AC
+        // H.264标准Table 7-11 (I帧) / Table 7-10 (P帧Intra mb_type-5):
+        // mbType 1-24: Intra16x16
+        // predMode顺序: 0(V),1(H),2(DC),3(Plane) 每4个一循环
+        // cbp分组: 每4个一组
+        //   组0 (1-4):  Luma=0,  Chroma=0
+        //   组1 (5-8):  Luma=0,  Chroma=1
+        //   组2 (9-12): Luma=0,  Chroma=2
+        //   组3 (13-16):Luma=15, Chroma=0
+        //   组4 (17-20):Luma=15, Chroma=1
+        //   组5 (21-24):Luma=15, Chroma=2
 
         $predMode = ($mbType - 1) % 4;
         $hasLumaAc = ($mbType - 1) >= 12;
@@ -890,40 +896,39 @@ trait MacroblockDecodingTrait
      */
     private function decodePInterMacroblock(int $mbX, int $mbY, int $mbType, int $sliceQp): int
     {
-        // P_L0_16x16 (mb_type 0)
         if ($mbType === 0) {
             return $this->decodePL0_16x16($mbX, $mbY, $sliceQp);
         }
 
-        // P_L0_L0_16x8 (mb_type 1)
         if ($mbType === 1) {
             return $this->decodePL0_16x8($mbX, $mbY, $sliceQp);
         }
 
-        // P_L0_L0_8x16 (mb_type 2)
         if ($mbType === 2) {
             return $this->decodePL0_8x16($mbX, $mbY, $sliceQp);
         }
 
-        // P_8x8 (mb_type 3)
         if ($mbType === 3) {
             return $this->decodeP_8x8($mbX, $mbY, $sliceQp);
         }
 
-        // P_8x8ref0 (mb_type 4)
         if ($mbType === 4) {
             return $this->decodeP_8x8ref0($mbX, $mbY, $sliceQp);
         }
 
-        // Intra 模式 (mb_type >= 5, 即 mb_type - 5 对应 I_4x4..I_PCM)
-        if ($mbType >= 5 && $mbType <= 30) {
+        if ($mbType >= 5) {
             $intraMbType = $mbType - 5;
+            if ($intraMbType === 31) {
+                $this->fillMacroblockGray($mbX, $mbY);
+                return 0;
+            }
             $mbQpDelta = $this->decodeIntraMacroblock($mbX, $mbY, $intraMbType, $sliceQp);
-            $this->mvLeftCol = [null, null, null, null];
-            $this->mvTopRow[$mbX * 4 + 0] = null;
-            $this->mvTopRow[$mbX * 4 + 1] = null;
-            $this->mvTopRow[$mbX * 4 + 2] = null;
-            $this->mvTopRow[$mbX * 4 + 3] = null;
+            $intraMv = [0, 0, -1];
+            $this->mvLeftCol = [$intraMv, $intraMv, $intraMv, $intraMv];
+            $this->mvTopRow[$mbX * 4 + 0] = $intraMv;
+            $this->mvTopRow[$mbX * 4 + 1] = $intraMv;
+            $this->mvTopRow[$mbX * 4 + 2] = $intraMv;
+            $this->mvTopRow[$mbX * 4 + 3] = $intraMv;
             return $mbQpDelta;
         }
         $this->fillMacroblockGray($mbX, $mbY);
@@ -941,7 +946,7 @@ trait MacroblockDecodingTrait
 
         $mvX = $predMvX;
         $mvY = $predMvY;
-
+        
         $this->performMotionCompensation16x16($mbX, $mbY, $mvX, $mvY, $refIdx);
 
         $this->saveMvForPrediction($mbX, $mbY, $mvX, $mvY, $refIdx);
@@ -989,33 +994,18 @@ trait MacroblockDecodingTrait
      */
     private function decodePL0_16x16(int $mbX, int $mbY, int $sliceQp): int
     {
-        $isDebugSlice = ($this->debugTargetSlice > 0 && $this->debugSliceIndex === $this->debugTargetSlice);
-        $isDebugMb = $isDebugSlice && $mbY === 0 && $mbX <= 5;
-
         $refIdx = 0;
         if ($this->numRefIdxL0Active > 1) {
             $refIdx = $this->reader->readUe();
         }
 
         $mvdL0X = $this->reader->readSe();
-
         $mvdL0Y = $this->reader->readSe();
-
 
         list($predMvX, $predMvY) = $this->getP16x16MvPrediction($mbX, $mbY, $refIdx);
         $mvX = $predMvX + $mvdL0X;
         $mvY = $predMvY + $mvdL0Y;
-
-        if ($isDebugSlice && $this->debugMbTraceFh) {
-            fwrite($this->debugMbTraceFh, " [P_L0_16x16] refIdx=$refIdx mvd=($mvdL0X,$mvdL0Y) pred_mv=($predMvX,$predMvY) mv=($mvX,$mvY)");
-        }
-        if ($mbX === 2 && $mbY === 0) {
-            // 临时测试：强制使用 MV=(-2,0)
-            if (property_exists($this, 'forceMvMb20') && $this->forceMvMb20) {
-                $mvX = -2;
-                $mvY = 0;
-            }
-        }
+        
         $this->performMotionCompensation16x16($mbX, $mbY, $mvX, $mvY, $refIdx);
         $cbpCode = $this->reader->readUe();
         $codedBlockPattern = self::GOLOMB_TO_INTER_CBP[$cbpCode] ?? 0;
@@ -1507,8 +1497,8 @@ trait MacroblockDecodingTrait
         }
 
         // 色度：8x8亮度对应4x4色度
-        $chromaRefX = $mbX * 64 + $blkX * 32 + ($mvX >> 1);
-        $chromaRefY = $mbY * 64 + $blkY * 32 + ($mvY >> 1);
+        $chromaRefX = $mbX * 64 + $blkX * 32 + $mvX;
+        $chromaRefY = $mbY * 64 + $blkY * 32 + $mvY;
 
         $cbPred = $this->mcChroma(
             $this->refFrameU, $this->refStrideUv,
@@ -1554,8 +1544,8 @@ trait MacroblockDecodingTrait
         }
 
         // 色度
-        $chromaRefX = $mbX * 64 + $blkX * 32 + ($mvX >> 1);
-        $chromaRefY = $mbY * 64 + $blkY * 32 + $yOffset * 4 + ($mvY >> 1);
+        $chromaRefX = $mbX * 64 + $blkX * 32 + $mvX;
+        $chromaRefY = $mbY * 64 + $blkY * 32 + $yOffset * 4 + $mvY;
 
         $cbPred = $this->mcChroma(
             $this->refFrameU, $this->refStrideUv,
@@ -1601,8 +1591,8 @@ trait MacroblockDecodingTrait
         }
 
         // 色度
-        $chromaRefX = $mbX * 64 + $blkX * 32 + $xOffset * 4 + ($mvX >> 1);
-        $chromaRefY = $mbY * 64 + $blkY * 32 + ($mvY >> 1);
+        $chromaRefX = $mbX * 64 + $blkX * 32 + $xOffset * 4 + $mvX;
+        $chromaRefY = $mbY * 64 + $blkY * 32 + $mvY;
 
         $cbPred = $this->mcChroma(
             $this->refFrameU, $this->refStrideUv,
@@ -1648,8 +1638,8 @@ trait MacroblockDecodingTrait
             }
         }
 
-        $chromaRefX = $mbX * 64 + $blkX * 32 + $subX * 16 + ($mvX >> 1);
-        $chromaRefY = $mbY * 64 + $blkY * 32 + $subY * 16 + ($mvY >> 1);
+        $chromaRefX = $mbX * 64 + $blkX * 32 + $subX * 16 + $mvX;
+        $chromaRefY = $mbY * 64 + $blkY * 32 + $subY * 16 + $mvY;
 
         $cbPred = $this->mcChroma(
             $this->refFrameU, $this->refStrideUv,
@@ -1685,7 +1675,9 @@ trait MacroblockDecodingTrait
         $mvC = null;
 
         if ($mbX > 0) {
-            if (isset($this->mvLeftCol[0])) {
+            if (isset($this->mvLeftCol[1])) {
+                $mvLeft = $this->mvLeftCol[1];
+            } elseif (isset($this->mvLeftCol[0])) {
                 $mvLeft = $this->mvLeftCol[0];
             }
         }
@@ -1715,41 +1707,28 @@ trait MacroblockDecodingTrait
     {
         $mbWidth = $this->picWidthInMbs;
 
-        $leftExists = ($mbX > 0);
-        $topExists = ($mbY > 0);
-
         $mvLeft = null;
         $mvTop = null;
         $mvC = null;
 
-        if ($leftExists) {
-            if (isset($this->mvLeftCol[0])) {
+        if ($mbX > 0) {
+            if (isset($this->mvLeftCol[1])) {
+                $mvLeft = $this->mvLeftCol[1];
+            } elseif (isset($this->mvLeftCol[0])) {
                 $mvLeft = $this->mvLeftCol[0];
-            } else {
-                $mvLeft = [0, 0, -1];
             }
         }
 
-        if ($topExists) {
+        if ($mbY > 0) {
             $mvTop = $this->mvTopRow[$mbX * 4] ?? null;
-            if ($mvTop === null) {
-                $mvTop = [0, 0, -1];
-            }
         }
 
-        if ($topExists) {
-            $topRightExists = ($mbX + 1 < $mbWidth);
-            if ($topRightExists) {
+        if ($mbY > 0) {
+            if ($mbX + 1 < $mbWidth) {
                 $mvC = $this->mvTopRow[($mbX + 1) * 4] ?? null;
-                if ($mvC === null) {
-                    $mvC = [0, 0, -1];
-                }
             }
             if ($mvC === null && $mbX > 0) {
                 $mvC = $this->mvTopRow[($mbX - 1) * 4 + 3] ?? null;
-                if ($mvC === null) {
-                    $mvC = [0, 0, -1];
-                }
             }
         }
 
@@ -1829,7 +1808,11 @@ trait MacroblockDecodingTrait
 
         if ($partIdx === 0) {
             if ($mbX > 0) {
-                $mvLeft = $this->mvLeftCol[0] ?? null;
+                if (isset($this->mvLeftCol[1])) {
+                    $mvLeft = $this->mvLeftCol[1];
+                } elseif (isset($this->mvLeftCol[0])) {
+                    $mvLeft = $this->mvLeftCol[0];
+                }
             }
         } else {
             $mvLeft = $mvPart0;
@@ -1952,8 +1935,8 @@ trait MacroblockDecodingTrait
             }
         }
 
-        $chromaRefX = $mbX * 64 + ($mvX >> 1);
-        $chromaRefY = $mbY * 64 + ($mvY >> 1);
+        $chromaRefX = $mbX * 64 + $mvX;
+        $chromaRefY = $mbY * 64 + $mvY;
 
         $cbPred = $this->mcChroma(
             $this->refFrameU, $this->refStrideUv,
@@ -2002,8 +1985,8 @@ trait MacroblockDecodingTrait
             }
         }
 
-        $chromaRefX = $mbX * 64 + ($mvX >> 1);
-        $chromaRefY = $mbY * 64 + ($mvY >> 1) + $yOffset * 4;
+        $chromaRefX = $mbX * 64 + $mvX;
+        $chromaRefY = $mbY * 64 + $mvY + $yOffset * 4;
 
         $cbPred = $this->mcChroma(
             $this->refFrameU, $this->refStrideUv,
@@ -2053,8 +2036,8 @@ trait MacroblockDecodingTrait
             }
         }
 
-        $chromaRefX = $mbX * 64 + ($mvX >> 1) + $xOffset * 4;
-        $chromaRefY = $mbY * 64 + ($mvY >> 1);
+        $chromaRefX = $mbX * 64 + $mvX + $xOffset * 4;
+        $chromaRefY = $mbY * 64 + $mvY;
 
         $cbPred = $this->mcChroma(
             $this->refFrameU, $this->refStrideUv,

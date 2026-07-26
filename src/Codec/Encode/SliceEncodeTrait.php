@@ -71,6 +71,47 @@ trait SliceEncodeTrait
         $yPlane = substr($yuvData, 0, $ySize);
         $uPlane = substr($yuvData, $ySize, $uvSize);
         $vPlane = substr($yuvData, $ySize + $uvSize, $uvSize);
+
+        // 将输入图像扩展到宏块对齐尺寸（边缘复制填充）
+        // 确保边界宏块的参考像素与FFmpeg一致，避免P帧误差累积
+        if ($this->mbAlignedWidth !== $this->width || $this->mbAlignedHeight !== $this->height) {
+            // 亮度平面扩展
+            $expandedY = '';
+            $padRight = $this->mbAlignedWidth - $this->width;
+            for ($y = 0; $y < $this->height; $y++) {
+                $row = substr($yPlane, $y * $this->width, $this->width);
+                $lastPixel = $row[$this->width - 1];
+                $expandedY .= $row . str_repeat($lastPixel, $padRight);
+            }
+            $padBottom = $this->mbAlignedHeight - $this->height;
+            $lastRow = substr($expandedY, ($this->height - 1) * $this->mbAlignedWidth, $this->mbAlignedWidth);
+            for ($y = 0; $y < $padBottom; $y++) {
+                $expandedY .= $lastRow;
+            }
+            $yPlane = $expandedY;
+
+            // 色度平面扩展
+            $uvW = (int)($this->width / 2);
+            $uvH = (int)($this->height / 2);
+            $uvAlignedW = (int)($this->mbAlignedWidth / 2);
+            $uvAlignedH = (int)($this->mbAlignedHeight / 2);
+            $padRightUv = $uvAlignedW - $uvW;
+            $padBottomUv = $uvAlignedH - $uvH;
+
+            foreach (['uPlane', 'vPlane'] as $planeName) {
+                $expandedUV = '';
+                for ($y = 0; $y < $uvH; $y++) {
+                    $row = substr($$planeName, $y * $uvW, $uvW);
+                    $lastPixel = $row[$uvW - 1];
+                    $expandedUV .= $row . str_repeat($lastPixel, $padRightUv);
+                }
+                $lastRowUv = substr($expandedUV, ($uvH - 1) * $uvAlignedW, $uvAlignedW);
+                for ($y = 0; $y < $padBottomUv; $y++) {
+                    $expandedUV .= $lastRowUv;
+                }
+                $$planeName = $expandedUV;
+            }
+        }
         $topNzLuma = array_fill(0, $mbWidth * 4, 0);
         $topNzCb = array_fill(0, $mbWidth * 2, 0);
         $topNzCr = array_fill(0, $mbWidth * 2, 0);
@@ -140,6 +181,14 @@ trait SliceEncodeTrait
                         echo "ENCODE SLICE MB({$mbX},{$mbY}): before=" . strlen($bits) . ", mbBits=" . strlen($mbBits) . ", after=" . (strlen($bits) + strlen($mbBits)) . "\n";
                     }
                     $bits .= $mbBits;
+
+                    // I帧宏块没有运动向量，设置为[0,0,-1]表示存在但不使用L0（与解码器一致）
+                    $intraMv = [0, 0, -1];
+                    $this->mvLeftCol = [$intraMv, $intraMv, $intraMv, $intraMv];
+                    $this->mvTopRow[$mbX * 4 + 0] = $intraMv;
+                    $this->mvTopRow[$mbX * 4 + 1] = $intraMv;
+                    $this->mvTopRow[$mbX * 4 + 2] = $intraMv;
+                    $this->mvTopRow[$mbX * 4 + 3] = $intraMv;
                 }
                 $leftAvailable = true;
             }

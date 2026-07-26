@@ -219,17 +219,14 @@ trait SliceDecodingTrait
             }
 
             if (($sliceType === 0 || $sliceType === 5) && !$this->entropyCodingModeFlag) {
-                if ($mbSkipRun < 0) {
+                if ($mbSkipRun === -1) {
                     $mbSkipRun = $this->reader->readUe();
                 }
-                if ($mbSkipRun > 0) {
-                    $mbSkipRun--;
+                if ($mbSkipRun--) {
                     $this->decodePSkip($mbX, $mbY);
                     $this->mbTypeForDeblock[$mbIdx] = 0;
                     $this->mbQpForDeblock[$mbIdx] = $qp;
                     continue;
-                } else {
-                    $mbSkipRun = -1;
                 }
             }
             $mbQpDelta = $this->decodeMacroblock($mbX, $mbY, $qp, $sliceType);

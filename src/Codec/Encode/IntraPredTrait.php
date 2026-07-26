@@ -35,13 +35,12 @@ trait IntraPredTrait
         $bits = '';
         $chromaWidth = (int)($this->width / 2);
         $lumaPixels = array_fill(0, 16, array_fill(0, 16, 128));
+        $reconStride = $this->mbAlignedWidth;
         for ($y = 0; $y < 16; $y++) {
             $py = $mbY * 16 + $y;
-            if ($py >= $this->height) break;
             for ($x = 0; $x < 16; $x++) {
                 $px = $mbX * 16 + $x;
-                if ($px >= $this->width) break;
-                $idx = $py * $this->width + $px;
+                $idx = $py * $reconStride + $px;
                 $lumaPixels[$y][$x] = ord($yPlane[$idx]);
             }
         }
@@ -181,13 +180,12 @@ trait IntraPredTrait
         $dcCr2x2 = [0, 0, 0, 0];
 
         $chromaHeight = (int)($this->height / 2);
+        $chromaStride = (int)($this->mbAlignedWidth / 2);
         for ($y = 0; $y < 8; $y++) {
             $py = $mbY * 8 + $y;
-            if ($py >= $chromaHeight) break;
             for ($x = 0; $x < 8; $x++) {
                 $px = $mbX * 8 + $x;
-                if ($px >= $chromaWidth) break;
-                $idx = $py * $chromaWidth + $px;
+                $idx = $py * $chromaStride + $px;
                 $u8x8[$y][$x] = ord($uPlane[$idx]);
                 $v8x8[$y][$x] = ord($vPlane[$idx]);
             }
@@ -673,13 +671,12 @@ trait IntraPredTrait
         $chromaHeight = (int)($this->height / 2);
 
         $lumaPixels = array_fill(0, 16, array_fill(0, 16, 128));
+        $reconStride = $this->mbAlignedWidth;
         for ($y = 0; $y < 16; $y++) {
             $py = $mbY * 16 + $y;
-            if ($py >= $this->height) break;
             for ($x = 0; $x < 16; $x++) {
                 $px = $mbX * 16 + $x;
-                if ($px >= $this->width) break;
-                $idx = $py * $this->width + $px;
+                $idx = $py * $reconStride + $px;
                 $lumaPixels[$y][$x] = ord($yPlane[$idx]);
             }
         }
@@ -1209,13 +1206,12 @@ trait IntraPredTrait
         $dcCb2x2 = [0, 0, 0, 0];
         $dcCr2x2 = [0, 0, 0, 0];
 
+        $chromaStride = (int)($this->mbAlignedWidth / 2);
         for ($y = 0; $y < 8; $y++) {
             $py = $mbY * 8 + $y;
-            if ($py >= $chromaHeight) break;
             for ($x = 0; $x < 8; $x++) {
                 $px = $mbX * 8 + $x;
-                if ($px >= $chromaWidth) break;
-                $idx = $py * $chromaWidth + $px;
+                $idx = $py * $chromaStride + $px;
                 $u8x8[$y][$x] = ord($uPlane[$idx]);
                 $v8x8[$y][$x] = ord($vPlane[$idx]);
             }

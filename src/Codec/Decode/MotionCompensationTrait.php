@@ -63,8 +63,14 @@ trait MotionCompensationTrait
         }
 
         $H = null;
+        $Hfull = null;
         if ($fracX !== 0) {
-            $H = array_fill(0, $hRows, array_fill(0, $blockW, 0));
+            if ($fracY === 0) {
+                $H = array_fill(0, $hRows, array_fill(0, $blockW, 0));
+            } else {
+                $Hfull = array_fill(0, $hRows, array_fill(0, $blockW, 0));
+                $H = array_fill(0, $hRows, array_fill(0, $blockW, 0));
+            }
             for ($j = $hStart; $j < $hStart + $hRows; $j++) {
                 $ry = $this->clamp($intY + $j, 0, $refHeight - 1);
                 for ($i = 0; $i < $blockW; $i++) {
@@ -74,8 +80,15 @@ trait MotionCompensationTrait
                     $px3 = $refPlane[$ry * $refStride + $this->clamp($intX + $i + 1, 0, $refWidth - 1)];
                     $px4 = $refPlane[$ry * $refStride + $this->clamp($intX + $i + 2, 0, $refWidth - 1)];
                     $px5 = $refPlane[$ry * $refStride + $this->clamp($intX + $i + 3, 0, $refWidth - 1)];
-                    $h = ($px0 - 5 * $px1 + 20 * $px2 + 20 * $px3 - 5 * $px4 + $px5 + 16) >> 5;
-                    $H[$j - $hStart][$i] = $this->clip255($h);
+                    $fullVal = $px0 - 5 * $px1 + 20 * $px2 + 20 * $px3 - 5 * $px4 + $px5;
+                    if ($fracY === 0) {
+                        $h = ($fullVal + 16) >> 5;
+                        $H[$j - $hStart][$i] = $this->clip255($h);
+                    } else {
+                        $Hfull[$j - $hStart][$i] = $fullVal;
+                        $h = ($fullVal + 16) >> 5;
+                        $H[$j - $hStart][$i] = $this->clip255($h);
+                    }
                 }
             }
         }
@@ -99,17 +112,18 @@ trait MotionCompensationTrait
         }
 
         $C = null;
-        if ($fracX !== 0 && $fracY !== 0 && ($fracX === 2 || $fracY === 2)) {
+        if ($fracX !== 0 && $fracY !== 0) {
             $C = array_fill(0, $blockH, array_fill(0, $blockW, 0));
             for ($j = 0; $j < $blockH; $j++) {
                 for ($i = 0; $i < $blockW; $i++) {
-                    $px0 = $H[$j][$i];
-                    $px1 = $H[$j + 1][$i];
-                    $px2 = $H[$j + 2][$i];
-                    $px3 = $H[$j + 3][$i];
-                    $px4 = $H[$j + 4][$i];
-                    $px5 = $H[$j + 5][$i];
-                    $h = ($px0 - 5 * $px1 + 20 * $px2 + 20 * $px3 - 5 * $px4 + $px5 + 16) >> 5;
+                    $px0 = $Hfull[$j][$i];
+                    $px1 = $Hfull[$j + 1][$i];
+                    $px2 = $Hfull[$j + 2][$i];
+                    $px3 = $Hfull[$j + 3][$i];
+                    $px4 = $Hfull[$j + 4][$i];
+                    $px5 = $Hfull[$j + 5][$i];
+                    $fullVal = $px0 - 5 * $px1 + 20 * $px2 + 20 * $px3 - 5 * $px4 + $px5;
+                    $h = ($fullVal + 512) >> 10;
                     $C[$j][$i] = $this->clip255($h);
                 }
             }

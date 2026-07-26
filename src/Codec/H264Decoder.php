@@ -318,15 +318,6 @@ class H264Decoder
                 
                 static $debugFrameNum = 0;
                 $debugFrameNum++;
-                if ($debugFrameNum >= 53 && $debugFrameNum <= 57) {
-                    $refAvg = 0;
-                    if ($this->refFrameY !== null) {
-                        $refSum = 0;
-                        for ($k = 0; $k < 100; $k++) $refSum += $this->refFrameY[$k];
-                        $refAvg = $refSum / 100;
-                    }
-                    echo "DECODE Frame $debugFrameNum: nalType=$nalType, nalRefIdc=$nalRefIdc, refFirst100Avg=$refAvg\n";
-                }
                 // 每帧重新初始化像素平面
                 $this->yPlane = array_fill(0, $ySize, 128);
                 $this->uPlane = array_fill(0, $uvSize, 128);
@@ -371,18 +362,6 @@ class H264Decoder
                     $vBin .= implode('', array_map('chr', array_slice($this->vPlane, $y * $uvMbAlignedWidth, $uvWidth)));
                 }
                 $outputData .= $yBin . $uBin . $vBin;
-
-                if ($debugFrameNum >= 54 && $debugFrameNum <= 56) {
-                    $rowAvgs = [];
-                    for ($row = 0; $row < $this->height; $row += 20) {
-                        $sum = 0;
-                        for ($x = 0; $x < $this->width; $x++) {
-                            $sum += ord($yBin[$row * $this->width + $x]);
-                        }
-                        $rowAvgs[] = "row$row=" . round($sum / $this->width, 1);
-                    }
-                    echo "DECODE Frame $debugFrameNum rowAvgs: " . implode(', ', $rowAvgs) . "\n";
-                }
 
                 if ($sliceCount === $this->debugTargetSlice && $this->debugMbTraceFh) {
                     fclose($this->debugMbTraceFh);

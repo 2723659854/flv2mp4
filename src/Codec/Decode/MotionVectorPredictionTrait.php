@@ -64,24 +64,25 @@ trait MotionVectorPredictionTrait
 
     /**
      * P_Skip 宏块运动向量预测 (H.264 8.4.1.1节)
-     * 特殊快速路径：A或B不可用时直接返回(0,0)；A或B为ref=0且mv=0时直接返回(0,0)
-     * @param array|null $mvLeft 左邻居 [mvX, mvY, refIdx]，null表示不可用
-     * @param array|null $mvTop 上邻居 [mvX, mvY, refIdx]，null表示不可用
-     * @param array|null $mvTopRight 右上邻居 [mvX, mvY, refIdx]，null表示不可用
+     * 特殊快速路径（与FFmpeg pred_pskip_motion一致）：
+     * - 如果A（左邻居）完全不存在（帧边界外，null）→ 返回(0,0)
+     * - 如果B（上邻居）完全不存在（帧边界外，null）→ 返回(0,0)
+     * - 如果A是Inter宏块且ref=0、MV=(0,0) → 返回(0,0)
+     * - 如果B是Inter宏块且ref=0、MV=(0,0) → 返回(0,0)
+     * - 否则使用与P_16x16相同的中值预测逻辑
+     * @param array|null $mvLeft 左邻居 [mvX, mvY, refIdx]，null表示完全不存在，[0,0,-1]表示存在但不使用L0（Intra）
+     * @param array|null $mvTop 上邻居 [mvX, mvY, refIdx]，null表示完全不存在，[0,0,-1]表示存在但不使用L0（Intra）
+     * @param array|null $mvTopRight 右上邻居 [mvX, mvY, refIdx]
      * @return array [predMvX, predMvY] 预测的运动向量
      */
     public function predictMvPSkip(?array $mvLeft, ?array $mvTop, ?array $mvTopRight): array
     {
-        $aAvail = ($mvLeft !== null);
-        $bAvail = ($mvTop !== null);
-
-        if (!$aAvail || !$bAvail) {
+        if ($mvLeft === null || $mvTop === null) {
             return [0, 0];
         }
 
         $aZero = ($mvLeft[2] === 0 && $mvLeft[0] === 0 && $mvLeft[1] === 0);
         $bZero = ($mvTop[2] === 0 && $mvTop[0] === 0 && $mvTop[1] === 0);
-
         if ($aZero || $bZero) {
             return [0, 0];
         }

@@ -28,13 +28,12 @@ trait InterPredTrait
 
         // 提取当前宏块像素
         $lumaPixels = array_fill(0, 16, array_fill(0, 16, 128));
+        $reconStride = $this->mbAlignedWidth;
         for ($y = 0; $y < 16; $y++) {
             $py = $mbY * 16 + $y;
-            if ($py >= $this->height) break;
             for ($x = 0; $x < 16; $x++) {
                 $px = $mbX * 16 + $x;
-                if ($px >= $this->width) break;
-                $idx = $py * $this->width + $px;
+                $idx = $py * $reconStride + $px;
                 $lumaPixels[$y][$x] = ord($yPlane[$idx]);
             }
         }
@@ -42,7 +41,7 @@ trait InterPredTrait
         // 运动估计（返回1/4像素单位的MV）
         list($mvX, $mvY, $sad) = $this->motionEstimate16x16($lumaPixels, $refYPlane, $mbX, $mbY);
 
-        // 亮度MC预测（1/4像素精度，边缘钳位到mbAligned尺寸，与解码器mcLuma一致）
+        // 亮度MC预测（1/4像素精度）
         $refX = $mbX * 64 + $mvX;
         $refY = $mbY * 64 + $mvY;
         $predBlock = $this->mcLumaBlock($refYPlane, $refX, $refY, $this->mbAlignedWidth, $this->mbAlignedHeight);
@@ -141,9 +140,9 @@ trait InterPredTrait
             }
 
             // P_Skip色度重建: 使用与解码器一致的1/8像素双线性插值MC
-            // chromaMV = floor(lumaMV / 2)，右移一位实现向下取整（符合H.264标准）
-            $chromaRefX = $mbX * 64 + ($skipMvpX >> 1);
-            $chromaRefY = $mbY * 64 + ($skipMvpY >> 1);
+            // 亮度MV（1/4像素单位）直接作为色度MV（1/8像素单位），无需移位
+            $chromaRefX = $mbX * 64 + $skipMvpX;
+            $chromaRefY = $mbY * 64 + $skipMvpY;
             $cbPred = $this->mcChromaBlock($this->refUPlane, $chromaRefX, $chromaRefY, $chromaW, $chromaH);
             $crPred = $this->mcChromaBlock($this->refVPlane, $chromaRefX, $chromaRefY, $chromaW, $chromaH);
             for ($y = 0; $y < 8; $y++) {
@@ -270,9 +269,9 @@ trait InterPredTrait
 
         // === P帧色度本地解码重建 ===
         // P帧cbpChroma=0, 解码器直接做色度MC(无残差)
-        // chromaMV = floor(lumaMV / 2)，右移一位实现向下取整（符合H.264标准）
-        $chromaRefX = $mbX * 64 + ($mvX >> 1);
-        $chromaRefY = $mbY * 64 + ($mvY >> 1);
+        // 亮度MV（1/4像素单位）直接作为色度MV（1/8像素单位），无需移位
+        $chromaRefX = $mbX * 64 + $mvX;
+        $chromaRefY = $mbY * 64 + $mvY;
         $cbPred = $this->mcChromaBlock($this->refUPlane, $chromaRefX, $chromaRefY, $chromaW, $chromaH);
         $crPred = $this->mcChromaBlock($this->refVPlane, $chromaRefX, $chromaRefY, $chromaW, $chromaH);
         for ($y = 0; $y < 8; $y++) {
@@ -350,20 +349,21 @@ trait InterPredTrait
 
     /**
      * P_Skip运动向量预测 (H.264 8.4.1.1节)
-     * 特殊快速路径：A或B不可用返回(0,0)；A或B为零向量返回(0,0)
+     * 特殊快速路径（与FFmpeg pred_pskip_motion一致，与解码器完全一致）：
+     * - 如果A（左邻居）完全不存在（帧边界外，null）→ 返回(0,0)
+     * - 如果B（上邻居）完全不存在（帧边界外，null）→ 返回(0,0)
+     * - 如果A是Inter宏块且ref=0、MV=(0,0) → 返回(0,0)
+     * - 如果B是Inter宏块且ref=0、MV=(0,0) → 返回(0,0)
+     * - 否则使用与P_16x16相同的中值预测逻辑
      */
     private function predictMvPSkip(?array $mvLeft, ?array $mvTop, ?array $mvTopRight): array
     {
-        $aAvail = ($mvLeft !== null);
-        $bAvail = ($mvTop !== null);
-
-        if (!$aAvail || !$bAvail) {
+        if ($mvLeft === null || $mvTop === null) {
             return [0, 0];
         }
 
         $aZero = ($mvLeft[2] === 0 && $mvLeft[0] === 0 && $mvLeft[1] === 0);
         $bZero = ($mvTop[2] === 0 && $mvTop[0] === 0 && $mvTop[1] === 0);
-
         if ($aZero || $bZero) {
             return [0, 0];
         }
@@ -383,8 +383,12 @@ trait InterPredTrait
         $mvTop = null;
         $mvC = null;
 
-        if ($mbX > 0 && isset($this->mvLeftCol[0])) {
-            $mvLeft = $this->mvLeftCol[0];
+        if ($mbX > 0) {
+            if (isset($this->mvLeftCol[1])) {
+                $mvLeft = $this->mvLeftCol[1];
+            } elseif (isset($this->mvLeftCol[0])) {
+                $mvLeft = $this->mvLeftCol[0];
+            }
         }
         if ($mbY > 0) {
             $mvTop = $this->mvTopRow[$mbX * 4] ?? null;
@@ -413,8 +417,12 @@ trait InterPredTrait
         $mvTop = null;
         $mvC = null;
 
-        if ($mbX > 0 && isset($this->mvLeftCol[0])) {
-            $mvLeft = $this->mvLeftCol[0];
+        if ($mbX > 0) {
+            if (isset($this->mvLeftCol[1])) {
+                $mvLeft = $this->mvLeftCol[1];
+            } elseif (isset($this->mvLeftCol[0])) {
+                $mvLeft = $this->mvLeftCol[0];
+            }
         }
         if ($mbY > 0) {
             $mvTop = $this->mvTopRow[$mbX * 4] ?? null;
@@ -485,7 +493,8 @@ trait InterPredTrait
     }
 
     /**
-     * 亮度运动补偿 - 1/4 像素精度（与解码器mcLuma完全一致）
+     * 亮度运动补偿 - 1/4 像素精度（与FFmpeg实现一致）
+     * 对角线方向：中间H数组不移位不裁剪，最终一次性移位10位
      */
     private function mcLumaBlock(string $refPlane, int $refX, int $refY, int $w, int $h): array
     {
@@ -529,8 +538,14 @@ trait InterPredTrait
         }
 
         $H = null;
+        $Hfull = null;
         if ($fracX !== 0) {
-            $H = array_fill(0, $hRows, array_fill(0, $blockW, 0));
+            if ($fracY === 0) {
+                $H = array_fill(0, $hRows, array_fill(0, $blockW, 0));
+            } else {
+                $Hfull = array_fill(0, $hRows, array_fill(0, $blockW, 0));
+                $H = array_fill(0, $hRows, array_fill(0, $blockW, 0));
+            }
             for ($j = $hStart; $j < $hStart + $hRows; $j++) {
                 $ry = $this->clampInt($intY + $j, 0, $h - 1);
                 for ($i = 0; $i < $blockW; $i++) {
@@ -540,8 +555,15 @@ trait InterPredTrait
                     $px3 = $this->getClampedPixel($refPlane, $intX + $i + 1, $ry, $w, $h);
                     $px4 = $this->getClampedPixel($refPlane, $intX + $i + 2, $ry, $w, $h);
                     $px5 = $this->getClampedPixel($refPlane, $intX + $i + 3, $ry, $w, $h);
-                    $hVal = ($px0 - 5 * $px1 + 20 * $px2 + 20 * $px3 - 5 * $px4 + $px5 + 16) >> 5;
-                    $H[$j - $hStart][$i] = $this->clip255Int($hVal);
+                    $fullVal = $px0 - 5 * $px1 + 20 * $px2 + 20 * $px3 - 5 * $px4 + $px5;
+                    if ($fracY === 0) {
+                        $hVal = ($fullVal + 16) >> 5;
+                        $H[$j - $hStart][$i] = $this->clip255Int($hVal);
+                    } else {
+                        $Hfull[$j - $hStart][$i] = $fullVal;
+                        $hVal = ($fullVal + 16) >> 5;
+                        $H[$j - $hStart][$i] = $this->clip255Int($hVal);
+                    }
                 }
             }
         }
@@ -565,17 +587,18 @@ trait InterPredTrait
         }
 
         $C = null;
-        if ($fracX !== 0 && $fracY !== 0 && ($fracX === 2 || $fracY === 2)) {
+        if ($fracX !== 0 && $fracY !== 0) {
             $C = array_fill(0, $blockH, array_fill(0, $blockW, 0));
             for ($j = 0; $j < $blockH; $j++) {
                 for ($i = 0; $i < $blockW; $i++) {
-                    $px0 = $H[$j][$i];
-                    $px1 = $H[$j + 1][$i];
-                    $px2 = $H[$j + 2][$i];
-                    $px3 = $H[$j + 3][$i];
-                    $px4 = $H[$j + 4][$i];
-                    $px5 = $H[$j + 5][$i];
-                    $hVal = ($px0 - 5 * $px1 + 20 * $px2 + 20 * $px3 - 5 * $px4 + $px5 + 16) >> 5;
+                    $px0 = $Hfull[$j][$i];
+                    $px1 = $Hfull[$j + 1][$i];
+                    $px2 = $Hfull[$j + 2][$i];
+                    $px3 = $Hfull[$j + 3][$i];
+                    $px4 = $Hfull[$j + 4][$i];
+                    $px5 = $Hfull[$j + 5][$i];
+                    $fullVal = $px0 - 5 * $px1 + 20 * $px2 + 20 * $px3 - 5 * $px4 + $px5;
+                    $hVal = ($fullVal + 512) >> 10;
                     $C[$j][$i] = $this->clip255Int($hVal);
                 }
             }
