@@ -288,132 +288,6 @@ trait InterPredTrait
         return $bits;
     }
 
-    /**
-     * 获取16x16宏块MVP：读取左/上/右上邻居MV
-     * 与解码器getP16x16MvPrediction一致
-     */
-    private function getMvpP16x16(int $mbX, int $mbY, int $refIdx): array
-    {
-        $mbWidth = $this->picWidthInMbs;
-
-        $mvLeft = null;
-        $mvTop = null;
-        $mvC = null;
-
-        if ($mbX > 0 && isset($this->mvLeftCol[0])) {
-            $mvLeft = $this->mvLeftCol[0];
-        }
-        if ($mbY > 0) {
-            $mvTop = $this->mvTopRow[$mbX * 4] ?? null;
-        }
-        // C邻居：优先top-right，不可用时回退到top-left (D)
-        if ($mbY > 0) {
-            if ($mbX + 1 < $mbWidth) {
-                $mvC = $this->mvTopRow[($mbX + 1) * 4] ?? null;
-            }
-            if ($mvC === null && $mbX > 0) {
-                $mvC = $this->mvTopRow[($mbX - 1) * 4 + 3] ?? null;
-            }
-        }
-
-        return $this->predictMvP16x16($mvLeft, $mvTop, $mvC, $refIdx);
-    }
-
-    /**
-     * 保存16x16宏块MV供后续预测（与解码器saveMvForPrediction一致）
-     * mvLeftCol和mvTopRow的4个子块都设为同一个MV
-     */
-    private function saveMv16x16(int $mbX, int $mvX, int $mvY, int $refIdx): void
-    {
-        $mv = [$mvX, $mvY, $refIdx];
-        $this->mvLeftCol = [$mv, $mv, $mv, $mv];
-        $this->mvTopRow[$mbX * 4 + 0] = $mv;
-        $this->mvTopRow[$mbX * 4 + 1] = $mv;
-        $this->mvTopRow[$mbX * 4 + 2] = $mv;
-        $this->mvTopRow[$mbX * 4 + 3] = $mv;
-    }
-
-    /**
-     * 色度运动补偿（与解码器mcChroma一致的1/8像素双线性插值）
-     * chromaMV数值与luma MV相同(1/4像素单位)，解释为1/8像素单位
-     */
-    private function mcChromaBlock(string $refPlane, int $chromaRefX, int $chromaRefY, int $chromaW, int $chromaH): array
-    {
-        $pred = array_fill(0, 8, array_fill(0, 8, 128));
-        $fracX = $chromaRefX & 7;
-        $fracY = $chromaRefY & 7;
-        $intX = $chromaRefX >> 3;
-        $intY = $chromaRefY >> 3;
-
-        for ($j = 0; $j < 8; $j++) {
-            for ($i = 0; $i < 8; $i++) {
-                $a00 = $this->getClampedPixel($refPlane, $intX + $i, $intY + $j, $chromaW, $chromaH);
-                $a10 = $this->getClampedPixel($refPlane, $intX + $i + 1, $intY + $j, $chromaW, $chromaH);
-                $a01 = $this->getClampedPixel($refPlane, $intX + $i, $intY + $j + 1, $chromaW, $chromaH);
-                $a11 = $this->getClampedPixel($refPlane, $intX + $i + 1, $intY + $j + 1, $chromaW, $chromaH);
-
-                $val = ((8 - $fracX) * (8 - $fracY) * $a00 +
-                        $fracX * (8 - $fracY) * $a10 +
-                        (8 - $fracX) * $fracY * $a01 +
-                        $fracX * $fracY * $a11 + 32) >> 6;
-                $pred[$j][$i] = max(0, min(255, $val));
-            }
-        }
-        return $pred;
-    }
-
-    /**
-     * 获取P_Skip MVP：与解码器getPSkipMvPrediction一致
-     */
-    private function getMvpPSkip(int $mbX, int $mbY): array
-    {
-        $mbWidth = $this->picWidthInMbs;
-
-        $mvLeft = null;
-        $mvTop = null;
-        $mvC = null;
-
-        if ($mbX > 0 && isset($this->mvLeftCol[0])) {
-            $mvLeft = $this->mvLeftCol[0];
-        }
-        if ($mbY > 0) {
-            $mvTop = $this->mvTopRow[$mbX * 4] ?? null;
-        }
-        if ($mbY > 0) {
-            if ($mbX + 1 < $mbWidth) {
-                $mvC = $this->mvTopRow[($mbX + 1) * 4] ?? null;
-            }
-            if ($mvC === null && $mbX > 0) {
-                $mvC = $this->mvTopRow[($mbX - 1) * 4 + 3] ?? null;
-            }
-        }
-
-        return $this->predictMvPSkip($mvLeft, $mvTop, $mvC);
-    }
-
-    /**
-     * P_Skip运动向量预测 (H.264 8.4.1.1节)
-     * 特殊快速路径：A或B不可用返回(0,0)；A或B为零向量返回(0,0)
-     */
-    private function predictMvPSkip(?array $mvLeft, ?array $mvTop, ?array $mvTopRight): array
-    {
-        $aAvail = ($mvLeft !== null);
-        $bAvail = ($mvTop !== null);
-
-        if (!$aAvail || !$bAvail) {
-            return [0, 0];
-        }
-
-        $aZero = ($mvLeft[2] === 0 && $mvLeft[0] === 0 && $mvLeft[1] === 0);
-        $bZero = ($mvTop[2] === 0 && $mvTop[0] === 0 && $mvTop[1] === 0);
-
-        if ($aZero || $bZero) {
-            return [0, 0];
-        }
-
-        return $this->predictMvP16x16($mvLeft, $mvTop, $mvTopRight, 0);
-    }
-
     // ====================== 运动向量预测 (与解码器MotionVectorPredictionTrait一致) ======================
 
     /**
@@ -475,6 +349,142 @@ trait InterPredTrait
     }
 
     /**
+     * P_Skip运动向量预测 (H.264 8.4.1.1节)
+     * 特殊快速路径：A或B不可用返回(0,0)；A或B为零向量返回(0,0)
+     */
+    private function predictMvPSkip(?array $mvLeft, ?array $mvTop, ?array $mvTopRight): array
+    {
+        $aAvail = ($mvLeft !== null);
+        $bAvail = ($mvTop !== null);
+
+        if (!$aAvail || !$bAvail) {
+            return [0, 0];
+        }
+
+        $aZero = ($mvLeft[2] === 0 && $mvLeft[0] === 0 && $mvLeft[1] === 0);
+        $bZero = ($mvTop[2] === 0 && $mvTop[0] === 0 && $mvTop[1] === 0);
+
+        if ($aZero || $bZero) {
+            return [0, 0];
+        }
+
+        return $this->predictMvP16x16($mvLeft, $mvTop, $mvTopRight, 0);
+    }
+
+    /**
+     * 获取16x16宏块MVP：读取左/上/右上邻居MV
+     * 与解码器getP16x16MvPrediction一致
+     */
+    private function getMvpP16x16(int $mbX, int $mbY, int $refIdx): array
+    {
+        $mbWidth = $this->picWidthInMbs;
+
+        $mvLeft = null;
+        $mvTop = null;
+        $mvC = null;
+
+        if ($mbX > 0 && isset($this->mvLeftCol[0])) {
+            $mvLeft = $this->mvLeftCol[0];
+        }
+        if ($mbY > 0) {
+            $mvTop = $this->mvTopRow[$mbX * 4] ?? null;
+        }
+        // C邻居：优先top-right，不可用时回退到top-left (D)
+        if ($mbY > 0) {
+            if ($mbX + 1 < $mbWidth) {
+                $mvC = $this->mvTopRow[($mbX + 1) * 4] ?? null;
+            }
+            if ($mvC === null && $mbX > 0) {
+                $mvC = $this->mvTopRow[($mbX - 1) * 4 + 3] ?? null;
+            }
+        }
+
+        return $this->predictMvP16x16($mvLeft, $mvTop, $mvC, $refIdx);
+    }
+
+    /**
+     * 获取P_Skip MVP：与解码器getPSkipMvPrediction一致
+     */
+    private function getMvpPSkip(int $mbX, int $mbY): array
+    {
+        $mbWidth = $this->picWidthInMbs;
+
+        $mvLeft = null;
+        $mvTop = null;
+        $mvC = null;
+
+        if ($mbX > 0 && isset($this->mvLeftCol[0])) {
+            $mvLeft = $this->mvLeftCol[0];
+        }
+        if ($mbY > 0) {
+            $mvTop = $this->mvTopRow[$mbX * 4] ?? null;
+        }
+        if ($mbY > 0) {
+            if ($mbX + 1 < $mbWidth) {
+                $mvC = $this->mvTopRow[($mbX + 1) * 4] ?? null;
+            }
+            if ($mvC === null && $mbX > 0) {
+                $mvC = $this->mvTopRow[($mbX - 1) * 4 + 3] ?? null;
+            }
+        }
+
+        return $this->predictMvPSkip($mvLeft, $mvTop, $mvC);
+    }
+
+    /**
+     * 保存16x16宏块MV供后续预测（与解码器saveMvForPrediction一致）
+     * mvLeftCol和mvTopRow的4个子块都设为同一个MV
+     */
+    private function saveMv16x16(int $mbX, int $mvX, int $mvY, int $refIdx): void
+    {
+        $mv = [$mvX, $mvY, $refIdx];
+        $this->mvLeftCol = [$mv, $mv, $mv, $mv];
+        $this->mvTopRow[$mbX * 4 + 0] = $mv;
+        $this->mvTopRow[$mbX * 4 + 1] = $mv;
+        $this->mvTopRow[$mbX * 4 + 2] = $mv;
+        $this->mvTopRow[$mbX * 4 + 3] = $mv;
+    }
+
+    /**
+     * 色度运动补偿（与解码器mcChroma一致的1/8像素双线性插值）
+     * chromaMV数值与luma MV相同(1/4像素单位)，解释为1/8像素单位
+     */
+    private function mcChromaBlock(string $refPlane, int $chromaRefX, int $chromaRefY, int $chromaW, int $chromaH): array
+    {
+        $pred = array_fill(0, 8, array_fill(0, 8, 128));
+        $fracX = $chromaRefX & 7;
+        $fracY = $chromaRefY & 7;
+        $intX = $chromaRefX >> 3;
+        $intY = $chromaRefY >> 3;
+
+        for ($j = 0; $j < 8; $j++) {
+            for ($i = 0; $i < 8; $i++) {
+                $a00 = $this->getClampedPixel($refPlane, $intX + $i, $intY + $j, $chromaW, $chromaH);
+                $a10 = $this->getClampedPixel($refPlane, $intX + $i + 1, $intY + $j, $chromaW, $chromaH);
+                $a01 = $this->getClampedPixel($refPlane, $intX + $i, $intY + $j + 1, $chromaW, $chromaH);
+                $a11 = $this->getClampedPixel($refPlane, $intX + $i + 1, $intY + $j + 1, $chromaW, $chromaH);
+
+                $val = ((8 - $fracX) * (8 - $fracY) * $a00 +
+                        $fracX * (8 - $fracY) * $a10 +
+                        (8 - $fracX) * $fracY * $a01 +
+                        $fracX * $fracY * $a11 + 32) >> 6;
+                $pred[$j][$i] = max(0, min(255, $val));
+            }
+        }
+        return $pred;
+    }
+
+    /**
+     * 从参考帧获取像素，越界时钳位到边缘（与解码器getRefPixel一致）
+     */
+    private function getClampedPixel(string $plane, int $x, int $y, int $w, int $h): int
+    {
+        $x = max(0, min($w - 1, $x));
+        $y = max(0, min($h - 1, $y));
+        return ord($plane[$y * $w + $x]);
+    }
+
+    /**
      * 亮度运动补偿：整数像素位置取值，越界钳位到边缘
      */
     private function mcLumaBlock(string $refPlane, int $refX, int $refY, int $w, int $h): array
@@ -497,8 +507,8 @@ trait InterPredTrait
 
         $H = null;
         if ($fracX !== 0) {
-            $H = array_fill(0, 21, array_fill(0, 16, 0));
-            for ($y = -2; $y < 19; $y++) {
+            $H = array_fill(0, 16, array_fill(0, 16, 0));
+            for ($y = 0; $y < 16; $y++) {
                 $ry = max(0, min($h - 1, $intY + $y));
                 for ($x = 0; $x < 16; $x++) {
                     $px0 = $this->getClampedPixel($refPlane, $intX + $x - 2, $ry, $w, $h);
@@ -508,7 +518,7 @@ trait InterPredTrait
                     $px4 = $this->getClampedPixel($refPlane, $intX + $x + 2, $ry, $w, $h);
                     $px5 = $this->getClampedPixel($refPlane, $intX + $x + 3, $ry, $w, $h);
                     $hVal = ($px0 - 5 * $px1 + 20 * $px2 + 20 * $px3 - 5 * $px4 + $px5 + 16) >> 5;
-                    $H[$y + 2][$x] = $hVal;
+                    $H[$y][$x] = max(0, min(255, $hVal));
                 }
             }
         }
@@ -516,21 +526,12 @@ trait InterPredTrait
         if ($fracY !== 0) {
             for ($y = 0; $y < 16; $y++) {
                 for ($x = 0; $x < 16; $x++) {
-                    if ($H !== null) {
-                        $p0 = $H[$y][$x];
-                        $p1 = $H[$y + 1][$x];
-                        $p2 = $H[$y + 2][$x];
-                        $p3 = $H[$y + 3][$x];
-                        $p4 = $H[$y + 4][$x];
-                        $p5 = $H[$y + 5][$x];
-                    } else {
-                        $p0 = $this->getClampedPixel($refPlane, $intX + $x, max(0, min($h - 1, $intY + $y - 2)), $w, $h);
-                        $p1 = $this->getClampedPixel($refPlane, $intX + $x, max(0, min($h - 1, $intY + $y - 1)), $w, $h);
-                        $p2 = $this->getClampedPixel($refPlane, $intX + $x, max(0, min($h - 1, $intY + $y)), $w, $h);
-                        $p3 = $this->getClampedPixel($refPlane, $intX + $x, max(0, min($h - 1, $intY + $y + 1)), $w, $h);
-                        $p4 = $this->getClampedPixel($refPlane, $intX + $x, max(0, min($h - 1, $intY + $y + 2)), $w, $h);
-                        $p5 = $this->getClampedPixel($refPlane, $intX + $x, max(0, min($h - 1, $intY + $y + 3)), $w, $h);
-                    }
+                    $p0 = $H !== null ? $H[max(0, $y - 2)][$x] : $this->getClampedPixel($refPlane, $intX + $x, max(0, min($h - 1, $intY + $y - 2)), $w, $h);
+                    $p1 = $H !== null ? $H[max(0, $y - 1)][$x] : $this->getClampedPixel($refPlane, $intX + $x, max(0, min($h - 1, $intY + $y - 1)), $w, $h);
+                    $p2 = $H !== null ? $H[$y][$x] : $this->getClampedPixel($refPlane, $intX + $x, max(0, min($h - 1, $intY + $y)), $w, $h);
+                    $p3 = $H !== null ? $H[min(15, $y + 1)][$x] : $this->getClampedPixel($refPlane, $intX + $x, max(0, min($h - 1, $intY + $y + 1)), $w, $h);
+                    $p4 = $H !== null ? $H[min(15, $y + 2)][$x] : $this->getClampedPixel($refPlane, $intX + $x, max(0, min($h - 1, $intY + $y + 2)), $w, $h);
+                    $p5 = $H !== null ? $H[min(15, $y + 3)][$x] : $this->getClampedPixel($refPlane, $intX + $x, max(0, min($h - 1, $intY + $y + 3)), $w, $h);
                     $vVal = ($p0 - 5 * $p1 + 20 * $p2 + 20 * $p3 - 5 * $p4 + $p5 + 16) >> 5;
                     $pred[$y][$x] = max(0, min(255, $vVal));
                 }
@@ -538,22 +539,11 @@ trait InterPredTrait
         } else {
             for ($y = 0; $y < 16; $y++) {
                 for ($x = 0; $x < 16; $x++) {
-                    $pred[$y][$x] = max(0, min(255, $H[$y + 2][$x]));
+                    $pred[$y][$x] = $H[$y][$x];
                 }
             }
         }
 
         return $pred;
-    }
-
-
-    /**
-     * 从参考帧获取像素，越界时钳位到边缘（与解码器getRefPixel一致）
-     */
-    private function getClampedPixel(string $plane, int $x, int $y, int $w, int $h): int
-    {
-        $x = max(0, min($w - 1, $x));
-        $y = max(0, min($h - 1, $y));
-        return ord($plane[$y * $w + $x]);
     }
 }

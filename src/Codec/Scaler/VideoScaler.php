@@ -30,9 +30,9 @@ class VideoScaler
         $uPlane = substr($yuvData, $ySize, $uvSize);
         $vPlane = substr($yuvData, $ySize + $uvSize, $uvSize);
 
-        $scaledY = $this->scalePlaneBicubic($yPlane, $srcW, $srcH, $dstW, $dstH);
-        $scaledU = $this->scalePlaneBicubic($uPlane, $srcW >> 1, $srcH >> 1, $dstW >> 1, $dstH >> 1);
-        $scaledV = $this->scalePlaneBicubic($vPlane, $srcW >> 1, $srcH >> 1, $dstW >> 1, $dstH >> 1);
+        $scaledY = $this->scalePlaneBilinear($yPlane, $srcW, $srcH, $dstW, $dstH);
+        $scaledU = $this->scalePlaneBilinear($uPlane, $srcW >> 1, $srcH >> 1, $dstW >> 1, $dstH >> 1);
+        $scaledV = $this->scalePlaneBilinear($vPlane, $srcW >> 1, $srcH >> 1, $dstW >> 1, $dstH >> 1);
 
         return $scaledY . $scaledU . $scaledV;
     }

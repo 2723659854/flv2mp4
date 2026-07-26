@@ -557,25 +557,12 @@ trait ResidualDecodingTrait
         }
 
         if ($left !== null && $top !== null) {
-            $result = (int)(($left + $top + 1) >> 1);
-            if (isset($GLOBALS['debugNc']) && $GLOBALS['debugNc']) {
-                echo "    computeNc(rasterIdx={$rasterIdx}, mbX={$mbX}, mbY={$mbY}): left={$left}, top={$top}, result={$result}\n";
-            }
-            return $result;
+            return (int)(($left + $top + 1) >> 1);
         } elseif ($left !== null) {
-            if (isset($GLOBALS['debugNc']) && $GLOBALS['debugNc']) {
-                echo "    computeNc(rasterIdx={$rasterIdx}, mbX={$mbX}, mbY={$mbY}): left={$left}, top=null, result={$left}\n";
-            }
             return (int)$left;
         } elseif ($top !== null) {
-            if (isset($GLOBALS['debugNc']) && $GLOBALS['debugNc']) {
-                echo "    computeNc(rasterIdx={$rasterIdx}, mbX={$mbX}, mbY={$mbY}): left=null, top={$top}, result={$top}\n";
-            }
             return (int)$top;
         } else {
-            if (isset($GLOBALS['debugNc']) && $GLOBALS['debugNc']) {
-                echo "    computeNc(rasterIdx={$rasterIdx}, mbX={$mbX}, mbY={$mbY}): left=null, top=null, result=0\n";
-            }
             return 0;
         }
     }
@@ -837,6 +824,7 @@ trait ResidualDecodingTrait
      */
     public function decodeResidualBlock(int $maxCoef, int $nC = -1): array
     {
+        // Direct translation of Rust decode_residual (cavlc.rs:344-542)
         $dbg = $this->debugResidual;
         $coeffs = array_fill(0, $maxCoef, 0);
 
@@ -911,17 +899,14 @@ trait ResidualDecodingTrait
                     }
                 }
 
-                // Apply trailing_ones < 3 offset for first level
-                $adjustedCode = $levelCode;
+                // 从 levelCode 中提取符号和绝对值（H.264 标准：最低位是符号位，0=正，1=负）
+                $sign = $levelCode & 1;
+                $absLevelMinus1 = $levelCode >> 1;
                 if ($isFirst && $trailingOnes < 3) {
-                    $adjustedCode += 2;
+                    $absLevelMinus1 += 1;
                 }
-                // Convert level_code to signed level value
-                // Even codes => negative, odd codes => positive
-                $mask = -($adjustedCode & 1);
-                $level = (($adjustedCode + 2) >> 1) ^ $mask;
-                $level = $level - $mask;
-                $levels[$levelIdx] = $level;
+                $absLevel = $absLevelMinus1 + 1;
+                $levels[$levelIdx] = $sign ? -$absLevel : $absLevel;
 
                 // Update suffix_length
                 $absLevel = abs($levels[$levelIdx]);

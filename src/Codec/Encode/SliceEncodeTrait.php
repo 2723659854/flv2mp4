@@ -136,9 +136,9 @@ trait SliceEncodeTrait
                         $topNzLuma, $topNzCb, $topNzCr,
                         $leftIntra4x4Mode, $topIntra4x4Mode
                     );
-//                    if ($mbY == 5 && $mbX >= 10 && $mbX <= 15) {
-//                        echo "ENCODE SLICE MB({$mbX},{$mbY}): before=" . strlen($bits) . ", mbBits=" . strlen($mbBits) . ", after=" . (strlen($bits) + strlen($mbBits)) . "\n";
-//                    }
+                    if ($mbY == 5 && $mbX >= 10 && $mbX <= 15) {
+                        echo "ENCODE SLICE MB({$mbX},{$mbY}): before=" . strlen($bits) . ", mbBits=" . strlen($mbBits) . ", after=" . (strlen($bits) + strlen($mbBits)) . "\n";
+                    }
                     $bits .= $mbBits;
                 }
                 $leftAvailable = true;

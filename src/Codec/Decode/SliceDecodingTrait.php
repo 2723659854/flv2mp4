@@ -62,25 +62,13 @@ trait SliceDecodingTrait
             $numRefIdxActiveOverrideFlag = $this->reader->readU(1);
             $this->numRefIdxActiveOverrideFlag = (bool)$numRefIdxActiveOverrideFlag;
             if ($numRefIdxActiveOverrideFlag) {
-                $numRefL0Val = $this->reader->readUe();
-                $numRefIdxL0Active = $numRefL0Val + 1;
+                $numRefIdxL0Active = $this->reader->readUe() + 1;
                 $this->numRefIdxL0Active = $numRefIdxL0Active;
                 if ($sliceType === 1) {
                     $numRefIdxL1Active = $this->reader->readUe() + 1;
                 }
             } else {
                 $this->numRefIdxL0Active = $this->numRefIdxL0DefaultActive;
-            }
-        }
-
-        // 临时调试：统计 numRefIdxL0Active > 1 的情况
-        static $frameCount2 = 0;
-        static $multiRefCount = 0;
-        $frameCount2++;
-        if ($this->numRefIdxL0Active > 1) {
-            $multiRefCount++;
-            if ($multiRefCount <= 5) {
-                echo "DEBUG: Frame $frameCount2, numRefIdxL0Active={$this->numRefIdxL0Active}, default={$this->numRefIdxL0DefaultActive}\n";
             }
         }
 
@@ -212,6 +200,8 @@ trait SliceDecodingTrait
         $this->mbNnzForDeblock = array_fill(0, $totalMbs, $emptyNz);
 
         $mbSkipRun = -1;
+
+        $isDebugSlice = ($this->debugTargetSlice > 0 && $this->debugSliceIndex === $this->debugTargetSlice);
 
         for ($mbIdx = $startMbIdx; $mbIdx < $endMbIdx; $mbIdx++) {
             $mbX = $mbIdx % $mbWidth;

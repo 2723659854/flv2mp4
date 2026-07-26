@@ -79,7 +79,7 @@ trait CavlcTrait
     {
 
         $bits = '';
-        
+
         $iLastIndex = $endIdx;
         while ($iLastIndex >= 0 && $coeffs[$iLastIndex] == 0) {
             $iLastIndex--;
@@ -100,19 +100,19 @@ trait CavlcTrait
 
         $totalZeros = 0;
         $totalCoeffs = 0;
-        
+
         $level = [];
         $run = [];
-        
+
         $iLastIndex = $endIdx;
         while ($iLastIndex >= 0 && $coeffs[$iLastIndex] == 0) {
             $iLastIndex--;
         }
-        
+
         while ($iLastIndex >= 0) {
             $countZero = 0;
             $level[$totalCoeffs] = $coeffs[$iLastIndex--];
-            
+
             while ($iLastIndex >= 0 && $coeffs[$iLastIndex] == 0) {
                 $countZero++;
                 $iLastIndex--;
@@ -120,7 +120,7 @@ trait CavlcTrait
             $totalZeros += $countZero;
             $run[$totalCoeffs++] = $countZero;
         }
-        
+
         $trailingOnes = 0;
         $sign = 0;
         $count = ($totalCoeffs > 3) ? 3 : $totalCoeffs;
@@ -151,86 +151,39 @@ trait CavlcTrait
 
         $suffixLength = ($totalCoeffs > 10 && $trailingOnes < 3) ? 1 : 0;
 
-        $suffixLimit = [0, 3, 6, 12, 24, 48, PHP_INT_MAX];
-
         for ($i = $trailingOnes; $i < $totalCoeffs; $i++) {
             $val = $level[$i];
-            $absVal = abs($val);
-            $isFirst = ($i == $trailingOnes);
 
-            if ($val > 0) {
-                $levelCode = 2 * ($val - 1);
-            } else {
-                $levelCode = 2 * (-$val) - 1;
-            }
-            if ($isFirst && ($trailingOnes < 3) && ($absVal > 1)) {
-                $levelCode -= 2;
-            }
-            if ($levelCode < 0) {
-                $levelCode = 0;
-            }
+            $levelCode = ($val - 1) * 2;
+            $sign = $levelCode >> 31;
+            $levelCode = ($levelCode ^ $sign) + ($sign << 1);
+            $levelCode -= (($i == $trailingOnes) && ($trailingOnes < 3)) << 1;
 
-            if ($isFirst && $suffixLength === 0) {
-                if ($levelCode < 14) {
-                    $levelPrefix = $levelCode;
-                    $levelSuffix = 0;
-                    $levelSuffixSize = 0;
-                } elseif ($levelCode < 30) {
-                    $levelPrefix = 14;
-                    $levelSuffix = $levelCode - 14;
-                    $levelSuffixSize = 4;
-                } else {
-                    $remaining = $levelCode - 30;
-                    $pre = 15;
-                    while (true) {
-                        $suffixBits = $pre - 3;
-                        $maxSuffixVal = (1 << $suffixBits) - 1;
-                        if ($remaining <= $maxSuffixVal) {
-                            break;
-                        }
-                        $remaining -= ($maxSuffixVal + 1);
-                        $pre++;
-                        if ($pre > 32) break;
-                    }
-                    $levelPrefix = $pre;
-                    $levelSuffix = $remaining;
-                    $levelSuffixSize = $pre - 3;
-                }
-            } else {
-                $levelPrefix = $levelCode >> $suffixLength;
-                $levelSuffixSize = $suffixLength;
+            $levelPrefix = $levelCode >> $suffixLength;
+            $levelSuffixSize = $suffixLength;
+            $levelSuffix = $levelCode - ($levelPrefix << $suffixLength);
+
+            if ($levelPrefix >= 14 && $levelPrefix < 30 && $suffixLength == 0) {
+                $levelPrefix = 14;
+                $levelSuffix = $levelCode - $levelPrefix;
+                $levelSuffixSize = 4;
+            } else if ($levelPrefix >= 15) {
+                $levelPrefix = 15;
                 $levelSuffix = $levelCode - ($levelPrefix << $suffixLength);
-
-                if ($levelPrefix >= 15) {
-                    $baseCode = 15 * (1 << $suffixLength);
-                    $remaining = $levelCode - $baseCode;
-                    $pre = 15;
-                    while (true) {
-                        $suffixBits = $pre - 3;
-                        $maxSuffixVal = (1 << $suffixBits) - 1;
-                        if ($remaining <= $maxSuffixVal) {
-                            break;
-                        }
-                        $remaining -= ($maxSuffixVal + 1);
-                        $pre++;
-                        if ($pre > 32) break;
-                    }
-                    $levelPrefix = $pre;
-                    $levelSuffix = $remaining;
-                    $levelSuffixSize = $pre - 3;
+                if ($suffixLength == 0) {
+                    $levelSuffix -= 15;
                 }
+                $levelSuffixSize = 12;
             }
 
             $n = $levelPrefix + 1 + $levelSuffixSize;
             $value = ((1 << $levelSuffixSize) | $levelSuffix);
             $bits .= $this->u($value, $n);
 
-            if ($isFirst) {
-                $suffixLength = ($absVal > 3) ? 2 : 1;
-            } else {
-                if ($suffixLength < 6 && $absVal > $suffixLimit[$suffixLength]) {
-                    $suffixLength++;
-                }
+            $suffixLength += ($suffixLength == 0) ? 1 : 0;
+            $threshold = 3 << ($suffixLength - 1);
+            if (($val > $threshold || $val < -$threshold) && $suffixLength < 6) {
+                $suffixLength++;
             }
         }
 

@@ -4,16 +4,6 @@ namespace Xiaosongshu\Flv2mp4\Codec\Encode;
 
 trait MotionTrait
 {
-    /**
-     * 6抽头插值滤波器系数 (1/32, -5/32, 20/32, 20/32, -5/32, 1/32)
-     * H.264标准规定的半像素插值
-     */
-    private const INTERP_TAP0 = 1;
-    private const INTERP_TAP1 = -5;
-    private const INTERP_TAP2 = 20;
-    private const INTERP_TAP3 = 20;
-    private const INTERP_TAP4 = -5;
-    private const INTERP_TAP5 = 1;
 
     /**
      * 获取参考帧中指定位置的像素值（带边界处理）
@@ -40,7 +30,7 @@ trait MotionTrait
         $I = $this->getRefPixel($refPlane, $x + 2, $y);
         $J = $this->getRefPixel($refPlane, $x + 3, $y);
         $val = self::INTERP_TAP0 * $E + self::INTERP_TAP1 * $F + self::INTERP_TAP2 * $G
-             + self::INTERP_TAP3 * $H + self::INTERP_TAP4 * $I + self::INTERP_TAP5 * $J;
+            + self::INTERP_TAP3 * $H + self::INTERP_TAP4 * $I + self::INTERP_TAP5 * $J;
         return max(0, min(255, (($val + 16) >> 5)));
     }
 
@@ -56,7 +46,7 @@ trait MotionTrait
         $E = $this->getRefPixel($refPlane, $x, $y + 2);
         $F = $this->getRefPixel($refPlane, $x, $y + 3);
         $val = self::INTERP_TAP0 * $A + self::INTERP_TAP1 * $B + self::INTERP_TAP2 * $C
-             + self::INTERP_TAP3 * $D + self::INTERP_TAP4 * $E + self::INTERP_TAP5 * $F;
+            + self::INTERP_TAP3 * $D + self::INTERP_TAP4 * $E + self::INTERP_TAP5 * $F;
         return max(0, min(255, (($val + 16) >> 5)));
     }
 
@@ -76,11 +66,11 @@ trait MotionTrait
             $I = $this->getRefPixel($refPlane, $x + 2, $y + $dy);
             $J = $this->getRefPixel($refPlane, $x + 3, $y + $dy);
             $vals[] = self::INTERP_TAP0 * $E + self::INTERP_TAP1 * $F + self::INTERP_TAP2 * $G
-                    + self::INTERP_TAP3 * $H + self::INTERP_TAP4 * $I + self::INTERP_TAP5 * $J;
+                + self::INTERP_TAP3 * $H + self::INTERP_TAP4 * $I + self::INTERP_TAP5 * $J;
         }
         // 对中间值做垂直插值
         $val = self::INTERP_TAP0 * $vals[0] + self::INTERP_TAP1 * $vals[1] + self::INTERP_TAP2 * $vals[2]
-             + self::INTERP_TAP3 * $vals[3] + self::INTERP_TAP4 * $vals[4] + self::INTERP_TAP5 * $vals[5];
+            + self::INTERP_TAP3 * $vals[3] + self::INTERP_TAP4 * $vals[4] + self::INTERP_TAP5 * $vals[5];
         return max(0, min(255, (($val + 512) >> 10)));
     }
 

@@ -331,26 +331,4 @@ trait TransformTrait
         $out[3] = (($e - $b) * $qmul) >> 7;
         return $out;
     }
-
-    public function initQuantMatrix(): void
-    {
-        $this->quantMatrix[0] = [6, 13, 20, 28, 13, 20, 28, 32, 20, 28, 32, 37, 28, 32, 37, 42];
-        $this->quantMatrix[1] = [6, 13, 20, 28, 13, 20, 28, 32, 20, 28, 32, 37, 28, 32, 37, 42];
-
-        // 构建反量化表（与解码器一致，使用flat scaling matrix=16）
-        $posClass = [0, 1, 0, 1, 1, 2, 1, 2, 0, 1, 0, 1, 1, 2, 1, 2];
-        $flatScaling4 = array_fill(0, 16, 16);
-        $this->dequant4Table = array_fill(0, 6, array_fill(0, 52, array_fill(0, 16, 0)));
-        for ($i = 0; $i < 6; $i++) {
-            for ($q = 0; $q < 52; $q++) {
-                $shift = intdiv($q, 6) + 2;
-                $idx = $q % 6;
-                for ($x = 0; $x < 16; $x++) {
-                    $scaleIdx = $posClass[$x];
-                    $this->dequant4Table[$i][$q][$x] =
-                        (self::DEQUANT4_COEFF_INIT[$idx][$scaleIdx] * $flatScaling4[$x]) << $shift;
-                }
-            }
-        }
-    }
 }
