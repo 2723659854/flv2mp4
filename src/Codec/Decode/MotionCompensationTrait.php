@@ -47,10 +47,8 @@ trait MotionCompensationTrait
             return (($a + $b + 1) >> 1);
         };
 
-        $hLowpass = function(int $srcIdx, int $srcStride, int $w, int $h) use ($refPlane, $refStride, $refWidth, $refHeight): array {
+        $hLowpass = function(int $srcX, int $srcY, int $w, int $h) use ($refPlane, $refStride, $refWidth, $refHeight): array {
             $out = array_fill(0, $h, array_fill(0, $w, 0));
-            $srcY = ($srcIdx >> 16) & 0xFFFF;
-            $srcX = $srcIdx & 0xFFFF;
             for ($j = 0; $j < $h; $j++) {
                 $ry = $this->clamp($srcY + $j, 0, $refHeight - 1);
                 for ($i = 0; $i < $w; $i++) {
@@ -73,10 +71,8 @@ trait MotionCompensationTrait
             return $out;
         };
 
-        $vLowpass = function(int $srcIdx, int $srcStride, int $w, int $h) use ($refPlane, $refStride, $refWidth, $refHeight): array {
+        $vLowpass = function(int $srcX, int $srcY, int $w, int $h) use ($refPlane, $refStride, $refWidth, $refHeight): array {
             $out = array_fill(0, $h, array_fill(0, $w, 0));
-            $srcY = ($srcIdx >> 16) & 0xFFFF;
-            $srcX = $srcIdx & 0xFFFF;
             for ($j = 0; $j < $h; $j++) {
                 for ($i = 0; $i < $w; $i++) {
                     $rx = $this->clamp($srcX + $i, 0, $refWidth - 1);
@@ -99,9 +95,7 @@ trait MotionCompensationTrait
             return $out;
         };
 
-        $hvLowpass = function(int $srcIdx, int $w, int $h) use ($refPlane, $refStride, $refWidth, $refHeight): array {
-            $srcY = ($srcIdx >> 16) & 0xFFFF;
-            $srcX = $srcIdx & 0xFFFF;
+        $hvLowpass = function(int $srcX, int $srcY, int $w, int $h) use ($refPlane, $refStride, $refWidth, $refHeight): array {
             $tmpH = $h + 5;
             $tmp = array_fill(0, $tmpH, array_fill(0, $w, 0));
             for ($j = 0; $j < $tmpH; $j++) {
@@ -138,10 +132,8 @@ trait MotionCompensationTrait
             return $out;
         };
 
-        $srcIdx = ($intY << 16) | $intX;
-
         if ($fracY === 0) {
-            $halfH = $hLowpass($srcIdx, $refStride, $blockW, $blockH);
+            $halfH = $hLowpass($intX, $intY, $blockW, $blockH);
             if ($fracX === 1) {
                 for ($j = 0; $j < $blockH; $j++) {
                     $ry = $this->clamp($intY + $j, 0, $refHeight - 1);
@@ -166,7 +158,7 @@ trait MotionCompensationTrait
                 }
             }
         } elseif ($fracX === 0) {
-            $halfV = $vLowpass((($intY - 2) << 16) | $intX, $refStride, $blockW, $blockH + 4);
+            $halfV = $vLowpass($intX, $intY - 2, $blockW, $blockH + 4);
             if ($fracY === 1) {
                 for ($j = 0; $j < $blockH; $j++) {
                     $ry = $this->clamp($intY + $j, 0, $refHeight - 1);
@@ -191,10 +183,10 @@ trait MotionCompensationTrait
                 }
             }
         } elseif ($fracX === 2 && $fracY === 2) {
-            $pred = $hvLowpass($srcIdx, $blockW, $blockH);
+            $pred = $hvLowpass($intX, $intY, $blockW, $blockH);
         } elseif ($fracX === 2) {
-            $halfH = $hLowpass((($intY + ($fracY === 1 ? 0 : 1)) << 16) | $intX, $refStride, $blockW, $blockH);
-            $halfHV = $hvLowpass($srcIdx, $blockW, $blockH);
+            $halfH = $hLowpass($intX, $intY + ($fracY === 1 ? 0 : 1), $blockW, $blockH);
+            $halfHV = $hvLowpass($intX, $intY, $blockW, $blockH);
             for ($j = 0; $j < $blockH; $j++) {
                 for ($i = 0; $i < $blockW; $i++) {
                     $pred[$j][$i] = $avg($halfH[$j][$i], $halfHV[$j][$i]);
@@ -202,8 +194,8 @@ trait MotionCompensationTrait
             }
         } elseif ($fracY === 2) {
             $srcOffX = ($fracX === 1) ? 0 : 1;
-            $halfV = $vLowpass((($intY - 2) << 16) | ($intX + $srcOffX), $refStride, $blockW, $blockH + 4);
-            $halfHV = $hvLowpass($srcIdx, $blockW, $blockH);
+            $halfV = $vLowpass($intX + $srcOffX, $intY - 2, $blockW, $blockH + 4);
+            $halfHV = $hvLowpass($intX, $intY, $blockW, $blockH);
             for ($j = 0; $j < $blockH; $j++) {
                 for ($i = 0; $i < $blockW; $i++) {
                     $pred[$j][$i] = $avg($halfV[$j + 2][$i], $halfHV[$j][$i]);
@@ -212,8 +204,8 @@ trait MotionCompensationTrait
         } else {
             $srcOffX = ($fracX === 3) ? 1 : 0;
             $srcOffY = ($fracY === 3) ? 1 : 0;
-            $halfH = $hLowpass((($intY + $srcOffY) << 16) | $intX, $refStride, $blockW, $blockH);
-            $halfV = $vLowpass((($intY - 2) << 16) | ($intX + $srcOffX), $refStride, $blockW, $blockH + 4);
+            $halfH = $hLowpass($intX, $intY + $srcOffY, $blockW, $blockH);
+            $halfV = $vLowpass($intX + $srcOffX, $intY - 2, $blockW, $blockH + 4);
             for ($j = 0; $j < $blockH; $j++) {
                 for ($i = 0; $i < $blockW; $i++) {
                     $pred[$j][$i] = $avg($halfH[$j][$i], $halfV[$j + 2][$i]);

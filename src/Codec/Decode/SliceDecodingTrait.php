@@ -24,6 +24,7 @@ trait SliceDecodingTrait
         $ppsId = $this->reader->readUe();
         $frameNumBits = $this->log2MaxFrameNumMinus4 + 4;
         $frameNum = $this->reader->readU($frameNumBits);
+        $this->currFrameNum = $frameNum;
         if (!$this->frameMbsOnlyFlag) {
             $fieldPicFlag = $this->reader->readU(1);
             if ($fieldPicFlag) {
@@ -33,6 +34,7 @@ trait SliceDecodingTrait
 
         if ($isIDR) {
             $idrPicId = $this->reader->readUe();
+            $this->dpb = [];
         }
 
         if ($this->picOrderCntType === 0) {
@@ -179,6 +181,40 @@ trait SliceDecodingTrait
         $totalMbs = $mbWidth * $mbHeight;
         $startMbIdx = $firstMbInSlice;
         $endMbIdx = $totalMbs;
+
+        if (!$isIDR) {
+            $maxFrameNum = 1 << ($this->log2MaxFrameNumMinus4 + 4);
+            $shortTermRefs = [];
+            foreach ($this->dpb as $entry) {
+                if (!$entry['isLongTerm']) {
+                    $fn = $entry['frameNum'];
+                    $fnWrap = ($fn > $this->currFrameNum) ? $fn - $maxFrameNum : $fn;
+                    $shortTermRefs[] = ['fnWrap' => $fnWrap, 'entry' => $entry];
+                }
+            }
+            usort($shortTermRefs, function($a, $b) {
+                return $b['fnWrap'] - $a['fnWrap'];
+            });
+            $this->refPicList0 = [];
+            foreach ($shortTermRefs as $ref) {
+                $this->refPicList0[] = $ref['entry'];
+            }
+        } else {
+            $this->refPicList0 = [];
+        }
+
+        if (!empty($this->refPicList0)) {
+            $ref0 = $this->refPicList0[0];
+            $this->refFrameY = $ref0['y'];
+            $this->refFrameU = $ref0['u'];
+            $this->refFrameV = $ref0['v'];
+            $this->refStrideY = $ref0['strideY'];
+            $this->refStrideUv = $ref0['strideUv'];
+            $this->refWidthY = $ref0['widthY'];
+            $this->refHeightY = $ref0['heightY'];
+            $this->refWidthUv = $ref0['widthUv'];
+            $this->refHeightUv = $ref0['heightUv'];
+        }
 
         // 初始化宏块间非零系数计数
         $this->nzTopRowLuma = array_fill(0, $mbWidth * 4, 0);

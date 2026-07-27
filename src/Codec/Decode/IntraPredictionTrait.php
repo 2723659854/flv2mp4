@@ -23,6 +23,8 @@ trait IntraPredictionTrait
         $mbPx = $mbX * 16 + $blkX * 4;
         $mbPy = $mbY * 16 + $blkY * 4;
 
+        $debugThis = !empty($this->debugFrame) && $this->frameNum === $this->debugFrame && $mbX === $this->debugMbX && $mbY === $this->debugMbY;
+
         $topAvail = ($blkY === 0 && $mbY > 0) || $blkY > 0;
         $leftAvail = ($blkX === 0 && $mbX > 0) || $blkX > 0;
         $topRightAvail = false;
@@ -88,7 +90,6 @@ trait IntraPredictionTrait
             }
         }
 
-
         if ($topAvail && $leftAvail) {
             $cornerIdx = ($mbPy - 1) * $this->width + ($mbPx - 1);
             if ($mbPy - 1 >= 0 && $mbPx - 1 >= 0 && $cornerIdx >= 0 && $cornerIdx < count($this->yPlane)) {
@@ -98,6 +99,14 @@ trait IntraPredictionTrait
             $topLeft = $top[0];
         } elseif ($leftAvail) {
             $topLeft = $left[0];
+        }
+
+        if ($debugThis) {
+            $modeNames = ['Vertical','Horizontal','DC','DDL','DDR','VR','HD','VL','HU'];
+            $modeName = $modeNames[$mode] ?? "unknown($mode)";
+            echo "    [I4x4Pred] blk($blkX,$blkY) mode=$mode($modeName) topAvail=" . ($topAvail?'Y':'N') . " leftAvail=" . ($leftAvail?'Y':'N') . "\n";
+            echo "      top=[" . implode(',', array_slice($top, 0, 4)) . "] topLeft=$topLeft left=[" . implode(',', $left) . "]\n";
+            if ($topRightAvail) echo "      topRight=[" . implode(',', array_slice($top, 4, 4)) . "]\n";
         }
 
         switch ($mode) {
@@ -337,6 +346,12 @@ trait IntraPredictionTrait
             for ($x = 0; $x < 4; $x++) {
                 if ($predicted[$y][$x] < 0) $predicted[$y][$x] = 0;
                 if ($predicted[$y][$x] > 255) $predicted[$y][$x] = 255;
+            }
+        }
+
+        if ($debugThis) {
+            for ($y = 0; $y < 4; $y++) {
+                echo "      pred[y=$y]: [" . implode(',', array_map('intval', $predicted[$y])) . "]\n";
             }
         }
 
