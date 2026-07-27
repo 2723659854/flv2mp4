@@ -276,11 +276,11 @@ class PurePhpHlsGenerator
                     $encoder->setQp($profile['qp'] ?? 30);
                     // DEBUG: 保存第一帧编码前的YUV
                     static $debugYuvSaved = false;
-                    if (!$debugYuvSaved) {
-                        file_put_contents('d:\php\flv2mp4\debug_before_encode.yuv', $scaledYuv);
-                        echo "DEBUG: Saved YUV before encode, size=" . strlen($scaledYuv) . ", srcW={$this->srcWidth}, srcH={$this->srcHeight}\n";
-                        $debugYuvSaved = true;
-                    }
+//                    if (!$debugYuvSaved) {
+//                        file_put_contents('d:\php\flv2mp4\debug_before_encode.yuv', $scaledYuv);
+//                        echo "DEBUG: Saved YUV before encode, size=" . strlen($scaledYuv) . ", srcW={$this->srcWidth}, srcH={$this->srcHeight}\n";
+//                        $debugYuvSaved = true;
+//                    }
                     /** 将被缩放后的yuv重新编码为h264 */
                     $encodedNals = $encoder->encodeFrame($scaledYuv, $isKeyFrame);
 
@@ -312,7 +312,7 @@ class PurePhpHlsGenerator
                             }
                         }
                         $avgDiff = $totalDiff / ($profile['width'] * $profile['height']);
-                        echo "DEBUG Frame $debugFrameCount2 (key=$isKeyFrame): avg=$avgDiff, max=$maxDiff, maxPos=$maxPosDiff, maxNeg=$maxNegDiff, pos=$posCount, neg=$negCount\n";
+                        //echo "DEBUG Frame $debugFrameCount2 (key=$isKeyFrame): avg=$avgDiff, max=$maxDiff, maxPos=$maxPosDiff, maxNeg=$maxNegDiff, pos=$posCount, neg=$negCount\n";
                     }
 
                     $outputData = '';
