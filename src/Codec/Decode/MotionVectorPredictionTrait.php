@@ -9,33 +9,44 @@ namespace Xiaosongshu\Flv2mp4\Codec\Decode;
  */
 trait MotionVectorPredictionTrait
 {
+    const PART_NOT_AVAILABLE = -2;
+
     /**
      * P帧16x16宏块运动向量预测 (H.264 8.4.1.3节)
-     * 参考 WeDeo predict_mv 实现
-     * @param array|null $mvLeft 左邻居 [mvX, mvY, refIdx]，null表示不可用
-     * @param array|null $mvTop 上邻居 [mvX, mvY, refIdx]，null表示不可用
-     * @param array|null $mvTopRight 右上邻居 [mvX, mvY, refIdx]，null表示不可用
+     * 严格参考FFmpeg pred_motion实现
+     * @param array|null $mvLeft 左邻居 [mvX, mvY, refIdx]，null表示PART_NOT_AVAILABLE（帧边界外），[0,0,-1]表示Intra（LIST_NOT_USED）
+     * @param array|null $mvTop 上邻居 [mvX, mvY, refIdx]，null表示PART_NOT_AVAILABLE
+     * @param array|null $mvTopRight 右上邻居 [mvX, mvY, refIdx]，null表示PART_NOT_AVAILABLE
      * @param int $currRefIdx 当前参考帧索引
      * @return array [predMvX, predMvY] 预测的运动向量
      */
     public function predictMvP16x16(?array $mvLeft, ?array $mvTop, ?array $mvTopRight, int $currRefIdx): array
     {
-        $aAvail = ($mvLeft !== null && $mvLeft[2] >= 0);
-        $bAvail = ($mvTop !== null && $mvTop[2] >= 0);
-        $cAvail = ($mvTopRight !== null && $mvTopRight[2] >= 0);
+        if ($mvLeft === null) {
+            $refA = self::PART_NOT_AVAILABLE;
+            $mvA = [0, 0];
+        } else {
+            $refA = $mvLeft[2];
+            $mvA = [$mvLeft[0], $mvLeft[1]];
+        }
 
-        $mvA = $aAvail ? [$mvLeft[0], $mvLeft[1]] : [0, 0];
-        $mvB = $bAvail ? [$mvTop[0], $mvTop[1]] : [0, 0];
-        $mvC = $cAvail ? [$mvTopRight[0], $mvTopRight[1]] : [0, 0];
+        if ($mvTop === null) {
+            $refB = self::PART_NOT_AVAILABLE;
+            $mvB = [0, 0];
+        } else {
+            $refB = $mvTop[2];
+            $mvB = [$mvTop[0], $mvTop[1]];
+        }
 
-        $refA = $aAvail ? $mvLeft[2] : -1;
-        $refB = $bAvail ? $mvTop[2] : -1;
-        $refC = $cAvail ? $mvTopRight[2] : -1;
+        if ($mvTopRight === null) {
+            $refC = self::PART_NOT_AVAILABLE;
+            $mvC = [0, 0];
+        } else {
+            $refC = $mvTopRight[2];
+            $mvC = [$mvTopRight[0], $mvTopRight[1]];
+        }
 
-        $matchCount = 0;
-        if ($refA === $currRefIdx) $matchCount++;
-        if ($refB === $currRefIdx) $matchCount++;
-        if ($refC === $currRefIdx) $matchCount++;
+        $matchCount = ($refA === $currRefIdx) + ($refB === $currRefIdx) + ($refC === $currRefIdx);
 
         if ($matchCount > 1) {
             return [
@@ -51,7 +62,7 @@ trait MotionVectorPredictionTrait
                 return $mvC;
             }
         } else {
-            if (!$bAvail && !$cAvail && $aAvail) {
+            if ($refB === self::PART_NOT_AVAILABLE && $refC === self::PART_NOT_AVAILABLE && $refA !== self::PART_NOT_AVAILABLE) {
                 return $mvA;
             } else {
                 return [
@@ -198,22 +209,31 @@ trait MotionVectorPredictionTrait
             }
         }
 
-        $aAvail = ($mvA !== null && $mvA[2] >= 0);
-        $bAvail = ($mvB !== null && $mvB[2] >= 0);
-        $cAvail = ($mvC !== null && $mvC[2] >= 0);
+        if ($mvA === null) {
+            $refA = self::PART_NOT_AVAILABLE;
+            $mvAv = [0, 0];
+        } else {
+            $refA = $mvA[2];
+            $mvAv = [$mvA[0], $mvA[1]];
+        }
 
-        $mvAv = $aAvail ? [$mvA[0], $mvA[1]] : [0, 0];
-        $mvBv = $bAvail ? [$mvB[0], $mvB[1]] : [0, 0];
-        $mvCv = $cAvail ? [$mvC[0], $mvC[1]] : [0, 0];
+        if ($mvB === null) {
+            $refB = self::PART_NOT_AVAILABLE;
+            $mvBv = [0, 0];
+        } else {
+            $refB = $mvB[2];
+            $mvBv = [$mvB[0], $mvB[1]];
+        }
 
-        $refA = $aAvail ? $mvA[2] : -1;
-        $refB = $bAvail ? $mvB[2] : -1;
-        $refC = $cAvail ? $mvC[2] : -1;
+        if ($mvC === null) {
+            $refC = self::PART_NOT_AVAILABLE;
+            $mvCv = [0, 0];
+        } else {
+            $refC = $mvC[2];
+            $mvCv = [$mvC[0], $mvC[1]];
+        }
 
-        $matchCount = 0;
-        if ($refA === $currRefIdx) $matchCount++;
-        if ($refB === $currRefIdx) $matchCount++;
-        if ($refC === $currRefIdx) $matchCount++;
+        $matchCount = ($refA === $currRefIdx) + ($refB === $currRefIdx) + ($refC === $currRefIdx);
 
         if ($matchCount > 1) {
             return [
@@ -229,7 +249,7 @@ trait MotionVectorPredictionTrait
                 return $mvCv;
             }
         } else {
-            if (!$bAvail && !$cAvail && $aAvail) {
+            if ($refB === self::PART_NOT_AVAILABLE && $refC === self::PART_NOT_AVAILABLE && $refA !== self::PART_NOT_AVAILABLE) {
                 return $mvAv;
             } else {
                 return [
