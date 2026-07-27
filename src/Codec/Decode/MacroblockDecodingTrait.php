@@ -18,7 +18,7 @@ trait MacroblockDecodingTrait
         $mbType = $this->reader->readUe();
         $mbWidth = $this->picWidthInMbs;
         $mbIdx = $mbY * $mbWidth + $mbX;
-        
+
         $this->mbTypeForDeblock[$mbIdx] = $mbType;
         $this->mbNnzForDeblock[$mbIdx] = array_fill(0, 24, 0);
         $this->mbMvForDeblock[$mbIdx] = array_fill(0, 16, [0, 0]);
@@ -26,16 +26,18 @@ trait MacroblockDecodingTrait
 
         $mbQpDelta = 0;
 
-        // I帧 (slice_type = 2 或 4)
+        $debugThis = !empty($this->debugFrame) && $this->frameNum === $this->debugFrame && $mbX === $this->debugMbX && $mbY === $this->debugMbY;
+        $debugRow = !empty($this->debugFrame) && $this->frameNum === $this->debugFrame && $mbY === $this->debugMbY;
+        $debugAll = !empty($this->debugFrame) && $this->frameNum === $this->debugFrame;
+
         if ($sliceType === 2 || $sliceType === 4) {
             $mbQpDelta = $this->decodeIntraMacroblock($mbX, $mbY, $mbType, $sliceQp);
-        }
-        // P帧 (slice_type = 0 或 5)
-        elseif ($sliceType === 0 || $sliceType === 5) {
+            if ($debugAll && $mbY <= 12) echo "  [TRACE] Frame {$this->frameNum} MB($mbX,$mbY): I-slice mbType=$mbType\n";
+        } elseif ($sliceType === 0 || $sliceType === 5) {
+            if ($debugAll && $mbY <= 12) echo "  [TRACE] Frame {$this->frameNum} MB($mbX,$mbY): P-slice mbType=$mbType\n";
+            if ($debugThis) echo "  [DEBUG] Frame {$this->frameNum} MB($mbX,$mbY): P-slice mbType=$mbType\n";
             $mbQpDelta = $this->decodePInterMacroblock($mbX, $mbY, $mbType, $sliceQp);
-        }
-        // 其他类型（B帧等）暂时填充灰色
-        else {
+        } else {
             $this->fillMacroblockGray($mbX, $mbY);
         }
         return $mbQpDelta;
@@ -46,7 +48,9 @@ trait MacroblockDecodingTrait
      */
     private function decodeIntraMacroblock(int $mbX, int $mbY, int $mbType, int $sliceQp): int
     {
-        // I_PCM 无损宏块
+        $debugThis = !empty($this->debugFrame) && $this->frameNum === $this->debugFrame && $mbX === $this->debugMbX && $mbY === $this->debugMbY;
+        if ($debugThis) echo "  [DEBUG] Intra: mbType=$mbType (I4x4)\n";
+
         if ($mbType === 25) {
             $this->reader->alignToByte();
             for ($y = 0; $y < 16; $y++) {
@@ -287,6 +291,9 @@ trait MacroblockDecodingTrait
                 $blk = $blkY * 4 + $blkX;
                 $predicted = $this->intra4x4Prediction($mbX, $mbY, $blkX, $blkY, $modes[$blk]);
 
+                $debugThis = $this->debugFrame !== null && $this->frameNum === $this->debugFrame
+                    && $mbX === $this->debugMbX && $mbY === $this->debugMbY;
+
                 for ($y = 0; $y < 4; $y++) {
                     for ($x = 0; $x < 4; $x++) {
                         $py = $mbY * 16 + $blkY * 4 + $y;
@@ -297,6 +304,29 @@ trait MacroblockDecodingTrait
                             $idx = $py * $this->width + $px;
                             $this->yPlane[$idx] = $val;
                         }
+                    }
+                }
+
+                if ($debugThis) {
+                    echo "      [blk($blkX,$blkY) mode=$modes[$blk]]\n";
+                    echo "        coeffs(raw): ";
+                    for ($i = 0; $i < 16; $i++) echo $yCoeffs[$blk][$i] . ",";
+                    echo "\n";
+                    echo "        residual(IDCT):\n";
+                    for ($y = 0; $y < 4; $y++) {
+                        echo "          [";
+                        for ($x = 0; $x < 4; $x++) printf("%4d", $yPixels[$blkY * 4 + $y][$blkX * 4 + $x]);
+                        echo "]\n";
+                    }
+                    echo "        recon:\n";
+                    for ($y = 0; $y < 4; $y++) {
+                        echo "          [";
+                        for ($x = 0; $x < 4; $x++) {
+                            $py = $mbY * 16 + $blkY * 4 + $y;
+                            $px = $mbX * 16 + $blkX * 4 + $x;
+                            printf("%4d", $this->yPlane[$py * $this->width + $px]);
+                        }
+                        echo "]\n";
                     }
                 }
             }
@@ -937,6 +967,11 @@ trait MacroblockDecodingTrait
         $mvX = $predMvX;
         $mvY = $predMvY;
 
+        $debugThis = !empty($this->debugFrame) && $this->frameNum === $this->debugFrame && $mbX === $this->debugMbX && $mbY === $this->debugMbY;
+        $debugRow = !empty($this->debugFrame) && $this->frameNum === $this->debugFrame && $mbY === $this->debugMbY;
+        if ($debugRow) echo "  [TRACE] Frame {$this->frameNum} MB($mbX,$mbY): P_Skip mv=($predMvX,$predMvY)\n";
+        if ($debugThis) echo "  [DEBUG] P_Skip: predMv=($predMvX,$predMvY) mv=($mvX,$mvY) ref=$refIdx\n";
+        
         $this->performMotionCompensation16x16($mbX, $mbY, $mvX, $mvY, $refIdx);
 
         $this->saveMvForPrediction($mbX, $mbY, $mvX, $mvY, $refIdx);
@@ -1012,14 +1047,19 @@ trait MacroblockDecodingTrait
         $mvX = $predMvX + $mvdL0X;
         $mvY = $predMvY + $mvdL0Y;
 
+        $debugThis = !empty($this->debugFrame) && $this->frameNum === $this->debugFrame && $mbX === $this->debugMbX && $mbY === $this->debugMbY;
+        if ($debugThis) echo "  [DEBUG] P_L0_16x16: mvd=($mvdL0X,$mvdL0Y) predMv=($predMvX,$predMvY) mv=($mvX,$mvY) refIdx=$refIdx\n";
+
         $this->performMotionCompensation16x16($mbX, $mbY, $mvX, $mvY, $refIdx);
         $cbpCode = $this->reader->readUe();
         $codedBlockPattern = self::GOLOMB_TO_INTER_CBP[$cbpCode] ?? 0;
+        if ($debugThis) echo "  [DEBUG] cbpCode=$cbpCode cbp=$codedBlockPattern\n";
         $mbQpDelta = 0;
         if ($codedBlockPattern !== 0) {
             $mbQpDelta = $this->reader->readSe();
             $qp = $sliceQp + $mbQpDelta;
             $qp = max(0, min(51, $qp));
+            if ($debugThis) echo "  [DEBUG] mbQpDelta=$mbQpDelta qp=$qp\n";
             $this->decodeResidualAndAdd($mbX, $mbY, $codedBlockPattern, $qp, 0);
         }
         if ($codedBlockPattern === 0) {
@@ -1104,6 +1144,8 @@ trait MacroblockDecodingTrait
      */
     private function decodePL0_8x16(int $mbX, int $mbY, int $sliceQp): int
     {
+        $debugThis = !empty($this->debugFrame) && $this->frameNum === $this->debugFrame && $mbX === $this->debugMbX && $mbY === $this->debugMbY;
+
         $refIdx0 = 0;
         $refIdx1 = 0;
         if ($this->numRefIdxL0Active > 1) {
@@ -1125,6 +1167,9 @@ trait MacroblockDecodingTrait
         list($predMv1X, $predMv1Y) = $this->getP8x16MvPrediction($mbX, $mbY, 1, $refIdx1, $mv0);
         $mv1X = $predMv1X + $mvd1X;
         $mv1Y = $predMv1Y + $mvd1Y;
+
+        if ($debugThis) echo "  [DEBUG] P_L0_L0_8x16: part0: mvd=($mvd0X,$mvd0Y) predMv=($predMv0X,$predMv0Y) mv=($mv0X,$mv0Y) ref=$refIdx0\n";
+        if ($debugThis) echo "  [DEBUG] P_L0_L0_8x16: part1: mvd=($mvd1X,$mvd1Y) predMv=($predMv1X,$predMv1Y) mv=($mv1X,$mv1Y) ref=$refIdx1\n";
 
         $this->performMotionCompensation8x16($mbX, $mbY, 0, $mv0X, $mv0Y, $refIdx0);
         $this->performMotionCompensation8x16($mbX, $mbY, 1, $mv1X, $mv1Y, $refIdx1);
@@ -1487,6 +1532,25 @@ trait MacroblockDecodingTrait
         return $mbQpDelta;
     }
 
+    private function getRefPlanes(int $refIdx): array
+    {
+        if (isset($this->refPicList0[$refIdx])) {
+            $ref = $this->refPicList0[$refIdx];
+            return [
+                'y' => $ref['y'], 'u' => $ref['u'], 'v' => $ref['v'],
+                'strideY' => $ref['strideY'], 'strideUv' => $ref['strideUv'],
+                'widthY' => $ref['widthY'], 'heightY' => $ref['heightY'],
+                'widthUv' => $ref['widthUv'], 'heightUv' => $ref['heightUv'],
+            ];
+        }
+        return [
+            'y' => $this->refFrameY, 'u' => $this->refFrameU, 'v' => $this->refFrameV,
+            'strideY' => $this->refStrideY, 'strideUv' => $this->refStrideUv,
+            'widthY' => $this->refWidthY, 'heightY' => $this->refHeightY,
+            'widthUv' => $this->refWidthUv, 'heightUv' => $this->refHeightUv,
+        ];
+    }
+
     /**
      * 执行8x8运动补偿
      */
@@ -1495,13 +1559,14 @@ trait MacroblockDecodingTrait
         if ($this->refFrameY === null) {
             return;
         }
+        $ref = $this->getRefPlanes($refIdx);
 
         $lumaRefX = $mbX * 64 + $blkX * 32 + $mvX;
         $lumaRefY = $mbY * 64 + $blkY * 32 + $mvY;
 
         $lumaPred = $this->mcLuma(
-            $this->refFrameY, $this->refStrideY,
-            $this->refWidthY, $this->refHeightY,
+            $ref['y'], $ref['strideY'],
+            $ref['widthY'], $ref['heightY'],
             $lumaRefX, $lumaRefY, 8, 8
         );
 
@@ -1516,13 +1581,13 @@ trait MacroblockDecodingTrait
         $chromaRefY = $mbY * 64 + $blkY * 32 + $mvY;
 
         $cbPred = $this->mcChroma(
-            $this->refFrameU, $this->refStrideUv,
-            $this->refWidthUv, $this->refHeightUv,
+            $ref['u'], $ref['strideUv'],
+            $ref['widthUv'], $ref['heightUv'],
             $chromaRefX, $chromaRefY, 4, 4
         );
         $crPred = $this->mcChroma(
-            $this->refFrameV, $this->refStrideUv,
-            $this->refWidthUv, $this->refHeightUv,
+            $ref['v'], $ref['strideUv'],
+            $ref['widthUv'], $ref['heightUv'],
             $chromaRefX, $chromaRefY, 4, 4
         );
 
@@ -1541,14 +1606,15 @@ trait MacroblockDecodingTrait
     private function performMotionCompensation8x4(int $mbX, int $mbY, int $blkX, int $blkY, int $subPartIdx, int $mvX, int $mvY, int $refIdx): void
     {
         if ($this->refFrameY === null) return;
+        $ref = $this->getRefPlanes($refIdx);
 
         $yOffset = $subPartIdx * 4;
         $lumaRefX = $mbX * 64 + $blkX * 32 + $mvX;
         $lumaRefY = $mbY * 64 + $blkY * 32 + $yOffset * 4 + $mvY;
 
         $lumaPred = $this->mcLuma(
-            $this->refFrameY, $this->refStrideY,
-            $this->refWidthY, $this->refHeightY,
+            $ref['y'], $ref['strideY'],
+            $ref['widthY'], $ref['heightY'],
             $lumaRefX, $lumaRefY, 8, 4
         );
 
@@ -1563,13 +1629,13 @@ trait MacroblockDecodingTrait
         $chromaRefY = $mbY * 64 + $blkY * 32 + $yOffset * 4 + $mvY;
 
         $cbPred = $this->mcChroma(
-            $this->refFrameU, $this->refStrideUv,
-            $this->refWidthUv, $this->refHeightUv,
+            $ref['u'], $ref['strideUv'],
+            $ref['widthUv'], $ref['heightUv'],
             $chromaRefX, $chromaRefY, 4, 2
         );
         $crPred = $this->mcChroma(
-            $this->refFrameV, $this->refStrideUv,
-            $this->refWidthUv, $this->refHeightUv,
+            $ref['v'], $ref['strideUv'],
+            $ref['widthUv'], $ref['heightUv'],
             $chromaRefX, $chromaRefY, 4, 2
         );
 
@@ -1588,14 +1654,15 @@ trait MacroblockDecodingTrait
     private function performMotionCompensation4x8(int $mbX, int $mbY, int $blkX, int $blkY, int $subPartIdx, int $mvX, int $mvY, int $refIdx): void
     {
         if ($this->refFrameY === null) return;
+        $ref = $this->getRefPlanes($refIdx);
 
         $xOffset = $subPartIdx * 4;
         $lumaRefX = $mbX * 64 + $blkX * 32 + $xOffset * 4 + $mvX;
         $lumaRefY = $mbY * 64 + $blkY * 32 + $mvY;
 
         $lumaPred = $this->mcLuma(
-            $this->refFrameY, $this->refStrideY,
-            $this->refWidthY, $this->refHeightY,
+            $ref['y'], $ref['strideY'],
+            $ref['widthY'], $ref['heightY'],
             $lumaRefX, $lumaRefY, 4, 8
         );
 
@@ -1610,13 +1677,13 @@ trait MacroblockDecodingTrait
         $chromaRefY = $mbY * 64 + $blkY * 32 + $mvY;
 
         $cbPred = $this->mcChroma(
-            $this->refFrameU, $this->refStrideUv,
-            $this->refWidthUv, $this->refHeightUv,
+            $ref['u'], $ref['strideUv'],
+            $ref['widthUv'], $ref['heightUv'],
             $chromaRefX, $chromaRefY, 2, 4
         );
         $crPred = $this->mcChroma(
-            $this->refFrameV, $this->refStrideUv,
-            $this->refWidthUv, $this->refHeightUv,
+            $ref['v'], $ref['strideUv'],
+            $ref['widthUv'], $ref['heightUv'],
             $chromaRefX, $chromaRefY, 2, 4
         );
 
@@ -1635,6 +1702,7 @@ trait MacroblockDecodingTrait
     private function performMotionCompensation4x4(int $mbX, int $mbY, int $blkX, int $blkY, int $subPartIdx, int $mvX, int $mvY, int $refIdx): void
     {
         if ($this->refFrameY === null) return;
+        $ref = $this->getRefPlanes($refIdx);
 
         $subX = $subPartIdx % 2;
         $subY = intdiv($subPartIdx, 2);
@@ -1642,8 +1710,8 @@ trait MacroblockDecodingTrait
         $lumaRefY = $mbY * 64 + $blkY * 32 + $subY * 16 + $mvY;
 
         $lumaPred = $this->mcLuma(
-            $this->refFrameY, $this->refStrideY,
-            $this->refWidthY, $this->refHeightY,
+            $ref['y'], $ref['strideY'],
+            $ref['widthY'], $ref['heightY'],
             $lumaRefX, $lumaRefY, 4, 4
         );
 
@@ -1657,13 +1725,13 @@ trait MacroblockDecodingTrait
         $chromaRefY = $mbY * 64 + $blkY * 32 + $subY * 16 + $mvY;
 
         $cbPred = $this->mcChroma(
-            $this->refFrameU, $this->refStrideUv,
-            $this->refWidthUv, $this->refHeightUv,
+            $ref['u'], $ref['strideUv'],
+            $ref['widthUv'], $ref['heightUv'],
             $chromaRefX, $chromaRefY, 2, 2
         );
         $crPred = $this->mcChroma(
-            $this->refFrameV, $this->refStrideUv,
-            $this->refWidthUv, $this->refHeightUv,
+            $ref['v'], $ref['strideUv'],
+            $ref['widthUv'], $ref['heightUv'],
             $chromaRefX, $chromaRefY, 2, 2
         );
 
@@ -1761,7 +1829,7 @@ trait MacroblockDecodingTrait
 
         $mvLeft = null;
         $mvTop = null;
-        $mvTopRight = null;
+        $mvC = null;
 
         if ($mbX > 0) {
             $rowIdx = $partIdx * 2;
@@ -1774,20 +1842,20 @@ trait MacroblockDecodingTrait
             if ($mbY > 0) {
                 $mvTop = $this->mvTopRow[$mbX * 4] ?? null;
             }
-        } else {
-            $mvTop = $mvPart0;
-        }
-
-        if ($partIdx === 0) {
-            // part0: C = top-right of current mb (topright 宏块的左下角)
+            // C = top-right: (blk_x+4, blk_y-1) = (4,-1) → mbX+1, blk_x=0
             if ($mbX + 1 < $mbWidth && $mbY > 0) {
-                $mvTopRight = $this->mvTopRow[($mbX + 1) * 4] ?? null;
+                $mvC = $this->mvTopRow[($mbX + 1) * 4] ?? null;
+            }
+            // D = top-left fallback: (blk_x-1, blk_y-1) = (-1,-1) → mbX-1, blk_x=3
+            if ($mvC === null && $mbX > 0 && $mbY > 0) {
+                $mvC = $this->mvTopRow[($mbX - 1) * 4 + 3] ?? null;
             }
         } else {
-            // part1: C 位置 (scan8[8]-8+part_width=24) 未被填充，回退到
-            // D = scan8[8]-8-1 = left of (0,1) = mvLeftCol[1] (左宏块 (3,1) 位置)
+            $mvTop = $mvPart0;
+            // part1 (下半): C = (blk_x+4, blk_y-1) = (4,1) → 右邻居同一行(未解码,不可用)
+            // D = (blk_x-1, blk_y-1) = (-1,1) → 左邻居 blk_y=1
             if ($mbX > 0 && isset($this->mvLeftCol[1])) {
-                $mvTopRight = $this->mvLeftCol[1];
+                $mvC = $this->mvLeftCol[1];
             }
         }
 
@@ -1805,7 +1873,7 @@ trait MacroblockDecodingTrait
             }
         }
 
-        return $this->predictMvP16x16($mvLeft, $mvTop, $mvTopRight, $refIdx);
+        return $this->predictMvP16x16($mvLeft, $mvTop, $mvC, $refIdx);
     }
 
     /**
@@ -1819,7 +1887,7 @@ trait MacroblockDecodingTrait
 
         $mvLeft = null;
         $mvTop = null;
-        $mvTopRight = null;
+        $mvC = null;
 
         if ($partIdx === 0) {
             if ($mbX > 0) {
@@ -1829,25 +1897,37 @@ trait MacroblockDecodingTrait
                     $mvLeft = $this->mvLeftCol[0];
                 }
             }
+            if ($mbY > 0) {
+                // B = top of blk(0,0) → blk(0,3) = mbX*4+0
+                $mvTop = $this->mvTopRow[$mbX * 4 + 0] ?? null;
+            }
+            // C = top-right of part0: blk(0+2,-1) = blk(2,-1) → mbX*4+2
+            if ($mbY > 0) {
+                $mvC = $this->mvTopRow[$mbX * 4 + 2] ?? null;
+            }
+            // D fallback: blk(0-1,-1) = blk(-1,-1) → (mbX-1)*4+3
+            if ($mvC === null && $mbX > 0 && $mbY > 0) {
+                $mvC = $this->mvTopRow[($mbX - 1) * 4 + 3] ?? null;
+            }
         } else {
             $mvLeft = $mvPart0;
-        }
-
-        if ($mbY > 0) {
-            $colIdx = $mbX * 4 + $partIdx * 2;
-            if (isset($this->mvTopRow[$colIdx])) {
-                $mvTop = $this->mvTopRow[$colIdx];
-            }
-        }
-
-        if ($partIdx === 0) {
             if ($mbY > 0) {
-                $mvTopRight = $this->mvTopRow[$mbX * 4 + 2] ?? null;
+                // B = top of blk(2,0) → blk(2,3) = mbX*4+2
+                $mvTop = $this->mvTopRow[$mbX * 4 + 2] ?? null;
             }
-        } else {
+            // C = top-right of part1: blk(2+2,-1) = blk(4,-1) → (mbX+1)*4
             if ($mbX + 1 < $mbWidth && $mbY > 0) {
-                $mvTopRight = $this->mvTopRow[($mbX + 1) * 4] ?? null;
+                $mvC = $this->mvTopRow[($mbX + 1) * 4] ?? null;
             }
+            // D fallback: blk(2-1,-1) = blk(1,-1) → mbX*4+1
+            if ($mvC === null && $mbY > 0) {
+                $mvC = $this->mvTopRow[$mbX * 4 + 1] ?? null;
+            }
+        }
+
+        $debugThis = !empty($this->debugFrame) && $this->frameNum === $this->debugFrame && $mbX === $this->debugMbX && $mbY === $this->debugMbY;
+        if ($debugThis) {
+            echo "  [DEBUG 8x16 part$partIdx] mvLeft=" . json_encode($mvLeft) . " mvTop=" . json_encode($mvTop) . " mvC=" . json_encode($mvC) . " refIdx=$refIdx\n";
         }
 
         if ($partIdx === 0) {
@@ -1855,12 +1935,16 @@ trait MacroblockDecodingTrait
                 return [$mvLeft[0], $mvLeft[1]];
             }
         } else {
-            if ($mvTopRight !== null && $mvTopRight[2] === $refIdx) {
-                return [$mvTopRight[0], $mvTopRight[1]];
+            if ($mvC !== null && $mvC[2] === $refIdx) {
+                return [$mvC[0], $mvC[1]];
             }
         }
 
-        return $this->predictMvP16x16($mvLeft, $mvTop, $mvTopRight, $refIdx);
+        $pred = $this->predictMvP16x16($mvLeft, $mvTop, $mvC, $refIdx);
+        if ($debugThis) {
+            echo "  [DEBUG 8x16 part$partIdx] pred=" . json_encode($pred) . "\n";
+        }
+        return $pred;
     }
 
     /**
@@ -1934,13 +2018,21 @@ trait MacroblockDecodingTrait
             $this->fillMacroblockGray($mbX, $mbY);
             return;
         }
+        $ref = $this->getRefPlanes($refIdx);
 
         $lumaRefX = $mbX * 64 + $mvX;
         $lumaRefY = $mbY * 64 + $mvY;
 
+        $debugThis = !empty($this->debugFrame) && $this->frameNum === $this->debugFrame && $mbX === $this->debugMbX && $mbY === $this->debugMbY;
+        if ($debugThis) {
+            $intX = $lumaRefX >> 2; $intY = $lumaRefY >> 2;
+            $fracX = $lumaRefX & 3; $fracY = $lumaRefY & 3;
+            echo "  [DEBUG] MC16x16: refX=$lumaRefX refY=$lumaRefY intPos=($intX,$intY) frac=($fracX,$fracY)\n";
+        }
+
         $lumaPred = $this->mcLuma(
-            $this->refFrameY, $this->refStrideY,
-            $this->refWidthY, $this->refHeightY,
+            $ref['y'], $ref['strideY'],
+            $ref['widthY'], $ref['heightY'],
             $lumaRefX, $lumaRefY, 16, 16
         );
 
@@ -1954,13 +2046,13 @@ trait MacroblockDecodingTrait
         $chromaRefY = $mbY * 64 + $mvY;
 
         $cbPred = $this->mcChroma(
-            $this->refFrameU, $this->refStrideUv,
-            $this->refWidthUv, $this->refHeightUv,
+            $ref['u'], $ref['strideUv'],
+            $ref['widthUv'], $ref['heightUv'],
             $chromaRefX, $chromaRefY, 8, 8
         );
         $crPred = $this->mcChroma(
-            $this->refFrameV, $this->refStrideUv,
-            $this->refWidthUv, $this->refHeightUv,
+            $ref['v'], $ref['strideUv'],
+            $ref['widthUv'], $ref['heightUv'],
             $chromaRefX, $chromaRefY, 8, 8
         );
 
@@ -1982,6 +2074,7 @@ trait MacroblockDecodingTrait
             $this->fillMacroblockGray($mbX, $mbY);
             return;
         }
+        $ref = $this->getRefPlanes($refIdx);
 
         $yOffset = $partIdx * 8;
 
@@ -1989,8 +2082,8 @@ trait MacroblockDecodingTrait
         $lumaRefY = $mbY * 64 + $mvY + $yOffset * 4;
 
         $lumaPred = $this->mcLuma(
-            $this->refFrameY, $this->refStrideY,
-            $this->refWidthY, $this->refHeightY,
+            $ref['y'], $ref['strideY'],
+            $ref['widthY'], $ref['heightY'],
             $lumaRefX, $lumaRefY, 16, 8
         );
 
@@ -2004,13 +2097,13 @@ trait MacroblockDecodingTrait
         $chromaRefY = $mbY * 64 + $mvY + $yOffset * 4;
 
         $cbPred = $this->mcChroma(
-            $this->refFrameU, $this->refStrideUv,
-            $this->refWidthUv, $this->refHeightUv,
+            $ref['u'], $ref['strideUv'],
+            $ref['widthUv'], $ref['heightUv'],
             $chromaRefX, $chromaRefY, 8, 4
         );
         $crPred = $this->mcChroma(
-            $this->refFrameV, $this->refStrideUv,
-            $this->refWidthUv, $this->refHeightUv,
+            $ref['v'], $ref['strideUv'],
+            $ref['widthUv'], $ref['heightUv'],
             $chromaRefX, $chromaRefY, 8, 4
         );
 
@@ -2033,6 +2126,7 @@ trait MacroblockDecodingTrait
             $this->fillMacroblockGray($mbX, $mbY);
             return;
         }
+        $ref = $this->getRefPlanes($refIdx);
 
         $xOffset = $partIdx * 8;
 
@@ -2040,8 +2134,8 @@ trait MacroblockDecodingTrait
         $lumaRefY = $mbY * 64 + $mvY;
 
         $lumaPred = $this->mcLuma(
-            $this->refFrameY, $this->refStrideY,
-            $this->refWidthY, $this->refHeightY,
+            $ref['y'], $ref['strideY'],
+            $ref['widthY'], $ref['heightY'],
             $lumaRefX, $lumaRefY, 8, 16
         );
 
@@ -2055,13 +2149,13 @@ trait MacroblockDecodingTrait
         $chromaRefY = $mbY * 64 + $mvY;
 
         $cbPred = $this->mcChroma(
-            $this->refFrameU, $this->refStrideUv,
-            $this->refWidthUv, $this->refHeightUv,
+            $ref['u'], $ref['strideUv'],
+            $ref['widthUv'], $ref['heightUv'],
             $chromaRefX, $chromaRefY, 4, 8
         );
         $crPred = $this->mcChroma(
-            $this->refFrameV, $this->refStrideUv,
-            $this->refWidthUv, $this->refHeightUv,
+            $ref['v'], $ref['strideUv'],
+            $ref['widthUv'], $ref['heightUv'],
             $chromaRefX, $chromaRefY, 4, 8
         );
 

@@ -85,7 +85,13 @@ class H264Decoder
     public bool $numRefIdxActiveOverrideFlag = false;
     public int $numRefIdxL0Active = 1;
 
-    // 参考帧管理
+    // DPB (Decoded Picture Buffer) - 多参考帧管理
+    public array $dpb = [];
+    public array $refPicList0 = [];
+    public int $maxNumRefFrames = 1;
+    public int $currFrameNum = 0;
+
+    // 参考帧管理 - 保留兼容，现在作为refPicList0[0]的快捷访问
     public ?array $refFrameY = null;
     public ?array $refFrameU = null;
     public ?array $refFrameV = null;
@@ -111,6 +117,10 @@ class H264Decoder
     public $debugMbTraceFh = null;
     public int $debugPFrameCount = 0;
     public bool $debugEnable = false;
+    public ?int $debugFrame = null;
+    public int $debugMbX = 0;
+    public int $debugMbY = 0;
+    public int $frameNum = 0;
 
     // DC系数映射表：DC数组索引 -> 块索引
     public static array $dcCoeffIndex = [0, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15];
@@ -308,6 +318,7 @@ class H264Decoder
         // 第二轮：解码图像Slice — 每个Slice是一帧，各自初始化并输出
         $sliceCount = 0;
         $outputData = '';
+        $this->frameNum = -1;
         foreach ($nalUnits as $nal) {
             $nalType = $nal['type'];
             if ($nalType === 1 || $nalType === 5) {
@@ -315,9 +326,7 @@ class H264Decoder
                 $nalRefIdc = ($nalHeader >> 5) & 0x03;
                 $sliceCount++;
                 $this->debugSliceIndex = $sliceCount;
-                
-                static $debugFrameNum = 0;
-                $debugFrameNum++;
+                $this->frameNum++;
                 // 每帧重新初始化像素平面
                 $this->yPlane = array_fill(0, $ySize, 128);
                 $this->uPlane = array_fill(0, $uvSize, 128);
@@ -332,15 +341,62 @@ class H264Decoder
                 $this->decodeSlice($nal['data'], $nalType === 5, $nalRefIdc);
                 // 更新参考帧（用于P帧运动补偿）- 在恢复尺寸之前进行
                 if ($nalRefIdc !== 0 || $nalType === 5) {
-                    $this->refFrameY = array_values($this->yPlane);
-                    $this->refFrameU = array_values($this->uPlane);
-                    $this->refFrameV = array_values($this->vPlane);
-                    $this->refStrideY = $mbAlignedWidth;
-                    $this->refStrideUv = (int)($mbAlignedWidth / 2);
-                    $this->refWidthY = $mbAlignedWidth;
-                    $this->refHeightY = $mbAlignedHeight;
-                    $this->refWidthUv = (int)($mbAlignedWidth / 2);
-                    $this->refHeightUv = (int)($mbAlignedHeight / 2);
+                    $dpbEntry = [
+                        'frameNum' => $this->currFrameNum,
+                        'isLongTerm' => false,
+                        'y' => array_values($this->yPlane),
+                        'u' => array_values($this->uPlane),
+                        'v' => array_values($this->vPlane),
+                        'strideY' => $mbAlignedWidth,
+                        'strideUv' => (int)($mbAlignedWidth / 2),
+                        'widthY' => $mbAlignedWidth,
+                        'heightY' => $mbAlignedHeight,
+                        'widthUv' => (int)($mbAlignedWidth / 2),
+                        'heightUv' => (int)($mbAlignedHeight / 2),
+                    ];
+                    $this->dpb[] = $dpbEntry;
+                    
+                    $maxFrameNum = 1 << ($this->log2MaxFrameNumMinus4 + 4);
+                    $shortTermCount = 0;
+                    $oldestKey = null;
+                    $oldestFnWrap = null;
+                    foreach ($this->dpb as $k => $entry) {
+                        if ($entry['isLongTerm']) continue;
+                        $shortTermCount++;
+                        $fn = $entry['frameNum'];
+                        $fnWrap = ($fn > $this->currFrameNum) ? $fn - $maxFrameNum : $fn;
+                        if ($oldestFnWrap === null || $fnWrap < $oldestFnWrap) {
+                            $oldestFnWrap = $fnWrap;
+                            $oldestKey = $k;
+                        }
+                    }
+                    while ($shortTermCount > $this->maxNumRefFrames) {
+                        if ($oldestKey !== null) {
+                            array_splice($this->dpb, $oldestKey, 1);
+                        }
+                        $shortTermCount--;
+                        $oldestKey = null;
+                        $oldestFnWrap = null;
+                        foreach ($this->dpb as $k => $entry) {
+                            if ($entry['isLongTerm']) continue;
+                            $fn = $entry['frameNum'];
+                            $fnWrap = ($fn > $this->currFrameNum) ? $fn - $maxFrameNum : $fn;
+                            if ($oldestFnWrap === null || $fnWrap < $oldestFnWrap) {
+                                $oldestFnWrap = $fnWrap;
+                                $oldestKey = $k;
+                            }
+                        }
+                    }
+                    
+                    $this->refFrameY = $dpbEntry['y'];
+                    $this->refFrameU = $dpbEntry['u'];
+                    $this->refFrameV = $dpbEntry['v'];
+                    $this->refStrideY = $dpbEntry['strideY'];
+                    $this->refStrideUv = $dpbEntry['strideUv'];
+                    $this->refWidthY = $dpbEntry['widthY'];
+                    $this->refHeightY = $dpbEntry['heightY'];
+                    $this->refWidthUv = $dpbEntry['widthUv'];
+                    $this->refHeightUv = $dpbEntry['heightUv'];
                 }
 
                 // 恢复实际图像尺寸
