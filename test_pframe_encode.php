@@ -1,8 +1,7 @@
 <?php
 
 /**
- * P帧编码测试
- * 测试P帧编码质量和文件大小
+ * P帧编码测试 - 三平面质量 (QP=30)
  */
 
 require_once __DIR__ . '/vendor/autoload.php';
@@ -13,7 +12,6 @@ function generateMotionYUV(int $width, int $height, int $frameIdx, int $motionX 
 {
     $yuv = str_repeat("\x80", $width * $height * 3 / 2);
 
-    // Y plane - 带运动矢量的渐变
     $offsetX = $frameIdx * $motionX;
     $offsetY = $frameIdx * $motionY;
 
@@ -25,7 +23,6 @@ function generateMotionYUV(int $width, int $height, int $frameIdx, int $motionX 
         }
     }
 
-    // U/V planes
     $chromaStart = $width * $height;
     for ($i = $chromaStart; $i < strlen($yuv); $i++) {
         $yuv[$i] = chr(128);
@@ -34,7 +31,7 @@ function generateMotionYUV(int $width, int $height, int $frameIdx, int $motionX 
     return $yuv;
 }
 
-function testPFrameEncoding(bool $enableInter, int $qp = 28): array
+function testPFrameEncoding(bool $enableInter, int $qp = 30): array
 {
     $width = 320;
     $height = 240;
@@ -49,7 +46,6 @@ function testPFrameEncoding(bool $enableInter, int $qp = 28): array
 
     echo "编码" . ($enableInter ? "P帧+I帧" : "全部I帧") . " ($frameCount 帧)...\n";
 
-    // 第一帧包含SPS/PPS + IDR
     for ($f = 0; $f < $frameCount; $f++) {
         $yuvData = generateMotionYUV($width, $height, $f);
         $yuvDataAll .= $yuvData;
@@ -65,12 +61,10 @@ function testPFrameEncoding(bool $enableInter, int $qp = 28): array
 
     echo "  文件大小: " . strlen($h264Data) . " 字节\n";
 
-    // 使用ffprobe验证
     $ffprobeOutput = shell_exec("ffprobe -v error -show_entries frame=pkt_size -of csv=p=0 $h264File 2>&1");
     $frameSizes = array_filter(explode("\n", trim($ffprobeOutput)));
     echo "  帧大小: " . implode(', ', $frameSizes) . "\n";
 
-    // 使用ffmpeg解码
     $decodedYuv = tempnam(sys_get_temp_dir(), 'decoded_') . '.yuv';
     exec("ffmpeg -y -i $h264File -f rawvideo -pix_fmt yuv420p $decodedYuv 2>&1", $ffmpegOutput, $returnCode);
 
@@ -79,6 +73,7 @@ function testPFrameEncoding(bool $enableInter, int $qp = 28): array
         'file_size' => strlen($h264Data),
         'frame_count' => $frameCount,
         'per_frame_psnr' => [],
+        'avg_psnr' => ['y' => 0, 'u' => 0, 'v' => 0],
     ];
 
     if ($returnCode === 0 && file_exists($decodedYuv)) {
@@ -86,26 +81,61 @@ function testPFrameEncoding(bool $enableInter, int $qp = 28): array
         unlink($decodedYuv);
 
         $ySize = $width * $height;
+        $uvSize = (int)($ySize / 4);
         $frameSize = (int)($ySize * 1.5);
 
-        // 逐帧计算PSNR
+        $sumY = 0;
+        $sumU = 0;
+        $sumV = 0;
+
         for ($f = 0; $f < $frameCount; $f++) {
             $offset = (int)($f * $frameSize);
-            $sse = 0;
+            $decY = substr($decoded, $offset, $ySize);
+            $decU = substr($decoded, $offset + $ySize, $uvSize);
+            $decV = substr($decoded, $offset + $ySize + $uvSize, $uvSize);
+            $refY = substr($yuvDataAll, $offset, $ySize);
+            $refU = substr($yuvDataAll, $offset + $ySize, $uvSize);
+            $refV = substr($yuvDataAll, $offset + $ySize + $uvSize, $uvSize);
+
+            $sseY = 0;
             for ($i = 0; $i < $ySize; $i++) {
-                $diff = ord($decoded[$offset + $i]) - ord($yuvDataAll[$offset + $i]);
-                $sse += $diff * $diff;
+                $diff = ord($decY[$i]) - ord($refY[$i]);
+                $sseY += $diff * $diff;
             }
-            $mse = $sse / $ySize;
-            $psnr = ($mse > 0) ? 10 * log10(255 * 255 / $mse) : 999.0;
-            $result['per_frame_psnr'][] = round($psnr, 2);
+            $mseY = $sseY / $ySize;
+            $psnrY = $mseY > 0 ? 10 * log10(255 * 255 / $mseY) : INF;
+
+            $sseU = 0;
+            for ($i = 0; $i < $uvSize; $i++) {
+                $diff = ord($decU[$i]) - ord($refU[$i]);
+                $sseU += $diff * $diff;
+            }
+            $mseU = $sseU / $uvSize;
+            $psnrU = $mseU > 0 ? 10 * log10(255 * 255 / $mseU) : INF;
+
+            $sseV = 0;
+            for ($i = 0; $i < $uvSize; $i++) {
+                $diff = ord($decV[$i]) - ord($refV[$i]);
+                $sseV += $diff * $diff;
+            }
+            $mseV = $sseV / $uvSize;
+            $psnrV = $mseV > 0 ? 10 * log10(255 * 255 / $mseV) : INF;
+
+            $result['per_frame_psnr'][] = [
+                'y' => round($psnrY, 2),
+                'u' => round($psnrU, 2),
+                'v' => round($psnrV, 2),
+            ];
+            $sumY += $psnrY;
+            $sumU += $psnrU;
+            $sumV += $psnrV;
         }
 
-        // 整体平均PSNR
-        $avgPsnr = array_sum($result['per_frame_psnr']) / $frameCount;
-        $result['psnr_y'] = round($avgPsnr, 2);
+        $result['avg_psnr']['y'] = round($sumY / $frameCount, 2);
+        $result['avg_psnr']['u'] = round($sumU / $frameCount, 2);
+        $result['avg_psnr']['v'] = round($sumV / $frameCount, 2);
     } else {
-        $result['psnr_y'] = 0;
+        $result['success'] = false;
         $error = '';
         foreach ($ffmpegOutput as $line) {
             if (stripos($line, 'error') !== false) {
@@ -119,34 +149,43 @@ function testPFrameEncoding(bool $enableInter, int $qp = 28): array
     return $result;
 }
 
-echo "=== P帧编码测试 ===\n\n";
+echo "=== P帧编码测试 (QP=30) ===\n\n";
 
-foreach ([28, 24, 20] as $qp) {
-    echo "===== QP=$qp =====\n";
+$qp = 30;
 
-    // 测试1: 全部I帧
-    echo "测试1: 全部I帧\n";
-    $resultI = testPFrameEncoding(false, $qp);
+// 测试1: 全部I帧
+echo "测试1: 全部I帧\n";
+$resultI = testPFrameEncoding(false, $qp);
+if ($resultI['success']) {
+    echo "  成功!\n";
+    echo "  文件大小: {$resultI['file_size']} 字节\n";
+    echo "  平均 PSNR: Y={$resultI['avg_psnr']['y']} dB, U={$resultI['avg_psnr']['u']} dB, V={$resultI['avg_psnr']['v']} dB\n";
+    echo "  每帧 PSNR:\n";
+    foreach ($resultI['per_frame_psnr'] as $i => $psnr) {
+        echo "    帧 {$i}: Y={$psnr['y']} dB, U={$psnr['u']} dB, V={$psnr['v']} dB\n";
+    }
+} else {
+    echo "  失败: " . ($resultI['error'] ?? '未知错误') . "\n";
+}
+echo "\n";
+
+// 测试2: I帧+P帧混合
+echo "测试2: I帧+P帧混合（I帧+P帧）\n";
+$resultP = testPFrameEncoding(true, $qp);
+if ($resultP['success']) {
+    echo "  成功!\n";
+    echo "  文件大小: {$resultP['file_size']} 字节\n";
+    echo "  平均 PSNR: Y={$resultP['avg_psnr']['y']} dB, U={$resultP['avg_psnr']['u']} dB, V={$resultP['avg_psnr']['v']} dB\n";
+    echo "  每帧 PSNR:\n";
+    foreach ($resultP['per_frame_psnr'] as $i => $psnr) {
+        echo "    帧 {$i}: Y={$psnr['y']} dB, U={$psnr['u']} dB, V={$psnr['v']} dB\n";
+    }
     if ($resultI['success']) {
-        echo sprintf("  成功! PSNR Y=%.2f dB, 文件大小=%d字节\n\n", $resultI['psnr_y'], $resultI['file_size']);
-    } else {
-        echo "  失败: " . ($resultI['error'] ?? '未知错误') . "\n\n";
+        $ratio = $resultP['file_size'] / $resultI['file_size'];
+        echo sprintf("  P帧/I帧大小比: %.2f (%.1f%%)\n", $ratio, $ratio * 100);
     }
-
-    // 测试2: I帧+P帧混合
-    echo "测试2: I帧+P帧混合（I帧+P帧）\n";
-    $resultP = testPFrameEncoding(true, $qp);
-    if ($resultP['success']) {
-        echo sprintf("  整体PSNR Y=%.2f dB, 文件大小=%d字节\n", $resultP['psnr_y'], $resultP['file_size']);
-        echo "  每帧PSNR (Y): " . implode(', ', $resultP['per_frame_psnr']) . "\n";
-        if ($resultI['success']) {
-            $ratio = $resultP['file_size'] / $resultI['file_size'];
-            echo sprintf("  P帧/I帧大小比: %.2f (%.1f%%)\n", $ratio, $ratio * 100);
-        }
-    } else {
-        echo "  失败: " . ($resultP['error'] ?? '未知错误') . "\n";
-    }
-    echo "\n";
+} else {
+    echo "  失败: " . ($resultP['error'] ?? '未知错误') . "\n";
 }
 
 echo "\n测试完成！\n";
