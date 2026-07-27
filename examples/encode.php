@@ -2,7 +2,7 @@
 
 require_once __DIR__ . '/vendor/autoload.php';
 ini_set('memory_limit', '2048M');
-// 使用纯 PHP 多码率 HLS 生成器
+// 使用纯 PHP 多码率 HLS 生成器 ffmpeg -i test.mp4 -c:v libx264 -profile:v baseline -level:v 3.1 -x264-params "no-cabac=1:ref=1" -g 90 -keyint_min 90 -c:a aac -b:a 128k -y test.flv
 
 // 定义规格
 $profiles = [
@@ -12,6 +12,7 @@ $profiles = [
 //        'bitrate' => 5000000,  // 5 Mbps
 //        'fps' => 30,
 //        'audioBitrate' => 192000,
+//        'qp'=>30
 //    ],
 //    '720p' => [
 //        'width' => 1280,
@@ -19,6 +20,7 @@ $profiles = [
 //        'bitrate' => 2500000,  // 2.5 Mbps
 //        'fps' => 30,
 //        'audioBitrate' => 128000,
+//        'qp'=>30
 //    ],
 //    '480p' => [
 //        'width' => 854,
@@ -26,14 +28,36 @@ $profiles = [
 //        'bitrate' => 1200000,  // 1.2 Mbps
 //        'fps' => 25,
 //        'audioBitrate' => 96000,
+//        'qp'=>30
 //    ],
-    '360p' => [
-        'width' => 640,
-        'height' => 360,
-        'bitrate' => 600000,   // 600 Kbps
+
+
+//    '360p' => [
+//        'width' => 640,
+//        'height' => 360,
+//        'bitrate' => 600000,   // 600 Kbps
+//        'fps' => 24,
+//        'audioBitrate' => 64000,
+//        'qp'=>30
+//    ],
+
+    '240p' => [
+        'width' => 426,      // 或 424，保持 16:9 比例即可
+        'height' => 240,
+        'bitrate' => 300000, // 300 Kbps（视频码率）
         'fps' => 24,
-        'audioBitrate' => 64000,
+        'audioBitrate' => 48000, // 48 Kbps
+        'qp' => 30,          // 保持 30 以确保稳定性
     ],
+
+//    '180p' => [
+//        'width' => 320,
+//        'height' => 180,
+//        'bitrate' => 150000, // 150 Kbps
+//        'fps' => 15,         // 帧率可以降一半，肉眼在极低分辨率下察觉不到
+//        'audioBitrate' => 32000,
+//        'qp' => 30,
+//    ],
 ];
 
 // 生成 HLS
@@ -41,8 +65,12 @@ $generator = new \Xiaosongshu\Flv2mp4\Manage\PurePhpHlsGenerator(
     $profiles,
     __DIR__ . '/hls/output'
 );
+//$generator->setMaxFrames(200);
 $startTime = time();
-$generator->processFlv(__DIR__ . '/test.flv');
+// 测试baseline profile 转码
+$generator->processFlv(__DIR__ . '/index.flv');
+//$generator->processFlv(__DIR__ . '/test.flv');
+//$generator->processFlv(__DIR__ . '/test1.flv');
 $endTime = time();
 $cost = $endTime - $startTime;
 echo "HLS 生成完成！\n";
