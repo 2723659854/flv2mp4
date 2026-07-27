@@ -181,9 +181,9 @@ trait SliceEncodeTrait
                         $topNzLuma, $topNzCb, $topNzCr,
                         $leftIntra4x4Mode, $topIntra4x4Mode
                     );
-                    if ($mbY == 5 && $mbX >= 10 && $mbX <= 15) {
-                        echo "ENCODE SLICE MB({$mbX},{$mbY}): before=" . strlen($bits) . ", mbBits=" . strlen($mbBits) . ", after=" . (strlen($bits) + strlen($mbBits)) . "\n";
-                    }
+//                    if ($mbY == 5 && $mbX >= 10 && $mbX <= 15) {
+//                        echo "ENCODE SLICE MB({$mbX},{$mbY}): before=" . strlen($bits) . ", mbBits=" . strlen($mbBits) . ", after=" . (strlen($bits) + strlen($mbBits)) . "\n";
+//                    }
                     $bits .= $mbBits;
 
                     // I帧宏块没有运动向量，设置为[0,0,-1]表示存在但不使用L0（与解码器一致）

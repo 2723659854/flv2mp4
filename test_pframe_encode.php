@@ -78,32 +78,34 @@ function testPFrameEncoding(bool $enableInter): array
         'success' => $returnCode === 0,
         'file_size' => strlen($h264Data),
         'frame_count' => $frameCount,
+        'per_frame_psnr' => [],
     ];
 
     if ($returnCode === 0 && file_exists($decodedYuv)) {
         $decoded = file_get_contents($decodedYuv);
         unlink($decodedYuv);
 
-        // 计算PSNR
-        $sseY = 0;
         $ySize = $width * $height;
-        $uvSize = $ySize / 4;
-        $frameSize = $ySize * 1.5;
+        $frameSize = (int)($ySize * 1.5);
 
+        // 逐帧计算PSNR
         for ($f = 0; $f < $frameCount; $f++) {
-            $offset = $f * $frameSize;
+            $offset = (int)($f * $frameSize);
+            $sse = 0;
             for ($i = 0; $i < $ySize; $i++) {
                 $diff = ord($decoded[$offset + $i]) - ord($yuvDataAll[$offset + $i]);
-                $sseY += $diff * $diff;
+                $sse += $diff * $diff;
             }
+            $mse = $sse / $ySize;
+            $psnr = ($mse > 0) ? 10 * log10(255 * 255 / $mse) : 999.0;
+            $result['per_frame_psnr'][] = round($psnr, 2);
         }
 
-        $mseY = $sseY / ($frameCount * $ySize);
-        $psnrY = ($mseY > 0) ? 10 * log10(255 * 255 / $mseY) : 999.0;
-        $result['psnr_y'] = round($psnrY, 2);
+        // 整体平均PSNR
+        $avgPsnr = array_sum($result['per_frame_psnr']) / $frameCount;
+        $result['psnr_y'] = round($avgPsnr, 2);
     } else {
         $result['psnr_y'] = 0;
-        // 提取ffmpeg错误
         $error = '';
         foreach ($ffmpegOutput as $line) {
             if (stripos($line, 'error') !== false) {
@@ -132,7 +134,8 @@ if ($resultI['success']) {
 echo "测试2: I帧+P帧混合（I帧+P帧）\n";
 $resultP = testPFrameEncoding(true);
 if ($resultP['success']) {
-    echo sprintf("  成功! PSNR Y=%.2f dB, 文件大小=%d字节\n", $resultP['psnr_y'], $resultP['file_size']);
+    echo sprintf("  整体PSNR Y=%.2f dB, 文件大小=%d字节\n", $resultP['psnr_y'], $resultP['file_size']);
+    echo "  每帧PSNR (Y): " . implode(', ', $resultP['per_frame_psnr']) . "\n";
     if ($resultI['success']) {
         $ratio = $resultP['file_size'] / $resultI['file_size'];
         echo sprintf("  P帧/I帧大小比: %.2f (%.1f%%)\n", $ratio, $ratio * 100);

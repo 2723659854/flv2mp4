@@ -13,15 +13,15 @@ trait IntraPredTrait
     {
         if ($this->mbType === self::MB_TYPE_I16x16) {
             $result = $this->encodeMacroblockI16x16($mbX, $mbY, $yPlane, $uPlane, $vPlane, $leftAvailable, $leftNz, $topAvailable, $topNzLuma, $topNzCb, $topNzCr);
-            if ($mbY == 5 && ($mbX == 12 || $mbX == 13)) {
-                echo "  MB({$mbX},{$mbY}): I16x16, total bits=" . strlen($result) . "\n";
-            }
+//            if ($mbY == 5 && ($mbX == 12 || $mbX == 13)) {
+//                echo "  MB({$mbX},{$mbY}): I16x16, total bits=" . strlen($result) . "\n";
+//            }
             return $result;
         } else {
             $result = $this->encodeMacroblockI4x4($mbX, $mbY, $yPlane, $uPlane, $vPlane, $leftAvailable, $leftNz, $topAvailable, $topNzLuma, $topNzCb, $topNzCr, $leftIntra4x4Mode, $topIntra4x4Mode);
-            if ($mbY == 5 && ($mbX == 12 || $mbX == 13)) {
-                echo "  MB({$mbX},{$mbY}): I4x4, total bits=" . strlen($result) . "\n";
-            }
+//            if ($mbY == 5 && ($mbX == 12 || $mbX == 13)) {
+//                echo "  MB({$mbX},{$mbY}): I4x4, total bits=" . strlen($result) . "\n";
+//            }
             return $result;
         }
     }
@@ -401,42 +401,42 @@ trait IntraPredTrait
         $mbTypeValue = 1 + $i16Mode + ($cbpIdx << 2);
         $debugThisMb = ($mbY == 5 && ($mbX == 12 || $mbX == 13));
         $debugTargetMb = ($mbY == 5 && ($mbX == 12 || $mbX == 13));
-        if ($debugTargetMb) {
-            echo "=== DEBUG MB({$mbX},{$mbY}) I16x16 START ===\n";
-            echo "  i16Mode={$i16Mode}, cbpChroma={$cbpChroma}, cbpLuma={$cbpLuma}, cbpIdx={$cbpIdx}, mbTypeValue={$mbTypeValue}\n";
-            echo "  chromaMode={$chromaMode}\n";
-            echo "  topAvailable=" . ($topAvailable ? 'true' : 'false') . ", leftAvailable=" . ($leftAvailable ? 'true' : 'false') . "\n";
-            echo "  lumaPredMode={$lumaPredMode}, chromaPredMode={$chromaPredMode}\n";
-            echo "  bit len before mb_type: " . strlen($bits) . "\n";
-        }
+//        if ($debugTargetMb) {
+//            echo "=== DEBUG MB({$mbX},{$mbY}) I16x16 START ===\n";
+//            echo "  i16Mode={$i16Mode}, cbpChroma={$cbpChroma}, cbpLuma={$cbpLuma}, cbpIdx={$cbpIdx}, mbTypeValue={$mbTypeValue}\n";
+//            echo "  chromaMode={$chromaMode}\n";
+//            echo "  topAvailable=" . ($topAvailable ? 'true' : 'false') . ", leftAvailable=" . ($leftAvailable ? 'true' : 'false') . "\n";
+//            echo "  lumaPredMode={$lumaPredMode}, chromaPredMode={$chromaPredMode}\n";
+//            echo "  bit len before mb_type: " . strlen($bits) . "\n";
+//        }
         $bits .= $this->ue($mbTypeValue);
-        if ($debugTargetMb) {
-            echo "  bit len after mb_type: " . strlen($bits) . "\n";
-        }
+//        if ($debugTargetMb) {
+//            echo "  bit len after mb_type: " . strlen($bits) . "\n";
+//        }
 
         $bits .= $this->ue($chromaMode);
 
         $bits .= $this->se(0);
 
         // DEBUG
-        if ($debugThisMb || $debugTargetMb) {
-            $prefix = $debugTargetMb ? "  MB(0,0)" : "  DEBUG MB(0,0)";
-            echo "{$prefix} header done, total bits: " . strlen($bits) . "\n";
-        }
+//        if ($debugThisMb || $debugTargetMb) {
+//            $prefix = $debugTargetMb ? "  MB(0,0)" : "  DEBUG MB(0,0)";
+//            echo "{$prefix} header done, total bits: " . strlen($bits) . "\n";
+//        }
 
-        if ($debugTargetMb) {
-            echo "  leftNz = [" . implode(',', $leftNz) . "]\n";
-            echo "  leftAvailable=" . ($leftAvailable ? 'true' : 'false') . "\n";
-        }
+//        if ($debugTargetMb) {
+//            echo "  leftNz = [" . implode(',', $leftNz) . "]\n";
+//            echo "  leftAvailable=" . ($leftAvailable ? 'true' : 'false') . "\n";
+//        }
         $dcNc = $this->computeNC(-1, $mbX, 0, 0, $leftAvailable, $leftNz, $topAvailable, $topNzLuma, $nzCache);
         $beforeDc = strlen($bits);
-        if ($debugThisMb) {
-            echo "  Luma DC coeffs: " . implode(',', $dcZigzag) . "\n";
-        }
+//        if ($debugThisMb) {
+//            echo "  Luma DC coeffs: " . implode(',', $dcZigzag) . "\n";
+//        }
         $bits .= $this->writeBlockResidualCavlc($dcZigzag, 15, false, $dcNc);
-        if ($debugThisMb) {
-            echo "  Luma DC: " . (strlen($bits) - $beforeDc) . " bits, dcNc={$dcNc}\n";
-        }
+//        if ($debugThisMb) {
+//            echo "  Luma DC: " . (strlen($bits) - $beforeDc) . " bits, dcNc={$dcNc}\n";
+//        }
 
         $lumaAcScanOrder = [0, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15];
         $nzCacheNew = array_fill(0, 24, 0);
@@ -448,9 +448,9 @@ trait IntraPredTrait
                 $ac = $this->scan4x4Ac($quant4x4Luma[$rasterIdx]);
                 $beforeAc = strlen($bits);
                 $bits .= $this->writeBlockResidualCavlc($ac, 14, false, $acNc);
-                if ($debugThisMb) {
-                    echo "  Luma AC block {$rasterIdx}: " . (strlen($bits) - $beforeAc) . " bits, acNc={$acNc}\n";
-                }
+//                if ($debugThisMb) {
+//                    echo "  Luma AC block {$rasterIdx}: " . (strlen($bits) - $beforeAc) . " bits, acNc={$acNc}\n";
+//                }
                 $nzCacheNew[$rasterIdx] = $nzCache[$rasterIdx];
             }
         }
@@ -467,14 +467,14 @@ trait IntraPredTrait
         if ($cbpChroma > 0) {
             $beforeCbDc = strlen($bits);
             $bits .= $this->writeBlockResidualCavlc($qCbDc, 3, true, -1);
-            if ($debugThisMb) {
-                echo "  Chroma Cb DC: " . (strlen($bits) - $beforeCbDc) . " bits\n";
-            }
+//            if ($debugThisMb) {
+//                echo "  Chroma Cb DC: " . (strlen($bits) - $beforeCbDc) . " bits\n";
+//            }
             $beforeCrDc = strlen($bits);
             $bits .= $this->writeBlockResidualCavlc($qCrDc, 3, true, -1);
-            if ($debugThisMb) {
-                echo "  Chroma Cr DC: " . (strlen($bits) - $beforeCrDc) . " bits\n";
-            }
+//            if ($debugThisMb) {
+//                echo "  Chroma Cr DC: " . (strlen($bits) - $beforeCrDc) . " bits\n";
+//            }
 
             if ($cbpChroma === 2) {
                 $cbScanOrder = [16, 17, 18, 19];
@@ -486,9 +486,9 @@ trait IntraPredTrait
                     $acCb = $this->scan4x4Ac($quantCb4x4[$blk]);
                     $beforeAc = strlen($bits);
                     $bits .= $this->writeBlockResidualCavlc($acCb, 14, false, $acNc);
-                    if ($debugThisMb) {
-                        echo "  Chroma Cb AC block {$blk} (raster {$blockIdx}): " . (strlen($bits) - $beforeAc) . " bits, acNc={$acNc}\n";
-                    }
+//                    if ($debugThisMb) {
+//                        echo "  Chroma Cb AC block {$blk} (raster {$blockIdx}): " . (strlen($bits) - $beforeAc) . " bits, acNc={$acNc}\n";
+//                    }
                     $nzCacheNew[$blockIdx] = $nzCache[$blockIdx];
                 }
                 $crScanOrder = [20, 21, 22, 23];
@@ -500,9 +500,9 @@ trait IntraPredTrait
                     $acCr = $this->scan4x4Ac($quantCr4x4[$blk]);
                     $beforeAc = strlen($bits);
                     $bits .= $this->writeBlockResidualCavlc($acCr, 14, false, $acNc);
-                    if ($debugThisMb) {
-                        echo "  Chroma Cr AC block {$blk} (raster {$blockIdx}): " . (strlen($bits) - $beforeAc) . " bits, acNc={$acNc}\n";
-                    }
+//                    if ($debugThisMb) {
+//                        echo "  Chroma Cr AC block {$blk} (raster {$blockIdx}): " . (strlen($bits) - $beforeAc) . " bits, acNc={$acNc}\n";
+//                    }
                     $nzCacheNew[$blockIdx] = $nzCache[$blockIdx];
                 }
             }
@@ -652,9 +652,9 @@ trait IntraPredTrait
         }
 
         // DEBUG
-        if ($mbY <= 3 && $mbX <= 5) {
-            echo "DEBUG MB({$mbX},{$mbY}): " . strlen($bits) . " bits, cbpLuma={$cbpLuma}, cbpChroma={$cbpChroma}, chromaMode={$chromaMode}\n";
-        }
+//        if ($mbY <= 3 && $mbX <= 5) {
+//            echo "DEBUG MB({$mbX},{$mbY}): " . strlen($bits) . " bits, cbpLuma={$cbpLuma}, cbpChroma={$cbpChroma}, chromaMode={$chromaMode}\n";
+//        }
 
         return $bits;
     }
