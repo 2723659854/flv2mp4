@@ -218,7 +218,7 @@ $generator->processFlv(__DIR__ . '/test.flv');
 echo "All processing complete!\n";
 ```
 
-For other features, please implement custom logic using the encoder.
+For detailed usage instructions of H.264, please refer to the <a href="./src/Codec/README.md">README</a>.
 
 ---
 

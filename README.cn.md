@@ -213,7 +213,7 @@ $generator = new PurePhpHlsGenerator($profiles, __DIR__ . '/hls/output');
 $generator->processFlv(__DIR__ . '/test.flv');
 echo "所有处理完成！\n";
 ```
-其他功能请使用编码器自定义实现。
+其他功能请使用编码器自定义实现。h264详细使用方法见<a href="./src/Codec/README.md">READEME</a>`。
 
 ---
 
