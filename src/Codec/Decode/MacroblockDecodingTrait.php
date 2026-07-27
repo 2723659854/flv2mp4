@@ -9,6 +9,27 @@ namespace Xiaosongshu\Flv2mp4\Codec\Decode;
  */
 trait MacroblockDecodingTrait
 {
+    private function readRefIdxL0(): int
+    {
+        $numRef = $this->numRefIdxL0Active;
+        if ($numRef <= 1) {
+            return 0;
+        }
+        if ($numRef === 2) {
+            $val = $this->reader->readU(1) ^ 1;
+            return $val;
+        }
+        $val = $this->reader->readUe();
+        if ($val >= $numRef && !empty($this->debugFrame) && $this->frameNum === $this->debugFrame) {
+            $mbX = $this->currMbX ?? -1;
+            $mbY = $this->currMbY ?? -1;
+            $trace = debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS, 2);
+            $func = $trace[1]['function'] ?? 'unknown';
+            echo "  [WARNING] MB($mbX,$mbY) $func: ref_idx=$val >= numRef=$numRef\n";
+        }
+        return $val;
+    }
+
     /**
      * 解码单个宏块
      * @return int mb_qp_delta
@@ -18,6 +39,9 @@ trait MacroblockDecodingTrait
         $mbType = $this->reader->readUe();
         $mbWidth = $this->picWidthInMbs;
         $mbIdx = $mbY * $mbWidth + $mbX;
+
+        $this->currMbX = $mbX;
+        $this->currMbY = $mbY;
 
         $this->mbTypeForDeblock[$mbIdx] = $mbType;
         $this->mbNnzForDeblock[$mbIdx] = array_fill(0, 24, 0);
@@ -1038,10 +1062,7 @@ trait MacroblockDecodingTrait
      */
     private function decodePL0_16x16(int $mbX, int $mbY, int $sliceQp): int
     {
-        $refIdx = 0;
-        if ($this->numRefIdxL0Active > 1) {
-            $refIdx = $this->reader->readUe();
-        }
+        $refIdx = $this->readRefIdxL0();
 
         $mvdL0X = $this->reader->readSe();
         $mvdL0Y = $this->reader->readSe();
@@ -1086,16 +1107,10 @@ trait MacroblockDecodingTrait
     {
         $debugThis = !empty($this->debugFrame) && $this->frameNum === $this->debugFrame && $mbX === $this->debugMbX && $mbY === $this->debugMbY;
 
-        $refIdx0 = 0;
-        $refIdx1 = 0;
-        if ($this->numRefIdxL0Active > 1) {
-            $refIdx0 = $this->reader->readUe();
-        }
+        $refIdx0 = $this->readRefIdxL0();
+        $refIdx1 = $this->readRefIdxL0();
         $mvd0X = $this->reader->readSe();
         $mvd0Y = $this->reader->readSe();
-        if ($this->numRefIdxL0Active > 1) {
-            $refIdx1 = $this->reader->readUe();
-        }
         $mvd1X = $this->reader->readSe();
         $mvd1Y = $this->reader->readSe();
 
@@ -1154,16 +1169,10 @@ trait MacroblockDecodingTrait
     {
         $debugThis = !empty($this->debugFrame) && $this->frameNum === $this->debugFrame && $mbX === $this->debugMbX && $mbY === $this->debugMbY;
 
-        $refIdx0 = 0;
-        $refIdx1 = 0;
-        if ($this->numRefIdxL0Active > 1) {
-            $refIdx0 = $this->reader->readUe();
-        }
+        $refIdx0 = $this->readRefIdxL0();
+        $refIdx1 = $this->readRefIdxL0();
         $mvd0X = $this->reader->readSe();
         $mvd0Y = $this->reader->readSe();
-        if ($this->numRefIdxL0Active > 1) {
-            $refIdx1 = $this->reader->readUe();
-        }
         $mvd1X = $this->reader->readSe();
         $mvd1Y = $this->reader->readSe();
 
@@ -1240,11 +1249,7 @@ trait MacroblockDecodingTrait
         }
 
         for ($i = 0; $i < 4; $i++) {
-            if ($this->numRefIdxL0Active > 1) {
-                $refIdxs[$i] = $this->reader->readUe();
-            } else {
-                $refIdxs[$i] = 0;
-            }
+            $refIdxs[$i] = $this->readRefIdxL0();
         }
 
         for ($i = 0; $i < 4; $i++) {

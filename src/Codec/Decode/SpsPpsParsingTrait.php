@@ -130,6 +130,7 @@ trait SpsPpsParsingTrait
         $this->numRefIdxL1DefaultActive = $this->reader->readUe() + 1;
         $this->weightedPredFlag = (bool)$this->reader->readU(1);
         $this->weightedBipredIdc = $this->reader->readU(2);
+        echo "  [DEBUG] PPS: weightedPredFlag=" . (int)$this->weightedPredFlag . " weightedBipredIdc=" . $this->weightedBipredIdc . " numRefIdxL0DefaultActive=" . $this->numRefIdxL0DefaultActive . "\n";
 
         $this->picInitQp = $this->reader->readSe() + 26;
         $this->reader->readSe();

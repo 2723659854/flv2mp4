@@ -17,6 +17,7 @@ trait SliceDecodingTrait
     public function decodeSlice(string $rbsp, bool $isIDR, int $nalRefIdc): void
     {
         $this->reader = new BitReader($rbsp);
+        $this->refIdxWarned = false;
         $firstMbInSlice = $this->reader->readUe();
         $sliceTypeRaw = $this->reader->readUe();
         $sliceType = $sliceTypeRaw % 5;
@@ -71,6 +72,25 @@ trait SliceDecodingTrait
                 }
             } else {
                 $this->numRefIdxL0Active = $this->numRefIdxL0DefaultActive;
+            }
+        }
+        
+        if (!$isIDR) {
+            $maxFrameNum = 1 << ($this->log2MaxFrameNumMinus4 + 4);
+            $shortTermRefs = [];
+            foreach ($this->dpb as $entry) {
+                if (!$entry['isLongTerm']) {
+                    $fn = $entry['frameNum'];
+                    $fnWrap = ($fn > $this->currFrameNum) ? $fn - $maxFrameNum : $fn;
+                    $shortTermRefs[] = ['fnWrap' => $fnWrap, 'entry' => $entry];
+                }
+            }
+            usort($shortTermRefs, function($a, $b) {
+                return $b['fnWrap'] - $a['fnWrap'];
+            });
+            $this->refPicList0 = [];
+            foreach ($shortTermRefs as $ref) {
+                $this->refPicList0[] = $ref['entry'];
             }
         }
 
@@ -248,6 +268,7 @@ trait SliceDecodingTrait
 
         $isDebugSlice = ($this->debugTargetSlice > 0 && $this->debugSliceIndex === $this->debugTargetSlice);
 
+        $firstCodedMb = true;
         for ($mbIdx = $startMbIdx; $mbIdx < $endMbIdx; $mbIdx++) {
             $mbX = $mbIdx % $mbWidth;
             $mbY = (int)($mbIdx / $mbWidth);
