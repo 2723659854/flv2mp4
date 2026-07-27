@@ -200,17 +200,7 @@ trait MacroblockDecodingTrait
                     $scanIdx = $i8x8 * 4 + $i4x4;
                     $rasterIdx = $scanToRaster[$scanIdx];
                     $nc = $this->computeNc($rasterIdx, $mbX, $mbY, $nzCache, $leftNz, $topNz, $leftAvailable, $topAvailable);
-                    $oldDbg = $this->debugResidual;
-                    $isTargetBlk = ($mbX === 2 && $mbY === 0 && $rasterIdx === 2);
-                    $isMb10 = ($mbX === 1 && $mbY === 0);
-                    $isMb11blk8 = ($mbX === 1 && $mbY === 1 && $rasterIdx === 8);
-                    $isMb11Any = ($mbX === 1 && $mbY === 1);
-                    $isMb01Any = ($mbX === 0 && $mbY === 1);
-                    if ($isTargetBlk || $isMb10 || $isMb11blk8 || $isMb11Any || $isMb01Any) {
-                       $this->debugResidual = true;
-                    }
                     $coeffs = $this->decodeResidualBlock(16, $nc);
-                    $this->debugResidual = $oldDbg;
                     for ($i = 0; $i < 16; $i++) $yCoeffs[$rasterIdx][$i] = $coeffs[$i];
                     $yCoeffs[$rasterIdx] = $this->zigzagToRaster($yCoeffs[$rasterIdx]);
                     $yCoeffs[$rasterIdx] = $this->dequantize4x4($yCoeffs[$rasterIdx], 0, $qp);
@@ -953,6 +943,8 @@ trait MacroblockDecodingTrait
 
         $this->updateNzCountZero($mbX, $mbY);
 
+        $this->updateInterMbIntraModes($mbX);
+
         $mbWidth = $this->picWidthInMbs;
         $mbIdx = $mbY * $mbWidth + $mbX;
         for ($i = 0; $i < 16; $i++) {
@@ -990,6 +982,20 @@ trait MacroblockDecodingTrait
     }
 
     /**
+     * Inter宏块解码后更新intra4x4预测模式缓存
+     * H.264标准: 非Intra_4x4宏块的邻居预测模式视为DC_PRED(2)
+     */
+    private function updateInterMbIntraModes(int $mbX): void
+    {
+        $this->intra4x4LeftModes = [2, 2, 2, 2];
+        $baseLuma = $mbX * 4;
+        $this->intra4x4TopModes[$baseLuma + 0] = 2;
+        $this->intra4x4TopModes[$baseLuma + 1] = 2;
+        $this->intra4x4TopModes[$baseLuma + 2] = 2;
+        $this->intra4x4TopModes[$baseLuma + 3] = 2;
+    }
+
+    /**
      * P_L0_16x16 宏块解码
      */
     private function decodePL0_16x16(int $mbX, int $mbY, int $sliceQp): int
@@ -1005,7 +1011,7 @@ trait MacroblockDecodingTrait
         list($predMvX, $predMvY) = $this->getP16x16MvPrediction($mbX, $mbY, $refIdx);
         $mvX = $predMvX + $mvdL0X;
         $mvY = $predMvY + $mvdL0Y;
-        
+
         $this->performMotionCompensation16x16($mbX, $mbY, $mvX, $mvY, $refIdx);
         $cbpCode = $this->reader->readUe();
         $codedBlockPattern = self::GOLOMB_TO_INTER_CBP[$cbpCode] ?? 0;
@@ -1020,6 +1026,7 @@ trait MacroblockDecodingTrait
             $this->updateNzCountZero($mbX, $mbY);
         }
         $this->saveMvForPrediction($mbX, $mbY, $mvX, $mvY, $refIdx);
+        $this->updateInterMbIntraModes($mbX);
         $mbWidth = $this->picWidthInMbs;
         $mbIdx = $mbY * $mbWidth + $mbX;
         for ($i = 0; $i < 16; $i++) {
@@ -1075,6 +1082,8 @@ trait MacroblockDecodingTrait
         }
 
         $this->saveMvForPrediction16x8($mbX, $mbY, $mv0X, $mv0Y, $refIdx0, $mv1X, $mv1Y, $refIdx1);
+
+        $this->updateInterMbIntraModes($mbX);
 
         $mbWidth = $this->picWidthInMbs;
         $mbIdx = $mbY * $mbWidth + $mbX;
@@ -1135,6 +1144,8 @@ trait MacroblockDecodingTrait
         }
 
         $this->saveMvForPrediction8x16($mbX, $mbY, $mv0X, $mv0Y, $refIdx0, $mv1X, $mv1Y, $refIdx1);
+
+        $this->updateInterMbIntraModes($mbX);
 
         $mbWidth = $this->picWidthInMbs;
         $mbIdx = $mbY * $mbWidth + $mbX;
@@ -1306,6 +1317,8 @@ trait MacroblockDecodingTrait
 
         $this->saveMvForPrediction8x8($mbX, $mbY, $mbMvs);
 
+        $this->updateInterMbIntraModes($mbX);
+
         return $mbQpDelta;
     }
 
@@ -1455,6 +1468,8 @@ trait MacroblockDecodingTrait
         }
 
         $this->saveMvForPrediction8x8($mbX, $mbY, $mbMvs);
+
+        $this->updateInterMbIntraModes($mbX);
 
         $mbWidth = $this->picWidthInMbs;
         $mbIdx = $mbY * $mbWidth + $mbX;
@@ -2104,7 +2119,7 @@ trait MacroblockDecodingTrait
                     $coeffs = $this->decodeResidualBlock(16, $nc);
                     for ($i = 0; $i < 16; $i++) $yCoeffs[$rasterIdx][$i] = $coeffs[$i];
                     $yCoeffs[$rasterIdx] = $this->zigzagToRaster($yCoeffs[$rasterIdx]);
-                    $yCoeffs[$rasterIdx] = $this->dequantize4x4($yCoeffs[$rasterIdx], 0, $qp);
+                    $yCoeffs[$rasterIdx] = $this->dequantize4x4($yCoeffs[$rasterIdx], 3, $qp);
                     $nzCount = 0;
                     for ($i = 0; $i < 16; $i++) if ($coeffs[$i] != 0) $nzCount++;
                     $nzCache[$rasterIdx] = $nzCount;
@@ -2135,8 +2150,8 @@ trait MacroblockDecodingTrait
             $crDc = $this->decodeResidualBlock(4, -1);
         }
 
-        $cbQmul = $this->dequant4Table[1][$chromaQp][0];
-        $crQmul = $this->dequant4Table[2][$chromaQp][0];
+        $cbQmul = $this->dequant4Table[5][$chromaQp][0];
+        $crQmul = $this->dequant4Table[4][$chromaQp][0];
         $cbDcResult = $this->chromaDcDequantIdct($cbDc, $cbQmul);
         $crDcResult = $this->chromaDcDequantIdct($crDc, $crQmul);
 
@@ -2149,7 +2164,7 @@ trait MacroblockDecodingTrait
                 $nzCnt = 0; for ($i = 0; $i < 15; $i++) if ($ac[$i] != 0) $nzCnt++;
                 for ($i = 1; $i < 16; $i++) $cbAcCoeffs[$blk][$i] = $ac[$i - 1];
                 $cbAcCoeffs[$blk] = $this->zigzagToRaster($cbAcCoeffs[$blk]);
-                $cbAcCoeffs[$blk] = $this->dequantize4x4($cbAcCoeffs[$blk], 1, $chromaQp);
+                $cbAcCoeffs[$blk] = $this->dequantize4x4($cbAcCoeffs[$blk], 5, $chromaQp);
                 $nzCache[$blockIdx] = $nzCnt;
             }
             $crScanOrder = [20, 21, 22, 23];
@@ -2161,7 +2176,7 @@ trait MacroblockDecodingTrait
                 $nzCnt = 0; for ($i = 0; $i < 15; $i++) if ($ac[$i] != 0) $nzCnt++;
                 for ($i = 1; $i < 16; $i++) $crAcCoeffs[$blk][$i] = $ac[$i - 1];
                 $crAcCoeffs[$blk] = $this->zigzagToRaster($crAcCoeffs[$blk]);
-                $crAcCoeffs[$blk] = $this->dequantize4x4($crAcCoeffs[$blk], 2, $chromaQp);
+                $crAcCoeffs[$blk] = $this->dequantize4x4($crAcCoeffs[$blk], 4, $chromaQp);
                 $nzCache[$blockIdx] = $nzCnt;
             }
         }

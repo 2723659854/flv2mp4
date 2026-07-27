@@ -109,6 +109,8 @@ class H264Decoder
     public int $debugSliceIndex = 0;
     public int $debugTargetSlice = 0;
     public $debugMbTraceFh = null;
+    public int $debugPFrameCount = 0;
+    public bool $debugEnable = false;
 
     // DC系数映射表：DC数组索引 -> 块索引
     public static array $dcCoeffIndex = [0, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15];
@@ -217,9 +219,10 @@ class H264Decoder
 
     public function initQuantMatrix(): void
     {
-        // H.264标准7.4.2.1节：当SPS/PPS都没有scaling_matrix_present_flag时，
-        // scaling_matrix4使用Flat_4x4_16（全16），而不是默认的intra/inter scaling matrix。
-        // 默认intra/inter scaling matrix只在显式指定scaling matrix但某个list缺失时作为fallback。
+        // H.264标准: FFmpeg h264_ps.c line 331: memset(sps->scaling_matrix4, 16, ...)
+        // 当scaling_matrix_present_flag=0时，所有矩阵初始化为16（flat matrix）
+        // default_scaling4[0/1]仅在decode_scaling_list内部作为fallback使用，
+        // 不覆盖整个矩阵为非flat值
         $flatScaling4 = array_fill(0, 16, 16);
 
         $scalingMatrices = [
@@ -229,9 +232,6 @@ class H264Decoder
 
         $this->quantMatrix = $scalingMatrices;
 
-        // 构建反量化表
-        // table[qp][x] = INIT[qp%6][scale_idx] * scaling_matrix[x] << (qp/6 + 2)
-        // scale_idx = (x & 1) + ((x >> 2) & 1) = posClass[x]
         $posClass = [0, 1, 0, 1, 1, 2, 1, 2, 0, 1, 0, 1, 1, 2, 1, 2];
 
         $this->dequant4Table = array_fill(0, 6, array_fill(0, 52, array_fill(0, 16, 0)));
