@@ -88,6 +88,23 @@ trait MotionVectorPredictionTrait
      */
     public function predictMvPSkip(?array $mvLeft, ?array $mvTop, ?array $mvTopRight): array
     {
+        $refA = $mvLeft === null ? self::PART_NOT_AVAILABLE : $mvLeft[2];
+        $refB = $mvTop === null ? self::PART_NOT_AVAILABLE : $mvTop[2];
+
+        if ($refA === self::PART_NOT_AVAILABLE) {
+            return [0, 0];
+        }
+        if ($refA === 0 && $mvLeft[0] === 0 && $mvLeft[1] === 0) {
+            return [0, 0];
+        }
+
+        if ($refB === self::PART_NOT_AVAILABLE) {
+            return [0, 0];
+        }
+        if ($refB === 0 && $mvTop[0] === 0 && $mvTop[1] === 0) {
+            return [0, 0];
+        }
+
         return $this->predictMvP16x16($mvLeft, $mvTop, $mvTopRight, 0);
     }
 
