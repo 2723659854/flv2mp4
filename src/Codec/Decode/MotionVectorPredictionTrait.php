@@ -20,9 +20,9 @@ trait MotionVectorPredictionTrait
      */
     public function predictMvP16x16(?array $mvLeft, ?array $mvTop, ?array $mvTopRight, int $currRefIdx): array
     {
-        $aAvail = ($mvLeft !== null);
-        $bAvail = ($mvTop !== null);
-        $cAvail = ($mvTopRight !== null);
+        $aAvail = ($mvLeft !== null && $mvLeft[2] >= 0);
+        $bAvail = ($mvTop !== null && $mvTop[2] >= 0);
+        $cAvail = ($mvTopRight !== null && $mvTopRight[2] >= 0);
 
         $mvA = $aAvail ? [$mvLeft[0], $mvLeft[1]] : [0, 0];
         $mvB = $bAvail ? [$mvTop[0], $mvTop[1]] : [0, 0];
@@ -77,16 +77,6 @@ trait MotionVectorPredictionTrait
      */
     public function predictMvPSkip(?array $mvLeft, ?array $mvTop, ?array $mvTopRight): array
     {
-        if ($mvLeft === null || $mvTop === null) {
-            return [0, 0];
-        }
-
-        $aZero = ($mvLeft[2] === 0 && $mvLeft[0] === 0 && $mvLeft[1] === 0);
-        $bZero = ($mvTop[2] === 0 && $mvTop[0] === 0 && $mvTop[1] === 0);
-        if ($aZero || $bZero) {
-            return [0, 0];
-        }
-
         return $this->predictMvP16x16($mvLeft, $mvTop, $mvTopRight, 0);
     }
 
@@ -208,9 +198,9 @@ trait MotionVectorPredictionTrait
             }
         }
 
-        $aAvail = ($mvA !== null);
-        $bAvail = ($mvB !== null);
-        $cAvail = ($mvC !== null);
+        $aAvail = ($mvA !== null && $mvA[2] >= 0);
+        $bAvail = ($mvB !== null && $mvB[2] >= 0);
+        $cAvail = ($mvC !== null && $mvC[2] >= 0);
 
         $mvAv = $aAvail ? [$mvA[0], $mvA[1]] : [0, 0];
         $mvBv = $bAvail ? [$mvB[0], $mvB[1]] : [0, 0];
