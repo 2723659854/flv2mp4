@@ -946,7 +946,7 @@ trait MacroblockDecodingTrait
 
         $mvX = $predMvX;
         $mvY = $predMvY;
-        
+
         $this->performMotionCompensation16x16($mbX, $mbY, $mvX, $mvY, $refIdx);
 
         $this->saveMvForPrediction($mbX, $mbY, $mvX, $mvY, $refIdx);
@@ -1005,7 +1005,7 @@ trait MacroblockDecodingTrait
         list($predMvX, $predMvY) = $this->getP16x16MvPrediction($mbX, $mbY, $refIdx);
         $mvX = $predMvX + $mvdL0X;
         $mvY = $predMvY + $mvdL0Y;
-        
+
         $this->performMotionCompensation16x16($mbX, $mbY, $mvX, $mvY, $refIdx);
         $cbpCode = $this->reader->readUe();
         $codedBlockPattern = self::GOLOMB_TO_INTER_CBP[$cbpCode] ?? 0;

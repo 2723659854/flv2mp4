@@ -201,7 +201,79 @@ trait MotionTrait
             if (!$foundBetter) break;
         }
 
-        return [$bestDX * 4, $bestDY * 4, $bestSAD];
+        // === 半像素/1/4像素精搜索 ===
+        // 使用mcLumaBlock计算子像素位置的SAD
+        $bestMVx = $bestDX * 4;
+        $bestMVy = $bestDY * 4;
+        $bestSAD = $this->computeSADSubpel($curFlat, $refPlane, $mbX, $mbY, $bestMVx, $bestMVy, $blockW, $blockH);
+
+        // 先搜索半像素位置 (±2, ±2) 在1/4像素单位
+        $halfPelPattern = [
+            [-2, -2], [-2, 0], [-2, 2],
+            [ 0, -2],          [ 0, 2],
+            [ 2, -2], [ 2, 0], [ 2, 2],
+        ];
+        foreach ($halfPelPattern as [$ox, $oy]) {
+            $mvx = $bestMVx + $ox;
+            $mvy = $bestMVy + $oy;
+            // 边界检查：整数像素位置不能越界
+            $intDx = ($mvx >> 2) - $bestDX;
+            $intDy = ($mvy >> 2) - $bestDY;
+            if ($bestDX + $intDx < $minDx || $bestDX + $intDx > $maxDx ||
+                $bestDY + $intDy < $minDy || $bestDY + $intDy > $maxDy) {
+                continue;
+            }
+            $sad = $this->computeSADSubpel($curFlat, $refPlane, $mbX, $mbY, $mvx, $mvy, $blockW, $blockH);
+            if ($sad < $bestSAD) {
+                $bestSAD = $sad;
+                $bestMVx = $mvx;
+                $bestMVy = $mvy;
+            }
+        }
+
+        // 再搜索1/4像素位置 (±1, 0), (0, ±1)
+        $quarterPelPattern = [
+            [-1, 0], [1, 0], [0, -1], [0, 1],
+        ];
+        foreach ($quarterPelPattern as [$ox, $oy]) {
+            $mvx = $bestMVx + $ox;
+            $mvy = $bestMVy + $oy;
+            $intDx = ($mvx >> 2) - $bestDX;
+            $intDy = ($mvy >> 2) - $bestDY;
+            if ($bestDX + $intDx < $minDx || $bestDX + $intDx > $maxDx ||
+                $bestDY + $intDy < $minDy || $bestDY + $intDy > $maxDy) {
+                continue;
+            }
+            $sad = $this->computeSADSubpel($curFlat, $refPlane, $mbX, $mbY, $mvx, $mvy, $blockW, $blockH);
+            if ($sad < $bestSAD) {
+                $bestSAD = $sad;
+                $bestMVx = $mvx;
+                $bestMVy = $mvy;
+            }
+        }
+
+        return [$bestMVx, $bestMVy, $bestSAD];
+    }
+
+    /**
+     * 计算子像素位置的SAD（使用mcLumaBlock获取1/4像素精度预测块）
+     */
+    private function computeSADSubpel(array $curFlat, string $refPlane, int $mbX, int $mbY, int $mvx, int $mvy, int $blockW, int $blockH): int
+    {
+        $refX = $mbX * 64 + $mvx;
+        $refY = $mbY * 64 + $mvy;
+        $predBlock = $this->mcLumaBlock($refPlane, $refX, $refY, $this->mbAlignedWidth, $this->mbAlignedHeight);
+        $sad = 0;
+        $pos = 0;
+        for ($y = 0; $y < $blockH; $y++) {
+            for ($x = 0; $x < $blockW; $x++) {
+                $diff = $curFlat[$pos] - $predBlock[$y][$x];
+                if ($diff < 0) $diff = -$diff;
+                $sad += $diff;
+                $pos++;
+            }
+        }
+        return $sad;
     }
 
     private function computeSADFast(array $curFlat, int $origX, int $origY, int $dx, int $dy, int $blockW, int $blockH, int $refStride): int

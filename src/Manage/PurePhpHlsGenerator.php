@@ -273,7 +273,7 @@ class PurePhpHlsGenerator
                     $encoder->setResolution($profile['width'], $profile['height']);
                     $encoder->setBitrate($profile['bitrate']);
                     $encoder->setFps($profile['fps']);
-                    $encoder->setQp($profile['qp'] ?? 30);
+                    $encoder->setQp($profile['qp'] ?? 26);
                     // DEBUG: 保存第一帧编码前的YUV
                     static $debugYuvSaved = false;
                     if (!$debugYuvSaved) {
