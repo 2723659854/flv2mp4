@@ -39,7 +39,8 @@ trait InterPredTrait
         }
 
         // 运动估计（返回1/4像素单位的MV）
-        list($mvX, $mvY, $sad) = $this->motionEstimate16x16($lumaPixels, $refYPlane, $mbX, $mbY);
+        // 搜索范围增大到32像素，适应更快速的运动
+        list($mvX, $mvY, $sad) = $this->motionEstimate16x16($lumaPixels, $refYPlane, $mbX, $mbY, 32);
 
         // 亮度MC预测（1/4像素精度）
         $refX = $mbX * 64 + $mvX;

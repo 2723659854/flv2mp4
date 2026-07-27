@@ -55,10 +55,19 @@ trait SliceEncodeTrait
             // 非IDR参考帧：adaptive_ref_pic_marking_mode_flag = 0 (滑窗模式，FIFO)
             $bits .= '0';
         }
-        
+
         // cabac_init_idc 不需要，因为PPS中entropy_coding_mode_flag=0 (CAVLC)
 
-        $bits .= $this->se(0); // slice_qp_delta
+        // slice_qp_delta: P帧QP = I帧QP + pFrameQpDelta
+        // I帧QP由PPS的pic_init_qp_minus26定义
+        // slice_qp_delta是相对于pic_init_qp_minus26的增量
+        if ($sliceType === 0) {
+            // P帧
+            $bits .= $this->se($this->pFrameQpDelta);
+        } else {
+            // I帧
+            $bits .= $this->se(0);
+        }
 
         // 禁用deblocking filter（编码器未实现去块滤波，需与解码器保持一致）
         $bits .= $this->ue(1); // disable_deblocking_filter_idc = 1 (禁用)
