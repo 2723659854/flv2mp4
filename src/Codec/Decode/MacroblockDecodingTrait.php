@@ -34,7 +34,7 @@ trait MacroblockDecodingTrait
             $mbQpDelta = $this->decodeIntraMacroblock($mbX, $mbY, $mbType, $sliceQp);
             if ($debugAll && $mbY <= 12) echo "  [TRACE] Frame {$this->frameNum} MB($mbX,$mbY): I-slice mbType=$mbType\n";
         } elseif ($sliceType === 0 || $sliceType === 5) {
-            if ($debugAll && $mbY <= 12) echo "  [TRACE] Frame {$this->frameNum} MB($mbX,$mbY): P-slice mbType=$mbType\n";
+            if ($debugAll && $mbY <= 12 && $mbType <= 10) echo "  [TRACE] Frame {$this->frameNum} MB($mbX,$mbY): P-slice mbType=$mbType\n";
             if ($debugThis) echo "  [DEBUG] Frame {$this->frameNum} MB($mbX,$mbY): P-slice mbType=$mbType\n";
             $mbQpDelta = $this->decodePInterMacroblock($mbX, $mbY, $mbType, $sliceQp);
         } else {
@@ -905,14 +905,15 @@ trait MacroblockDecodingTrait
 
     /**
      * P帧宏块解码
-     * P slice mb_type:
-     *   0 = P_Skip
-     *   1 = P_L0_16x16
-     *   2 = P_L0_L0_16x8
-     *   3 = P_L0_L0_8x16
-     *   4 = P_8x8
-     *   5 = P_8x8ref0
-     *   6..31 = Intra_16x16 / I_4x4 / I_PCM (与I帧对应关系: mb_type - 1)
+     * H.264 P-slice mb_type (CAVLC, Table 7-11):
+     *   0 = P_L0_16x16
+     *   1 = P_L0_L0_16x8
+     *   2 = P_L0_L0_8x16
+     *   3 = P_8x8
+     *   4 = P_8x8ref0
+     *   5..30 = Intra (intraMbType = mb_type - 5; I-slice mb_type 0=I4x4, 1-24=I16x16)
+     *   31 = I_PCM
+     * P_Skip宏块由mb_skip_run计数处理，不在macroblock_layer()中出现。
      */
     private function decodePInterMacroblock(int $mbX, int $mbY, int $mbType, int $sliceQp): int
     {
@@ -936,12 +937,8 @@ trait MacroblockDecodingTrait
             return $this->decodeP_8x8ref0($mbX, $mbY, $sliceQp);
         }
 
-        if ($mbType >= 5) {
+        if ($mbType >= 5 && $mbType <= 30) {
             $intraMbType = $mbType - 5;
-            if ($intraMbType === 31) {
-                $this->fillMacroblockGray($mbX, $mbY);
-                return 0;
-            }
             $mbQpDelta = $this->decodeIntraMacroblock($mbX, $mbY, $intraMbType, $sliceQp);
             $intraMv = [0, 0, -1];
             $this->mvLeftCol = [$intraMv, $intraMv, $intraMv, $intraMv];
@@ -951,6 +948,12 @@ trait MacroblockDecodingTrait
             $this->mvTopRow[$mbX * 4 + 3] = $intraMv;
             return $mbQpDelta;
         }
+
+        if ($mbType === 31) {
+            $this->fillMacroblockGray($mbX, $mbY);
+            return 0;
+        }
+
         $this->fillMacroblockGray($mbX, $mbY);
         return 0;
     }
@@ -1081,6 +1084,8 @@ trait MacroblockDecodingTrait
      */
     private function decodePL0_16x8(int $mbX, int $mbY, int $sliceQp): int
     {
+        $debugThis = !empty($this->debugFrame) && $this->frameNum === $this->debugFrame && $mbX === $this->debugMbX && $mbY === $this->debugMbY;
+
         $refIdx0 = 0;
         $refIdx1 = 0;
         if ($this->numRefIdxL0Active > 1) {
@@ -1102,6 +1107,9 @@ trait MacroblockDecodingTrait
         list($predMv1X, $predMv1Y) = $this->getP16x8MvPrediction($mbX, $mbY, 1, $refIdx1, $mv0);
         $mv1X = $predMv1X + $mvd1X;
         $mv1Y = $predMv1Y + $mvd1Y;
+
+        if ($debugThis) echo "  [DEBUG] P_L0_L0_16x8: part0: mvd=($mvd0X,$mvd0Y) predMv=($predMv0X,$predMv0Y) mv=($mv0X,$mv0Y) ref=$refIdx0\n";
+        if ($debugThis) echo "  [DEBUG] P_L0_L0_16x8: part1: mvd=($mvd1X,$mvd1Y) predMv=($predMv1X,$predMv1Y) mv=($mv1X,$mv1Y) ref=$refIdx1\n";
 
         $this->performMotionCompensation16x8($mbX, $mbY, 0, $mv0X, $mv0Y, $refIdx0);
         $this->performMotionCompensation16x8($mbX, $mbY, 1, $mv1X, $mv1Y, $refIdx1);
@@ -1826,6 +1834,7 @@ trait MacroblockDecodingTrait
     private function getP16x8MvPrediction(int $mbX, int $mbY, int $partIdx, int $refIdx, ?array $mvPart0 = null): array
     {
         $mbWidth = $this->picWidthInMbs;
+        $debugPred = !empty($this->debugFrame) && $this->frameNum === $this->debugFrame && $mbX === $this->debugMbX && $mbY === $this->debugMbY;
 
         $mvLeft = null;
         $mvTop = null;
@@ -1842,38 +1851,42 @@ trait MacroblockDecodingTrait
             if ($mbY > 0) {
                 $mvTop = $this->mvTopRow[$mbX * 4] ?? null;
             }
-            // C = top-right: (blk_x+4, blk_y-1) = (4,-1) → mbX+1, blk_x=0
             if ($mbX + 1 < $mbWidth && $mbY > 0) {
                 $mvC = $this->mvTopRow[($mbX + 1) * 4] ?? null;
             }
-            // D = top-left fallback: (blk_x-1, blk_y-1) = (-1,-1) → mbX-1, blk_x=3
             if ($mvC === null && $mbX > 0 && $mbY > 0) {
                 $mvC = $this->mvTopRow[($mbX - 1) * 4 + 3] ?? null;
             }
         } else {
             $mvTop = $mvPart0;
-            // part1 (下半): C = (blk_x+4, blk_y-1) = (4,1) → 右邻居同一行(未解码,不可用)
-            // D = (blk_x-1, blk_y-1) = (-1,1) → 左邻居 blk_y=1
             if ($mbX > 0 && isset($this->mvLeftCol[1])) {
                 $mvC = $this->mvLeftCol[1];
             }
         }
 
-        // 标准 FFmpeg pred_16x8_motion (h264_mvpred.h):
-        //   part0: 若 top 可用且 top_ref == ref，直接返回 top_mv
-        //   part1: 若 left 可用且 left_ref == ref，直接返回 left_mv
-        //   否则调用 pred_motion (median)
+        if ($debugPred) {
+            echo "  [DEBUG] getP16x8MvPred(part$partIdx, ref$refIdx): ";
+            echo "A=" . ($mvLeft !== null ? "[" . $mvLeft[0] . "," . $mvLeft[1] . "," . $mvLeft[2] . "]" : "null");
+            echo " B=" . ($mvTop !== null ? "[" . $mvTop[0] . "," . $mvTop[1] . "," . $mvTop[2] . "]" : "null");
+            echo " C=" . ($mvC !== null ? "[" . $mvC[0] . "," . $mvC[1] . "," . $mvC[2] . "]" : "null");
+            echo "\n";
+        }
+
         if ($partIdx === 0) {
-            if ($mvTop !== null && $mvTop[2] === $refIdx) {
+            if ($mvTop !== null && $mvTop[2] >= 0 && $mvTop[2] === $refIdx) {
+                if ($debugPred) echo "  [DEBUG] -> B fast path: ($mvTop[0],$mvTop[1])\n";
                 return [$mvTop[0], $mvTop[1]];
             }
         } else {
-            if ($mvLeft !== null && $mvLeft[2] === $refIdx) {
+            if ($mvLeft !== null && $mvLeft[2] >= 0 && $mvLeft[2] === $refIdx) {
+                if ($debugPred) echo "  [DEBUG] -> A fast path: ($mvLeft[0],$mvLeft[1])\n";
                 return [$mvLeft[0], $mvLeft[1]];
             }
         }
 
-        return $this->predictMvP16x16($mvLeft, $mvTop, $mvC, $refIdx);
+        $result = $this->predictMvP16x16($mvLeft, $mvTop, $mvC, $refIdx);
+        if ($debugPred) echo "  [DEBUG] -> median result: (" . $result[0] . "," . $result[1] . ")\n";
+        return $result;
     }
 
     /**
