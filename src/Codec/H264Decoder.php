@@ -122,6 +122,11 @@ class H264Decoder
     public int $debugMbY = 0;
     public int $frameNum = 0;
 
+    public bool $refIdxWarned = false;
+
+    public int $currMbX = 0;
+    public int $currMbY = 0;
+
     // DC系数映射表：DC数组索引 -> 块索引
     public static array $dcCoeffIndex = [0, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15];
 
