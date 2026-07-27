@@ -2,6 +2,10 @@
 
 namespace Xiaosongshu\Flv2mp4\Codec\Encode;
 
+/**
+ * @purpose bite写入器
+ * @author yanglong
+ */
 trait BitstreamTrait
 {
     public function ue(int $v): string

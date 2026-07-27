@@ -2,6 +2,9 @@
 
 namespace Xiaosongshu\Flv2mp4\Codec\Encode;
 
+/**
+ * @purpose CAVLC编码特征/模块 熵编码模块
+ */
 trait CavlcTrait
 {
     public function computeNC($blockIdx, $mbX, $bx, $by, $leftAvailable, $leftNz, $topAvailable, $topNz, $nzCache)

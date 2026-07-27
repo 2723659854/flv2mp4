@@ -9,7 +9,7 @@ namespace Xiaosongshu\Flv2mp4\Codec\Decode;
  */
 trait MotionVectorPredictionTrait
 {
-    const PART_NOT_AVAILABLE = -2;
+
 
     /**
      * P帧16x16宏块运动向量预测 (H.264 8.4.1.3节)

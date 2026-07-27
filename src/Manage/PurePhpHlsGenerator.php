@@ -142,7 +142,7 @@ class PurePhpHlsGenerator
                 elseif ($tag->tagType === 8) $this->handleAudioFrame($tag);
             }
             $frameCount++;
-            if ($frameCount % 100 === 0) echo "Processed {$frameCount} frames ({$videoCount} video)\n";
+            if ($frameCount % 10 === 0) echo "Processed {$frameCount} frames ({$videoCount} video)\n";
             if ($this->maxFrames !== null && $videoCount >= $this->maxFrames) {
                 echo "Reached max frames limit ({$this->maxFrames}), stopping...\n";
                 break;

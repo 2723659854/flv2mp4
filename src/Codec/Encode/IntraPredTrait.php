@@ -2,6 +2,10 @@
 
 namespace Xiaosongshu\Flv2mp4\Codec\Encode;
 
+/**
+ * @purpose 帧内预测
+ * @author yanglong
+ */
 trait IntraPredTrait
 {
     public function encodeMacroblock(

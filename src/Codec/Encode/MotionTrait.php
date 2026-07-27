@@ -2,6 +2,10 @@
 
 namespace Xiaosongshu\Flv2mp4\Codec\Encode;
 
+/**
+ * @purpose 运动矢量缓存与参考帧管理
+ * @author yanglong
+ */
 trait MotionTrait
 {
 

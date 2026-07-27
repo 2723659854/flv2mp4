@@ -2,6 +2,10 @@
 
 namespace Xiaosongshu\Flv2mp4\Codec\Encode;
 
+/**
+ * @purpose 变换与量化
+ * @author yanglong
+ */
 trait TransformTrait
 {
     /**

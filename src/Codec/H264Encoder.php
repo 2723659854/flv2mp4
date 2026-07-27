@@ -475,5 +475,4 @@ class H264Encoder
     public $picWidthInMbs = 0;
     public $lastMbWasSkip = false; // 上一个宏块是否为P_Skip
 
-
 }
