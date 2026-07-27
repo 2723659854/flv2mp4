@@ -216,7 +216,7 @@ trait MacroblockDecodingTrait
             for ($x = 0; $x < 2; $x++) $topNz[$this->picWidthInMbs * 4 + $this->picWidthInMbs * 2 + $mbX * 2 + $x] = $this->nzTopRowChroma[$this->picWidthInMbs * 2 + $mbX * 2 + $x];
         }
 
-        // SCAN_TO_RASTER映射：扫描顺序 -> 光栅顺序（与wedeo cavlc.rs完全一致）
+        // SCAN_TO_RASTER映射：扫描顺序 -> 光栅顺序
         $scanToRaster = [0, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15];
         $lumaCbp = $cbp & 0x0F;
 
