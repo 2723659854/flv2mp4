@@ -327,6 +327,12 @@ class H264Encoder
     public $chromaQpIndexOffset = 0;
     public $mbType = self::MB_TYPE_I16x16;
 
+    /**
+     * P帧QP偏移量（相对于I帧QP）
+     * 默认+2，即P帧QP = I帧QP + 2，与x264默认一致
+     */
+    public $pFrameQpDelta = 0;
+
     // 宏块对齐尺寸（与解码器一致，用于重建帧和参考帧）
     // 解码器使用mbAlignedWidth/Height存储参考帧，编码器必须匹配
     public int $mbAlignedWidth = 0;
