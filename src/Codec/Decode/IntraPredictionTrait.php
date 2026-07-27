@@ -31,9 +31,6 @@ trait IntraPredictionTrait
         $left = array_fill(0, 4, 128);
         $topLeft = 128;
 
-        // 不强制转换模式
-        // 当top/left不可用时，top/left数组保持为128（默认值） 预测函数直接使用这些值
-
         if ($leftAvail) {
             $refX = $mbPx - 1;
             for ($y = 0; $y < 4; $y++) {
@@ -49,7 +46,6 @@ trait IntraPredictionTrait
 
         if ($topAvail) {
             $refY = $mbPy - 1;
-            // 先读取top[0..3]
             for ($x = 0; $x < 4; $x++) {
                 $px = $mbPx + $x;
                 if ($px < $this->width && $refY >= 0) {
@@ -60,20 +56,16 @@ trait IntraPredictionTrait
                 }
             }
 
-            // 判断top-right可用性
             if ($blkY > 0) {
-                // 宏块内部的行：考虑8x8块边界
                 $blockHasTopRight = ($blkX < 3)
                     && !($blkX == 1 && $blkY == 1)
                     && !($blkX == 1 && $blkY == 3)
                     && !($blkX == 3 && $blkY == 1)
                     && !($blkX == 3 && $blkY == 3);
             } else {
-                // 宏块第一行（blkY==0）：top-right来自上方宏块
                 if ($blkX < 3) {
                     $blockHasTopRight = true;
                 } else {
-                    // blkX==3: top-right来自右上方的宏块
                     $blockHasTopRight = ($mbX + 1 < $this->picWidthInMbs);
                 }
             }
@@ -90,7 +82,6 @@ trait IntraPredictionTrait
                 }
                 $topRightAvail = true;
             } else {
-                // top-right不可用：填充为top[3]
                 for ($x = 4; $x < 8; $x++) {
                     $top[$x] = $top[3];
                 }
@@ -108,7 +99,6 @@ trait IntraPredictionTrait
         } elseif ($leftAvail) {
             $topLeft = $left[0];
         }
-
 
         switch ($mode) {
             case 0: // Vertical

@@ -198,8 +198,17 @@ trait SliceDecodingTrait
         // 每帧必须重置NZ缓存，否则P_Skip宏块会使用前一帧的过期数据导致边界强度计算错误
         $emptyNz = array_fill(0, 24, 0);
         $this->mbNnzForDeblock = array_fill(0, $totalMbs, $emptyNz);
+        $emptyMv = array_fill(0, 16, [0, 0]);
+        $this->mbMvForDeblock = array_fill(0, $totalMbs, $emptyMv);
+        $emptyRef = array_fill(0, 16, 0);
+        $this->mbRefForDeblock = array_fill(0, $totalMbs, $emptyRef);
 
         $mbSkipRun = -1;
+
+        $isPSlice = ($sliceType === 0 || $sliceType === 5);
+        if ($isPSlice && $startMbIdx === 0) {
+            $this->debugPFrameCount++;
+        }
 
         $isDebugSlice = ($this->debugTargetSlice > 0 && $this->debugSliceIndex === $this->debugTargetSlice);
 
