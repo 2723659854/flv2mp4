@@ -137,7 +137,10 @@ trait IntraPredTrait
                 }
                 $nzCache[$blkIdx] = min(15, $nz);
                 if ($nz > 0) {
-                    $cbpLuma |= 1 << (int)($blkIdx / 4);
+                    $subY = intdiv($blkIdx, 4);
+                    $subX = $blkIdx % 4;
+                    $block8x8Idx = intdiv($subY, 2) * 2 + intdiv($subX, 2);
+                    $cbpLuma |= 1 << $block8x8Idx;
                 }
             }
         }
@@ -1032,6 +1035,7 @@ trait IntraPredTrait
                 if (!$leftAvail && ($mode === 1 || $mode === 4 || $mode === 6 || $mode === 8)) {
                     $mode = 2;
                 }
+                $intra4x4PredModes[$blkIdx] = $mode;
                 $predPixels = array_fill(0, 4, array_fill(0, 4, 128));
                 switch ($mode) {
                     case 0:
@@ -1191,7 +1195,10 @@ trait IntraPredTrait
                 }
                 $nzCache[$blkIdx] = min(15, $nz);
                 if ($nz > 0) {
-                    $cbpLuma |= 1 << (int)($blkIdx / 4);
+                    $subY = intdiv($blkIdx, 4);
+                    $subX = $blkIdx % 4;
+                    $block8x8Idx = intdiv($subY, 2) * 2 + intdiv($subX, 2);
+                    $cbpLuma |= 1 << $block8x8Idx;
                 }
             }
         }

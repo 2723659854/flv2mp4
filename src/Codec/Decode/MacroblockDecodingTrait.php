@@ -936,7 +936,7 @@ trait MacroblockDecodingTrait
 
         $mvX = $predMvX;
         $mvY = $predMvY;
-        
+
         $this->performMotionCompensation16x16($mbX, $mbY, $mvX, $mvY, $refIdx);
 
         $this->saveMvForPrediction($mbX, $mbY, $mvX, $mvY, $refIdx);

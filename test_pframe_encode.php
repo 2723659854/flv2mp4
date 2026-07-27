@@ -34,14 +34,14 @@ function generateMotionYUV(int $width, int $height, int $frameIdx, int $motionX 
     return $yuv;
 }
 
-function testPFrameEncoding(bool $enableInter): array
+function testPFrameEncoding(bool $enableInter, int $qp = 28): array
 {
     $width = 320;
     $height = 240;
     $frameCount = 10;
 
     $encoder = new H264Encoder($width, $height, 25, 1000000);
-    $encoder->setQp(28);
+    $encoder->setQp($qp);
     $encoder->enableInter = $enableInter;
 
     $nalUnits = [];
@@ -121,27 +121,32 @@ function testPFrameEncoding(bool $enableInter): array
 
 echo "=== P帧编码测试 ===\n\n";
 
-// 测试1: 全部I帧
-echo "测试1: 全部I帧\n";
-$resultI = testPFrameEncoding(false);
-if ($resultI['success']) {
-    echo sprintf("  成功! PSNR Y=%.2f dB, 文件大小=%d字节\n\n", $resultI['psnr_y'], $resultI['file_size']);
-} else {
-    echo "  失败: " . ($resultI['error'] ?? '未知错误') . "\n\n";
-}
+foreach ([28, 24, 20] as $qp) {
+    echo "===== QP=$qp =====\n";
 
-// 测试2: I帧+P帧混合
-echo "测试2: I帧+P帧混合（I帧+P帧）\n";
-$resultP = testPFrameEncoding(true);
-if ($resultP['success']) {
-    echo sprintf("  整体PSNR Y=%.2f dB, 文件大小=%d字节\n", $resultP['psnr_y'], $resultP['file_size']);
-    echo "  每帧PSNR (Y): " . implode(', ', $resultP['per_frame_psnr']) . "\n";
+    // 测试1: 全部I帧
+    echo "测试1: 全部I帧\n";
+    $resultI = testPFrameEncoding(false, $qp);
     if ($resultI['success']) {
-        $ratio = $resultP['file_size'] / $resultI['file_size'];
-        echo sprintf("  P帧/I帧大小比: %.2f (%.1f%%)\n", $ratio, $ratio * 100);
+        echo sprintf("  成功! PSNR Y=%.2f dB, 文件大小=%d字节\n\n", $resultI['psnr_y'], $resultI['file_size']);
+    } else {
+        echo "  失败: " . ($resultI['error'] ?? '未知错误') . "\n\n";
     }
-} else {
-    echo "  失败: " . ($resultP['error'] ?? '未知错误') . "\n";
+
+    // 测试2: I帧+P帧混合
+    echo "测试2: I帧+P帧混合（I帧+P帧）\n";
+    $resultP = testPFrameEncoding(true, $qp);
+    if ($resultP['success']) {
+        echo sprintf("  整体PSNR Y=%.2f dB, 文件大小=%d字节\n", $resultP['psnr_y'], $resultP['file_size']);
+        echo "  每帧PSNR (Y): " . implode(', ', $resultP['per_frame_psnr']) . "\n";
+        if ($resultI['success']) {
+            $ratio = $resultP['file_size'] / $resultI['file_size'];
+            echo sprintf("  P帧/I帧大小比: %.2f (%.1f%%)\n", $ratio, $ratio * 100);
+        }
+    } else {
+        echo "  失败: " . ($resultP['error'] ?? '未知错误') . "\n";
+    }
+    echo "\n";
 }
 
 echo "\n测试完成！\n";

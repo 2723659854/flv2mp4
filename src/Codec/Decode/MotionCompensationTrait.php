@@ -49,8 +49,9 @@ trait MotionCompensationTrait
 
         $hLowpass = function(int $srcIdx, int $srcStride, int $w, int $h) use ($refPlane, $refStride, $refWidth, $refHeight): array {
             $out = array_fill(0, $h, array_fill(0, $w, 0));
-            $srcY = ($srcIdx >> 16) & 0xFFFF;
+            $srcY = $srcIdx >> 16;
             $srcX = $srcIdx & 0xFFFF;
+            if ($srcX & 0x8000) $srcX -= 0x10000;
             for ($j = 0; $j < $h; $j++) {
                 $ry = $this->clamp($srcY + $j, 0, $refHeight - 1);
                 for ($i = 0; $i < $w; $i++) {
@@ -75,8 +76,9 @@ trait MotionCompensationTrait
 
         $vLowpass = function(int $srcIdx, int $srcStride, int $w, int $h) use ($refPlane, $refStride, $refWidth, $refHeight): array {
             $out = array_fill(0, $h, array_fill(0, $w, 0));
-            $srcY = ($srcIdx >> 16) & 0xFFFF;
+            $srcY = $srcIdx >> 16;
             $srcX = $srcIdx & 0xFFFF;
+            if ($srcX & 0x8000) $srcX -= 0x10000;
             for ($j = 0; $j < $h; $j++) {
                 for ($i = 0; $i < $w; $i++) {
                     $rx = $this->clamp($srcX + $i, 0, $refWidth - 1);
@@ -100,8 +102,9 @@ trait MotionCompensationTrait
         };
 
         $hvLowpass = function(int $srcIdx, int $w, int $h) use ($refPlane, $refStride, $refWidth, $refHeight): array {
-            $srcY = ($srcIdx >> 16) & 0xFFFF;
+            $srcY = $srcIdx >> 16;
             $srcX = $srcIdx & 0xFFFF;
+            if ($srcX & 0x8000) $srcX -= 0x10000;
             $tmpH = $h + 5;
             $tmp = array_fill(0, $tmpH, array_fill(0, $w, 0));
             for ($j = 0; $j < $tmpH; $j++) {
