@@ -2,6 +2,7 @@
 
 namespace Xiaosongshu\Flv2mp4\Codec;
 
+use Xiaosongshu\Flv2mp4\Codec\Decode\BitReader;
 use Xiaosongshu\Flv2mp4\Codec\Decode\DeblockingFilterTrait;
 use Xiaosongshu\Flv2mp4\Codec\Decode\IntraPredictionTrait;
 use Xiaosongshu\Flv2mp4\Codec\Decode\MacroblockDecodingTrait;

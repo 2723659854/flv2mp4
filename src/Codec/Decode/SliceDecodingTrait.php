@@ -2,8 +2,6 @@
 
 namespace Xiaosongshu\Flv2mp4\Codec\Decode;
 
-use Xiaosongshu\Flv2mp4\Codec\BitReader;
-
 /**
  * @purpose slice分片解析器
  * @author yanglong

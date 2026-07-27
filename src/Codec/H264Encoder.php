@@ -452,18 +452,7 @@ class H264Encoder
         return $nalUnits;
     }
 
-
-
-
-
-
-
-
-
-
-
     private static $ueCache = [];
-
 
 
     /**
