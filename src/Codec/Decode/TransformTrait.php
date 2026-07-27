@@ -47,44 +47,44 @@ trait TransformTrait
 
     /**
      * 4x4 IDCT整数逆变换
-     * 变换顺序: 先行变换(混合列), 后列变换(混合行) + >>6
-     * >>1截断不可交换, 顺序必须与Rust/FFmpeg一致
+     * 严格对齐FFmpeg ff_h264_idct_add: 先列变换，后行变换，中间>>1不可交换顺序
      */
     public function idct4x4(array $in): array
     {
-        $coeffs = array_fill(0, 16, 0);
-        for ($y = 0; $y < 4; $y++) for ($x = 0; $x < 4; $x++) $coeffs[$y * 4 + $x] = $in[$y][$x];
+        $block = array_fill(0, 16, 0);
+        for ($y = 0; $y < 4; $y++) for ($x = 0; $x < 4; $x++) 
+            $block[$y * 4 + $x] = $in[$y][$x];
 
-        $coeffs[0] = $coeffs[0] + 32;
+        $block[0] += 32;
 
+        // 第一遍：列变换 (与FFmpeg一致: i是列索引)
+        for ($i = 0; $i < 4; $i++) {
+            $z0 = $block[$i + 0] + $block[$i + 8];
+            $z1 = $block[$i + 0] - $block[$i + 8];
+            $z2 = ($block[$i + 4] >> 1) - $block[$i + 12];
+            $z3 = $block[$i + 4] + ($block[$i + 12] >> 1);
+
+            $block[$i + 0] = $z0 + $z3;
+            $block[$i + 4] = $z1 + $z2;
+            $block[$i + 8] = $z1 - $z2;
+            $block[$i + 12] = $z0 - $z3;
+        }
+
+        // 第二遍：行变换并>>6 (与FFmpeg一致)
+        $out = array_fill(0, 4, array_fill(0, 4, 0));
         for ($i = 0; $i < 4; $i++) {
             $row = 4 * $i;
-            $z0 = $coeffs[$row] + $coeffs[$row + 2];
-            $z1 = $coeffs[$row] - $coeffs[$row + 2];
-            $z2 = ($coeffs[$row + 1] >> 1) - $coeffs[$row + 3];
-            $z3 = $coeffs[$row + 1] + ($coeffs[$row + 3] >> 1);
+            $z0 = $block[$row + 0] + $block[$row + 2];
+            $z1 = $block[$row + 0] - $block[$row + 2];
+            $z2 = ($block[$row + 1] >> 1) - $block[$row + 3];
+            $z3 = $block[$row + 1] + ($block[$row + 3] >> 1);
 
-            $coeffs[$row] = $z0 + $z3;
-            $coeffs[$row + 1] = $z1 + $z2;
-            $coeffs[$row + 2] = $z1 - $z2;
-            $coeffs[$row + 3] = $z0 - $z3;
+            $out[$i][0] = ($z0 + $z3) >> 6;
+            $out[$i][1] = ($z1 + $z2) >> 6;
+            $out[$i][2] = ($z1 - $z2) >> 6;
+            $out[$i][3] = ($z0 - $z3) >> 6;
         }
 
-        $d = array_fill(0, 16, 0);
-        for ($i = 0; $i < 4; $i++) {
-            $z0 = $coeffs[$i] + $coeffs[$i + 8];
-            $z1 = $coeffs[$i] - $coeffs[$i + 8];
-            $z2 = ($coeffs[$i + 4] >> 1) - $coeffs[$i + 12];
-            $z3 = $coeffs[$i + 4] + ($coeffs[$i + 12] >> 1);
-
-            $d[$i] = ($z0 + $z3) >> 6;
-            $d[$i + 4] = ($z1 + $z2) >> 6;
-            $d[$i + 8] = ($z1 - $z2) >> 6;
-            $d[$i + 12] = ($z0 - $z3) >> 6;
-        }
-
-        $out = array_fill(0, 4, array_fill(0, 4, 0));
-        for ($y = 0; $y < 4; $y++) for ($x = 0; $x < 4; $x++) $out[$y][$x] = $d[$y * 4 + $x];
         return $out;
     }
 
