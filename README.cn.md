@@ -182,14 +182,15 @@ php forward.php
 
 ---
 
-## 🧪 测试与播放
+## 🧪 测试&推流&播放
 
-| 输出格式 | 推荐播放器 | 参考文件 |
-|----------|------------|----------|
-| MP4 | HTML5 `<video>` | `index.html` |
-| fMP4 | MSE 播放器 | `play_merge.html`、`mse.html` |
-| HLS (TS) | hls.js / Safari | `play.html` |
-| FLV | flv.js | `flv.html` |
+| 输出格式 | 推荐播放器           | 参考文件                         |
+|----------|-----------------|------------------------------|
+| MP4 | HTML5 `<video>` | `index.html`                 |
+| fMP4 | MSE 播放器         | `play_merge.html`、`mse.html` |
+| HLS (TS) | hls.js / Safari | `play.html`                  |
+| FLV | flv.js          | `flv.html`                   |
+| FLV | web推流测试         | `push.html`                    |
 
 ---
 
