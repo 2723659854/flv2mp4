@@ -61,7 +61,7 @@ $profiles = [
 ];
 
 // 生成 HLS
-$generator = new \Xiaosongshu\Flv2mp4\Manage\PurePhpHlsGenerator(
+$generator = new \Xiaosongshu\Flv2mp4\Recode\PurePhpHlsGenerator(
     $profiles,
     __DIR__ . '/hls/output'
 );
