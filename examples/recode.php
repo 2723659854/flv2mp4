@@ -8,6 +8,8 @@ $config = [
     'bitrate' => 150000,   // 目标码率（bps），0 = 使用 QP 模式
     'fps' => 15,           // 目标帧率
     'qp' => 30,            // QP 质量参数（码率为 0 时生效）
+    'watermark'=>true,     // 是否添加水印
+    'watermark_file'=> __DIR__."/src/Static/watermark_80x16.yuv",// 水印文件
 ];
 
 $recoder = new \Xiaosongshu\Flv2mp4\Recode\FlvRecoder($config);
