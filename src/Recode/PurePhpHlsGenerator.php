@@ -321,19 +321,23 @@ class PurePhpHlsGenerator
             $outputSpsPps = $this->spsPpsData[$name];
             $isTranscoded = false;
 
-            // 转码逻辑：源尺寸≠目标尺寸才缩放编码
-            $targetW = $profile['width'];
-            $targetH = $profile['height'];
-            $needTranscode = $this->srcInitialized && ($this->srcWidth !== $targetW || $this->srcHeight !== $targetH || $this->profileWatermark[$name] !== null);
+            // 转码逻辑
+            $targetW = $profile['width'] > 0 ? $profile['width'] : $this->srcWidth;
+            $targetH = $profile['height'] > 0 ? $profile['height'] : $this->srcHeight;
+            $needTranscode = $this->srcInitialized && (
+                ($profile['width'] > 0 && $this->srcWidth !== $profile['width']) ||
+                ($profile['height'] > 0 && $this->srcHeight !== $profile['height']) ||
+                $this->profileWatermark[$name] !== null
+            );
             if ($needTranscode) {
-                $cacheKey = "{$profile['width']}_{$profile['height']}";
+                $cacheKey = "{$targetW}_{$targetH}";
                 if (!isset($this->decodedFrameCache[$cacheKey])) {
                     /** 解码h264为yuv */
                     $rawYuv = $this->decodeNaluToYuv($avcData);
                     if ($rawYuv !== null) {
-                        if ($this->srcWidth !== $profile['width'] || $this->srcHeight !== $profile['height']) {
+                        if ($targetW !== $this->srcWidth || $targetH !== $this->srcHeight) {
                             /** 缩放尺寸 */
-                            $scaledYuv = $this->scaler->scaleYUV420P($rawYuv, $this->srcWidth, $this->srcHeight, $profile['width'], $profile['height']);
+                            $scaledYuv = $this->scaler->scaleYUV420P($rawYuv, $this->srcWidth, $this->srcHeight, $targetW, $targetH);
                         } else {
                             $scaledYuv = $rawYuv;
                         }
@@ -346,12 +350,12 @@ class PurePhpHlsGenerator
                     $scaledYuv = $this->decodedFrameCache[$cacheKey];
 
                     if ($this->profileWatermark[$name] !== null) {
-                        $scaledYuv = $this->applyWatermarkToFrame($scaledYuv, $profile['width'], $profile['height'], $this->profileWatermark[$name]);
+                        $scaledYuv = $this->applyWatermarkToFrame($scaledYuv, $targetW, $targetH, $this->profileWatermark[$name]);
                     }
 
                     /** 使用该profile专属的编码器，避免多码率间参考帧污染 */
                     $encoder = $this->encoders[$name];
-                    $encoder->setResolution($profile['width'], $profile['height']);
+                    $encoder->setResolution($targetW, $targetH);
                     $encoder->setBitrate($profile['bitrate']);
                     $encoder->setFps($profile['fps']);
                     $encoder->setQp($profile['qp'] ?? 26);
