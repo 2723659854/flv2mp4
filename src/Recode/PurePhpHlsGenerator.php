@@ -61,6 +61,8 @@ class PurePhpHlsGenerator
     private int $srcHeight = 0;
     private bool $srcInitialized = false;
 
+    private array $profileWatermark = [];
+
     /** 最大处理帧数 调试用 */
     private ?int $maxFrames = null;
     private array $videoFrameCounts = [];
@@ -102,6 +104,12 @@ class PurePhpHlsGenerator
             $this->videoFrameCounts[$name] = 0;
             $this->lastDts[$name] = -1;
             $this->segmentFirstFrame[$name] = true;
+
+            if (!empty($profile['watermark']) && !empty($profile['watermark_file'])) {
+                $this->profileWatermark[$name] = $this->loadWatermarkFile($profile['watermark_file']);
+            } else {
+                $this->profileWatermark[$name] = null;
+            }
         }
 
         /** 初始化空m3u8 */
@@ -116,6 +124,85 @@ class PurePhpHlsGenerator
     public function setMaxFrames(int $maxFrames): void
     {
         $this->maxFrames = $maxFrames;
+    }
+
+    private function loadWatermarkFile(string $watermarkFile): array
+    {
+        if (!file_exists($watermarkFile)) {
+            throw new \RuntimeException("水印文件不存在: {$watermarkFile}");
+        }
+
+        $wmData = file_get_contents($watermarkFile);
+        if ($wmData === false || $wmData === '') {
+            throw new \RuntimeException("无法读取水印文件: {$watermarkFile}");
+        }
+
+        $basename = basename($watermarkFile, '.yuv');
+        if (preg_match('/_(\d+)x(\d+)$/', $basename, $matches)) {
+            $wmWidth = (int)$matches[1];
+            $wmHeight = (int)$matches[2];
+        } else {
+            $wmWidth = 80;
+            $wmHeight = 16;
+        }
+
+        $wmYSize = $wmWidth * $wmHeight;
+        $wmUvSize = $wmYSize >> 2;
+        $expectedSize = $wmYSize + $wmUvSize * 2;
+
+        if (strlen($wmData) < $expectedSize) {
+            throw new \RuntimeException("水印文件尺寸不匹配: 期望 {$expectedSize} 字节, 实际 " . strlen($wmData) . " 字节");
+        }
+
+        return [
+            'width' => $wmWidth,
+            'height' => $wmHeight,
+            'y' => substr($wmData, 0, $wmYSize),
+            'u' => substr($wmData, $wmYSize, $wmUvSize),
+            'v' => substr($wmData, $wmYSize + $wmUvSize, $wmUvSize),
+        ];
+    }
+
+    private function applyWatermarkToFrame(string $yuvData, int $frameW, int $frameH, array $wm): string
+    {
+        if ($wm['width'] > $frameW || $wm['height'] > $frameH) {
+            return $yuvData;
+        }
+
+        $ySize = $frameW * $frameH;
+        $uvW = $frameW >> 1;
+        $uvH = $frameH >> 1;
+        $uvSize = $uvW * $uvH;
+
+        $dstX = 0;
+        $dstY = 0;
+
+        for ($row = 0; $row < $wm['height']; $row++) {
+            $srcOffset = $row * $wm['width'];
+            $dstOffset = ($dstY + $row) * $frameW + $dstX;
+            for ($col = 0; $col < $wm['width']; $col++) {
+                $yuvData[$dstOffset + $col] = $wm['y'][$srcOffset + $col];
+            }
+        }
+
+        $wmUvW = $wm['width'] >> 1;
+        $wmUvH = $wm['height'] >> 1;
+        $dstUvX = $dstX >> 1;
+        $dstUvY = $dstY >> 1;
+
+        $uOffset = $ySize;
+        $vOffset = $ySize + $uvSize;
+
+        for ($row = 0; $row < $wmUvH; $row++) {
+            $srcOffset = $row * $wmUvW;
+            $dstOffset = ($dstUvY + $row) * $uvW + $dstUvX;
+            for ($col = 0; $col < $wmUvW; $col++) {
+                $yuvData[$uOffset + $dstOffset + $col] = $wm['u'][$srcOffset + $col];
+                $yuvData[$vOffset + $dstOffset + $col] = $wm['v'][$srcOffset + $col];
+            }
+        }
+
+        return $yuvData;
     }
 
     /**
@@ -237,15 +324,19 @@ class PurePhpHlsGenerator
             // 转码逻辑：源尺寸≠目标尺寸才缩放编码
             $targetW = $profile['width'];
             $targetH = $profile['height'];
-            $needTranscode = $this->srcInitialized && ($this->srcWidth !== $targetW || $this->srcHeight !== $targetH);
+            $needTranscode = $this->srcInitialized && ($this->srcWidth !== $targetW || $this->srcHeight !== $targetH || $this->profileWatermark[$name] !== null);
             if ($needTranscode) {
                 $cacheKey = "{$profile['width']}_{$profile['height']}";
                 if (!isset($this->decodedFrameCache[$cacheKey])) {
                     /** 解码h264为yuv */
                     $rawYuv = $this->decodeNaluToYuv($avcData);
                     if ($rawYuv !== null) {
-                        /** 缩放尺寸 */
-                        $scaledYuv = $this->scaler->scaleYUV420P($rawYuv, $this->srcWidth, $this->srcHeight, $profile['width'], $profile['height']);
+                        if ($this->srcWidth !== $profile['width'] || $this->srcHeight !== $profile['height']) {
+                            /** 缩放尺寸 */
+                            $scaledYuv = $this->scaler->scaleYUV420P($rawYuv, $this->srcWidth, $this->srcHeight, $profile['width'], $profile['height']);
+                        } else {
+                            $scaledYuv = $rawYuv;
+                        }
                         $this->decodedFrameCache[$cacheKey] = $scaledYuv;
                     }
                 }
@@ -253,6 +344,11 @@ class PurePhpHlsGenerator
                 if (isset($this->decodedFrameCache[$cacheKey])) {
                     /** 取出被缩放的yuv */
                     $scaledYuv = $this->decodedFrameCache[$cacheKey];
+
+                    if ($this->profileWatermark[$name] !== null) {
+                        $scaledYuv = $this->applyWatermarkToFrame($scaledYuv, $profile['width'], $profile['height'], $this->profileWatermark[$name]);
+                    }
+
                     /** 使用该profile专属的编码器，避免多码率间参考帧污染 */
                     $encoder = $this->encoders[$name];
                     $encoder->setResolution($profile['width'], $profile['height']);

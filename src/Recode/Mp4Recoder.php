@@ -21,6 +21,14 @@ class Mp4Recoder
     private int $targetFps = 30;
     private int $targetQp = 26;
 
+    private bool $watermarkEnabled = false;
+    private string $watermarkFile = '';
+    private string $wmY = '';
+    private string $wmU = '';
+    private string $wmV = '';
+    private int $wmWidth = 0;
+    private int $wmHeight = 0;
+
     private ?H264Decoder $decoder = null;
     private ?H264Encoder $encoder = null;
     private ?VideoScaler $scaler = null;
@@ -69,9 +77,90 @@ class Mp4Recoder
         $this->targetFps = $config['fps'] ?? 30;
         $this->targetQp = $config['qp'] ?? 26;
 
+        if (!empty($config['watermark']) && !empty($config['watermark_file'])) {
+            $this->watermarkEnabled = true;
+            $this->watermarkFile = $config['watermark_file'];
+            $this->loadWatermark();
+        }
+
         $this->decoder = new H264Decoder();
         $this->encoder = new H264Encoder();
         $this->scaler = new VideoScaler();
+    }
+
+    private function loadWatermark(): void
+    {
+        if (!file_exists($this->watermarkFile)) {
+            throw new \RuntimeException("水印文件不存在: {$this->watermarkFile}");
+        }
+
+        $wmData = file_get_contents($this->watermarkFile);
+        if ($wmData === false || $wmData === '') {
+            throw new \RuntimeException("无法读取水印文件: {$this->watermarkFile}");
+        }
+
+        $basename = basename($this->watermarkFile, '.yuv');
+        if (preg_match('/_(\d+)x(\d+)$/', $basename, $matches)) {
+            $this->wmWidth = (int)$matches[1];
+            $this->wmHeight = (int)$matches[2];
+        } else {
+            $this->wmWidth = 80;
+            $this->wmHeight = 16;
+        }
+
+        $wmYSize = $this->wmWidth * $this->wmHeight;
+        $wmUvSize = $wmYSize >> 2;
+        $expectedSize = $wmYSize + $wmUvSize * 2;
+
+        if (strlen($wmData) < $expectedSize) {
+            throw new \RuntimeException("水印文件尺寸不匹配: 期望 {$expectedSize} 字节, 实际 " . strlen($wmData) . " 字节");
+        }
+
+        $this->wmY = substr($wmData, 0, $wmYSize);
+        $this->wmU = substr($wmData, $wmYSize, $wmUvSize);
+        $this->wmV = substr($wmData, $wmYSize + $wmUvSize, $wmUvSize);
+    }
+
+    private function applyWatermark(string $yuvData, int $frameW, int $frameH): string
+    {
+        if ($this->wmWidth > $frameW || $this->wmHeight > $frameH) {
+            return $yuvData;
+        }
+
+        $ySize = $frameW * $frameH;
+        $uvW = $frameW >> 1;
+        $uvH = $frameH >> 1;
+        $uvSize = $uvW * $uvH;
+
+        $dstX = 0;
+        $dstY = 0;
+
+        for ($row = 0; $row < $this->wmHeight; $row++) {
+            $srcOffset = $row * $this->wmWidth;
+            $dstOffset = ($dstY + $row) * $frameW + $dstX;
+            for ($col = 0; $col < $this->wmWidth; $col++) {
+                $yuvData[$dstOffset + $col] = $this->wmY[$srcOffset + $col];
+            }
+        }
+
+        $wmUvW = $this->wmWidth >> 1;
+        $wmUvH = $this->wmHeight >> 1;
+        $dstUvX = $dstX >> 1;
+        $dstUvY = $dstY >> 1;
+
+        $uOffset = $ySize;
+        $vOffset = $ySize + $uvSize;
+
+        for ($row = 0; $row < $wmUvH; $row++) {
+            $srcOffset = $row * $wmUvW;
+            $dstOffset = ($dstUvY + $row) * $uvW + $dstUvX;
+            for ($col = 0; $col < $wmUvW; $col++) {
+                $yuvData[$uOffset + $dstOffset + $col] = $this->wmU[$srcOffset + $col];
+                $yuvData[$vOffset + $dstOffset + $col] = $this->wmV[$srcOffset + $col];
+            }
+        }
+
+        return $yuvData;
     }
 
     public function setMaxFrames(int $maxFrames): void
@@ -595,6 +684,10 @@ class Mp4Recoder
                     $this->srcWidth, $this->srcHeight,
                     $targetW, $targetH
                 );
+            }
+
+            if ($this->watermarkEnabled) {
+                $yuvData = $this->applyWatermark($yuvData, $targetW, $targetH);
             }
 
             $this->encoder->setResolution($targetW, $targetH);

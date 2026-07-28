@@ -1,4 +1,4 @@
-# FLV ↔ MP4 / HLS 转换工具
+# FLV ↔ MP4 / HLS 转换工具 + H264 重编码工具
 
 <p align="center">
   <a href="./README.cn.md"><strong>🇨🇳 中文</strong></a> •
@@ -197,23 +197,77 @@ php forward.php http://127.0.0.1:8501/a/b.flv \
 **技术定位**：这是一个完整的 **H.264 像素处理管道**（解码 → 处理 → 编码），不依赖 FFmpeg，纯 PHP 实现。
 
 ---
-以下为多码率hls示例：
+####  flv=>hls
+以下为flv转码多码率hls示例：
 ```php
 <?php
 
 require_once __DIR__ . '/vendor/autoload.php';
 ini_set('memory_limit', '2048M');
 $profiles = [
-    '1080p' => ['width' => 1920, 'height' => 1080, 'bitrate' => 5000000],
-    '720p'  => ['width' => 1280, 'height' => 720,  'bitrate' => 2500000],
-    '480p'  => ['width' => 854,  'height' => 480,  'bitrate' => 1200000],
-    '360p'  => ['width' => 640,  'height' => 360,  'bitrate' => 600000],
+    // 不同码率分别配置
+    '240p' => [
+        'width' => 426,      // 或 424，保持 16:9 比例即可
+        'height' => 240,
+        'bitrate' => 300000, // 300 Kbps（视频码率）
+        'fps' => 24,
+        'audioBitrate' => 48000, // 48 Kbps
+        'qp' => 30,          // 保持 30 以确保稳定性
+        'watermark'=>true,     // 是否添加水印
+        'watermark_file'=> __DIR__."/src/Static/watermark_80x16.yuv",// 水印文件
+    ]
 ];
-$generator = new PurePhpHlsGenerator($profiles, __DIR__ . '/hls/output');
-$generator->processFlv(__DIR__ . '/test.flv');
+$generator = new \Xiaosongshu\Flv2mp4\Recode\PurePhpHlsGenerator($profiles, __DIR__ . '/hls/output');
+$generator->processFlv(__DIR__ . '/input.flv');
+echo "索引地址: hls/output/master.m3u8\n";
 echo "所有处理完成！\n";
 ```
-其他功能请使用编码器自定义实现。h264详细使用方法见<a href="./src/Codec/README.md">READEME</a>`。
+#### flv=>flv
+将flv使用新的码率编码
+```php
+<?php
+require_once __DIR__ . '/vendor/autoload.php';
+ini_set('memory_limit', '2048M');
+
+$config = [
+    'width' => 320,        // 目标宽度，0 = 保持原分辨率
+    'height' => 180,       // 目标高度，0 = 保持原分辨率
+    'bitrate' => 150000,   // 目标码率（bps），0 = 使用 QP 模式
+    'fps' => 15,           // 目标帧率
+    'qp' => 30,            // QP 质量参数（码率为 0 时生效）
+    'watermark'=>true,     // 是否添加水印
+    'watermark_file'=> __DIR__."/src/Static/watermark_80x16.yuv",// 水印文件
+];
+
+$recoder = new \Xiaosongshu\Flv2mp4\Recode\FlvRecoder($config);
+$recoder->setMaxFrames(50);  // 可选：限制处理帧数
+$recoder->processFlv(__DIR__ . '/input.flv', __DIR__.'/output.flv');
+echo "flv重编码完成\r\n";
+```
+#### mp4=>mp4
+将mp4文件使用新的码率编码
+```php
+<?php
+require_once __DIR__ . '/vendor/autoload.php';
+ini_set('memory_limit', '2048M');
+
+$config = [
+    'width' => 320,        // 目标宽度，0 = 保持原分辨率
+    'height' => 180,       // 目标高度，0 = 保持原分辨率
+    'bitrate' => 150000,   // 目标码率（bps），0 = 使用 QP 模式
+    'fps' => 15,           // 目标帧率
+    'qp' => 30,            // QP 质量参数（码率为 0 时生效）
+    'watermark'=>true,     // 是否添加水印
+    'watermark_file'=> __DIR__."/src/Static/watermark_80x16.yuv",// 水印文件
+];
+$recoder = new \Xiaosongshu\Flv2mp4\Recode\Mp4Recoder($config);
+$recoder->setMaxFrames(50); // 可选：限制处理帧数
+$recoder->processMp4(__DIR__ . '/input.mp4', __DIR__ . '/output.mp4');
+echo "mp4重编码完成\r\n";
+```
+- 添加水印的时候，需要使用yuv格式文件，并且文件名称如上面的示例所示，必须包含水印文件的宽高（watermark_{width}x{height}.yuv）。工具会自动从文件名解析宽高（如 `watermark_80x16.yuv` → 宽 80，高 16），请确保文件名格式准确。
+- 重编码模块提供了 **YUV 像素级操作接口**，你可以基于此实现自定义功能，如添加字幕、画中画、视频拼接等。
+- h264详细使用方法见<a href="./src/Codec/README.md">README</a>`。
 
 ---
 
@@ -227,15 +281,16 @@ echo "所有处理完成！\n";
 - [x] **CAVLC 熵编码**（Baseline Profile）
 - [x] **分辨率缩放**（解码后 YUV 缩放 → 重新编码）
 - [x] **码率控制**（通过 QP 参数调节）
-- [ ] **B 帧支持**（计划中，需处理双向预测）
+- [ ] **B 帧支持**（计划中，需扩展至 Main Profile 并实现双向预测）
 - [ ] **CABAC 熵编码**（计划中，Main Profile 支持）
 
+> ⚠️ **性能说明**：当前 H.264 重编码模块由纯 PHP 实现，适用于**短时长视频（建议 ≤ 10 秒）**的离线处理或功能验证。对于长视频或高分辨率转码，建议使用 FFmpeg 等专业工具。
 ---
 
 ## 🔧 技术说明
 
 - 纯 PHP 8.1+ 实现，无 FFmpeg 依赖
-- 配套 [xiaosongshu/rtmp_server](https://github.com/2723659854/rtmp-server) 使用
+- 当前项目最初主要是为 [xiaosongshu/rtmp_server](https://github.com/2723659854/rtmp-server) 提供服务
 - 建议使用 [PHPStan](https://phpstan.org/) Level 8 进行静态分析
 
 ---
