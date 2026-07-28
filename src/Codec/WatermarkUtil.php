@@ -168,12 +168,24 @@ class WatermarkUtil
             $y = (int)(($height - $textH) / 2) - $bbox[7];
             imagettftext($img, $fontSize, 0, $x, $y, $textColor, $fontFamily, $text);
         } else {
-            $fontWidth = imagefontwidth($fontSize);
-            $fontHeight = imagefontheight($fontSize);
-            $textW = $fontWidth * strlen($text);
+            if (!is_int($fontSize) || $fontSize < 1 || $fontSize > 5) {
+                $fontSize = 5;
+            }
+            $textLen = strlen($text);
+            $bestFontSize = $fontSize;
+            for ($fs = $fontSize; $fs >= 1; $fs--) {
+                $fw = imagefontwidth($fs);
+                if ($fw * $textLen <= $width) {
+                    $bestFontSize = $fs;
+                    break;
+                }
+            }
+            $fontWidth = imagefontwidth($bestFontSize);
+            $fontHeight = imagefontheight($bestFontSize);
+            $textW = $fontWidth * $textLen;
             $x = (int)(($width - $textW) / 2);
             $y = (int)(($height - $fontHeight) / 2);
-            imagestring($img, $fontSize, $x, $y, $text, $textColor);
+            imagestring($img, $bestFontSize, $x, $y, $text, $textColor);
         }
 
         $yuvData = self::rgbImageToYuv420p($img, $width, $height);
