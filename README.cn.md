@@ -29,11 +29,12 @@
 
 ## 环境依赖
 
-| 依赖项 | 说明 |
-|--------|------|
-| PHP | ≥ 8.1（**仅 CLI 命令行模式**） |
-| `sockets` 扩展 | **必需**，提供底层 Socket 通信 |
-| `bcmath` 扩展 | 可选，高精度运算优化 |
+| 依赖项          | 说明                     |
+|--------------|------------------------|
+| PHP          | ≥ 8.1（**仅 CLI 命令行模式**） |
+| `sockets` 扩展 | **必需**，提供底层 Socket 通信  |
+| `bcmath` 扩展  | 可选，高精度运算优化             |
+| `gd` 扩展      | 可选，仅生成美观的水印时需要         |
 
 💡 **无需 FFmpeg，无需任何第三方二进制程序，全部纯 PHP 实现。**
 
@@ -286,6 +287,88 @@ echo "mp4重编码完成\r\n";
 
 > ⚠️ **性能说明**：当前 H.264 重编码模块由纯 PHP 实现，适用于**短时长视频（建议 ≤ 10 秒）**的离线处理或功能验证。对于长视频或高分辨率转码，建议使用 FFmpeg 等专业工具。
 ---
+
+### 水印生成工具
+本项目提供php生成水印yuv功能，GD 扩展优先，无 GD 时自动降级为点阵字体。
+- generateTextWatermark()	生成文字水印 YUV，	GD 扩展优先，无 GD 时自动降级为点阵字体
+- generateFromImage()	从图片生成水印 YUV，需要 GD 扩展，支持png/jpg
+
+#### 使用文字生成水印文件
+
+```php
+<?php
+require_once __DIR__ . '/vendor/autoload.php';
+
+use Xiaosongshu\Flv2mp4\Codec\WatermarkUtil;
+
+echo "=== 测试 WatermarkUtil ===\n\n";
+
+// 测试1：生成文字水印
+echo "1. 生成文字水印 (xiaosongshu, 80x16)...\n";
+$outputFile1 = __DIR__ . '/test_wm_80x16.yuv';
+$start = microtime(true);
+$result = WatermarkUtil::generateTextWatermark(
+    'xiaosongshu',
+    80,
+    16,
+    $outputFile1,
+    [
+        'fontSize' => 5, // 内置字体大小 1-5
+        'fontColor' => [255, 255, 255],
+        'bgColor' => [0, 0, 0],
+    ]
+);
+$cost = round(microtime(true) - $start, 3);
+if ($result && file_exists($outputFile1)) {
+    $size = filesize($outputFile1);
+    $expectedSize = 80 * 16 + (80 * 16 >> 1);
+    echo "   成功! 文件大小: {$size} 字节 (期望: {$expectedSize}) - 耗时: {$cost}s\n";
+    if ($size === $expectedSize) {
+        echo "   ✅ 文件尺寸正确\n";
+    } else {
+        echo "   ❌ 文件尺寸不匹配\n";
+    }
+} else {
+    echo "   ❌ 生成失败\n";
+}
+```
+#### 使用图片生成水印文件
+
+- 需要php安装gd扩展
+
+```php
+<?php
+
+require_once __DIR__ . '/vendor/autoload.php';
+
+use Xiaosongshu\Flv2mp4\Codec\WatermarkUtil;
+
+echo "=== 测试 WatermarkUtil ===\n\n";
+
+// 测试1：生成文字水印
+echo "1. 生成文字水印 (xiaosongshu, 80x16)...\n";
+$outputFile1 = __DIR__ . '/test_wm_copy_80x16.yuv';
+$start = microtime(true);
+$result = WatermarkUtil::generateFromImage(
+    __DIR__."/watermark_80x16.png",
+    $outputFile1,
+    80,
+    16,
+);
+$cost = round(microtime(true) - $start, 3);
+if ($result && file_exists($outputFile1)) {
+    $size = filesize($outputFile1);
+    $expectedSize = 80 * 16 + (80 * 16 >> 1);
+    echo "   成功! 文件大小: {$size} 字节 (期望: {$expectedSize}) - 耗时: {$cost}s\n";
+    if ($size === $expectedSize) {
+        echo "   ✅ 文件尺寸正确\n";
+    } else {
+        echo "   ❌ 文件尺寸不匹配\n";
+    }
+} else {
+    echo "   ❌ 生成失败\n";
+}
+```
 
 ## 🔧 技术说明
 
