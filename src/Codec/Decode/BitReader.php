@@ -53,10 +53,16 @@ class BitReader
             $this->pos = $total;
             return 0;
         }
-        
+
+        $totalBitsNeeded = $leadingZeros + 1 + $leadingZeros;
+        if ($this->pos + $totalBitsNeeded > $total) {
+            $this->pos = $total;
+            return 0;
+        }
+
         // 跳过分隔符 '1'
         $this->pos += $leadingZeros + 1;
-        
+
         // 读取 leadingZeros 个数据位
         $value = 0;
         for ($i = 0; $i < $leadingZeros; $i++) {
@@ -64,7 +70,7 @@ class BitReader
             $value = ($value << 1) | $bit;
         }
         $this->pos += $leadingZeros;
-        
+
         // 计算 codeNum = 2^leadingZeros + value
         $codeNum = (1 << $leadingZeros) + $value;
         return $codeNum - 1;
