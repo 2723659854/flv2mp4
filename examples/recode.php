@@ -11,6 +11,12 @@ $config = [
 ];
 
 $recoder = new \Xiaosongshu\Flv2mp4\Recode\FlvRecoder($config);
-$recoder->setMaxFrames(100);  // 可选：限制处理帧数
+$recoder->setMaxFrames(50);  // 可选：限制处理帧数
 $recoder->processFlv(__DIR__ . '/test.flv', __DIR__.'/output.flv');
-echo "flv转码完成\r\n";
+echo "flv重编码完成\r\n";
+
+// 转码模式（改变分辨率/码率）
+$recoder = new \Xiaosongshu\Flv2mp4\Recode\Mp4Recoder($config);
+$recoder->setMaxFrames(50);
+$recoder->processMp4(__DIR__ . '/demo.mp4', __DIR__ . '/output.mp4');
+echo "mp4重编码完成\r\n";
