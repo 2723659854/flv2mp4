@@ -1,4 +1,10 @@
 # FLV ↔ MP4 / HLS 转换工具 + H264 重编码工具
+<p align="center">
+<img src="https://img.shields.io/badge/PHP-8.1%2B-blue" />
+<img src="https://img.shields.io/badge/License-Apache%202.0-green" />
+<img src="https://img.shields.io/badge/Code-PHPStan%20Level8-purple" />
+<img src="https://img.shields.io/badge/No-FFmpeg-red" />
+</p>
 
 <p align="center">
   <a href="./README.cn.md"><strong>🇨🇳 中文</strong></a> •
@@ -7,6 +13,22 @@
 
 纯 PHP 8.1+ 实现的轻量级媒体处理工具包，**零外部依赖（无需 FFmpeg）**。  
 支持 FLV、FMP4、MP4、HLS 互转，直播流网关、推流、拉流、转播，以及 **H.264 解码 + 缩放 + 重新编码**（Baseline Profile）。
+
+---
+
+## 📋 目录
+- [项目简介](#项目简介)
+- [核心功能](#🎯-核心功能)
+- [环境依赖](#环境依赖)
+- [安装](#🚀-安装)
+- [快速开始](#📚-快速开始)
+- [高级功能](#🌐-高级功能)
+- [测试播放](#🧪-测试与播放)
+- [应用场景](#🎯-应用场景)
+- [H.264重编码详解](#🔥-h264-解码--缩放--重编码)
+- [水印工具](#水印生成工具)
+- [技术说明](#🔧-技术说明)
+- [开源协议&联系方式](#开源协议--免责声明)
 
 ---
 
@@ -33,8 +55,7 @@
 |--------------|------------------------|
 | PHP          | ≥ 8.1（**仅 CLI 命令行模式**） |
 | `sockets` 扩展 | **必需**，提供底层 Socket 通信  |
-| `bcmath` 扩展  | 可选，高精度运算优化             |
-| `gd` 扩展      | 可选，仅生成美观的水印时需要         |
+| `gd` 扩展      | **可选**，用于从 PNG/JPG 图片生成水印。如果未安装，将自动降级为内置点阵字体模式。       |
 
 💡 **无需 FFmpeg，无需任何第三方二进制程序，全部纯 PHP 实现。**
 
@@ -88,70 +109,75 @@ $file = __DIR__ . '/test.flv';
 
 ### FLV 直播网关
 
-支持多级代理部署，实现高并发直播流转发。
+支持多级代理部署，实现高并发直播流转发。新建文件`flvGateway.php`，内容如下:
 
 ```php
+<?php
+require_once __DIR__ . '/vendor/autoload.php';
 $gateway = new \Xiaosongshu\Flv2mp4\manage\FlvGateway(8080, 'http://127.0.0.1:8501');
 $gateway->debug = true;
 $gateway->start();
 ```
-
+启动flv网关
 ```bash
-# 一级网关
-php flvGateway.php 8080 http://127.0.0.1:8501
-# 二级网关
-php flvGateway.php 8081 http://127.0.0.1:8080
-# 播放地址：http://127.0.0.1:8081/{app}/{stream}.flv
+php flvGateway.php
 ```
 
 ### 静态文件网关
 
-轻量级 HTTP 文件服务器，支持目录浏览开关。
+轻量级 HTTP 文件服务器，支持目录浏览开关。新建文件`fileGateway.php`，内容如下:
 
 ```php
-$server = new \Xiaosongshu\Flv2mp4\manage\FileGateway(
-    host: '0.0.0.0',
-    port: 8100,
-    documentRoot: __DIR__,
-    enableDirListing: false
-);
+<?php
+require_once __DIR__ . '/vendor/autoload.php';
+$server = new \Xiaosongshu\Flv2mp4\manage\FileGateway( '0.0.0.0',8100,__DIR__,false);
 $server->debug = true;
 $server->start();
 ```
-
+启动file网关
+```bash
+php fileGateway.php
+```
 ### 推流客户端
 
-支持 HTTP-FLV、WS-FLV、RTMP 三种协议，倍速推流、断线重连。
-
+支持 HTTP-FLV、WS-FLV、RTMP 三种协议，倍速推流、断线重连。新建文件`pusher.php`，内容如下:
+```php
+require_once __DIR__ . '/vendor/autoload.php';
+ini_set('memory_limit', '2048M');
+$pusher = new \Xiaosongshu\Flv2mp4\Manage\PusherManage(__DIR__."/test.flv", "http://127.0.0.1:8501/live/stream", 1.0, false);
+$pusher->start();
+```
+启动推流
 ```bash
-# HTTP-FLV 推流
-php flv_pusher.php test.flv http://127.0.0.1:8501/live/stream
-
-# 2 倍速 + 禁用重连
-php flv_pusher.php test.flv http://127.0.0.1:8501/live/stream 2.0 --no-reconnect
-
-# RTMP 推流
-php rtmp_pusher.php test.mp4 rtmp://127.0.0.1:1935/live/stream
-
-# MP4 推流（2 倍速）
-php mp4_pusher.php test.mp4 http://127.0.0.1:8501/live/stream 2.0
+php pusher.php
 ```
 
 ### 拉流客户端
 
-从直播流拉取并保存为本地 FLV，适合录制或调试。
-
+从直播流拉取并保存为本地 FLV，适合录制或调试。新建文件`puller.php`，内容如下：
+```php
+require_once __DIR__ . '/vendor/autoload.php';
+ini_set('memory_limit', '2048M');
+$puller = new \Xiaosongshu\Flv2mp4\Manage\PullerManage("ws://127.0.0.1:8501/live/stream.flv", __DIR__."/pull_record.flv", 0, false);
+$puller->start();
+```
+启动拉流客户端
 ```bash
-php puller.php http://127.0.0.1:8501/live/stream.flv output.flv 0 --no-reconnect
+php puller.php
 ```
 
 ### 直播转发（转播）
 
-一路拉流，同时转发至多个目标地址（支持协议混用）。
-
+一路拉流，同时转发至多个目标地址（支持协议混用）。新建文件`forward.php`，内容如下：
+```php
+require_once __DIR__ . '/vendor/autoload.php';
+ini_set('memory_limit', '2048M');
+$forwarder = new \Xiaosongshu\Flv2mp4\Flv\FlvForwardClient("http://127.0.0.1:8501/a/b.flv", ["rtmp://127.0.0.1:1935/c/d","ws://127.0.0.1:8501/c/e"], 0, true);
+$forwarder->start();
+```
+启动转播客户端
 ```bash
-php forward.php http://127.0.0.1:8501/a/b.flv \
-  "rtmp://127.0.0.1:1935/c/d,ws://127.0.0.1:8501/c/e,http://127.0.0.1:8501/c/f"
+php forward.php
 ```
 
 ---
@@ -290,7 +316,7 @@ echo "mp4重编码完成\r\n";
 
 ### 水印生成工具
 本项目提供php生成水印yuv功能，GD 扩展优先，无 GD 时自动降级为点阵字体。
-- generateTextWatermark()	生成文字水印 YUV，	GD 扩展优先，无 GD 时自动降级为点阵字体
+- generateFromText()	生成文字水印 YUV，	GD 扩展优先，无 GD 时自动降级为点阵字体,**内置点阵字体仅支持 ASCII 字符（英文字母、数字、英文标点）**
 - generateFromImage()	从图片生成水印 YUV，需要 GD 扩展，支持png/jpg
 
 #### 使用文字生成水印文件
@@ -305,15 +331,16 @@ echo "=== 测试 WatermarkUtil ===\n\n";
 
 // 测试1：生成文字水印
 echo "1. 生成文字水印 (xiaosongshu, 80x16)...\n";
-$outputFile1 = __DIR__ . '/test_wm_80x16.yuv';
+$outputFile1 = __DIR__ . '/test_wm_text.yuv';
 $start = microtime(true);
-$result = WatermarkUtil::generateTextWatermark(
+$result = WatermarkUtil::generateFromText(
     'xiaosongshu',
+    $outputFile1,
     80,
     16,
-    $outputFile1,
+
     [
-        'fontSize' => 5, // 内置字体大小 1-5
+        'fontSize' => 5, // 内置字体大小 1-5 `fontSize` 取值范围 1-5（数字越大字体越大），内置点阵字体仅支持 ASCII 字符。
         'fontColor' => [255, 255, 255],
         'bgColor' => [0, 0, 0],
     ]
@@ -345,8 +372,8 @@ use Xiaosongshu\Flv2mp4\Codec\WatermarkUtil;
 
 echo "=== 测试 WatermarkUtil ===\n\n";
 
-// 测试1：生成文字水印
-echo "1. 生成文字水印 (xiaosongshu, 80x16)...\n";
+// 测试1：从图片生成水印
+echo "1. 从图片生成水印 (xiaosongshu, 80x16)...\n";
 $outputFile1 = __DIR__ . '/test_wm_copy_80x16.yuv';
 $start = microtime(true);
 $result = WatermarkUtil::generateFromImage(
@@ -377,6 +404,13 @@ if ($result && file_exists($outputFile1)) {
 - 建议使用 [PHPStan](https://phpstan.org/) Level 8 进行静态分析
 
 ---
+
+### 常见问题 FAQ
+Q：为什么只能 CLI 运行，不能网页端调用？
+Q：重编码内存占用过高如何调优？
+Q：Windows 环境下 sockets 扩展开启方法？
+Q：输出视频无法在微信内置播放器播放怎么解决？
+Q：水印中文乱码原因？
 
 ## 开源协议 & 免责声明
 

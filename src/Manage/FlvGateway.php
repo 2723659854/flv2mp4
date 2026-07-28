@@ -32,9 +32,14 @@ class FlvGateway
     private $_timerEvent = null;
     private $handshakeClients = [];
 
-    public function __construct($port = null, $upstream = null)
+    /**
+     * flv网关初始化
+     * @param int $port 监听端口
+     * @param string $upstream 上游地址（http-flv/ws-flv）
+     */
+    public function __construct(int $port = 8080,string $upstream = "http://127.0.0.1:8501")
     {
-        if ($port !== null) $this->listenPort = (int)$port;
+        if ($port !== null) $this->listenPort = $port;
         if ($upstream !== null) $this->upstreamBaseUrl = rtrim($upstream, '/');
     }
 
@@ -80,6 +85,10 @@ class FlvGateway
         return $frame . $data;
     }
 
+    /**
+     * 启动网关
+     * @return void
+     */
     public function start(): void
     {
         $context = stream_context_create([

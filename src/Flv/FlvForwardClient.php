@@ -67,6 +67,13 @@ class FlvForwardClient
     const SOUND_FORMAT_AAC = 10;
     const AAC_PACKET_TYPE_SEQUENCE_HEADER = 0;
 
+    /**
+     * 转播器初始化
+     * @param string $pullUrl 上游拉流地址
+     * @param array $pushUrls 下游转发地址组
+     * @param int $duration 推流时长（秒），0表示持续推流直到手动停止
+     * @param bool $autoReconnect 自动重连
+     */
     public function __construct(string $pullUrl, array $pushUrls, int $duration = 0, bool $autoReconnect = true)
     {
         $this->pullUrl = $pullUrl;
@@ -86,6 +93,10 @@ class FlvForwardClient
         $this->isRunning = false;
     }
 
+    /**
+     * 启动转播器
+     * @return void
+     */
     public function start(): void
     {
         $this->stats['start_time'] = microtime(true);

@@ -53,6 +53,13 @@ class FileGateway
         'fmp4' => 'video/mp4', 'cmfv' => 'video/mp4',
     ];
 
+    /**
+     * 静态文件网关
+     * @param string $host 监测地址
+     * @param int $port 检测端口
+     * @param string $documentRoot 根目录
+     * @param bool $enableDirListing 是否开启目录扫描
+     */
     public function __construct(
         string $host = '0.0.0.0',
         int    $port = 8100,
@@ -66,6 +73,10 @@ class FileGateway
         if (!is_dir($this->documentRoot)) mkdir($this->documentRoot, 0777, true);
     }
 
+    /**
+     * 启动网关
+     * @return void
+     */
     public function start(): void
     {
         $context = stream_context_create([

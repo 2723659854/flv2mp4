@@ -9,11 +9,12 @@ echo "=== 测试 WatermarkUtil ===\n\n";
 echo "1. 生成文字水印 (xiaosongshu, 80x16)...\n";
 $outputFile1 = __DIR__ . '/test_wm_text.yuv';
 $start = microtime(true);
-$result = WatermarkUtil::generateTextWatermark(
+$result = WatermarkUtil::generateFromText(
     'xiaosongshu',
+    $outputFile1,
     80,
     16,
-    $outputFile1,
+
     [
         'fontSize' => 5, // 内置字体大小 1-5
         'fontColor' => [255, 255, 255],
@@ -67,7 +68,7 @@ if (file_exists($existingWm)) {
     for ($i = 0; $i < $ySize; $i++) {
         if (ord($wmData[$i]) === ord($existingData[$i])) $yMatch++;
     }
-    echo "   Y平面匹配: {$yMatch} / {$ySize} (" . round($yMatch/$ySize*100, 1) . "%)\n";
+    echo "   Y平面匹配: {$yMatch} / {$ySize} (" . round($yMatch / $ySize * 100, 1) . "%)\n";
     echo "   (注：字体不同导致差异是正常的，ffmpeg用的是系统字体)\n";
 }
 

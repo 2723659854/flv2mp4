@@ -110,14 +110,14 @@ class WatermarkUtil
     /**
      * 生成文字水印 YUV 文件
      * @param string $text 文字内容
+     * @param string $outputFile 输出YUV文件路径
      * @param int $width 水印宽度
      * @param int $height 水印高度
-     * @param string $outputFile 输出YUV文件路径
      * @param array $options 可选配置：fontSize, fontColor, bgColor, fontFamily
      * @return bool
      * @throws \RuntimeException
      */
-    public static function generateTextWatermark(
+    public static function generateFromText(
         string $text,
         int $width,
         int $height,
@@ -197,9 +197,9 @@ class WatermarkUtil
 
     private static function generateWithDotMatrix(
         string $text,
+        string $outputFile,
         int $width,
         int $height,
-        string $outputFile,
         array $fontColor,
         array $bgColor
     ): bool {
