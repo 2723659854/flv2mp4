@@ -1,12 +1,47 @@
-# FLV ↔ MP4 / HLS Conversion Toolkit
+# FLV ↔ MP4 / HLS Conversion Toolkit + H264 Re-encoding Tool
+
+<p align="center">
+<img src="https://img.shields.io/badge/PHP-8.1%2B-blue" />
+<img src="https://img.shields.io/badge/License-Apache%202.0-green" />
+<img src="https://img.shields.io/badge/Code-PHPStan%20Level8-purple" />
+<img src="https://img.shields.io/badge/No-FFmpeg-red" />
+</p>
 
 <p align="center">
   <a href="./README.cn.md"><strong>🇨🇳 中文</strong></a> •
   <a href="./README.md"><strong>🇬🇧 English</strong></a>
 </p>
 
+## Project Overview
+
 A lightweight media processing toolkit implemented in pure PHP 8.1+, **zero external dependencies (no FFmpeg required)**.  
 Supports FLV, FMP4, MP4, HLS interconversion, live streaming gateway, pushing, pulling, relaying, and **H.264 decoding + scaling + re-encoding** (Baseline Profile).
+
+---
+
+## 📋 Table of Contents
+
+- [Project Overview](#project-overview)
+- [Core Features](#-core-features)
+- [Requirements](#requirements)
+- [Installation](#-installation)
+- [Quick Start](#-quick-start)
+- [Advanced Features](#-advanced-features)
+    - [FLV Live Gateway](#flv-live-gateway)
+    - [Static File Gateway](#static-file-gateway)
+    - [Push Client](#push-client)
+    - [Pull Client](#pull-client)
+    - [Live Relay](#live-relay)
+- [Testing & Playback](#-testing--playback)
+- [Use Cases](#-use-cases)
+- [H.264 Re-encoding Deep Dive](#-h264-decoding--scaling--re-encoding)
+    - [FLV → HLS Multi-bitrate Example](#flv-hls)
+    - [FLV → FLV Re-encoding Example](#flv-flv)
+    - [MP4 → MP4 Re-encoding Example](#mp4-mp4)
+    - [Watermark Generation Tool](#watermark-generation-tool)
+- [Technical Notes](#-technical-notes)
+- [License & Disclaimer](#license--disclaimer)
+- [Contact](#-contact)
 
 ---
 
@@ -33,7 +68,7 @@ Supports FLV, FMP4, MP4, HLS interconversion, live streaming gateway, pushing, p
 |------------|-------------|
 | PHP | ≥ 8.1 (**CLI mode only**) |
 | `sockets` extension | **Required**, provides underlying Socket communication |
-| `bcmath` extension | Optional, for high-precision arithmetic optimization |
+| `gd` extension | **Optional**, used for generating watermarks from PNG/JPG images. If not installed, it will automatically fallback to built-in bitmap font mode. |
 
 💡 **No FFmpeg, no third-party binaries — all pure PHP.**
 
@@ -87,70 +122,84 @@ $file = __DIR__ . '/test.flv';
 
 ### FLV Live Gateway
 
-Supports multi-level proxy deployment for high-concurrency live stream forwarding.
+Supports multi-level proxy deployment for high-concurrency live stream forwarding. Create a new file `flvGateway.php` with the following content:
 
 ```php
+<?php
+require_once __DIR__ . '/vendor/autoload.php';
 $gateway = new \Xiaosongshu\Flv2mp4\manage\FlvGateway(8080, 'http://127.0.0.1:8501');
 $gateway->debug = true;
 $gateway->start();
 ```
 
+Start the FLV gateway:
 ```bash
-# Level 1 gateway
-php flvGateway.php 8080 http://127.0.0.1:8501
-# Level 2 gateway
-php flvGateway.php 8081 http://127.0.0.1:8080
-# Playback URL: http://127.0.0.1:8081/{app}/{stream}.flv
+php flvGateway.php
 ```
 
 ### Static File Gateway
 
-Lightweight HTTP file server with directory listing toggle.
+Lightweight HTTP file server with directory listing toggle. Create a new file `fileGateway.php` with the following content:
 
 ```php
-$server = new \Xiaosongshu\Flv2mp4\manage\FileGateway(
-    host: '0.0.0.0',
-    port: 8100,
-    documentRoot: __DIR__,
-    enableDirListing: false
-);
+<?php
+require_once __DIR__ . '/vendor/autoload.php';
+$server = new \Xiaosongshu\Flv2mp4\manage\FileGateway( '0.0.0.0',8100,__DIR__,false);
 $server->debug = true;
 $server->start();
 ```
 
+Start the file gateway:
+```bash
+php fileGateway.php
+```
+
 ### Push Client
 
-Supports HTTP-FLV, WS-FLV, RTMP protocols with speed control and auto-reconnect.
+Supports HTTP-FLV, WS-FLV, RTMP protocols with speed control and auto-reconnect. Create a new file `pusher.php` with the following content:
 
+```php
+require_once __DIR__ . '/vendor/autoload.php';
+ini_set('memory_limit', '2048M');
+$pusher = new \Xiaosongshu\Flv2mp4\Manage\PusherManage(__DIR__."/test.flv", "http://127.0.0.1:8501/live/stream", 1.0, false);
+$pusher->start();
+```
+
+Start pushing:
 ```bash
-# HTTP-FLV push
-php flv_pusher.php test.flv http://127.0.0.1:8501/live/stream
-
-# 2x speed + disable reconnect
-php flv_pusher.php test.flv http://127.0.0.1:8501/live/stream 2.0 --no-reconnect
-
-# RTMP push
-php rtmp_pusher.php test.mp4 rtmp://127.0.0.1:1935/live/stream
-
-# MP4 push (2x speed)
-php mp4_pusher.php test.mp4 http://127.0.0.1:8501/live/stream 2.0
+php pusher.php
 ```
 
 ### Pull Client
 
-Pull live streams and save as local FLV files, suitable for recording or debugging.
+Pull live streams and save as local FLV files, suitable for recording or debugging. Create a new file `puller.php` with the following content:
 
+```php
+require_once __DIR__ . '/vendor/autoload.php';
+ini_set('memory_limit', '2048M');
+$puller = new \Xiaosongshu\Flv2mp4\Manage\PullerManage("ws://127.0.0.1:8501/live/stream.flv", __DIR__."/pull_record.flv", 0, false);
+$puller->start();
+```
+
+Start the pull client:
 ```bash
-php puller.php http://127.0.0.1:8501/live/stream.flv output.flv 0 --no-reconnect
+php puller.php
 ```
 
 ### Live Relay
 
-Pull one stream and forward to multiple targets simultaneously (supports mixed protocols).
+Pull one stream and forward to multiple targets simultaneously (supports mixed protocols). Create a new file `forward.php` with the following content:
 
+```php
+require_once __DIR__ . '/vendor/autoload.php';
+ini_set('memory_limit', '2048M');
+$forwarder = new \Xiaosongshu\Flv2mp4\Flv\FlvForwardClient("http://127.0.0.1:8501/a/b.flv", ["rtmp://127.0.0.1:1935/c/d","ws://127.0.0.1:8501/c/e"], 0, true);
+$forwarder->start();
+```
+
+Start the relay client:
 ```bash
-php forward.php http://127.0.0.1:8501/a/b.flv \
-  "rtmp://127.0.0.1:1935/c/d,ws://127.0.0.1:8501/c/e,http://127.0.0.1:8501/c/f"
+php forward.php
 ```
 
 ---
@@ -158,11 +207,12 @@ php forward.php http://127.0.0.1:8501/a/b.flv \
 ## 🧪 Testing & Playback
 
 | Output Format | Recommended Player | Reference File |
-|---------------|-------------------|----------------|
+|---------------|--------------------|----------------|
 | MP4 | HTML5 `<video>` | `index.html` |
-| fMP4 | MSE Player | `play_merge.html`, `mse.html` |
+| fMP4 | MSE Player | `play_merge.html`、`mse.html` |
 | HLS (TS) | hls.js / Safari | `play.html` |
 | FLV | flv.js | `flv.html` |
+| FLV | Web push test | `push.html` |
 
 ---
 
@@ -197,28 +247,86 @@ Supports Baseline Profile H.264 decoding, scaling, and re-encoding, providing co
 
 ---
 
-Below is a multi-bitrate HLS example:
+#### FLV → HLS
+
+Below is a FLV to multi-bitrate HLS example:
 
 ```php
 <?php
 
 require_once __DIR__ . '/vendor/autoload.php';
 ini_set('memory_limit', '2048M');
-
 $profiles = [
-    '1080p' => ['width' => 1920, 'height' => 1080, 'bitrate' => 5000000],
-    '720p'  => ['width' => 1280, 'height' => 720,  'bitrate' => 2500000],
-    '480p'  => ['width' => 854,  'height' => 480,  'bitrate' => 1200000],
-    '360p'  => ['width' => 640,  'height' => 360,  'bitrate' => 600000],
+    // Configure different bitrates separately
+    '240p' => [
+        'width' => 426,      // or 424, keep 16:9 ratio
+        'height' => 240,
+        'bitrate' => 300000, // 300 Kbps (video bitrate)
+        'fps' => 24,
+        'audioBitrate' => 48000, // 48 Kbps
+        'qp' => 30,          // Keep 30 for stability
+        'watermark'=>true,     // Whether to add watermark
+        'watermark_file'=> __DIR__."/src/Static/watermark_80x16.yuv",// Watermark file
+    ]
 ];
-
-$generator = new PurePhpHlsGenerator($profiles, __DIR__ . '/hls/output');
-$generator->processFlv(__DIR__ . '/test.flv');
-
+$generator = new \Xiaosongshu\Flv2mp4\Recode\PurePhpHlsGenerator($profiles, __DIR__ . '/hls/output');
+$generator->processFlv(__DIR__ . '/input.flv');
+echo "Index URL: hls/output/master.m3u8\n";
 echo "All processing complete!\n";
 ```
 
-For detailed usage instructions of H.264, please refer to the <a href="./src/Codec/README.md">README</a>.
+#### FLV → FLV
+
+Re-encode FLV with new bitrate settings:
+
+```php
+<?php
+require_once __DIR__ . '/vendor/autoload.php';
+ini_set('memory_limit', '2048M');
+
+$config = [
+    'width' => 320,        // Target width, 0 = keep original resolution
+    'height' => 180,       // Target height, 0 = keep original resolution
+    'bitrate' => 150000,   // Target bitrate (bps), 0 = use QP mode
+    'fps' => 15,           // Target framerate
+    'qp' => 30,            // QP quality parameter (takes effect when bitrate is 0)
+    'watermark'=>true,     // Whether to add watermark
+    'watermark_file'=> __DIR__."/src/Static/watermark_80x16.yuv",// Watermark file
+];
+
+$recoder = new \Xiaosongshu\Flv2mp4\Recode\FlvRecoder($config);
+$recoder->setMaxFrames(50);  // Optional: limit the number of frames to process
+$recoder->processFlv(__DIR__ . '/input.flv', __DIR__.'/output.flv');
+echo "FLV re-encoding complete\n";
+```
+
+#### MP4 → MP4
+
+Re-encode MP4 file with new bitrate settings:
+
+```php
+<?php
+require_once __DIR__ . '/vendor/autoload.php';
+ini_set('memory_limit', '2048M');
+
+$config = [
+    'width' => 320,        // Target width, 0 = keep original resolution
+    'height' => 180,       // Target height, 0 = keep original resolution
+    'bitrate' => 150000,   // Target bitrate (bps), 0 = use QP mode
+    'fps' => 15,           // Target framerate
+    'qp' => 30,            // QP quality parameter (takes effect when bitrate is 0)
+    'watermark'=>true,     // Whether to add watermark
+    'watermark_file'=> __DIR__."/src/Static/watermark_80x16.yuv",// Watermark file
+];
+$recoder = new \Xiaosongshu\Flv2mp4\Recode\Mp4Recoder($config);
+$recoder->setMaxFrames(50); // Optional: limit the number of frames to process
+$recoder->processMp4(__DIR__ . '/input.mp4', __DIR__ . '/output.mp4');
+echo "MP4 re-encoding complete\n";
+```
+
+- When adding a watermark, a YUV format file is required. The filename must include the watermark dimensions (e.g., `watermark_{width}x{height}.yuv`). The tool will automatically parse the width and height from the filename (e.g., `watermark_80x16.yuv` → width 80, height 16). Please ensure the filename format is correct.
+- The re-encoding module provides a **YUV pixel-level operation interface**. You can build custom features on top of it, such as adding subtitles, picture-in-picture, video splicing, etc.
+- For detailed H.264 usage instructions, please refer to the <a href="./src/Codec/README.md">README</a>.
 
 ---
 
@@ -232,18 +340,104 @@ For detailed usage instructions of H.264, please refer to the <a href="./src/Cod
 - [x] **CAVLC Entropy Coding** (Baseline Profile)
 - [x] **Resolution Scaling** (YUV scaling after decoding → re-encoding)
 - [x] **Bitrate Control** (via QP parameter adjustment)
-- [ ] **B-frame Support** (planned, requires bidirectional prediction handling)
+- [ ] **B-frame Support** (planned, requires extension to Main Profile and bidirectional prediction implementation)
 - [ ] **CABAC Entropy Coding** (planned, for Main Profile support)
 
+> ⚠️ **Performance Notice**: The current H.264 re-encoding module is implemented in pure PHP and is suitable for **short-duration videos (recommended ≤ 10 seconds)** offline processing or functional verification. For long videos or high-resolution transcoding, it is recommended to use FFmpeg or other professional tools.
+
 ---
+
+### Watermark Generation Tool
+
+This project provides PHP functions for generating watermark YUV files. GD extension is preferred, with automatic fallback to bitmap font when GD is unavailable.
+
+- `generateFromText()`: Generate text watermark YUV. GD extension preferred, falls back to bitmap font when GD is unavailable. **Built-in bitmap font only supports ASCII characters (English letters, numbers, and English punctuation).**
+- `generateFromImage()`: Generate watermark YUV from an image. Requires GD extension, supports PNG/JPG.
+
+#### Generate Watermark File from Text
+
+```php
+<?php
+require_once __DIR__ . '/vendor/autoload.php';
+
+use Xiaosongshu\Flv2mp4\Codec\WatermarkUtil;
+
+echo "=== Testing WatermarkUtil ===\n\n";
+
+// Test 1: Generate text watermark
+echo "1. Generating text watermark (xiaosongshu, 80x16)...\n";
+$outputFile1 = __DIR__ . '/test_wm_text.yuv';
+$start = microtime(true);
+$result = WatermarkUtil::generateFromText(
+    'xiaosongshu',
+    $outputFile1,
+    80,
+    16,
+
+    [
+        'fontSize' => 5, // Built-in font size 1-5. `fontSize` ranges from 1-5 (larger number = larger font). Built-in bitmap font only supports ASCII characters.
+        'fontColor' => [255, 255, 255],
+        'bgColor' => [0, 0, 0],
+    ]
+);
+$cost = round(microtime(true) - $start, 3);
+if ($result && file_exists($outputFile1)) {
+    $size = filesize($outputFile1);
+    $expectedSize = 80 * 16 + (80 * 16 >> 1);
+    echo "   Success! File size: {$size} bytes (expected: {$expectedSize}) - Time: {$cost}s\n";
+    if ($size === $expectedSize) {
+        echo "   ✅ File size correct\n";
+    } else {
+        echo "   ❌ File size mismatch\n";
+    }
+} else {
+    echo "   ❌ Generation failed\n";
+}
+```
+
+#### Generate Watermark File from Image
+
+- Requires PHP GD extension installed.
+
+```php
+<?php
+
+require_once __DIR__ . '/vendor/autoload.php';
+
+use Xiaosongshu\Flv2mp4\Codec\WatermarkUtil;
+
+echo "=== Testing WatermarkUtil ===\n\n";
+
+// Test 1: Generate watermark from image
+echo "1. Generating watermark from image (xiaosongshu, 80x16)...\n";
+$outputFile1 = __DIR__ . '/test_wm_copy_80x16.yuv';
+$start = microtime(true);
+$result = WatermarkUtil::generateFromImage(
+    __DIR__."/watermark_80x16.png",
+    $outputFile1,
+    80,
+    16,
+);
+$cost = round(microtime(true) - $start, 3);
+if ($result && file_exists($outputFile1)) {
+    $size = filesize($outputFile1);
+    $expectedSize = 80 * 16 + (80 * 16 >> 1);
+    echo "   Success! File size: {$size} bytes (expected: {$expectedSize}) - Time: {$cost}s\n";
+    if ($size === $expectedSize) {
+        echo "   ✅ File size correct\n";
+    } else {
+        echo "   ❌ File size mismatch\n";
+    }
+} else {
+    echo "   ❌ Generation failed\n";
+}
+```
 
 ## 🔧 Technical Notes
 
 - Pure PHP 8.1+ implementation, no FFmpeg dependency
-- Companion to [xiaosongshu/rtmp_server](https://github.com/2723659854/rtmp-server)
+- This project was originally created primarily to serve the [xiaosongshu/rtmp_server](https://github.com/2723659854/rtmp-server) project
 - Recommended static analysis with [PHPStan](https://phpstan.org/) Level 8
-
----
 
 ## License & Disclaimer
 
