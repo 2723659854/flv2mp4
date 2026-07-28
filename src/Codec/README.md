@@ -198,7 +198,7 @@ $rbsp = NalUtil::removeEmulationPrevention($nal['raw']);
 
 ## 完整流程：FLV → HLS 多码率转码
 
-参考项目根目录的 [encode.php](file:///d:/php/flv2mp4/encode.php) 和 `PurePhpHlsGenerator` 类。
+参考项目根目录的 [encode.php](/examples/encode.php) 和 `PurePhpHlsGenerator` 类。
 
 ```
 FLV 文件
@@ -304,12 +304,10 @@ Demo 会自动完成以下步骤：
 2. **多参考帧**：解码器支持多参考帧（`num_ref_idx_l0_active_minus1`），但参考帧数量过多时性能会下降。
 3. **内存使用**：每帧 YUV 数据约为 `宽 × 高 × 1.5` 字节，处理高分辨率视频时请注意内存限制。
 4. **性能**：纯 PHP 实现的编解码性能低于原生 C 实现（如 FFmpeg），适合离线转码或低分辨率实时场景。
+5. **⚠️ 高风险修改警告**：H.264 编解码逻辑涉及码流层级的位操作（Bitstream Manipulation），
+   任何对熵编码（CAVLC）、变换（DCT/IDCT）、预测（Intra/Inter）模块的修改，
+   都可能因单比特错误导致全部码流无法解码。
+   **非充分理解 H.264 标准者，请勿修改本目录下的核心编解码文件。**
 
-## 相关文件
 
-- 解码器主类：[H264Decoder.php](file:///d:/php/flv2mp4/src/Codec/H264Decoder.php)
-- 编码器主类：[H264Encoder.php](file:///d:/php/flv2mp4/src/Codec/H264Encoder.php)
-- 视频缩放器：[VideoScaler.php](file:///d:/php/flv2mp4/src/Codec/Scaler/VideoScaler.php)
-- NALU 工具：[NalUtil.php](file:///d:/php/flv2mp4/src/Codec/NalUtil.php)
-- 转码入口：[encode.php](file:///d:/php/flv2mp4/encode.php)
-- HLS 生成器：[PurePhpHlsGenerator.php](file:///d:/php/flv2mp4/src/Manage/PurePhpHlsGenerator.php)
+
