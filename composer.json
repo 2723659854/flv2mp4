@@ -1,6 +1,6 @@
 {
   "name": "xiaosongshu/flv2mp4",
-  "description": "A pure PHP media processing toolkit for bidirectional conversion between FLV, MP4,  HLS and H.264 re-encoding. Includes live stream relay gateway, file server, and push clients (HTTP-FLV, WebSocket-FLV, RTMP).",
+  "description": "Pure PHP native media processing library, realize FLV/MP4/HLS mutual conversion and H.264 re-encoding. Built-in live stream relay gateway, file server, multi-protocol push client: RTMP, HTTP-FLV, WebSocket-FLV, no FFmpeg external dependencies.",
   "keywords": [
     "h264",
     "flv",
@@ -15,7 +15,7 @@
     "php"
   ],
   "type": "library",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "autoload": {
     "psr-4": {
       "Xiaosongshu\\Flv2mp4\\": "src/"
