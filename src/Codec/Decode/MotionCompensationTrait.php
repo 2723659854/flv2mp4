@@ -66,6 +66,7 @@ trait MotionCompensationTrait
                     $p5 = $refPlane[$ry * $refStride + $rx5];
                     $val = $p0 - 5*$p1 + 20*$p2 + 20*$p3 - 5*$p4 + $p5;
                     $out[$j][$i] = ($val + 16) >> 5;
+                    $out[$j][$i] = $this->clip255($out[$j][$i]);
                 }
             }
             return $out;
@@ -90,6 +91,7 @@ trait MotionCompensationTrait
                     $p5 = $refPlane[$ry5 * $refStride + $rx];
                     $val = $p0 - 5*$p1 + 20*$p2 + 20*$p3 - 5*$p4 + $p5;
                     $out[$j][$i] = ($val + 16) >> 5;
+                    $out[$j][$i] = $this->clip255($out[$j][$i]);
                 }
             }
             return $out;
@@ -127,6 +129,7 @@ trait MotionCompensationTrait
                     $t5 = $tmp[$j + 5][$i];
                     $val = $t0 - 5*$t1 + 20*$t2 + 20*$t3 - 5*$t4 + $t5;
                     $out[$j][$i] = ($val + 512) >> 10;
+                    $out[$j][$i] = $this->clip255($out[$j][$i]);
                 }
             }
             return $out;
