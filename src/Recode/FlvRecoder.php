@@ -66,6 +66,13 @@ class FlvRecoder
     private string $encPpsRbsp = '';
     private bool $encoderConfigReady = false;
 
+    private int $outputVideoFrameCount = 0;
+    private int $outputAudioFrameCount = 0;
+    private ?int $lastVideoOutputTimestamp = null;
+    private ?int $lastAudioOutputTimestamp = null;
+    private int $positiveVideoDtsDeltaTotal = 0;
+    private int $positiveVideoDtsDeltaCount = 0;
+
     public function __construct(array $config = [])
     {
         $this->targetWidth = $config['width'] ?? 0;
@@ -174,16 +181,23 @@ class FlvRecoder
 
         $flvData = file_get_contents($inputFile);
         FlvParse::setFlv($flvData);
+        $tags = FlvParse::getTags();
 
         $this->outputBuffer = '';
         $this->flvHeaderWritten = false;
+        $this->outputVideoFrameCount = 0;
+        $this->outputAudioFrameCount = 0;
+        $this->lastVideoOutputTimestamp = null;
+        $this->lastAudioOutputTimestamp = null;
+        $this->positiveVideoDtsDeltaTotal = 0;
+        $this->positiveVideoDtsDeltaCount = 0;
 
         $frameCount = 0;
         $videoCount = 0;
         $hasAudio = false;
         $hasVideo = false;
 
-        foreach (FlvParse::getTags() as $tag) {
+        foreach ($tags as $tag) {
             if (!property_exists($tag, 'tagType')) continue;
 
             if ($tag->tagType === 9) {
@@ -203,6 +217,46 @@ class FlvRecoder
                 echo "Reached max frames limit ({$this->maxFrames}), stopping...\n";
                 break;
             }
+        }
+
+        $actualHasVideo = $this->outputVideoFrameCount > 0;
+        $actualHasAudio = $this->outputAudioFrameCount > 0;
+        $videoFrameDurationMs = $this->positiveVideoDtsDeltaCount > 0
+            ? $this->positiveVideoDtsDeltaTotal / $this->positiveVideoDtsDeltaCount
+            : 1000 / $this->targetFps;
+        $videoEndMs = $actualHasVideo && $this->lastVideoOutputTimestamp !== null
+            ? $this->lastVideoOutputTimestamp + $videoFrameDurationMs
+            : 0.0;
+        $audioSamplesPerFrame = in_array($this->audioObjectType, [5, 29], true) ? 2048 : 1024;
+        $audioFrameDurationMs = $this->audioSampleRate > 0
+            ? $audioSamplesPerFrame / $this->audioSampleRate * 1000
+            : 0.0;
+        $audioEndMs = $actualHasAudio && $this->lastAudioOutputTimestamp !== null
+            ? $this->lastAudioOutputTimestamp + $audioFrameDurationMs
+            : 0.0;
+        $duration = max($videoEndMs, $audioEndMs) / 1000;
+
+        if ($this->flvHeaderWritten && strlen($this->outputBuffer) >= 13) {
+            $metadata = [
+                'duration' => $duration,
+                'width' => (float)($this->targetWidth > 0 ? $this->targetWidth : $this->srcWidth),
+                'height' => (float)($this->targetHeight > 0 ? $this->targetHeight : $this->srcHeight),
+                'videocodecid' => 'avc1',
+                'framerate' => $videoFrameDurationMs > 0 ? 1000 / $videoFrameDurationMs : 0.0,
+                'hasVideo' => $actualHasVideo,
+                'hasAudio' => $actualHasAudio,
+            ];
+            if ($actualHasAudio) {
+                $metadata['audiocodecid'] = 'mp4a';
+                $metadata['audiosamplerate'] = (float)$this->audioSampleRate;
+                $metadata['audiochannels'] = (float)$this->audioChannels;
+            }
+
+            $scriptData = $this->amf0EncodeValue('onMetaData') . $this->amf0EncodeValue($metadata);
+            $scriptTag = $this->buildTag(18, $scriptData, 0);
+            $this->outputBuffer = substr($this->outputBuffer, 0, 13)
+                . $scriptTag
+                . substr($this->outputBuffer, 13);
         }
 
         file_put_contents($outputFile, $this->outputBuffer);
@@ -538,6 +592,22 @@ class FlvRecoder
 
     private function writeVideoTag(string $avccData, bool $isKeyFrame, int $timestamp, int $cts): void
     {
+        $hasWritableVideoNal = false;
+        $offset = 0;
+        $dataLength = strlen($avccData);
+        while ($offset + 4 <= $dataLength) {
+            $nalLength = unpack('N', substr($avccData, $offset, 4))[1];
+            $offset += 4;
+            if ($nalLength <= 0 || $offset + $nalLength > $dataLength) break;
+
+            $nalType = ord($avccData[$offset]) & 0x1F;
+            if ($nalType !== 7 && $nalType !== 8) {
+                $hasWritableVideoNal = true;
+                break;
+            }
+            $offset += $nalLength;
+        }
+
         $frameType = $isKeyFrame ? 0x10 : 0x20;
         $codecId = 0x07;
         $avcPacketType = 1;
@@ -553,6 +623,18 @@ class FlvRecoder
         $body .= $ctsBytes;
         $body .= $avccData;
 
+        if ($hasWritableVideoNal) {
+            if ($this->lastVideoOutputTimestamp !== null) {
+                $delta = $timestamp - $this->lastVideoOutputTimestamp;
+                if ($delta > 0) {
+                    $this->positiveVideoDtsDeltaTotal += $delta;
+                    $this->positiveVideoDtsDeltaCount++;
+                }
+            }
+            $this->outputVideoFrameCount++;
+            $this->lastVideoOutputTimestamp = $timestamp;
+        }
+
         $this->writeTag(9, $body, $timestamp);
     }
 
@@ -561,6 +643,8 @@ class FlvRecoder
         $audioHeader = $this->getAudioHeaderByte();
         $body = chr($audioHeader) . chr(1) . $aacRaw;
 
+        $this->outputAudioFrameCount++;
+        $this->lastAudioOutputTimestamp = $timestamp;
         $this->writeTag(8, $body, $timestamp);
     }
 
@@ -585,32 +669,54 @@ class FlvRecoder
         return ($soundFormat << 4) | ($soundRate << 2) | ($soundSize << 1) | $soundType;
     }
 
-    private function writeTag(int $tagType, string $data, int $timestamp): void
+    /**
+     * Encode only the AMF0 value types required by onMetaData.
+     */
+    private function amf0EncodeValue(mixed $value): string
+    {
+        if (is_string($value)) {
+            return "\x02" . pack('n', strlen($value)) . $value;
+        }
+        if (is_int($value) || is_float($value)) {
+            return "\x00" . pack('E', (float)$value);
+        }
+        if (is_bool($value)) {
+            return "\x01" . chr($value ? 1 : 0);
+        }
+        if (is_array($value)) {
+            $encoded = "\x08" . pack('N', count($value));
+            foreach ($value as $key => $item) {
+                $key = (string)$key;
+                $encoded .= pack('n', strlen($key)) . $key . $this->amf0EncodeValue($item);
+            }
+            return $encoded . "\x00\x00\x09";
+        }
+
+        throw new \InvalidArgumentException('Unsupported AMF0 value type');
+    }
+
+    private function buildTag(int $tagType, string $data, int $timestamp): string
     {
         $dataSize = strlen($data);
+        $tsLow = $timestamp & 0xFFFFFF;
+        $tsExt = ($timestamp >> 24) & 0xFF;
 
-        $tagHeader = '';
-        $tagHeader .= chr($tagType);
+        $tagHeader = chr($tagType);
         $tagHeader .= chr(($dataSize >> 16) & 0xFF);
         $tagHeader .= chr(($dataSize >> 8) & 0xFF);
         $tagHeader .= chr($dataSize & 0xFF);
-
-        $tsLow = $timestamp & 0xFFFFFF;
-        $tsExt = ($timestamp >> 24) & 0xFF;
         $tagHeader .= chr(($tsLow >> 16) & 0xFF);
         $tagHeader .= chr(($tsLow >> 8) & 0xFF);
         $tagHeader .= chr($tsLow & 0xFF);
         $tagHeader .= chr($tsExt);
+        $tagHeader .= "\x00\x00\x00";
 
-        $tagHeader .= chr(0);
-        $tagHeader .= chr(0);
-        $tagHeader .= chr(0);
+        return $tagHeader . $data . pack('N', 11 + $dataSize);
+    }
 
-        $prevTagSize = 11 + $dataSize;
-
-        $this->outputBuffer .= $tagHeader;
-        $this->outputBuffer .= $data;
-        $this->outputBuffer .= pack('N', $prevTagSize);
+    private function writeTag(int $tagType, string $data, int $timestamp): void
+    {
+        $this->outputBuffer .= $this->buildTag($tagType, $data, $timestamp);
     }
 
     private function videoFrameDataRead(string $data): ?array
@@ -689,4 +795,5 @@ class FlvRecoder
         if ($len >= 3 && substr($nal, 0, 3) === "\x00\x00\x01") return 3;
         return -1;
     }
+
 }
