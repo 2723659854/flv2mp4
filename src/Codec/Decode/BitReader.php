@@ -9,71 +9,77 @@ namespace Xiaosongshu\Flv2mp4\Codec\Decode;
  */
 class BitReader
 {
-    private string $bits;
+    private string $data;
+    private int $bitLength;
     private int $pos;
 
     public function __construct(string $data)
     {
-        $this->bits = '';
-        $len = strlen($data);
-        for ($i = 0; $i < $len; $i++) {
-            $this->bits .= str_pad(decbin(ord($data[$i])), 8, '0', STR_PAD_LEFT);
-        }
+        $this->data = $data;
+        $this->bitLength = strlen($data) * 8;
         $this->pos = 0;
     }
 
     public function skip(int $n): void
     {
-        $total = strlen($this->bits);
-        $this->pos = max(0, min($total, $this->pos + $n));
+        $this->pos = max(0, min($this->bitLength, $this->pos + $n));
     }
 
     public function readU(int $n): int
     {
-        $total = strlen($this->bits);
-        if ($this->pos + $n > $total) {
-            $remain = $total - $this->pos;
-            $read = substr($this->bits, $this->pos, $remain);
-            $this->pos = $total;
-            return bindec(str_pad($read, $n, '0', STR_PAD_RIGHT));
+        if ($n === 0) {
+            return 0;
         }
-        $value = bindec(substr($this->bits, $this->pos, $n));
-        $this->pos += $n;
+
+        $pos = $this->pos;
+        $available = min($n, $this->bitLength - $pos);
+        $remaining = $available;
+        $value = 0;
+
+        while ($remaining > 0) {
+            $bitOffset = $pos & 7;
+            $take = min($remaining, 8 - $bitOffset);
+            $byte = ord($this->data[$pos >> 3]);
+            $shift = 8 - $bitOffset - $take;
+            $value = ($value << $take) | (($byte >> $shift) & ((1 << $take) - 1));
+            $pos += $take;
+            $remaining -= $take;
+        }
+
+        $this->pos = $pos;
+        if ($available < $n) {
+            $this->pos = $this->bitLength;
+            $value <<= $n - $available;
+        }
         return $value;
     }
 
     public function readUe(): int
     {
-        $leadingZeros = 0;
-        $total = strlen($this->bits);
-        while (($this->pos + $leadingZeros) < $total && $this->bits[$this->pos + $leadingZeros] === '0') {
-            $leadingZeros++;
+        $start = $this->pos;
+        $pos = $start;
+        while ($pos < $this->bitLength) {
+            $byte = ord($this->data[$pos >> 3]);
+            if ((($byte >> (7 - ($pos & 7))) & 1) !== 0) {
+                break;
+            }
+            $pos++;
         }
-        if (($this->pos + $leadingZeros) >= $total) {
-            $this->pos = $total;
+
+        if ($pos >= $this->bitLength) {
+            $this->pos = $this->bitLength;
             return 0;
         }
 
-        $totalBitsNeeded = $leadingZeros + 1 + $leadingZeros;
-        if ($this->pos + $totalBitsNeeded > $total) {
-            $this->pos = $total;
+        $leadingZeros = $pos - $start;
+        if ($start + $leadingZeros + 1 + $leadingZeros > $this->bitLength) {
+            $this->pos = $this->bitLength;
             return 0;
         }
 
-        // 跳过分隔符 '1'
-        $this->pos += $leadingZeros + 1;
-
-        // 读取 leadingZeros 个数据位
-        $value = 0;
-        for ($i = 0; $i < $leadingZeros; $i++) {
-            $bit = ($this->bits[$this->pos + $i] === '1' ? 1 : 0);
-            $value = ($value << 1) | $bit;
-        }
-        $this->pos += $leadingZeros;
-
-        // 计算 codeNum = 2^leadingZeros + value
-        $codeNum = (1 << $leadingZeros) + $value;
-        return $codeNum - 1;
+        $this->pos = $pos + 1;
+        $value = $this->readU($leadingZeros);
+        return (1 << $leadingZeros) + $value - 1;
     }
 
     public function readSe(): int
@@ -110,7 +116,7 @@ class BitReader
 
     public function getRemainingBits(): int
     {
-        return max(0, strlen($this->bits) - $this->pos);
+        return max(0, $this->bitLength - $this->pos);
     }
 
     public function alignToByte(): void
@@ -119,7 +125,7 @@ class BitReader
         if ($rem !== 0) {
             $this->pos += 8 - $rem;
         }
-        $this->pos = min($this->pos, strlen($this->bits));
+        $this->pos = min($this->pos, $this->bitLength);
     }
 
     public function readByte(): int
@@ -130,13 +136,28 @@ class BitReader
 
     public function peek(int $n): int
     {
-        $total = strlen($this->bits);
-        if ($this->pos + $n > $total) {
-            $remain = $total - $this->pos;
-            $read = substr($this->bits, $this->pos, $remain);
-            return bindec(str_pad($read, $n, '0', STR_PAD_RIGHT));
+        if ($n === 0) {
+            return 0;
         }
-        return bindec(substr($this->bits, $this->pos, $n));
+
+        $pos = $this->pos;
+        $available = min($n, $this->bitLength - $pos);
+        $remaining = $available;
+        $value = 0;
+
+        while ($remaining > 0) {
+            $bitOffset = $pos & 7;
+            $take = min($remaining, 8 - $bitOffset);
+            $byte = ord($this->data[$pos >> 3]);
+            $shift = 8 - $bitOffset - $take;
+            $value = ($value << $take) | (($byte >> $shift) & ((1 << $take) - 1));
+            $pos += $take;
+            $remaining -= $take;
+        }
+
+        if ($available < $n) {
+            $value <<= $n - $available;
+        }
+        return $value;
     }
 }
-

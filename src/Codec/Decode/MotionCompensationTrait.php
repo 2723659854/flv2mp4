@@ -26,203 +26,202 @@ trait MotionCompensationTrait
     public function mcLuma(array $refPlane, int $refStride, int $refWidth, int $refHeight, int $x, int $y, int $blockW, int $blockH): array
     {
         $pred = array_fill(0, $blockH, array_fill(0, $blockW, 0));
-
         $fracX = $x & 3;
         $fracY = $y & 3;
         $intX = $x >> 2;
         $intY = $y >> 2;
+        $maxX = $refWidth - 1;
+        $maxY = $refHeight - 1;
 
         if ($fracX === 0 && $fracY === 0) {
+            $xIndex = [];
+            for ($i = 0; $i < $blockW; $i++) {
+                $sx = $intX + $i;
+                $xIndex[$i] = $sx < 0 ? 0 : ($sx > $maxX ? $maxX : $sx);
+            }
             for ($j = 0; $j < $blockH; $j++) {
+                $sy = $intY + $j;
+                $sy = $sy < 0 ? 0 : ($sy > $maxY ? $maxY : $sy);
+                $row = $sy * $refStride;
                 for ($i = 0; $i < $blockW; $i++) {
-                    $rx = $this->clamp($intX + $i, 0, $refWidth - 1);
-                    $ry = $this->clamp($intY + $j, 0, $refHeight - 1);
-                    $pred[$j][$i] = $refPlane[$ry * $refStride + $rx];
+                    $pred[$j][$i] = $refPlane[$row + $xIndex[$i]];
                 }
             }
             return $pred;
         }
 
-        $avg = function($a, $b): int {
-            return (($a + $b + 1) >> 1);
-        };
-
-        $hLowpass = function(int $srcX, int $srcY, int $w, int $h) use ($refPlane, $refStride, $refWidth, $refHeight): array {
-            $out = array_fill(0, $h, array_fill(0, $w, 0));
-            for ($j = 0; $j < $h; $j++) {
-                $ry = $this->clamp($srcY + $j, 0, $refHeight - 1);
-                for ($i = 0; $i < $w; $i++) {
-                    $rx0 = $this->clamp($srcX + $i - 2, 0, $refWidth - 1);
-                    $rx1 = $this->clamp($srcX + $i - 1, 0, $refWidth - 1);
-                    $rx2 = $this->clamp($srcX + $i, 0, $refWidth - 1);
-                    $rx3 = $this->clamp($srcX + $i + 1, 0, $refWidth - 1);
-                    $rx4 = $this->clamp($srcX + $i + 2, 0, $refWidth - 1);
-                    $rx5 = $this->clamp($srcX + $i + 3, 0, $refWidth - 1);
-                    $p0 = $refPlane[$ry * $refStride + $rx0];
-                    $p1 = $refPlane[$ry * $refStride + $rx1];
-                    $p2 = $refPlane[$ry * $refStride + $rx2];
-                    $p3 = $refPlane[$ry * $refStride + $rx3];
-                    $p4 = $refPlane[$ry * $refStride + $rx4];
-                    $p5 = $refPlane[$ry * $refStride + $rx5];
-                    $val = $p0 - 5*$p1 + 20*$p2 + 20*$p3 - 5*$p4 + $p5;
-                    $out[$j][$i] = ($val + 16) >> 5;
-                    $out[$j][$i] = $this->clip255($out[$j][$i]);
-                }
-            }
-            return $out;
-        };
-
-        $vLowpass = function(int $srcX, int $srcY, int $w, int $h) use ($refPlane, $refStride, $refWidth, $refHeight): array {
-            $out = array_fill(0, $h, array_fill(0, $w, 0));
-            for ($j = 0; $j < $h; $j++) {
-                for ($i = 0; $i < $w; $i++) {
-                    $rx = $this->clamp($srcX + $i, 0, $refWidth - 1);
-                    $ry0 = $this->clamp($srcY + $j - 2, 0, $refHeight - 1);
-                    $ry1 = $this->clamp($srcY + $j - 1, 0, $refHeight - 1);
-                    $ry2 = $this->clamp($srcY + $j, 0, $refHeight - 1);
-                    $ry3 = $this->clamp($srcY + $j + 1, 0, $refHeight - 1);
-                    $ry4 = $this->clamp($srcY + $j + 2, 0, $refHeight - 1);
-                    $ry5 = $this->clamp($srcY + $j + 3, 0, $refHeight - 1);
-                    $p0 = $refPlane[$ry0 * $refStride + $rx];
-                    $p1 = $refPlane[$ry1 * $refStride + $rx];
-                    $p2 = $refPlane[$ry2 * $refStride + $rx];
-                    $p3 = $refPlane[$ry3 * $refStride + $rx];
-                    $p4 = $refPlane[$ry4 * $refStride + $rx];
-                    $p5 = $refPlane[$ry5 * $refStride + $rx];
-                    $val = $p0 - 5*$p1 + 20*$p2 + 20*$p3 - 5*$p4 + $p5;
-                    $out[$j][$i] = ($val + 16) >> 5;
-                    $out[$j][$i] = $this->clip255($out[$j][$i]);
-                }
-            }
-            return $out;
-        };
-
-        $hvLowpass = function(int $srcX, int $srcY, int $w, int $h) use ($refPlane, $refStride, $refWidth, $refHeight): array {
-            $tmpH = $h + 5;
-            $tmp = array_fill(0, $tmpH, array_fill(0, $w, 0));
-            for ($j = 0; $j < $tmpH; $j++) {
-                $ry = $this->clamp($srcY - 2 + $j, 0, $refHeight - 1);
-                for ($i = 0; $i < $w; $i++) {
-                    $rx0 = $this->clamp($srcX + $i - 2, 0, $refWidth - 1);
-                    $rx1 = $this->clamp($srcX + $i - 1, 0, $refWidth - 1);
-                    $rx2 = $this->clamp($srcX + $i, 0, $refWidth - 1);
-                    $rx3 = $this->clamp($srcX + $i + 1, 0, $refWidth - 1);
-                    $rx4 = $this->clamp($srcX + $i + 2, 0, $refWidth - 1);
-                    $rx5 = $this->clamp($srcX + $i + 3, 0, $refWidth - 1);
-                    $p0 = $refPlane[$ry * $refStride + $rx0];
-                    $p1 = $refPlane[$ry * $refStride + $rx1];
-                    $p2 = $refPlane[$ry * $refStride + $rx2];
-                    $p3 = $refPlane[$ry * $refStride + $rx3];
-                    $p4 = $refPlane[$ry * $refStride + $rx4];
-                    $p5 = $refPlane[$ry * $refStride + $rx5];
-                    $tmp[$j][$i] = $p0 - 5*$p1 + 20*$p2 + 20*$p3 - 5*$p4 + $p5;
-                }
-            }
-            $out = array_fill(0, $h, array_fill(0, $w, 0));
-            for ($j = 0; $j < $h; $j++) {
-                for ($i = 0; $i < $w; $i++) {
-                    $t0 = $tmp[$j][$i];
-                    $t1 = $tmp[$j + 1][$i];
-                    $t2 = $tmp[$j + 2][$i];
-                    $t3 = $tmp[$j + 3][$i];
-                    $t4 = $tmp[$j + 4][$i];
-                    $t5 = $tmp[$j + 5][$i];
-                    $val = $t0 - 5*$t1 + 20*$t2 + 20*$t3 - 5*$t4 + $t5;
-                    $out[$j][$i] = ($val + 512) >> 10;
-                    $out[$j][$i] = $this->clip255($out[$j][$i]);
-                }
-            }
-            return $out;
-        };
-
         if ($fracY === 0) {
-            $halfH = $hLowpass($intX, $intY, $blockW, $blockH);
-            if ($fracX === 1) {
-                for ($j = 0; $j < $blockH; $j++) {
-                    $ry = $this->clamp($intY + $j, 0, $refHeight - 1);
-                    for ($i = 0; $i < $blockW; $i++) {
-                        $rx = $this->clamp($intX + $i, 0, $refWidth - 1);
-                        $pred[$j][$i] = $avg($refPlane[$ry * $refStride + $rx], $halfH[$j][$i]);
-                    }
-                }
-            } elseif ($fracX === 2) {
-                for ($j = 0; $j < $blockH; $j++) {
-                    for ($i = 0; $i < $blockW; $i++) {
-                        $pred[$j][$i] = $halfH[$j][$i];
-                    }
-                }
-            } else {
-                for ($j = 0; $j < $blockH; $j++) {
-                    $ry = $this->clamp($intY + $j, 0, $refHeight - 1);
-                    for ($i = 0; $i < $blockW; $i++) {
-                        $rx = $this->clamp($intX + $i + 1, 0, $refWidth - 1);
-                        $pred[$j][$i] = $avg($halfH[$j][$i], $refPlane[$ry * $refStride + $rx]);
+            $halfH = $this->lumaHorizontalLowpass($refPlane, $refStride, $refWidth, $refHeight, $intX, $intY, $blockW, $blockH);
+            $srcOffX = $fracX === 3 ? 1 : 0;
+            for ($j = 0; $j < $blockH; $j++) {
+                $sy = $intY + $j;
+                $sy = $sy < 0 ? 0 : ($sy > $maxY ? $maxY : $sy);
+                $row = $sy * $refStride;
+                $outBase = $j * $blockW;
+                for ($i = 0; $i < $blockW; $i++) {
+                    if ($fracX === 2) {
+                        $pred[$j][$i] = $halfH[$outBase + $i];
+                    } else {
+                        $sx = $intX + $i + $srcOffX;
+                        $sx = $sx < 0 ? 0 : ($sx > $maxX ? $maxX : $sx);
+                        $pred[$j][$i] = ($refPlane[$row + $sx] + $halfH[$outBase + $i] + 1) >> 1;
                     }
                 }
             }
         } elseif ($fracX === 0) {
-            $halfV = $vLowpass($intX, $intY - 2, $blockW, $blockH + 4);
-            if ($fracY === 1) {
-                for ($j = 0; $j < $blockH; $j++) {
-                    $ry = $this->clamp($intY + $j, 0, $refHeight - 1);
-                    for ($i = 0; $i < $blockW; $i++) {
-                        $rx = $this->clamp($intX + $i, 0, $refWidth - 1);
-                        $pred[$j][$i] = $avg($refPlane[$ry * $refStride + $rx], $halfV[$j + 2][$i]);
-                    }
-                }
-            } elseif ($fracY === 2) {
-                for ($j = 0; $j < $blockH; $j++) {
-                    for ($i = 0; $i < $blockW; $i++) {
-                        $pred[$j][$i] = $halfV[$j + 2][$i];
-                    }
-                }
-            } else {
-                for ($j = 0; $j < $blockH; $j++) {
-                    $ry = $this->clamp($intY + $j + 1, 0, $refHeight - 1);
-                    for ($i = 0; $i < $blockW; $i++) {
-                        $rx = $this->clamp($intX + $i, 0, $refWidth - 1);
-                        $pred[$j][$i] = $avg($halfV[$j + 2][$i], $refPlane[$ry * $refStride + $rx]);
+            $halfV = $this->lumaVerticalLowpass($refPlane, $refStride, $refWidth, $refHeight, $intX, $intY - 2, $blockW, $blockH + 4);
+            $srcOffY = $fracY === 3 ? 1 : 0;
+            for ($j = 0; $j < $blockH; $j++) {
+                $sy = $intY + $j + $srcOffY;
+                $sy = $sy < 0 ? 0 : ($sy > $maxY ? $maxY : $sy);
+                $row = $sy * $refStride;
+                $halfBase = ($j + 2) * $blockW;
+                for ($i = 0; $i < $blockW; $i++) {
+                    if ($fracY === 2) {
+                        $pred[$j][$i] = $halfV[$halfBase + $i];
+                    } else {
+                        $sx = $intX + $i;
+                        $sx = $sx < 0 ? 0 : ($sx > $maxX ? $maxX : $sx);
+                        $pred[$j][$i] = ($refPlane[$row + $sx] + $halfV[$halfBase + $i] + 1) >> 1;
                     }
                 }
             }
         } elseif ($fracX === 2 && $fracY === 2) {
-            $pred = $hvLowpass($intX, $intY, $blockW, $blockH);
-        } elseif ($fracX === 2) {
-            $halfH = $hLowpass($intX, $intY + ($fracY === 1 ? 0 : 1), $blockW, $blockH);
-            $halfHV = $hvLowpass($intX, $intY, $blockW, $blockH);
+            $halfHV = $this->lumaHvLowpass($refPlane, $refStride, $refWidth, $refHeight, $intX, $intY, $blockW, $blockH);
             for ($j = 0; $j < $blockH; $j++) {
+                $base = $j * $blockW;
                 for ($i = 0; $i < $blockW; $i++) {
-                    $pred[$j][$i] = $avg($halfH[$j][$i], $halfHV[$j][$i]);
+                    $pred[$j][$i] = $halfHV[$base + $i];
+                }
+            }
+        } elseif ($fracX === 2) {
+            $halfH = $this->lumaHorizontalLowpass($refPlane, $refStride, $refWidth, $refHeight, $intX, $intY + ($fracY === 1 ? 0 : 1), $blockW, $blockH);
+            $halfHV = $this->lumaHvLowpass($refPlane, $refStride, $refWidth, $refHeight, $intX, $intY, $blockW, $blockH);
+            for ($j = 0; $j < $blockH; $j++) {
+                $base = $j * $blockW;
+                for ($i = 0; $i < $blockW; $i++) {
+                    $pred[$j][$i] = ($halfH[$base + $i] + $halfHV[$base + $i] + 1) >> 1;
                 }
             }
         } elseif ($fracY === 2) {
-            $srcOffX = ($fracX === 1) ? 0 : 1;
-            $halfV = $vLowpass($intX + $srcOffX, $intY - 2, $blockW, $blockH + 4);
-            $halfHV = $hvLowpass($intX, $intY, $blockW, $blockH);
+            $halfV = $this->lumaVerticalLowpass($refPlane, $refStride, $refWidth, $refHeight, $intX + ($fracX === 1 ? 0 : 1), $intY - 2, $blockW, $blockH + 4);
+            $halfHV = $this->lumaHvLowpass($refPlane, $refStride, $refWidth, $refHeight, $intX, $intY, $blockW, $blockH);
             for ($j = 0; $j < $blockH; $j++) {
+                $base = $j * $blockW;
+                $vBase = ($j + 2) * $blockW;
                 for ($i = 0; $i < $blockW; $i++) {
-                    $pred[$j][$i] = $avg($halfV[$j + 2][$i], $halfHV[$j][$i]);
+                    $pred[$j][$i] = ($halfV[$vBase + $i] + $halfHV[$base + $i] + 1) >> 1;
                 }
             }
         } else {
-            $srcOffX = ($fracX === 3) ? 1 : 0;
-            $srcOffY = ($fracY === 3) ? 1 : 0;
-            $halfH = $hLowpass($intX, $intY + $srcOffY, $blockW, $blockH);
-            $halfV = $vLowpass($intX + $srcOffX, $intY - 2, $blockW, $blockH + 4);
+            $halfH = $this->lumaHorizontalLowpass($refPlane, $refStride, $refWidth, $refHeight, $intX, $intY + ($fracY === 3 ? 1 : 0), $blockW, $blockH);
+            $halfV = $this->lumaVerticalLowpass($refPlane, $refStride, $refWidth, $refHeight, $intX + ($fracX === 3 ? 1 : 0), $intY - 2, $blockW, $blockH + 4);
             for ($j = 0; $j < $blockH; $j++) {
+                $base = $j * $blockW;
+                $vBase = ($j + 2) * $blockW;
                 for ($i = 0; $i < $blockW; $i++) {
-                    $pred[$j][$i] = $avg($halfH[$j][$i], $halfV[$j + 2][$i]);
+                    $pred[$j][$i] = ($halfH[$base + $i] + $halfV[$vBase + $i] + 1) >> 1;
                 }
-            }
-        }
-
-        for ($j = 0; $j < $blockH; $j++) {
-            for ($i = 0; $i < $blockW; $i++) {
-                $pred[$j][$i] = $this->clip255($pred[$j][$i]);
             }
         }
 
         return $pred;
+    }
+
+    private function lumaHorizontalLowpass(array &$refPlane, int $stride, int $width, int $height, int $srcX, int $srcY, int $w, int $h): array
+    {
+        $maxX = $width - 1;
+        $maxY = $height - 1;
+        $taps = array_fill(0, 6, []);
+        for ($i = 0; $i < $w; $i++) {
+            for ($tap = 0; $tap < 6; $tap++) {
+                $sx = $srcX + $i + $tap - 2;
+                $taps[$tap][$i] = $sx < 0 ? 0 : ($sx > $maxX ? $maxX : $sx);
+            }
+        }
+        $out = array_fill(0, $w * $h, 0);
+        for ($j = 0; $j < $h; $j++) {
+            $sy = $srcY + $j;
+            $sy = $sy < 0 ? 0 : ($sy > $maxY ? $maxY : $sy);
+            $row = $sy * $stride;
+            $base = $j * $w;
+            for ($i = 0; $i < $w; $i++) {
+                $val = $refPlane[$row + $taps[0][$i]] - 5 * $refPlane[$row + $taps[1][$i]]
+                    + 20 * $refPlane[$row + $taps[2][$i]] + 20 * $refPlane[$row + $taps[3][$i]]
+                    - 5 * $refPlane[$row + $taps[4][$i]] + $refPlane[$row + $taps[5][$i]];
+                $val = ($val + 16) >> 5;
+                $out[$base + $i] = $val < 0 ? 0 : ($val > 255 ? 255 : $val);
+            }
+        }
+        return $out;
+    }
+
+    private function lumaVerticalLowpass(array &$refPlane, int $stride, int $width, int $height, int $srcX, int $srcY, int $w, int $h): array
+    {
+        $maxX = $width - 1;
+        $maxY = $height - 1;
+        $xIndex = [];
+        for ($i = 0; $i < $w; $i++) {
+            $sx = $srcX + $i;
+            $xIndex[$i] = $sx < 0 ? 0 : ($sx > $maxX ? $maxX : $sx);
+        }
+        $out = array_fill(0, $w * $h, 0);
+        for ($j = 0; $j < $h; $j++) {
+            $rows = [];
+            for ($tap = 0; $tap < 6; $tap++) {
+                $sy = $srcY + $j + $tap - 2;
+                $sy = $sy < 0 ? 0 : ($sy > $maxY ? $maxY : $sy);
+                $rows[$tap] = $sy * $stride;
+            }
+            $base = $j * $w;
+            for ($i = 0; $i < $w; $i++) {
+                $sx = $xIndex[$i];
+                $val = $refPlane[$rows[0] + $sx] - 5 * $refPlane[$rows[1] + $sx]
+                    + 20 * $refPlane[$rows[2] + $sx] + 20 * $refPlane[$rows[3] + $sx]
+                    - 5 * $refPlane[$rows[4] + $sx] + $refPlane[$rows[5] + $sx];
+                $val = ($val + 16) >> 5;
+                $out[$base + $i] = $val < 0 ? 0 : ($val > 255 ? 255 : $val);
+            }
+        }
+        return $out;
+    }
+
+    private function lumaHvLowpass(array &$refPlane, int $stride, int $width, int $height, int $srcX, int $srcY, int $w, int $h): array
+    {
+        $maxX = $width - 1;
+        $maxY = $height - 1;
+        $taps = array_fill(0, 6, []);
+        for ($i = 0; $i < $w; $i++) {
+            for ($tap = 0; $tap < 6; $tap++) {
+                $sx = $srcX + $i + $tap - 2;
+                $taps[$tap][$i] = $sx < 0 ? 0 : ($sx > $maxX ? $maxX : $sx);
+            }
+        }
+        $tmpH = $h + 5;
+        $tmp = array_fill(0, $tmpH * $w, 0);
+        for ($j = 0; $j < $tmpH; $j++) {
+            $sy = $srcY - 2 + $j;
+            $sy = $sy < 0 ? 0 : ($sy > $maxY ? $maxY : $sy);
+            $row = $sy * $stride;
+            $base = $j * $w;
+            for ($i = 0; $i < $w; $i++) {
+                $tmp[$base + $i] = $refPlane[$row + $taps[0][$i]] - 5 * $refPlane[$row + $taps[1][$i]]
+                    + 20 * $refPlane[$row + $taps[2][$i]] + 20 * $refPlane[$row + $taps[3][$i]]
+                    - 5 * $refPlane[$row + $taps[4][$i]] + $refPlane[$row + $taps[5][$i]];
+            }
+        }
+        $out = array_fill(0, $h * $w, 0);
+        for ($j = 0; $j < $h; $j++) {
+            $base = $j * $w;
+            for ($i = 0; $i < $w; $i++) {
+                $val = $tmp[$base + $i] - 5 * $tmp[$base + $w + $i]
+                    + 20 * $tmp[$base + 2 * $w + $i] + 20 * $tmp[$base + 3 * $w + $i]
+                    - 5 * $tmp[$base + 4 * $w + $i] + $tmp[$base + 5 * $w + $i];
+                $val = ($val + 512) >> 10;
+                $out[$base + $i] = $val < 0 ? 0 : ($val > 255 ? 255 : $val);
+            }
+        }
+        return $out;
     }
 
     /**
@@ -245,19 +244,47 @@ trait MotionCompensationTrait
         $fracY = $y & 7;
         $intX = $x >> 3;
         $intY = $y >> 3;
+        $maxX = $refWidth - 1;
+        $maxY = $refHeight - 1;
 
-        for ($j = 0; $j < $blockH; $j++) {
-            for ($i = 0; $i < $blockW; $i++) {
-                $a00 = $this->getRefPixel($refPlane, $refStride, $refWidth, $refHeight, $intX + $i, $intY + $j);
-                $a10 = $this->getRefPixel($refPlane, $refStride, $refWidth, $refHeight, $intX + $i + 1, $intY + $j);
-                $a01 = $this->getRefPixel($refPlane, $refStride, $refWidth, $refHeight, $intX + $i, $intY + $j + 1);
-                $a11 = $this->getRefPixel($refPlane, $refStride, $refWidth, $refHeight, $intX + $i + 1, $intY + $j + 1);
+        $x0 = $x1 = [];
+        for ($i = 0; $i < $blockW; $i++) {
+            $sx = $intX + $i;
+            $x0[$i] = $sx < 0 ? 0 : ($sx > $maxX ? $maxX : $sx);
+            $sx++;
+            $x1[$i] = $sx < 0 ? 0 : ($sx > $maxX ? $maxX : $sx);
+        }
 
-                $val = ((8 - $fracX) * (8 - $fracY) * $a00 +
-                         $fracX * (8 - $fracY) * $a10 +
-                         (8 - $fracX) * $fracY * $a01 +
-                         $fracX * $fracY * $a11 + 32) >> 6;
-                $pred[$j][$i] = $this->clip255($val);
+        if ($fracX === 0 && $fracY === 0) {
+            for ($j = 0; $j < $blockH; $j++) {
+                $sy = $intY + $j;
+                $sy = $sy < 0 ? 0 : ($sy > $maxY ? $maxY : $sy);
+                $row = $sy * $refStride;
+                for ($i = 0; $i < $blockW; $i++) {
+                    $pred[$j][$i] = $refPlane[$row + $x0[$i]];
+                }
+            }
+        } else {
+            $wx0 = 8 - $fracX;
+            $wy0 = 8 - $fracY;
+            $w00 = $wx0 * $wy0;
+            $w10 = $fracX * $wy0;
+            $w01 = $wx0 * $fracY;
+            $w11 = $fracX * $fracY;
+            for ($j = 0; $j < $blockH; $j++) {
+                $sy0 = $intY + $j;
+                $sy0 = $sy0 < 0 ? 0 : ($sy0 > $maxY ? $maxY : $sy0);
+                $sy1 = $intY + $j + 1;
+                $sy1 = $sy1 < 0 ? 0 : ($sy1 > $maxY ? $maxY : $sy1);
+                $row0 = $sy0 * $refStride;
+                $row1 = $sy1 * $refStride;
+                for ($i = 0; $i < $blockW; $i++) {
+                    $val = ($w00 * $refPlane[$row0 + $x0[$i]] +
+                            $w10 * $refPlane[$row0 + $x1[$i]] +
+                            $w01 * $refPlane[$row1 + $x0[$i]] +
+                            $w11 * $refPlane[$row1 + $x1[$i]] + 32) >> 6;
+                    $pred[$j][$i] = $this->clip255($val);
+                }
             }
         }
 

@@ -80,7 +80,6 @@ trait CavlcTrait
 
     public function writeBlockResidualCavlc(array $coeffs, int $endIdx, bool $isChromaDc, int $iNC): string
     {
-
         $bits = '';
 
         $iLastIndex = $endIdx;

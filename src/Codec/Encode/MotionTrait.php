@@ -165,7 +165,8 @@ trait MotionTrait
 
         $bestDX = 0;
         $bestDY = 0;
-        $bestSAD = $this->computeSADFast($curFlat, $origX, $origY, 0, 0, $blockW, $blockH, $refStride);
+        $bestSAD = $this->computeSADFast($curFlat, $origX, $origY, 0, 0, $blockW, $blockH, $refStride, PHP_INT_MAX);
+        $candidateSads = ['0,0' => $bestSAD];
 
         for ($iter = 0; $iter < 10; $iter++) {
             $foundBetter = false;
@@ -175,7 +176,13 @@ trait MotionTrait
                 if ($dx < $minDx || $dx > $maxDx || $dy < $minDy || $dy > $maxDy) {
                     continue;
                 }
-                $sad = $this->computeSADFast($curFlat, $origX, $origY, $dx, $dy, $blockW, $blockH, $refStride);
+                $candidateKey = $dx . ',' . $dy;
+                if (isset($candidateSads[$candidateKey])) {
+                    $sad = $candidateSads[$candidateKey];
+                } else {
+                    $sad = $this->computeSADFast($curFlat, $origX, $origY, $dx, $dy, $blockW, $blockH, $refStride, $bestSAD);
+                    $candidateSads[$candidateKey] = $sad;
+                }
                 if ($sad < $bestSAD) {
                     $bestSAD = $sad;
                     $bestDX = $dx;
@@ -194,7 +201,13 @@ trait MotionTrait
                 if ($dx < $minDx || $dx > $maxDx || $dy < $minDy || $dy > $maxDy) {
                     continue;
                 }
-                $sad = $this->computeSADFast($curFlat, $origX, $origY, $dx, $dy, $blockW, $blockH, $refStride);
+                $candidateKey = $dx . ',' . $dy;
+                if (isset($candidateSads[$candidateKey])) {
+                    $sad = $candidateSads[$candidateKey];
+                } else {
+                    $sad = $this->computeSADFast($curFlat, $origX, $origY, $dx, $dy, $blockW, $blockH, $refStride, $bestSAD);
+                    $candidateSads[$candidateKey] = $sad;
+                }
                 if ($sad < $bestSAD) {
                     $bestSAD = $sad;
                     $bestDX = $dx;
@@ -209,7 +222,8 @@ trait MotionTrait
         // 使用mcLumaBlock计算子像素位置的SAD
         $bestMVx = $bestDX * 4;
         $bestMVy = $bestDY * 4;
-        $bestSAD = $this->computeSADSubpel($curFlat, $refPlane, $mbX, $mbY, $bestMVx, $bestMVy, $blockW, $blockH);
+        // 整数 MV 的 MC 像素与整数 SAD 候选完全等价，复用已计算结果。
+        $bestSAD = $candidateSads[$bestDX . ',' . $bestDY];
 
         // 先搜索半像素位置 (±2, ±2) 在1/4像素单位
         $halfPelPattern = [
@@ -227,7 +241,7 @@ trait MotionTrait
                 $bestDY + $intDy < $minDy || $bestDY + $intDy > $maxDy) {
                 continue;
             }
-            $sad = $this->computeSADSubpel($curFlat, $refPlane, $mbX, $mbY, $mvx, $mvy, $blockW, $blockH);
+            $sad = $this->computeSADSubpel($curFlat, $refPlane, $mbX, $mbY, $mvx, $mvy, $blockW, $blockH, $bestSAD);
             if ($sad < $bestSAD) {
                 $bestSAD = $sad;
                 $bestMVx = $mvx;
@@ -248,7 +262,7 @@ trait MotionTrait
                 $bestDY + $intDy < $minDy || $bestDY + $intDy > $maxDy) {
                 continue;
             }
-            $sad = $this->computeSADSubpel($curFlat, $refPlane, $mbX, $mbY, $mvx, $mvy, $blockW, $blockH);
+            $sad = $this->computeSADSubpel($curFlat, $refPlane, $mbX, $mbY, $mvx, $mvy, $blockW, $blockH, $bestSAD);
             if ($sad < $bestSAD) {
                 $bestSAD = $sad;
                 $bestMVx = $mvx;
@@ -260,25 +274,124 @@ trait MotionTrait
     }
 
     /**
-     * 计算子像素位置的SAD（使用mcLumaBlock获取1/4像素精度预测块）
+     * 计算子像素位置的SAD，融合运动补偿与像素比较，避免构造完整预测块。
      */
-    private function computeSADSubpel(array $curFlat, string $refPlane, int $mbX, int $mbY, int $mvx, int $mvy, int $blockW, int $blockH): int
+    private function computeSADSubpel(array $curFlat, string $refPlane, int $mbX, int $mbY, int $mvx, int $mvy, int $blockW, int $blockH, int $cutoff): int
     {
         $refX = $mbX * 64 + $mvx;
         $refY = $mbY * 64 + $mvy;
-        $predBlock = $this->mcLumaBlock($refPlane, $refX, $refY, $this->mbAlignedWidth, $this->mbAlignedHeight);
+        $fracX = $refX & 3;
+        $fracY = $refY & 3;
+        $intX = $refX >> 2;
+        $intY = $refY >> 2;
+        $stride = $this->mbAlignedWidth;
+        $height = $this->mbAlignedHeight;
+        $ref = $this->refInts;
         $sad = 0;
+
+        $xs = [];
+        for ($x = -2; $x < $blockW + 3; $x++) {
+            $xs[$x + 2] = max(0, min($stride - 1, $intX + $x));
+        }
+        $ys = [];
+        for ($y = -2; $y < $blockH + 3; $y++) {
+            $ys[$y + 2] = max(0, min($height - 1, $intY + $y));
+        }
+
+        $h = [];
+        $hFull = [];
+        $needC = ($fracX === 2 && $fracY !== 0) || ($fracY === 2 && $fracX !== 0);
+        $needH = $fracX !== 0 && ($fracY === 0 || $fracX === 2 || ($fracX !== 2 && $fracY !== 2));
+        if ($needH || $needC) {
+            $startY = ($fracY === 0) ? 0 : -2;
+            $rows = ($fracY === 0) ? $blockH : $blockH + 5;
+            for ($y = 0; $y < $rows; $y++) {
+                $base = $ys[$startY + $y + 2] * $stride + 1;
+                for ($x = 0; $x < $blockW; $x++) {
+                    $full = $ref[$base + $xs[$x]] - 5 * $ref[$base + $xs[$x + 1]]
+                        + 20 * $ref[$base + $xs[$x + 2]] + 20 * $ref[$base + $xs[$x + 3]]
+                        - 5 * $ref[$base + $xs[$x + 4]] + $ref[$base + $xs[$x + 5]];
+                    $idx = $y * $blockW + $x;
+                    if ($needC) $hFull[$idx] = $full;
+                    if ($needH) {
+                        $half = ($full + 16) >> 5;
+                        $h[$idx] = $half < 0 ? 0 : ($half > 255 ? 255 : $half);
+                    }
+                }
+            }
+        }
+
+        $v = [];
+        $needV = $fracY !== 0 && ($fracX === 0 || $fracY === 2 || ($fracX !== 2 && $fracY !== 2));
+        $vCols = $blockW + (($fracX !== 0 && $needV) ? 1 : 0);
+        if ($needV) {
+            for ($y = 0; $y < $blockH; $y++) {
+                for ($x = 0; $x < $vCols; $x++) {
+                    $rx = $xs[$x + 2];
+                    $full = $ref[$ys[$y] * $stride + $rx + 1]
+                        - 5 * $ref[$ys[$y + 1] * $stride + $rx + 1]
+                        + 20 * $ref[$ys[$y + 2] * $stride + $rx + 1]
+                        + 20 * $ref[$ys[$y + 3] * $stride + $rx + 1]
+                        - 5 * $ref[$ys[$y + 4] * $stride + $rx + 1]
+                        + $ref[$ys[$y + 5] * $stride + $rx + 1];
+                    $half = ($full + 16) >> 5;
+                    $v[$y * $vCols + $x] = $half < 0 ? 0 : ($half > 255 ? 255 : $half);
+                }
+            }
+        }
+
         for ($y = 0; $y < $blockH; $y++) {
             for ($x = 0; $x < $blockW; $x++) {
-                $diff = $curFlat[$y * 16 + $x] - $predBlock[$y][$x];
+                if ($fracX === 0 && $fracY === 0) {
+                    $pred = $ref[$ys[$y + 2] * $stride + $xs[$x + 2] + 1];
+                } elseif ($fracY === 0) {
+                    $half = $h[$y * $blockW + $x];
+                    if ($fracX === 1) {
+                        $pred = ($ref[$ys[$y + 2] * $stride + $xs[$x + 2] + 1] + $half + 1) >> 1;
+                    } elseif ($fracX === 2) {
+                        $pred = $half;
+                    } else {
+                        $pred = ($half + $ref[$ys[$y + 2] * $stride + $xs[$x + 3] + 1] + 1) >> 1;
+                    }
+                } elseif ($fracX === 0) {
+                    $half = $v[$y * $vCols + $x];
+                    if ($fracY === 1) {
+                        $pred = ($ref[$ys[$y + 2] * $stride + $xs[$x + 2] + 1] + $half + 1) >> 1;
+                    } elseif ($fracY === 2) {
+                        $pred = $half;
+                    } else {
+                        $pred = ($half + $ref[$ys[$y + 3] * $stride + $xs[$x + 2] + 1] + 1) >> 1;
+                    }
+                } elseif ($needC) {
+                    $idx = $y * $blockW + $x;
+                    $full = $hFull[$idx] - 5 * $hFull[$idx + $blockW]
+                        + 20 * $hFull[$idx + 2 * $blockW] + 20 * $hFull[$idx + 3 * $blockW]
+                        - 5 * $hFull[$idx + 4 * $blockW] + $hFull[$idx + 5 * $blockW];
+                    $center = ($full + 512) >> 10;
+                    $center = $center < 0 ? 0 : ($center > 255 ? 255 : $center);
+                    if ($fracX === 2) {
+                        $pred = $fracY === 2 ? $center : (($h[($y + ($fracY === 1 ? 2 : 3)) * $blockW + $x] + $center + 1) >> 1);
+                    } else {
+                        $pred = ($center + $v[$y * $vCols + $x + ($fracX === 3 ? 1 : 0)] + 1) >> 1;
+                    }
+                } else {
+                    $hIdx = $y + ($fracY === 1 ? 2 : 3);
+                    $vIdx = $x + ($fracX === 3 ? 1 : 0);
+                    $pred = ($h[$hIdx * $blockW + $x] + $v[$y * $vCols + $vIdx] + 1) >> 1;
+                }
+
+                $diff = $curFlat[$y * 16 + $x] - $pred;
                 if ($diff < 0) $diff = -$diff;
                 $sad += $diff;
+                if ($sad >= $cutoff) {
+                    return $sad;
+                }
             }
         }
         return $sad;
     }
 
-    private function computeSADFast(array $curFlat, int $origX, int $origY, int $dx, int $dy, int $blockW, int $blockH, int $refStride): int
+    private function computeSADFast(array $curFlat, int $origX, int $origY, int $dx, int $dy, int $blockW, int $blockH, int $refStride, int $cutoff): int
     {
         $rx = $origX + $dx;
         $ry = $origY + $dy;
@@ -292,6 +405,9 @@ trait MotionTrait
                 $diff = $curFlat[$y * 16 + $x] - $refInts[$rowOffset + $x];
                 if ($diff < 0) $diff = -$diff;
                 $sad += $diff;
+                if ($sad >= $cutoff) {
+                    return $sad;
+                }
             }
         }
         return $sad;
