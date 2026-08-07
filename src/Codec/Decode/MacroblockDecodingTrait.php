@@ -2054,9 +2054,16 @@ trait MacroblockDecodingTrait
             $lumaRefX, $lumaRefY, 16, 16
         );
 
-        for ($y = 0; $y < 16; $y++) {
-            for ($x = 0; $x < 16; $x++) {
-                $this->writeLumaPixel($mbX, $mbY, $x, $y, $lumaPred[$y][$x]);
+        $dstX = $mbX * 16;
+        $dstY = $mbY * 16;
+        $copyW = min(16, $this->width - $dstX);
+        $copyH = min(16, $this->height - $dstY);
+        $dstStride = $this->width;
+        for ($y = 0; $y < $copyH; $y++) {
+            $dstBase = ($dstY + $y) * $dstStride + $dstX;
+            $srcRow = $lumaPred[$y];
+            for ($x = 0; $x < $copyW; $x++) {
+                $this->yPlane[$dstBase + $x] = $srcRow[$x];
             }
         }
 
@@ -2074,10 +2081,19 @@ trait MacroblockDecodingTrait
             $chromaRefX, $chromaRefY, 8, 8
         );
 
-        for ($y = 0; $y < 8; $y++) {
-            for ($x = 0; $x < 8; $x++) {
-                $this->writeChromaPixel($mbX, $mbY, $x, $y, $cbPred[$y][$x], 0);
-                $this->writeChromaPixel($mbX, $mbY, $x, $y, $crPred[$y][$x], 1);
+        $chromaStride = intdiv($this->width, 2);
+        $chromaHeight = intdiv($this->height, 2);
+        $dstChromaX = $mbX * 8;
+        $dstChromaY = $mbY * 8;
+        $copyChromaW = min(8, $chromaStride - $dstChromaX);
+        $copyChromaH = min(8, $chromaHeight - $dstChromaY);
+        for ($y = 0; $y < $copyChromaH; $y++) {
+            $dstBase = ($dstChromaY + $y) * $chromaStride + $dstChromaX;
+            $srcCbRow = $cbPred[$y];
+            $srcCrRow = $crPred[$y];
+            for ($x = 0; $x < $copyChromaW; $x++) {
+                $this->uPlane[$dstBase + $x] = $srcCbRow[$x];
+                $this->vPlane[$dstBase + $x] = $srcCrRow[$x];
             }
         }
     }

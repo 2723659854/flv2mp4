@@ -662,26 +662,28 @@ trait ResidualDecodingTrait
 
         $peeked = $this->reader->peek($maxBits);
 
-        $entries = [];
-        for ($i = 0; $i < $count; $i++) {
-            $len = $lens[$i];
-            if ($len == 0) continue;
-            $entries[] = ['len' => $len, 'code' => $bitsTab[$i], 'index' => $i];
+        static $lookupCache = [];
+        $lookupKey = $nC == -1 ? -1 : $tableIdx;
+        if (!isset($lookupCache[$lookupKey])) {
+            $lookup = [];
+            for ($i = 0; $i < $count; $i++) {
+                $len = $lens[$i];
+                if ($len !== 0) {
+                    $lookup[$len][$bitsTab[$i]] = $i;
+                }
+            }
+            $lookupCache[$lookupKey] = $lookup;
         }
-        usort($entries, function($a, $b) {
-            return $b['len'] - $a['len'];
-        });
+        $lookup = $lookupCache[$lookupKey];
 
-        foreach ($entries as $entry) {
-            $len = $entry['len'];
-            $code = $entry['code'];
-            $shift = $maxBits - $len;
-            $mask = (1 << $len) - 1;
-            $masked = ($peeked >> $shift) & $mask;
-            if ($masked == $code) {
+        for ($len = $maxBits; $len > 0; $len--) {
+            if (!isset($lookup[$len])) continue;
+            $code = $peeked >> ($maxBits - $len);
+            if (isset($lookup[$len][$code])) {
+                $index = $lookup[$len][$code];
                 $this->reader->skip($len);
-                $totalCoeff = (int)($entry['index'] / 4);
-                $trailingOnes = $entry['index'] % 4;
+                $totalCoeff = intdiv($index, 4);
+                $trailingOnes = $index & 3;
                 return;
             }
         }
