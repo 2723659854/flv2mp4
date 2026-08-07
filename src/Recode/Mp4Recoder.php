@@ -675,8 +675,17 @@ class Mp4Recoder
         );
 
         if ($needTranscode) {
+            // 每个输入 sample 都必须解码，以维持 H.264 参考帧链；抽帧只能发生在解码之后。
             $yuvData = $this->decodeNaluToYuv($avcData);
             if ($yuvData === null) return;
+
+            $outputCount = count($this->videoSamples);
+            $shouldOutput = $this->targetFps <= 0
+                || $outputCount === 0
+                || $dtsMs * $this->targetFps >= $outputCount * 1000;
+            if (!$shouldOutput) {
+                return;
+            }
 
             if ($targetW !== $this->srcWidth || $targetH !== $this->srcHeight) {
                 $yuvData = $this->scaler->scaleYUV420P(
@@ -696,7 +705,9 @@ class Mp4Recoder
             } else {
                 $this->encoder->setQp($this->targetQp);
             }
-            $this->encoder->setFps($this->targetFps);
+            if ($this->targetFps > 0) {
+                $this->encoder->setFps($this->targetFps);
+            }
 
             $encodedNals = $this->encoder->encodeFrame($yuvData, $isKeyFrame);
             $this->videoFrameCount++;
@@ -712,7 +723,9 @@ class Mp4Recoder
             if ($videoAvcc === '') return;
 
             $frameIndex = count($this->videoSamples);
-            $transcodeTimestamp = (int)($frameIndex * 1000 / $this->targetFps);
+            $transcodeTimestamp = $this->targetFps > 0
+                ? (int)round($frameIndex * 1000 / $this->targetFps)
+                : $dtsMs;
 
             $this->videoSamples[] = [
                 'data' => $videoAvcc,
@@ -889,6 +902,8 @@ class Mp4Recoder
 
     private function buildMp4(string $outputFile): void
     {
+        // 输出 movie timescale 与视频 media timescale 沿用当前结构，统一为毫秒刻度。
+        $this->videoTimescale = 1000;
         $this->sortAndNormalizeSamples();
 
         $ftyp = $this->buildFtyp();
@@ -952,21 +967,57 @@ class Mp4Recoder
         });
     }
 
-    private function calculateDuration(): int
+    private function calculateVideoSampleDurations(): array
     {
-        $maxVideoDts = 0;
-        $maxAudioDts = 0;
+        $count = count($this->videoSamples);
+        if ($count === 0) return [];
 
-        foreach ($this->videoSamples as $sample) {
-            if ($sample['timestamp'] > $maxVideoDts) $maxVideoDts = $sample['timestamp'];
+        $durations = [];
+        $positiveTotal = 0;
+        $positiveCount = 0;
+        for ($i = 0; $i < $count - 1; $i++) {
+            $currentTicks = (int)round($this->videoSamples[$i]['timestamp'] * $this->videoTimescale / 1000);
+            $nextTicks = (int)round($this->videoSamples[$i + 1]['timestamp'] * $this->videoTimescale / 1000);
+            $delta = max(1, $nextTicks - $currentTicks);
+            $durations[] = $delta;
+            $positiveTotal += $delta;
+            $positiveCount++;
         }
 
-        foreach ($this->audioSamples as $sample) {
-            if ($sample['timestamp'] > $maxAudioDts) $maxAudioDts = $sample['timestamp'];
+        if ($positiveCount > 0) {
+            $lastDuration = max(1, (int)round($positiveTotal / $positiveCount));
+        } else {
+            $fps = $this->calculateVideoFrameRate();
+            $lastDuration = max(1, (int)round($this->videoTimescale / $fps));
         }
+        $durations[] = $lastDuration;
+        return $durations;
+    }
 
-        $maxDtsMs = max($maxVideoDts, $maxAudioDts);
-        return (int)($maxDtsMs * $this->videoTimescale / 1000);
+    private function calculateAudioSampleDuration(): int
+    {
+        return in_array($this->audioObjectType, [5, 29], true) ? 2048 : 1024;
+    }
+
+    private function calculateVideoDurationTicks(): int
+    {
+        return array_sum($this->calculateVideoSampleDurations());
+    }
+
+    private function calculateAudioDurationTicks(): int
+    {
+        return count($this->audioSamples) * $this->calculateAudioSampleDuration();
+    }
+
+    private function calculateMovieDuration(): int
+    {
+        $videoMovieTicks = $this->videoTimescale > 0
+            ? (int)round($this->calculateVideoDurationTicks())
+            : 0;
+        $audioMovieTicks = $this->audioTimescale > 0
+            ? (int)round($this->calculateAudioDurationTicks() * $this->videoTimescale / $this->audioTimescale)
+            : 0;
+        return max($videoMovieTicks, $audioMovieTicks);
     }
 
     private function buildFtyp(): string
@@ -982,7 +1033,7 @@ class Mp4Recoder
 
     private function buildMoov(int $stcoVideoBase = 0, int $stcoAudioBase = 0): string
     {
-        $duration = $this->calculateDuration();
+        $duration = $this->calculateMovieDuration();
         $mvhd = $this->buildMvhd($this->videoTimescale, $duration);
         $tracks = [];
 
@@ -1016,11 +1067,13 @@ class Mp4Recoder
     private function buildVideoTrak(int $stcoBase = 0): string
     {
         $trackId = 1;
-        $numSamples = count($this->videoSamples);
-        $duration = ($numSamples > 0) ? $this->calculateDuration() : 0;
+        $mediaDuration = $this->calculateVideoDurationTicks();
+        $movieDuration = $this->videoTimescale > 0
+            ? (int)round($mediaDuration)
+            : 0;
 
-        $tkhd = $this->buildTkhd($trackId, $duration, $this->outputVideoWidth, $this->outputVideoHeight);
-        $mdhd = $this->buildMdhd($this->videoTimescale, $duration);
+        $tkhd = $this->buildTkhd($trackId, $movieDuration, $this->outputVideoWidth, $this->outputVideoHeight);
+        $mdhd = $this->buildMdhd($this->videoTimescale, $mediaDuration);
         $hdlr = $this->buildHdlr('vide');
         $minf = $this->buildMinf('video', $stcoBase);
 
@@ -1031,11 +1084,13 @@ class Mp4Recoder
     private function buildAudioTrak(int $stcoBase = 0): string
     {
         $trackId = 2;
-        $numSamples = count($this->audioSamples);
-        $duration = ($numSamples > 0) ? (int)($this->calculateDuration() * $this->audioTimescale / $this->videoTimescale) : 0;
+        $mediaDuration = $this->calculateAudioDurationTicks();
+        $movieDuration = $this->audioTimescale > 0
+            ? (int)round($mediaDuration * $this->videoTimescale / $this->audioTimescale)
+            : 0;
 
-        $tkhd = $this->buildTkhd($trackId, $duration, 0, 0);
-        $mdhd = $this->buildMdhd($this->audioTimescale, $duration);
+        $tkhd = $this->buildTkhd($trackId, $movieDuration, 0, 0);
+        $mdhd = $this->buildMdhd($this->audioTimescale, $mediaDuration);
         $hdlr = $this->buildHdlr('soun');
         $minf = $this->buildMinf('audio', $stcoBase);
 
@@ -1255,30 +1310,12 @@ class Mp4Recoder
             return $this->box('stts', pack('N*', 0, 0));
         }
 
+        $durations = $this->calculateVideoSampleDurations();
         $data = pack('N', 0);
-
-        $baseTimestamp = PHP_INT_MAX;
-        foreach ($samples as $sample) {
-            if ($sample['timestamp'] < $baseTimestamp) {
-                $baseTimestamp = $sample['timestamp'];
-            }
-        }
-
-        $entries = [];
-        $currentDts = 0;
-
-        foreach ($samples as $sample) {
-            $targetDts = (int)(($sample['timestamp'] - $baseTimestamp) * $this->videoTimescale / 1000);
-            $delta = $targetDts - $currentDts;
-            if ($delta <= 0) $delta = 1;
-            $entries[] = ['count' => 1, 'delta' => $delta];
-            $currentDts += $delta;
-        }
-
-        $data .= pack('N', count($entries));
-        foreach ($entries as $entry) {
-            $data .= pack('N', $entry['count']);
-            $data .= pack('N', $entry['delta']);
+        $data .= pack('N', count($durations));
+        foreach ($durations as $duration) {
+            $data .= pack('N', 1);
+            $data .= pack('N', max(1, $duration));
         }
 
         return $this->box('stts', $data);
@@ -1293,31 +1330,11 @@ class Mp4Recoder
             return $this->box('stts', pack('N*', 0, 0));
         }
 
+        $sampleDuration = $this->calculateAudioSampleDuration();
         $data = pack('N', 0);
-
-        $baseTimestamp = PHP_INT_MAX;
-        foreach ($samples as $sample) {
-            if ($sample['timestamp'] < $baseTimestamp) {
-                $baseTimestamp = $sample['timestamp'];
-            }
-        }
-
-        $entries = [];
-        $currentDts = 0;
-
-        foreach ($samples as $sample) {
-            $targetDts = (int)(($sample['timestamp'] - $baseTimestamp) * $this->audioTimescale / 1000);
-            $delta = $targetDts - $currentDts;
-            if ($delta <= 0) $delta = 1;
-            $entries[] = ['count' => 1, 'delta' => $delta];
-            $currentDts += $delta;
-        }
-
-        $data .= pack('N', count($entries));
-        foreach ($entries as $entry) {
-            $data .= pack('N', $entry['count']);
-            $data .= pack('N', $entry['delta']);
-        }
+        $data .= pack('N', 1);
+        $data .= pack('N', $count);
+        $data .= pack('N', $sampleDuration);
 
         return $this->box('stts', $data);
     }
