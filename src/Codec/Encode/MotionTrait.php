@@ -268,13 +268,11 @@ trait MotionTrait
         $refY = $mbY * 64 + $mvy;
         $predBlock = $this->mcLumaBlock($refPlane, $refX, $refY, $this->mbAlignedWidth, $this->mbAlignedHeight);
         $sad = 0;
-        $pos = 0;
         for ($y = 0; $y < $blockH; $y++) {
             for ($x = 0; $x < $blockW; $x++) {
-                $diff = $curFlat[$pos] - $predBlock[$y][$x];
+                $diff = $curFlat[$y * 16 + $x] - $predBlock[$y][$x];
                 if ($diff < 0) $diff = -$diff;
                 $sad += $diff;
-                $pos++;
             }
         }
         return $sad;
@@ -286,16 +284,14 @@ trait MotionTrait
         $ry = $origY + $dy;
         $refStart = $ry * $refStride + $rx + 1;
         $sad = 0;
-        $pos = 0;
         $refInts = $this->refInts;
 
         for ($y = 0; $y < $blockH; $y++) {
             $rowOffset = $refStart + $y * $refStride;
             for ($x = 0; $x < $blockW; $x++) {
-                $diff = $curFlat[$pos] - $refInts[$rowOffset + $x];
+                $diff = $curFlat[$y * 16 + $x] - $refInts[$rowOffset + $x];
                 if ($diff < 0) $diff = -$diff;
                 $sad += $diff;
-                $pos++;
             }
         }
         return $sad;
