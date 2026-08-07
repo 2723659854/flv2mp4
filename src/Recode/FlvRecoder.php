@@ -24,7 +24,7 @@ class FlvRecoder
     private int $targetWidth = 0;
     private int $targetHeight = 0;
     private int $targetBitrate = 0;
-    private int $targetFps = 30;
+    private int $targetFps = 0;
     private int $targetQp = 26;
 
     private bool $watermarkEnabled = false;
@@ -42,6 +42,11 @@ class FlvRecoder
     private int $srcWidth = 0;
     private int $srcHeight = 0;
     private bool $srcInitialized = false;
+    private ?float $sourceFps = null;
+    private ?float $effectiveTargetFps = null;
+    private bool $dropFrames = false;
+    private int $outputVideoWidth = 0;
+    private int $outputVideoHeight = 0;
 
     private string $srcSpsData = '';
     private string $srcPpsData = '';
@@ -78,8 +83,9 @@ class FlvRecoder
         $this->targetWidth = $config['width'] ?? 0;
         $this->targetHeight = $config['height'] ?? 0;
         $this->targetBitrate = $config['bitrate'] ?? 0;
-        $this->targetFps = $config['fps'] ?? 30;
+        $this->targetFps = $config['fps'] ?? 0;
         $this->targetQp = $config['qp'] ?? 26;
+        $this->validateConfig();
 
         if (!empty($config['watermark']) && !empty($config['watermark_file'])) {
             $this->watermarkEnabled = true;
@@ -90,6 +96,22 @@ class FlvRecoder
         $this->decoder = new H264Decoder();
         $this->encoder = new H264Encoder();
         $this->scaler = new VideoScaler();
+    }
+
+    private function validateConfig(): void
+    {
+        foreach (['width' => $this->targetWidth, 'height' => $this->targetHeight, 'fps' => $this->targetFps, 'bitrate' => $this->targetBitrate] as $name => $value) {
+            if ($value < 0) {
+                throw new \RuntimeException("配置 {$name} 不得为负数");
+            }
+        }
+        if ($this->targetWidth !== 0 && ($this->targetWidth & 1) !== 0) {
+            throw new \RuntimeException('配置 width 非0时必须为偶数');
+        }
+        if ($this->targetHeight !== 0 && ($this->targetHeight & 1) !== 0) {
+            throw new \RuntimeException('配置 height 非0时必须为偶数');
+        }
+        // 当前容器无法可靠获得源视频轨码率；bitrate>0由调用方保证不高于源视频码率。
     }
 
     private function loadWatermark(): void
@@ -129,7 +151,7 @@ class FlvRecoder
     private function applyWatermark(string $yuvData, int $frameW, int $frameH): string
     {
         if ($this->wmWidth > $frameW || $this->wmHeight > $frameH) {
-            return $yuvData;
+            throw new \RuntimeException("水印尺寸 {$this->wmWidth}x{$this->wmHeight} 超过最终输出尺寸 {$frameW}x{$frameH}");
         }
 
         $ySize = $frameW * $frameH;
@@ -173,16 +195,32 @@ class FlvRecoder
         $this->maxFrames = $maxFrames;
     }
 
-    public function processFlv(string $inputFile, string $outputFile): void
+    private function resetProcessState(): void
     {
-        if (!file_exists($inputFile)) {
-            throw new \Exception("FLV file not found: {$inputFile}");
-        }
-
-        $flvData = file_get_contents($inputFile);
-        FlvParse::setFlv($flvData);
-        $tags = FlvParse::getTags();
-
+        $this->decoder = new H264Decoder();
+        $this->encoder = new H264Encoder();
+        $this->srcWidth = 0;
+        $this->srcHeight = 0;
+        $this->srcInitialized = false;
+        $this->srcSpsData = '';
+        $this->srcPpsData = '';
+        $this->sourceFps = null;
+        $this->effectiveTargetFps = null;
+        $this->dropFrames = false;
+        $this->outputVideoWidth = 0;
+        $this->outputVideoHeight = 0;
+        $this->baseTimestamp = null;
+        $this->videoFrameCount = 0;
+        $this->encSpsAnnexB = '';
+        $this->encPpsAnnexB = '';
+        $this->encSpsRbsp = '';
+        $this->encPpsRbsp = '';
+        $this->encoderConfigReady = false;
+        $this->audioSpecificConfig = '';
+        $this->audioConfigParsed = false;
+        $this->audioSampleRate = 44100;
+        $this->audioChannels = 2;
+        $this->audioObjectType = 2;
         $this->outputBuffer = '';
         $this->flvHeaderWritten = false;
         $this->outputVideoFrameCount = 0;
@@ -191,6 +229,61 @@ class FlvRecoder
         $this->lastAudioOutputTimestamp = null;
         $this->positiveVideoDtsDeltaTotal = 0;
         $this->positiveVideoDtsDeltaCount = 0;
+    }
+
+    private function detectSourceFps(array $tags): void
+    {
+        $timestamps = [];
+        foreach ($tags as $tag) {
+            if (!property_exists($tag, 'tagType') || $tag->tagType !== 9 || !isset($tag->body)) continue;
+            $videoData = $this->videoFrameDataRead($tag->body);
+            if (!$videoData) continue;
+            $avc = $this->avcPacketRead($videoData['data']);
+            if ($avc && $avc['avcPacketType'] === self::AVC_PACKET_TYPE_NALU) {
+                $timestamps[] = $tag->getTime();
+            }
+        }
+        $count = count($timestamps);
+        if ($count >= 2) {
+            $span = $timestamps[$count - 1] - $timestamps[0];
+            if ($span > 0) {
+                $this->sourceFps = ($count - 1) * 1000 / $span;
+            }
+        }
+    }
+
+    private function configureOutputVideo(): void
+    {
+        $this->outputVideoWidth = $this->targetWidth > 0 ? $this->targetWidth : $this->srcWidth;
+        $this->outputVideoHeight = $this->targetHeight > 0 ? $this->targetHeight : $this->srcHeight;
+        if ($this->targetWidth > $this->srcWidth) {
+            throw new \RuntimeException("目标 width {$this->targetWidth} 超过源 width {$this->srcWidth}，不支持升配");
+        }
+        if ($this->targetHeight > $this->srcHeight) {
+            throw new \RuntimeException("目标 height {$this->targetHeight} 超过源 height {$this->srcHeight}，不支持升配");
+        }
+        if ($this->watermarkEnabled && ($this->wmWidth > $this->outputVideoWidth || $this->wmHeight > $this->outputVideoHeight)) {
+            throw new \RuntimeException("水印尺寸 {$this->wmWidth}x{$this->wmHeight} 超过最终输出尺寸 {$this->outputVideoWidth}x{$this->outputVideoHeight}");
+        }
+        if ($this->targetFps > 0 && $this->sourceFps !== null && $this->targetFps > $this->sourceFps + 0.01) {
+            throw new \RuntimeException("目标 fps {$this->targetFps} 高于源 fps " . round($this->sourceFps, 3) . '，不支持升帧');
+        }
+        // 源帧率未知时不按目标重建或抽帧，避免误升帧及改变播放时长。
+        $this->dropFrames = $this->targetFps > 0 && $this->sourceFps !== null && $this->targetFps < $this->sourceFps - 0.01;
+        $this->effectiveTargetFps = $this->dropFrames ? (float)$this->targetFps : $this->sourceFps;
+    }
+
+    public function processFlv(string $inputFile, string $outputFile): void
+    {
+        if (!file_exists($inputFile)) {
+            throw new \Exception("FLV file not found: {$inputFile}");
+        }
+
+        $this->resetProcessState();
+        $flvData = file_get_contents($inputFile);
+        FlvParse::setFlv($flvData);
+        $tags = FlvParse::getTags();
+        $this->detectSourceFps($tags);
 
         $frameCount = 0;
         $videoCount = 0;
@@ -221,9 +314,12 @@ class FlvRecoder
 
         $actualHasVideo = $this->outputVideoFrameCount > 0;
         $actualHasAudio = $this->outputAudioFrameCount > 0;
+        $fallbackFps = ($this->effectiveTargetFps !== null && $this->effectiveTargetFps > 0)
+            ? $this->effectiveTargetFps
+            : (($this->sourceFps !== null && $this->sourceFps > 0) ? $this->sourceFps : 30.0);
         $videoFrameDurationMs = $this->positiveVideoDtsDeltaCount > 0
             ? $this->positiveVideoDtsDeltaTotal / $this->positiveVideoDtsDeltaCount
-            : 1000 / $this->targetFps;
+            : 1000 / $fallbackFps;
         $videoEndMs = $actualHasVideo && $this->lastVideoOutputTimestamp !== null
             ? $this->lastVideoOutputTimestamp + $videoFrameDurationMs
             : 0.0;
@@ -239,8 +335,8 @@ class FlvRecoder
         if ($this->flvHeaderWritten && strlen($this->outputBuffer) >= 13) {
             $metadata = [
                 'duration' => $duration,
-                'width' => (float)($this->targetWidth > 0 ? $this->targetWidth : $this->srcWidth),
-                'height' => (float)($this->targetHeight > 0 ? $this->targetHeight : $this->srcHeight),
+                'width' => (float)$this->outputVideoWidth,
+                'height' => (float)$this->outputVideoHeight,
                 'videocodecid' => 'avc1',
                 'framerate' => $videoFrameDurationMs > 0 ? 1000 / $videoFrameDurationMs : 0.0,
                 'hasVideo' => $actualHasVideo,
@@ -277,6 +373,9 @@ class FlvRecoder
 
         if ($avc['avcPacketType'] === self::AVC_PACKET_TYPE_SEQUENCE_HEADER) {
             $this->parseAVCDecoderConfigurationRecord($avc['data']);
+            if ($this->srcInitialized) {
+                $this->configureOutputVideo();
+            }
             return;
         }
 
@@ -297,16 +396,32 @@ class FlvRecoder
         $needTranscode = $this->srcInitialized && (
             $this->targetWidth > 0 && $this->srcWidth !== $this->targetWidth ||
             $this->targetHeight > 0 && $this->srcHeight !== $this->targetHeight ||
-            $this->targetBitrate > 0
+            $this->targetBitrate > 0 ||
+            $this->dropFrames ||
+            $this->watermarkEnabled
         );
 
         if ($needTranscode) {
+            // 每个输入 sample 都先解码以维持 H.264 参考链，之后才决定是否输出。
             $yuvData = $this->decodeNaluToYuv($avcData);
             if ($yuvData === null) return;
 
-            $targetW = $this->targetWidth > 0 ? $this->targetWidth : $this->srcWidth;
-            $targetH = $this->targetHeight > 0 ? $this->targetHeight : $this->srcHeight;
+            if ($this->baseTimestamp === null) {
+                if (!$isKeyFrame) return;
+                $this->baseTimestamp = $timestamp;
+                $relativeTime = 0;
+            } else {
+                $relativeTime = $timestamp - $this->baseTimestamp;
+            }
 
+            // 相对首关键帧时间轴选择，无浮点累积误差；首个输出固定为关键帧。
+            $shouldOutput = !$this->dropFrames
+                || $this->outputVideoFrameCount === 0
+                || $relativeTime * $this->effectiveTargetFps >= $this->outputVideoFrameCount * 1000;
+            if (!$shouldOutput) return;
+
+            $targetW = $this->outputVideoWidth;
+            $targetH = $this->outputVideoHeight;
             if ($targetW !== $this->srcWidth || $targetH !== $this->srcHeight) {
                 $yuvData = $this->scaler->scaleYUV420P(
                     $yuvData,
@@ -325,23 +440,22 @@ class FlvRecoder
             } else {
                 $this->encoder->setQp($this->targetQp);
             }
-            $this->encoder->setFps($this->targetFps);
+            $encoderFps = $this->effectiveTargetFps ?? $this->sourceFps;
+            if ($encoderFps !== null && $encoderFps > 0) {
+                $this->encoder->setFps(max(1, (int)round($encoderFps)));
+            }
 
-            $encodedNals = $this->encoder->encodeFrame($yuvData, $isKeyFrame);
+            $encodedNals = $this->encoder->encodeFrame($yuvData, $this->outputVideoFrameCount === 0 || $isKeyFrame);
             $this->videoFrameCount++;
 
-            if ($this->baseTimestamp === null) {
-                if (!$isKeyFrame) return;
-                $this->baseTimestamp = $timestamp;
-                $relativeTime = 0;
-
+            if ($this->outputVideoFrameCount === 0) {
                 $this->extractSpsPpsFromNals($encodedNals);
-
                 $this->writeFlvHeader(true, true);
                 $this->writeSequenceHeaderTag();
             }
 
-            $this->writeEncodedVideoFrame($encodedNals, $isKeyFrame, $relativeTime, $cts);
+            // 重编码器不生成 B 帧，CTS 必须为0；DTS保留选中输入帧的相对时间。
+            $this->writeEncodedVideoFrame($encodedNals, $this->outputVideoFrameCount === 0 || $isKeyFrame, $relativeTime, 0);
         } else {
             if ($this->baseTimestamp === null) {
                 if (!$isKeyFrame) return;

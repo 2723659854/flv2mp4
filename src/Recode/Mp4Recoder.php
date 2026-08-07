@@ -18,7 +18,7 @@ class Mp4Recoder
     private int $targetWidth = 0;
     private int $targetHeight = 0;
     private int $targetBitrate = 0;
-    private int $targetFps = 30;
+    private int $targetFps = 0;
     private int $targetQp = 26;
 
     private bool $watermarkEnabled = false;
@@ -68,14 +68,19 @@ class Mp4Recoder
 
     private int $outputVideoWidth = 0;
     private int $outputVideoHeight = 0;
+    private ?float $sourceFps = null;
+    private ?float $effectiveTargetFps = null;
+    private bool $dropFrames = false;
+    private ?int $firstVideoDtsMs = null;
 
     public function __construct(array $config = [])
     {
         $this->targetWidth = $config['width'] ?? 0;
         $this->targetHeight = $config['height'] ?? 0;
         $this->targetBitrate = $config['bitrate'] ?? 0;
-        $this->targetFps = $config['fps'] ?? 30;
+        $this->targetFps = $config['fps'] ?? 0;
         $this->targetQp = $config['qp'] ?? 26;
+        $this->validateConfig();
 
         if (!empty($config['watermark']) && !empty($config['watermark_file'])) {
             $this->watermarkEnabled = true;
@@ -86,6 +91,22 @@ class Mp4Recoder
         $this->decoder = new H264Decoder();
         $this->encoder = new H264Encoder();
         $this->scaler = new VideoScaler();
+    }
+
+    private function validateConfig(): void
+    {
+        foreach (['width' => $this->targetWidth, 'height' => $this->targetHeight, 'fps' => $this->targetFps, 'bitrate' => $this->targetBitrate] as $name => $value) {
+            if ($value < 0) {
+                throw new \RuntimeException("配置 {$name} 不得为负数");
+            }
+        }
+        if ($this->targetWidth !== 0 && ($this->targetWidth & 1) !== 0) {
+            throw new \RuntimeException('配置 width 非0时必须为偶数');
+        }
+        if ($this->targetHeight !== 0 && ($this->targetHeight & 1) !== 0) {
+            throw new \RuntimeException('配置 height 非0时必须为偶数');
+        }
+        // 当前容器无法可靠获得源视频轨码率；bitrate>0由调用方保证不高于源视频码率。
     }
 
     private function loadWatermark(): void
@@ -124,7 +145,7 @@ class Mp4Recoder
     private function applyWatermark(string $yuvData, int $frameW, int $frameH): string
     {
         if ($this->wmWidth > $frameW || $this->wmHeight > $frameH) {
-            return $yuvData;
+            throw new \RuntimeException("水印尺寸 {$this->wmWidth}x{$this->wmHeight} 超过最终输出尺寸 {$frameW}x{$frameH}");
         }
 
         $ySize = $frameW * $frameH;
@@ -168,12 +189,48 @@ class Mp4Recoder
         $this->maxFrames = $maxFrames;
     }
 
+    private function resetProcessState(): void
+    {
+        $this->decoder = new H264Decoder();
+        $this->encoder = new H264Encoder();
+        $this->mp4Data = '';
+        $this->boxTree = [];
+        $this->videoTrack = null;
+        $this->audioTrack = null;
+        $this->srcWidth = 0;
+        $this->srcHeight = 0;
+        $this->srcInitialized = false;
+        $this->srcSpsData = '';
+        $this->srcPpsData = '';
+        $this->videoSamples = [];
+        $this->audioSamples = [];
+        $this->videoTimescale = 90000;
+        $this->audioTimescale = 44100;
+        $this->duration = 0;
+        $this->encSpsAnnexB = '';
+        $this->encPpsAnnexB = '';
+        $this->encAvccHeader = '';
+        $this->videoFrameCount = 0;
+        $this->outputVideoWidth = 0;
+        $this->outputVideoHeight = 0;
+        $this->sourceFps = null;
+        $this->effectiveTargetFps = null;
+        $this->dropFrames = false;
+        $this->firstVideoDtsMs = null;
+        $this->audioSpecificConfig = '';
+        $this->audioConfigParsed = false;
+        $this->audioSampleRate = 44100;
+        $this->audioChannels = 2;
+        $this->audioObjectType = 2;
+    }
+
     public function processMp4(string $inputFile, string $outputFile): void
     {
         if (!file_exists($inputFile)) {
             throw new \RuntimeException("MP4文件不存在: {$inputFile}");
         }
 
+        $this->resetProcessState();
         $outputDir = dirname($outputFile);
         if (!is_dir($outputDir)) {
             mkdir($outputDir, 0777, true);
@@ -472,6 +529,7 @@ class Mp4Recoder
 
         if ($this->videoTrack) {
             $videoSamples = $this->extractVideoSamples();
+            $this->configureOutputVideo($videoSamples);
             foreach ($videoSamples as &$s) {
                 $s['type'] = 'video';
             }
@@ -519,6 +577,34 @@ class Mp4Recoder
         $trak = $this->videoTrack['trak'];
         $timescale = $this->videoTrack['timescale'];
         return $this->extractSamplesFromTrak($trak, $timescale, 'video');
+    }
+
+    private function configureOutputVideo(array $samples): void
+    {
+        $count = count($samples);
+        if ($count >= 2) {
+            $span = $samples[$count - 1]['dtsMs'] - $samples[0]['dtsMs'];
+            if ($span > 0) {
+                $this->sourceFps = ($count - 1) * 1000 / $span;
+            }
+        }
+        $this->outputVideoWidth = $this->targetWidth > 0 ? $this->targetWidth : $this->srcWidth;
+        $this->outputVideoHeight = $this->targetHeight > 0 ? $this->targetHeight : $this->srcHeight;
+        if ($this->targetWidth > $this->srcWidth) {
+            throw new \RuntimeException("目标 width {$this->targetWidth} 超过源 width {$this->srcWidth}，不支持升配");
+        }
+        if ($this->targetHeight > $this->srcHeight) {
+            throw new \RuntimeException("目标 height {$this->targetHeight} 超过源 height {$this->srcHeight}，不支持升配");
+        }
+        if ($this->watermarkEnabled && ($this->wmWidth > $this->outputVideoWidth || $this->wmHeight > $this->outputVideoHeight)) {
+            throw new \RuntimeException("水印尺寸 {$this->wmWidth}x{$this->wmHeight} 超过最终输出尺寸 {$this->outputVideoWidth}x{$this->outputVideoHeight}");
+        }
+        if ($this->targetFps > 0 && $this->sourceFps !== null && $this->targetFps > $this->sourceFps + 0.01) {
+            throw new \RuntimeException("目标 fps {$this->targetFps} 高于源 fps " . round($this->sourceFps, 3) . '，不支持升帧');
+        }
+        // 源帧率未知时保留输入时间戳且不抽帧，避免无法确认的升帧行为。
+        $this->dropFrames = $this->targetFps > 0 && $this->sourceFps !== null && $this->targetFps < $this->sourceFps - 0.01;
+        $this->effectiveTargetFps = $this->dropFrames ? (float)$this->targetFps : $this->sourceFps;
     }
 
     private function extractAudioSamples(): array
@@ -665,13 +751,15 @@ class Mp4Recoder
         $dtsMs = $sample['dtsMs'];
         $ctsMs = $sample['ctsMs'];
 
-        $targetW = $this->targetWidth > 0 ? $this->targetWidth : $this->srcWidth;
-        $targetH = $this->targetHeight > 0 ? $this->targetHeight : $this->srcHeight;
+        $targetW = $this->outputVideoWidth;
+        $targetH = $this->outputVideoHeight;
 
         $needTranscode = $this->srcInitialized && (
             $this->targetWidth > 0 && $this->srcWidth !== $this->targetWidth ||
             $this->targetHeight > 0 && $this->srcHeight !== $this->targetHeight ||
-            $this->targetBitrate > 0
+            $this->targetBitrate > 0 ||
+            $this->dropFrames ||
+            $this->watermarkEnabled
         );
 
         if ($needTranscode) {
@@ -680,9 +768,14 @@ class Mp4Recoder
             if ($yuvData === null) return;
 
             $outputCount = count($this->videoSamples);
-            $shouldOutput = $this->targetFps <= 0
+            if ($this->firstVideoDtsMs === null) {
+                if (!$isKeyFrame) return;
+                $this->firstVideoDtsMs = $dtsMs;
+            }
+            $relativeTime = $dtsMs - $this->firstVideoDtsMs;
+            $shouldOutput = !$this->dropFrames
                 || $outputCount === 0
-                || $dtsMs * $this->targetFps >= $outputCount * 1000;
+                || $relativeTime * $this->effectiveTargetFps >= $outputCount * 1000;
             if (!$shouldOutput) {
                 return;
             }
@@ -705,11 +798,12 @@ class Mp4Recoder
             } else {
                 $this->encoder->setQp($this->targetQp);
             }
-            if ($this->targetFps > 0) {
-                $this->encoder->setFps($this->targetFps);
+            $encoderFps = $this->effectiveTargetFps ?? $this->sourceFps;
+            if ($encoderFps !== null && $encoderFps > 0) {
+                $this->encoder->setFps(max(1, (int)round($encoderFps)));
             }
 
-            $encodedNals = $this->encoder->encodeFrame($yuvData, $isKeyFrame);
+            $encodedNals = $this->encoder->encodeFrame($yuvData, $outputCount === 0 || $isKeyFrame);
             $this->videoFrameCount++;
 
             if (empty($this->videoSamples)) {
@@ -723,15 +817,15 @@ class Mp4Recoder
             if ($videoAvcc === '') return;
 
             $frameIndex = count($this->videoSamples);
-            $transcodeTimestamp = $this->targetFps > 0
-                ? (int)round($frameIndex * 1000 / $this->targetFps)
+            $transcodeTimestamp = $this->dropFrames
+                ? (int)round($frameIndex * 1000 / $this->effectiveTargetFps)
                 : $dtsMs;
 
             $this->videoSamples[] = [
                 'data' => $videoAvcc,
                 'timestamp' => $transcodeTimestamp,
                 'cts' => 0,
-                'keyframe' => $isKeyFrame,
+                'keyframe' => $frameIndex === 0 || $isKeyFrame,
             ];
         } else {
             if (empty($this->videoSamples)) {
@@ -1274,7 +1368,8 @@ class Mp4Recoder
         $count = count($samples);
 
         if ($count < 2) {
-            return $this->targetFps > 0 && $this->targetFps <= 120 ? $this->targetFps : 30;
+            $fallbackFps = $this->effectiveTargetFps ?? $this->sourceFps;
+            return $fallbackFps !== null && $fallbackFps > 0 && $fallbackFps <= 120 ? $fallbackFps : 30;
         }
 
         $totalInterval = 0;
@@ -1288,14 +1383,16 @@ class Mp4Recoder
         }
 
         if ($intervals == 0) {
-            return $this->targetFps > 0 && $this->targetFps <= 120 ? $this->targetFps : 30;
+            $fallbackFps = $this->effectiveTargetFps ?? $this->sourceFps;
+            return $fallbackFps !== null && $fallbackFps > 0 && $fallbackFps <= 120 ? $fallbackFps : 30;
         }
 
         $avgIntervalMs = $totalInterval / $intervals;
         $fps = 1000 / $avgIntervalMs;
 
         if ($fps <= 0 || $fps > 120) {
-            return $this->targetFps > 0 && $this->targetFps <= 120 ? $this->targetFps : 30;
+            $fallbackFps = $this->effectiveTargetFps ?? $this->sourceFps;
+            return $fallbackFps !== null && $fallbackFps > 0 && $fallbackFps <= 120 ? $fallbackFps : 30;
         }
 
         return $fps;
