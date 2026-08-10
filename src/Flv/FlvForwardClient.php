@@ -101,13 +101,10 @@ class FlvForwardClient
         $this->stats['last_report_time'] = $this->stats['start_time'];
 
         $this->log("========================================");
-        $this->log("FLV Forwarder v1.0.0");
+        $this->log("xiaosongshu flv/rtmp Forwarder v1.0.0");
         $this->log("========================================");
-        $this->log("拉流地址: {$this->pullUrl}");
-        $this->log("推流地址: " . implode(', ', $this->pushUrls));
-        $this->log("转发时长: " . ($this->duration > 0 ? "{$this->duration} 秒" : "不限"));
-        $this->log("自动重连: " . ($this->autoReconnect ? '是' : '否'));
-        $this->log("========================================");
+        $this->log("拉流地址: {$this->pullUrl}，"."推流地址: " . implode(', ', $this->pushUrls)."转发时长: " . ($this->duration > 0 ? "{$this->duration} 秒" : "不限")."，自动重连: " . ($this->autoReconnect ? '是' : '否'));
+
 
         while ($this->isRunning) {
             try {
@@ -1184,26 +1181,16 @@ class FlvForwardClient
         $kbps = ($this->stats['bytes_received'] * 8) / max(1, $elapsed) / 1000;
 
         echo "\n";
-        $this->log("========================================");
-        $this->log("转发统计");
-        $this->log("========================================");
-        $this->log("运行时间: {$elapsedFormatted}");
-        $this->log("接收 Tag 数: {$this->stats['tags_received']}");
-        $this->log("  - 音频: {$this->stats['audio_tags']}");
-        $this->log("  - 视频: {$this->stats['video_tags']}");
-        $this->log("发送 Tag 数: {$this->stats['tags_sent']}");
-        $this->log("接收字节: " . $this->formatBytes($this->stats['bytes_received']));
-        $this->log("发送字节: " . $this->formatBytes($this->stats['bytes_sent']));
-        $this->log("速率: " . sprintf("%.1f", $tagsPerSec) . " tags/s");
-        $this->log("码率: " . sprintf("%.1f", $kbps) . " kbps");
-        $this->log("重连次数: {$this->stats['reconnect_count']}");
-        $this->log("上游状态: " . ($this->upstreamConnected ? '✓ 连接' : '✗ 断开'));
-        $this->log("下游状态:");
+        $this->log("转发统计:运行时间: {$elapsedFormatted},接收 Tag 数: {$this->stats['tags_received']},音频: {$this->stats['audio_tags']},视频: {$this->stats['video_tags']},发送 Tag 数: {$this->stats['tags_sent']},接收字节: ".$this->formatBytes($this->stats['bytes_received'])
+            .",发送字节:".$this->formatBytes($this->stats['bytes_sent']).",速率:"
+            .sprintf("%.1f", $tagsPerSec) . " tags/s,码率:"
+            . sprintf("%.1f", $kbps) . " kbps"
+            .",重连次数: {$this->stats['reconnect_count']},上游状态: ".($this->upstreamConnected ? '✓ 连接' : '✗ 断开').",下游状态:");
         foreach ($this->downstreamClients as $idx => $downstream) {
             $status = $downstream['connected'] ? '✓ 连接' : '✗ 断开';
             $this->log("  {$downstream['url']}: {$status} | Tags: {$this->downstreamStats[$idx]['tags_sent']}");
         }
-        $this->log("========================================");
+
     }
 
     protected function printFinalStats(): void
