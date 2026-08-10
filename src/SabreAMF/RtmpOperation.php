@@ -13,7 +13,7 @@ class RtmpOperation
 	
 	private $handler;
 	
-	public function __construct(RtmpMessage $call = null, $handler = null)
+	public function __construct(?RtmpMessage $call = null, $handler = null)
 	{
 		if($call)
 		{

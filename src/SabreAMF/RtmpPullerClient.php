@@ -11,6 +11,10 @@ use Xiaosongshu\Flv2mp4\Flv\FlvPullerClient;
 class RtmpPullerClient extends FlvPullerClient
 {
     const RTMP_SIG_SIZE = 1536;
+    const MEDIA_TAG = 'media_tag';
+    const READ_TIMEOUT = 'read_timeout';
+    const READ_EOF = 'read_eof';
+    const READ_ERROR = 'read_error';
 
     protected $socket = null;
     protected int $chunkSizeR = 128;
@@ -626,6 +630,28 @@ class RtmpPullerClient extends FlvPullerClient
         }
 
         return null;
+    }
+
+    public function readMediaTag(): array
+    {
+        $tag = $this->receiveData();
+        if ($tag !== null) {
+            return ['status' => self::MEDIA_TAG, 'tag' => $tag];
+        }
+
+        if (!is_resource($this->socket) || get_resource_type($this->socket) !== 'stream') {
+            return ['status' => self::READ_ERROR, 'error' => 'RTMP socket is not available'];
+        }
+        if (feof($this->socket)) {
+            return ['status' => self::READ_EOF];
+        }
+
+        $meta = stream_get_meta_data($this->socket);
+        if (!empty($meta['timed_out'])) {
+            return ['status' => self::READ_TIMEOUT];
+        }
+
+        return ['status' => self::READ_TIMEOUT];
     }
 
     protected function receiveData(): ?string
