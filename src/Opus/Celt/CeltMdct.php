@@ -57,7 +57,7 @@ final class CeltMdct
         self::fft($real, $imaginary, true);
 
         $output = [];
-        $scale = -1.0 / 32768.0;
+        $scale = 1.0 / 32768.0;
         for ($i = 0; $i < $length; $i++) {
             $angle = $factor * (0.5 * ($i + $length + 0.5) + 0.5 * $i * $i);
             $position = $offset + $i;

@@ -28,7 +28,8 @@ final class CeltBands
         array $allocation,
         int $lm,
         bool $transient,
-        int $totalBits
+        int $totalBits,
+        int $seed
     ): array {
         $m = 1 << $lm;
         $size = 120 << $lm;
@@ -39,7 +40,7 @@ final class CeltBands
         $ctx->intensity = $allocation['intensity'];
         $ctx->spread = $allocation['spread'];
         $ctx->tf = 0;
-        $ctx->seed = 0;
+        $ctx->seed = $seed;
 
         $x = array_fill(0, $size, 0.0);
         $y = array_fill(0, $size, 0.0);
@@ -214,7 +215,7 @@ final class CeltBands
     private static function theta(stdClass $ctx, int $n, int $b, int $blocks, int $b0, int $lm, bool $stereo, int &$fill): array
     {
         $pulseCap = CeltBitAllocation::LOG_WIDTHS[$ctx->band] + ($lm << 3);
-        $offset = ($pulseCap >> 1) - ($stereo && $n === 2 ? 16 : 12);
+        $offset = ($pulseCap >> 1) - ($stereo && $n === 2 ? 16 : 4);
         $n2 = 2 * $n - 1 - (($stereo && $n === 2) ? 1 : 0);
         $qb = intdiv($b + $n2 * $offset, $n2); $qb = min($b - $pulseCap - 32, $qb, 64);
         $qn = $qb < 4 ? 1 : ((self::EXP2_TABLE8[$qb & 7] >> (14 - ($qb >> 3))) + 1) >> 1 << 1;

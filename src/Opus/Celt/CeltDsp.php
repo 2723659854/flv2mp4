@@ -12,7 +12,7 @@ use InvalidArgumentException;
  */
 final class CeltDsp
 {
-    public const DEEMPHASIS = 27853.0 / 32768.0;
+    public const DEEMPHASIS = 0.8500061035;
     public const POSTFILTER_TAPS = [
         [0.306640625, 0.217041015625, 0.129638671875],
         [0.4638671875, 0.26806640625, 0.0],
@@ -24,6 +24,9 @@ final class CeltDsp
     private int $postfilterPeriod = 15;
     private float $postfilterGain = 0.0;
     private int $postfilterTapset = 0;
+    private int $postfilterOldPeriod = 15;
+    private float $postfilterOldGain = 0.0;
+    private int $postfilterOldTapset = 0;
     private float $deemphasisMemory = 0.0;
 
     /**
@@ -66,8 +69,9 @@ final class CeltDsp
         $output = array_slice($buffer, 0, $frameSize);
         $this->outMemory = array_slice($buffer, $frameSize, $overlap);
 
-        $output = $this->postfilterTransition($output, $postfilterPeriod, $postfilterGain, $tapset);
-        return $this->deemphasis($output);
+        return $this->deemphasis(
+            $this->postfilterTransition($output, $postfilterPeriod, $postfilterGain, $tapset)
+        );
     }
 
     public function deemphasis(array $samples): array
@@ -128,6 +132,9 @@ final class CeltDsp
         $this->postfilterPeriod = 15;
         $this->postfilterGain = 0.0;
         $this->postfilterTapset = 0;
+        $this->postfilterOldPeriod = 15;
+        $this->postfilterOldGain = 0.0;
+        $this->postfilterOldTapset = 0;
         $this->deemphasisMemory = 0.0;
     }
 
@@ -141,14 +148,32 @@ final class CeltDsp
         $output = [];
         $window = CeltWindow::coefficients();
         foreach ($samples as $i => $sample) {
-            $mix = $i < CeltWindow::OVERLAP ? $window[$i] ** 2 : 1.0;
-            $old = $this->postfilterContribution(
-                $input, $historyLength + $i, $this->postfilterPeriod, $this->postfilterGain, $this->postfilterTapset
-            );
-            $new = $this->postfilterContribution($input, $historyLength + $i, $newPeriod, $newGain, $tapset);
+            $position = $historyLength + $i;
+            if ($i < CeltWindow::OVERLAP) {
+                $mix = $window[$i] ** 2;
+                $old = $this->postfilterContribution(
+                    $input, $position, $this->postfilterOldPeriod, $this->postfilterOldGain, $this->postfilterOldTapset
+                );
+                $new = $this->postfilterContribution(
+                    $input, $position, $this->postfilterPeriod, $this->postfilterGain, $this->postfilterTapset
+                );
+            } elseif ($i < 2 * CeltWindow::OVERLAP) {
+                $mix = $window[$i - CeltWindow::OVERLAP] ** 2;
+                $old = $this->postfilterContribution(
+                    $input, $position, $this->postfilterPeriod, $this->postfilterGain, $this->postfilterTapset
+                );
+                $new = $this->postfilterContribution($input, $position, $newPeriod, $newGain, $tapset);
+            } else {
+                $mix = 1.0;
+                $old = 0.0;
+                $new = $this->postfilterContribution($input, $position, $newPeriod, $newGain, $tapset);
+            }
             $output[] = (float) $sample + (1.0 - $mix) * $old + $mix * $new;
         }
         $this->postfilterHistory = array_slice($input, -1024);
+        $this->postfilterOldPeriod = $this->postfilterPeriod;
+        $this->postfilterOldGain = $this->postfilterGain;
+        $this->postfilterOldTapset = $this->postfilterTapset;
         $this->postfilterPeriod = $newPeriod;
         $this->postfilterGain = $newGain;
         $this->postfilterTapset = $tapset;

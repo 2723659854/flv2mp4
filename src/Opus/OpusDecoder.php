@@ -50,6 +50,11 @@ final class OpusDecoder
         return $this->lastSampleCount;
     }
 
+    public function debugCeltFrame(): ?array
+    {
+        return $this->celtDecoder->debugFrame();
+    }
+
     public function reset(): void
     {
         $this->lastPacket = null;
@@ -69,7 +74,9 @@ final class OpusDecoder
             || $this->lastPacket['frameCount'] !== 1) {
             throw new LogicException('CELT decoder currently validates only 48 kHz stereo fullband 20 ms single-frame packets');
         }
-        return $this->celtDecoder->decode($this->lastPacket['frames'][0], 960, 2);
+        $pcm = $this->celtDecoder->decode($this->lastPacket['frames'][0], 960, 2);
+        $this->lastSampleCount = intdiv(count($pcm), $this->channels);
+        return $pcm;
     }
 
     public function decodeS16le(string $packet): string

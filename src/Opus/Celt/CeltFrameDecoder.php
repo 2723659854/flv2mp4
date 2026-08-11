@@ -21,6 +21,8 @@ final class CeltFrameDecoder
 
     private CeltEnergy $energy;
     private array $dsp;
+    private int $rng = 0;
+    private ?array $debugFrame = null;
 
     public function __construct()
     {
@@ -31,6 +33,8 @@ final class CeltFrameDecoder
     public function reset(): void
     {
         $this->energy->reset();
+        $this->rng = 0;
+        $this->debugFrame = null;
         foreach ($this->dsp as $dsp) {
             $dsp->reset();
         }
@@ -43,6 +47,8 @@ final class CeltFrameDecoder
         $decoder = new RangeDecoder($frame);
         $silence = $decoder->tell() === 1 && $decoder->decodeBitLogp(15) === 1;
         if ($silence) {
+            $silentEnergy = [array_fill(0, 21, -28.0), array_fill(0, 21, -28.0)];
+            $this->energy->finishFrame($silentEnergy, false, $channels);
             return array_fill(0, $frameSamples * $channels, 0.0);
         }
         $postfilter = $this->decodePostfilter($decoder, $totalBits);
@@ -52,7 +58,7 @@ final class CeltFrameDecoder
         $allocation = CeltBitAllocation::decode($decoder, $lm, $transient, $channels, $totalBits);
         $coarse = CeltEnergy::decodeFine($decoder, $coarse, $allocation['fine'], $channels);
         try {
-            $bands = CeltBands::decode($decoder, $allocation, $lm, $transient, $totalBits);
+            $bands = CeltBands::decode($decoder, $allocation, $lm, $transient, $totalBits, $this->rng);
         } catch (\Throwable $error) {
             throw new LogicException(sprintf(
                 'CELT PVQ failed (LM=%d, codedBands=%d, intensity=%d, dual=%d, tellFrac=%d/%d): %s; refusing to synthesize unverified PCM',
@@ -64,17 +70,22 @@ final class CeltFrameDecoder
             $decoder, $coarse, $allocation['fine'], $allocation['priority'], $channels, $totalBits
         );
         $spectra = [$bands['x'], $bands['y']];
+        $previous = $this->energy->previous();
         if ($antiCollapse) {
+            $seed = $bands['seed'];
             for ($channel = 0; $channel < $channels; $channel++) {
-                $spectra[$channel] = $this->antiCollapse(
-                    $spectra[$channel], $bands['collapse'], $channel, $coarse[$channel], $allocation, $lm, $bands['seed']
+                [$spectra[$channel], $seed] = $this->antiCollapse(
+                    $spectra[$channel], $bands['collapse'], $channel, $coarse[$channel],
+                    $previous[0][$channel], $previous[1][$channel], $allocation, $lm, $seed
                 );
             }
         }
         $pcm = [];
+        $finalSpectra = [];
         $blocks = $transient ? 1 << $lm : 1;
         for ($channel = 0; $channel < $channels; $channel++) {
             $spectrum = $this->denormalize($spectra[$channel], $coarse[$channel], $lm);
+            $finalSpectra[$channel] = $spectrum;
             $samples = $this->dsp[$channel]->synthesize(
                 $spectrum,
                 $blocks,
@@ -87,9 +98,26 @@ final class CeltFrameDecoder
             }
         }
         ksort($pcm);
-        throw new LogicException(
-            'CELT synthesis quality validation failed: PCM correlation remains below required 0.95; refusing to expose unverified PCM'
-        );
+        $this->debugFrame = [
+            'energy' => $coarse,
+            'spectrum' => $finalSpectra,
+            'range' => $decoder->range(),
+            'tell' => $decoder->tell(),
+            'tellFrac' => $decoder->tellFrac(),
+            'allocation' => $allocation,
+            'transient' => $transient,
+            'antiCollapse' => $antiCollapse,
+            'seed' => $bands['seed'],
+            'pcm' => $pcm,
+        ];
+        $this->energy->finishFrame($coarse, $transient, $channels);
+        $this->rng = $decoder->range();
+        return $pcm;
+    }
+
+    public function debugFrame(): ?array
+    {
+        return $this->debugFrame;
     }
 
     private function denormalize(array $spectrum, array $energy, int $lm): array
@@ -110,6 +138,8 @@ final class CeltFrameDecoder
         array $collapse,
         int $channel,
         array $energy,
+        array $previous,
+        array $previous2,
         array $allocation,
         int $lm,
         int $seed
@@ -119,8 +149,12 @@ final class CeltFrameDecoder
             $width = CeltBitAllocation::BAND_WIDTHS[$band];
             $length = $width << $lm;
             $offset = CeltBitAllocation::BAND_EDGES[$band] << $lm;
-            $depth = (1 + $allocation['pulses'][$band]) / $length;
-            $level = min(2 ** (-1.0 - 0.125 * $depth), 2 ** (1 - max(0.0, $energy[$band] + 28.0))) / sqrt($length);
+            $depth = ((1 + $allocation['pulses'][$band]) / $width) / (1 << $lm);
+            $difference = max(0.0, $energy[$band] - min($previous[$band], $previous2[$band]));
+            $level = min(
+                0.5 * 2 ** (-0.125 * $depth),
+                2 * 2 ** (-$difference) * ($lm === 3 ? M_SQRT2 : 1.0)
+            ) / sqrt($length);
             $changed = false;
             for ($block = 0; $block < $blocks; $block++) {
                 if (($collapse[2 * $band + $channel] & (1 << $block)) !== 0) {
@@ -139,7 +173,7 @@ final class CeltFrameDecoder
                 for ($i = 0; $i < $length; $i++) $spectrum[$offset + $i] *= $scale;
             }
         }
-        return $spectrum;
+        return [$spectrum, $seed];
     }
 
     private function decodePostfilter(RangeDecoder $decoder, int $totalBits): ?array

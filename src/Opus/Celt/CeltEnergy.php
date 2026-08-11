@@ -18,7 +18,7 @@ final class CeltEnergy
 {
     private const ALPHA = [29440 / 32768, 26112 / 32768, 21248 / 32768, 16384 / 32768];
     private const BETA = [1 - 30147 / 32768, 1 - 22282 / 32768, 1 - 12124 / 32768, 1 - 6554 / 32768];
-    private const INTRA_BETA = 4915 / 32768;
+    private const INTRA_BETA = 1 - 4915 / 32768;
 
     private const MODEL_LM3 = [
         [[42,121],[96,66],[108,43],[111,40],[117,44],[123,32],[120,36],[119,33],[127,33],[134,34],[139,21],[147,23],[152,20],[158,25],[154,26],[166,21],[173,16],[184,13],[184,10],[150,13],[139,15]],
@@ -26,6 +26,7 @@ final class CeltEnergy
     ];
 
     private array $previous = [[], []];
+    private array $previous2 = [[], []];
 
     public function __construct()
     {
@@ -34,7 +35,9 @@ final class CeltEnergy
 
     public function reset(): void
     {
-        $this->previous = [array_fill(0, 21, -28.0), array_fill(0, 21, -28.0)];
+        $silence = array_fill(0, 21, -28.0);
+        $this->previous = [$silence, $silence];
+        $this->previous2 = [$silence, $silence];
     }
 
     public function decodeCoarse(RangeDecoder $decoder, int $lm, int $channels, bool $intra, int $totalBits): array
@@ -59,15 +62,33 @@ final class CeltEnergy
                 }
                 $value = $alpha * max(-9.0, $this->previous[$channel][$band]) + $prediction[$channel] + $delta;
                 $energy[$channel][$band] = $value;
-                $this->previous[$channel][$band] = $value;
-                $prediction[$channel] += (1.0 - $beta) * $delta;
+                $prediction[$channel] += $beta * $delta;
             }
         }
         if ($channels === 1) {
             $energy[1] = $energy[0];
-            $this->previous[1] = $this->previous[0];
         }
         return $energy;
+    }
+
+    public function previous(): array
+    {
+        return [$this->previous, $this->previous2];
+    }
+
+    public function finishFrame(array $energy, bool $transient, int $channels): void
+    {
+        if ($channels === 1) $energy[1] = $energy[0];
+        for ($channel = 0; $channel < 2; $channel++) {
+            if ($transient) {
+                for ($band = 0; $band < 21; $band++) {
+                    $this->previous[$channel][$band] = min($this->previous[$channel][$band], $energy[$channel][$band]);
+                }
+            } else {
+                $this->previous2[$channel] = $this->previous[$channel];
+                $this->previous[$channel] = $energy[$channel];
+            }
+        }
     }
 
     public static function decodeFine(RangeDecoder $decoder, array $energy, array $fineBits, int $channels): array
