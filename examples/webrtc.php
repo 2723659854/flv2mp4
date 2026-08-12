@@ -6,6 +6,7 @@
  */
 
 use Xiaosongshu\Flv2mp4\Flv\WebRtcFlvRelay;
+use Xiaosongshu\Flv2mp4\Opus\OpusWorkerClient;
 use Xiaosongshu\Webrtc\WebRTCServer;
 
 require_once __DIR__."/vendor/autoload.php";
@@ -18,6 +19,7 @@ $server->isDev = true;
 
 $rooms = [];
 $flvRelays = [];
+$opusWorkerPort = 8330;
 $wsFlvPushUrl = getenv('WS_FLV_PUSH_URL') ?: 'ws://127.0.0.1:8501/live/{streamId}';
 $makeFlvPushUrl = static function (string $streamId) use ($wsFlvPushUrl): string {
     return str_replace('{streamId}', rawurlencode($streamId), $wsFlvPushUrl);
@@ -33,6 +35,42 @@ $closeFlvRelay = static function (int $clientId, WebRTCServer $srv) use (&$flvRe
     }
     unset($flvRelays[$clientId]);
 };
+$shuttingDown = false;
+$shutdown = static function () use (&$shuttingDown, &$flvRelays, $server): void {
+    if ($shuttingDown) {
+        return;
+    }
+    $shuttingDown = true;
+    foreach (array_keys($flvRelays) as $clientId) {
+        try {
+            $flvRelays[$clientId]->finish();
+        } catch (\Throwable $e) {
+            $server->_log_std("[ws-flv] client={$clientId} shutdown failed: {$e->getMessage()}\n");
+        }
+        unset($flvRelays[$clientId]);
+    }
+    OpusWorkerClient::shutdownOwnedWorkers();
+};
+register_shutdown_function($shutdown);
+if (PHP_OS_FAMILY === 'Windows' && function_exists('sapi_windows_set_ctrl_handler')) {
+    sapi_windows_set_ctrl_handler(static function (int $event) use ($shutdown): bool {
+        if ($event === PHP_WINDOWS_EVENT_CTRL_C || $event === PHP_WINDOWS_EVENT_CTRL_BREAK) {
+            $shutdown();
+            exit(0);
+        }
+        return false;
+    });
+} elseif (function_exists('pcntl_async_signals') && function_exists('pcntl_signal')) {
+    pcntl_async_signals(true);
+    pcntl_signal(SIGINT, static function () use ($shutdown): void {
+        $shutdown();
+        exit(0);
+    });
+    pcntl_signal(SIGTERM, static function () use ($shutdown): void {
+        $shutdown();
+        exit(0);
+    });
+}
 
 $server->onOpen = function ($label, $clientId, WebRTCServer $srv) use (&$rooms) {
     $total = count($srv->getClientIds());
@@ -76,7 +114,7 @@ $server->onJoin = function (int $clientId, array $msg, WebRTCServer $srv, &$hand
 
 };
 
-$server->onPublisher = function (int $clientId, array $ctx, WebRTCServer $srv) use (&$rooms, &$flvRelays, $makeFlvPushUrl, $closeFlvRelay) {
+$server->onPublisher = function (int $clientId, array $ctx, WebRTCServer $srv) use (&$rooms, &$flvRelays, $makeFlvPushUrl, $closeFlvRelay,$opusWorkerPort) {
     $streamId = (string)($ctx['streamId'] ?? '');
     $localSsrc = $ctx['localSsrc'] ?? [];
     $videoPTs = array_keys($ctx['videoPTs'] ?? []);
@@ -99,8 +137,8 @@ $server->onPublisher = function (int $clientId, array $ctx, WebRTCServer $srv) u
         . "videoSSRC=" . ($localSsrc['video'] ?? '?') . " audioSSRC=" . ($localSsrc['audio'] ?? '?')
         . " videoPTs=[" . implode(',', $videoPTs) . "] audioPTs=[" . implode(',', $audioPTs) . "]\r\n";
     $_msg = "[onPublisher] 推流端就绪 clientId={$clientId} streamId={$streamId} "
-         . "videoSSRC=" . ($localSsrc['video'] ?? '?') . " audioSSRC=" . ($localSsrc['audio'] ?? '?')
-         . " videoPTs=[" . implode(',', $videoPTs) . "] audioPTs=[" . implode(',', $audioPTs) . "]\n";
+        . "videoSSRC=" . ($localSsrc['video'] ?? '?') . " audioSSRC=" . ($localSsrc['audio'] ?? '?')
+        . " videoPTs=[" . implode(',', $videoPTs) . "] audioPTs=[" . implode(',', $audioPTs) . "]\n";
     $srv->_log_std($_msg);
 
     if ($streamId !== '') {
@@ -117,7 +155,7 @@ $server->onPublisher = function (int $clientId, array $ctx, WebRTCServer $srv) u
         if ($existing === null) {
             $relay = null;
             try {
-                $relay = new WebRtcFlvRelay($clientId, $streamId, $makeFlvPushUrl($streamId));
+                $relay = new WebRtcFlvRelay($clientId, $streamId, $makeFlvPushUrl($streamId), null, null, $opusWorkerPort);
                 $relay->connect();
                 $flvRelays[$clientId] = $relay;
                 $srv->_log_std("[ws-flv] relay connected client={$clientId} streamId={$streamId}\n");
@@ -241,7 +279,7 @@ $server->onMediaConnected = function (int $clientId, array $rtp, WebRTCServer $s
     $kind = isset($videoPTs[$pt]) ? 'video' : (isset($audioPTs[$pt]) ? 'audio' : 'unknown');
 
     $msg = "[onMediaConnected] 媒体首帧 client={$clientId} role={$role} streamId={$streamId} "
-         . "kind={$kind} pt={$pt} ssrc={$ssrc} seq={$seq}\n";
+        . "kind={$kind} pt={$pt} ssrc={$ssrc} seq={$seq}\n";
     echo $msg;
     $srv->_log_std($msg);
 };
@@ -387,7 +425,7 @@ $server->onmessage = function (string $message, int $clientId, WebRTCServer $srv
         $targets = $srv->getClientsInStreamRoom($streamId, [$clientId]);
         if (!empty($targets)) {
             $chatMsg = ($role === 'push' ? '【主播】' : '【观众】')
-                     . "{$label}(id{$clientId}): {$trimMsg}";
+                . "{$label}(id{$clientId}): {$trimMsg}";
             $sent = $srv->broadcastDataChannel($targets, $chatMsg);
             $srv->_log_std("[onmessage] 房间聊天 streamId={$streamId} targets=" . count($targets) . " sent={$sent} msg=\"{$chatMsg}\"\n");
         }
