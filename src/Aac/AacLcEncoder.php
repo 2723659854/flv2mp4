@@ -131,15 +131,22 @@ final class AacLcEncoder
             }
             $spectra[$ch] = $spectrum;
         }
-        $targetBits = (int) floor($this->bitrate * 1024 / self::SAMPLE_RATE);
+        $targetBytes = max(1, intdiv((int) floor($this->bitrate * 1024 / self::SAMPLE_RATE) - 56, 8));
+        $low = 180;
+        $high = 255;
         $best = null;
-        for ($gain = 180; $gain <= 255; ++$gain) {
+        while ($low <= $high) {
+            $gain = ($low + $high) >> 1;
             $encoded = $this->rawDataBlock($spectra, $gain);
-            $bits = strlen($encoded) * 8;
-            if ($bits <= $targetBits - 56 || $gain === 255) {
+            if (strlen($encoded) <= $targetBytes) {
                 $best = $encoded;
-                break;
+                $high = $gain - 1;
+            } else {
+                $low = $gain + 1;
             }
+        }
+        if ($best === null) {
+            $best = $this->rawDataBlock($spectra, 255);
         }
 
         ++$this->frameCount;

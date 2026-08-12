@@ -81,11 +81,9 @@ final class CeltFrameDecoder
             }
         }
         $pcm = array_fill(0, $frameSamples * $channels, 0.0);
-        $finalSpectra = [];
         $blocks = $transient ? 1 << $lm : 1;
         for ($channel = 0; $channel < $channels; $channel++) {
             $spectrum = $this->denormalize($spectra[$channel], $coarse[$channel], $lm);
-            $finalSpectra[$channel] = $spectrum;
             $samples = $this->dsp[$channel]->synthesize(
                 $spectrum,
                 $blocks,
@@ -98,16 +96,12 @@ final class CeltFrameDecoder
             }
         }
         $this->debugFrame = [
-            'energy' => $coarse,
-            'spectrum' => $finalSpectra,
             'range' => $decoder->range(),
             'tell' => $decoder->tell(),
             'tellFrac' => $decoder->tellFrac(),
-            'allocation' => $allocation,
             'transient' => $transient,
             'antiCollapse' => $antiCollapse,
             'seed' => $bands['seed'],
-            'pcm' => $pcm,
         ];
         $this->energy->finishFrame($coarse, $transient, $channels);
         $this->rng = $decoder->range();
