@@ -481,6 +481,18 @@ final class WebRtcFlvRelay
             if ($this->workerClient === null) {
                 throw new RuntimeException('Opus worker client is unavailable');
             }
+            if (!$this->workerClient->canAcceptPacket()) {
+                $deadline = microtime(true) + 0.05;
+                do {
+                    foreach ($this->workerClient->pump() as $response) {
+                        $this->handleWorkerResponse($response);
+                    }
+                    if ($this->workerClient->canAcceptPacket()) {
+                        break;
+                    }
+                    usleep(1000);
+                } while (microtime(true) < $deadline);
+            }
             $this->workerClient->push($rtp['seq'], $rtp['ts'], $packet);
         } catch (\Throwable $e) {
             $this->failAudio($e);

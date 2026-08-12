@@ -165,6 +165,11 @@ final class OpusWorkerClient
         return $this->finished;
     }
 
+    public function canAcceptPacket(): bool
+    {
+        return $this->pendingPackets < self::MAX_PENDING_PACKETS;
+    }
+
     private function decodeResponse(string $body): array
     {
         $type = ord($body[0]);
