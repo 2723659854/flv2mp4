@@ -75,9 +75,6 @@ final class OpusWorkerClient
         $requestId = $this->nextRequestId++;
         $frame = OpusWorkerProtocol::push($requestId, $sequence, $timestamp, $payload);
         if ($this->pendingPackets >= self::MAX_PENDING_PACKETS || strlen($this->output) + strlen($frame) > self::MAX_OUTPUT_BYTES) {
-            // #region debug-point E:queue-overflow
-            @file_get_contents('http://127.0.0.1:7777/event', false, stream_context_create(['http' => ['method' => 'POST', 'header' => "Content-Type: application/json\r\n", 'content' => json_encode(['sessionId' => 'worker-autoload-disconnect', 'runId' => 'pre-fix-2', 'hypothesisId' => 'E', 'location' => 'OpusWorkerClient::push', 'msg' => '[DEBUG] Worker queue overflow', 'data' => ['pendingPackets' => $this->pendingPackets, 'outputBytes' => strlen($this->output), 'inputBytes' => strlen($this->input), 'nextRequestId' => $this->nextRequestId], 'ts' => (int) (microtime(true) * 1000)]), 'timeout' => 0.2, 'ignore_errors' => true]]));
-            // #endregion
             throw new RuntimeException('Opus worker input queue limit exceeded');
         }
         $this->output .= $frame;
@@ -264,9 +261,6 @@ final class OpusWorkerClient
         }
         $composerClassLoader = (new \ReflectionClass(\Composer\Autoload\ClassLoader::class))->getFileName();
         $autoload = dirname($composerClassLoader, 2) . DIRECTORY_SEPARATOR . 'autoload.php';
-        // #region debug-point A-D:worker-launch
-        @file_get_contents('http://127.0.0.1:7777/event', false, stream_context_create(['http' => ['method' => 'POST', 'header' => "Content-Type: application/json\r\n", 'content' => json_encode(['sessionId' => 'worker-autoload-disconnect', 'runId' => 'pre-fix', 'hypothesisId' => 'A,B,C,D', 'location' => 'OpusWorkerClient::startWorker', 'msg' => '[DEBUG] Worker launch arguments', 'data' => ['entry' => $entry, 'port' => $port, 'autoload' => $autoload, 'autoloadExists' => is_file($autoload), 'php' => PHP_BINARY], 'ts' => (int) (microtime(true) * 1000)]), 'timeout' => 0.2, 'ignore_errors' => true]]));
-        // #endregion
         $process = @proc_open(
             [PHP_BINARY, $entry, '--owned', "--port={$port}", "--autoload={$autoload}"],
             $descriptor,

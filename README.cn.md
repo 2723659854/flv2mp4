@@ -120,6 +120,71 @@ $file = __DIR__ . '/test.flv';
 
 ## 🌐 高级功能
 
+### WebRTC Opus 转 AAC 并转发 FLV
+
+`WebRtcFlvRelay` 可接收 WebRTC RTP 数据，将 H.264 视频封装为 FLV，并通过纯 PHP Worker 把 Opus 音频实时转码为 AAC-LC，再推送到 WebSocket-FLV 服务，由该服务继续录制或转发到 RTMP 等目标。
+
+```php
+<?php
+
+require_once __DIR__ . '/vendor/autoload.php';
+
+use Xiaosongshu\Flv2mp4\Flv\WebRtcFlvRelay;
+use Xiaosongshu\Flv2mp4\Opus\OpusWorkerClient;
+
+$clientId = 1;
+$streamId = 'stream_001';
+$opusWorkerPort = 8330;
+$pushUrl = "ws://127.0.0.1:8501/live/{$streamId}";
+
+$relay = new WebRtcFlvRelay(
+    $clientId,
+    $streamId,
+    $pushUrl,
+    null,
+    null,
+    $opusWorkerPort
+);
+$relay->connect();
+
+// 在 WebRTC 服务端的 RTP 回调中调用：
+// $relay->pushRtp($plainRtp, 'video');
+// $relay->pushRtp($plainRtp, 'audio');
+
+// 推流结束时关闭 relay，并在主进程退出时关闭自动启动的 Worker。
+$relay->finish();
+OpusWorkerClient::shutdownOwnedWorkers();
+```
+
+项目根目录的 `start.php` 提供了完整的 WebRTC 转 FLV 示例。常用配置如下：
+
+```php
+// 每个项目实例应使用不同的 Worker 端口。
+$opusWorkerPort = 8330;
+
+// 支持 RTMP、HTTP-FLV 和 WebSocket-FLV 服务提供的推流地址；
+// 示例默认使用 WebSocket-FLV，并以 streamId 替换占位符。
+$wsFlvPushUrl = 'ws://127.0.0.1:8501/live/{streamId}';
+```
+
+运行示例：
+
+```bash
+php start.php
+```
+
+说明：
+
+- relay 连接时会自动启动 `bin/opus-worker.php`（若目标端口尚无 Worker），无需手动启动 Worker；
+- Worker 仅监听 `127.0.0.1`，默认端口为 `8330`；
+- 自动启动时会把宿主项目真实的 `vendor/autoload.php` 通过 `--autoload` 传给 Worker，兼容通过 `composer require xiaosongshu/flv2mp4` 安装及自定义 `vendor-dir`；
+- 默认输出为 `48kHz`、单声道、`64kbps` AAC-LC；
+- 同一个 Worker 进程可以管理多路独立连接，但纯 PHP 实时转码会消耗较多 CPU，建议单实例先按一路实时节目规划；
+- 同一台机器启动多个项目实例时，必须为每个实例配置不同的 `$opusWorkerPort`；
+- 主进程收到 `Ctrl+C` 或退出时，应调用 `OpusWorkerClient::shutdownOwnedWorkers()`，`start.php` 已包含相应的退出处理；
+- PHP 必须允许使用 `proc_open`，否则无法自动创建 Worker 子进程；
+- Worker 队列包含有界背压保护。不要仅通过扩大队列解决性能不足，否则可能增加音频延迟并造成音视频不同步。
+
 ### FLV 直播网关
 
 支持多级代理部署，实现高并发直播流转发。新建文件`flvGateway.php`，内容如下:

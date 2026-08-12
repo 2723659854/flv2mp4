@@ -493,9 +493,6 @@
 
     // ========== 停止 ==========
     function stopPush() {
-        // #region debug-point F:frontend-stop
-        try { fetch('http://127.0.0.1:7777/event', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId: 'worker-autoload-disconnect', runId: 'pre-fix-3', hypothesisId: 'F', location: 'push.html:stopPush', msg: '[DEBUG] Frontend stopPush invoked', data: { iceState: pc?.iceConnectionState ?? null, connectionState: pc?.connectionState ?? null, signalingState: pc?.signalingState ?? null, wsState: ws?.readyState ?? null, streaming: isStreaming, stack: new Error().stack }, ts: Date.now() }), keepalive: true }).catch(() => {}); } catch (_) {}
-        // #endregion
         isStreaming = false;
         joined = false;
         setButtons(false);

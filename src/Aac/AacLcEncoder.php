@@ -20,10 +20,6 @@ final class AacLcEncoder
     private int $bitrate;
     private int $channels;
     private ?int $previousGlobalOffset = null;
-    // #region debug-point E:aac-state
-    private int $debugFrames = 0;
-    private int $debugAttempts = 0;
-    // #endregion
     private array $pending = [];
     private int $pendingOffset = 0;
     private array $overlap = [[], []];
@@ -205,13 +201,6 @@ final class AacLcEncoder
         }
         $raw = $this->rawDataBlock($plans);
 
-        // #region debug-point E:aac-attempts
-        ++$this->debugFrames;
-        $this->debugAttempts += $attempts;
-        if ($this->debugFrames === 100) {
-            @file_get_contents('http://127.0.0.1:7777/event', false, stream_context_create(['http' => ['method' => 'POST', 'header' => "Content-Type: application/json\r\n", 'content' => json_encode(['sessionId' => 'worker-autoload-disconnect', 'runId' => 'pre-fix', 'hypothesisId' => 'E', 'location' => 'AacLcEncoder::encodeFrame', 'msg' => '[DEBUG] AAC attempts', 'data' => ['frames' => $this->debugFrames, 'averageAttempts' => $this->debugAttempts / $this->debugFrames], 'ts' => (int) (microtime(true) * 1000)]), 'timeout' => 0.2, 'ignore_errors' => true]]));
-        }
-        // #endregion
         ++$this->frameCount;
         return $this->adtsHeader(strlen($raw) + 7) . $raw;
     }
