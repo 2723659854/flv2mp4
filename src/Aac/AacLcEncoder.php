@@ -5,30 +5,36 @@ namespace Xiaosongshu\Flv2mp4\Aac;
 use InvalidArgumentException;
 
 /**
- * Pure PHP AAC-LC encoder for 48 kHz interleaved stereo PCM.
+ * Pure PHP AAC-LC encoder for 48 kHz mono or interleaved stereo PCM.
  * Bitstream syntax and tables follow ISO/IEC 14496-3; the transform, rate loop,
  * psychoacoustic thresholds and quantizer are an independent implementation.
  */
 final class AacLcEncoder
 {
     public const FRAME_SAMPLES = 1024;
-    private const CHANNELS = 2;
     private const SAMPLE_RATE = 48000;
     private const MAX_SFB = 49;
 
     private int $bitrate;
+    private int $channels;
     private array $pending = [];
     private int $pendingOffset = 0;
     private array $overlap = [[], []];
     private int $frameCount = 0;
 
-    public function __construct(int $bitrate = 128000)
+    public function __construct(int $bitrate = 128000, int $channels = 2)
     {
-        if ($bitrate < 96000 || $bitrate > 192000) {
-            throw new InvalidArgumentException('AAC bitrate must be between 96000 and 192000 bit/s');
+        if ($channels !== 1 && $channels !== 2) {
+            throw new InvalidArgumentException('AAC channel count must be 1 or 2');
+        }
+        $minimumBitrate = $channels === 1 ? 48000 : 96000;
+        if ($bitrate < $minimumBitrate || $bitrate > 192000) {
+            throw new InvalidArgumentException("AAC bitrate must be between {$minimumBitrate} and 192000 bit/s");
         }
         $this->bitrate = $bitrate;
-        $this->overlap = [array_fill(0, 1024, 0.0), array_fill(0, 1024, 0.0)];
+        $this->channels = $channels;
+        $silence = array_fill(0, self::FRAME_SAMPLES, 0.0);
+        $this->overlap = array_fill(0, $channels, $silence);
     }
 
     public function encodeFloat(array $interleavedPcm): string
@@ -41,8 +47,9 @@ final class AacLcEncoder
 
     public function encodeS16le(string $interleavedPcm): string
     {
-        if ((strlen($interleavedPcm) & 3) !== 0) {
-            throw new InvalidArgumentException('Stereo s16le PCM must contain complete sample pairs');
+        $sampleFrameBytes = $this->channels * 2;
+        if (strlen($interleavedPcm) % $sampleFrameBytes !== 0) {
+            throw new InvalidArgumentException('s16le PCM must contain complete sample frames');
         }
         $samples = unpack('v*', $interleavedPcm);
         $float = [];
@@ -62,7 +69,7 @@ final class AacLcEncoder
             $this->pendingOffset = 0;
             return '';
         }
-        $needed = self::FRAME_SAMPLES * self::CHANNELS - (count($this->pending) - $this->pendingOffset);
+        $needed = self::FRAME_SAMPLES * $this->channels - (count($this->pending) - $this->pendingOffset);
         while ($needed-- > 0) {
             $this->pending[] = 0.0;
         }
@@ -71,7 +78,13 @@ final class AacLcEncoder
 
     public function getAudioSpecificConfig(): string
     {
-        return pack('C2', 0x11, 0x90);
+        $config = (2 << 11) | (3 << 7) | ($this->channels << 3);
+        return pack('n', $config);
+    }
+
+    public function channels(): int
+    {
+        return $this->channels;
     }
 
     public function frameCount(): int
@@ -82,14 +95,15 @@ final class AacLcEncoder
     private function drain(bool $flush): string
     {
         $output = '';
-        $frameSize = self::FRAME_SAMPLES * self::CHANNELS;
+        $frameSize = self::FRAME_SAMPLES * $this->channels;
         $pendingCount = count($this->pending);
         while ($pendingCount - $this->pendingOffset >= $frameSize) {
-            $channels = [[], []];
+            $channels = array_fill(0, $this->channels, []);
             $offset = $this->pendingOffset;
             for ($i = 0; $i < self::FRAME_SAMPLES; ++$i) {
-                $channels[0][$i] = $this->pending[$offset++];
-                $channels[1][$i] = $this->pending[$offset++];
+                for ($channel = 0; $channel < $this->channels; ++$channel) {
+                    $channels[$channel][$i] = $this->pending[$offset++];
+                }
             }
             $this->pendingOffset = $offset;
             $output .= $this->encodeFrame($channels);
@@ -106,7 +120,7 @@ final class AacLcEncoder
     private function encodeFrame(array $channels): string
     {
         $spectra = [];
-        foreach ([0, 1] as $ch) {
+        for ($ch = 0; $ch < $this->channels; ++$ch) {
             $input = array_merge($this->overlap[$ch], $channels[$ch]);
             $this->overlap[$ch] = $channels[$ch];
             $spectrum = $this->mdct($input);
@@ -135,13 +149,21 @@ final class AacLcEncoder
     private function rawDataBlock(array $spectra, int $globalGain): string
     {
         $writer = new BitWriter();
-        $writer->write(1, 3); // channel_pair_element
-        $writer->write(0, 4);
-        $writer->write(1, 1); // common_window
-        $this->writeIcsInfo($writer);
-        $writer->write(0, 2); // ms_mask_present
-        $this->writeChannel($writer, $spectra[0], $globalGain);
-        $this->writeChannel($writer, $spectra[1], $globalGain);
+        if ($this->channels === 1) {
+            $writer->write(0, 3); // single_channel_element
+            $writer->write(0, 4);
+            $writer->write($globalGain, 8);
+            $this->writeIcsInfo($writer);
+            $this->writeChannelPayload($writer, $spectra[0], $globalGain);
+        } else {
+            $writer->write(1, 3); // channel_pair_element
+            $writer->write(0, 4);
+            $writer->write(1, 1); // common_window
+            $this->writeIcsInfo($writer);
+            $writer->write(0, 2); // ms_mask_present
+            $this->writeChannel($writer, $spectra[0], $globalGain);
+            $this->writeChannel($writer, $spectra[1], $globalGain);
+        }
         $writer->write(7, 3); // end
         return $writer->finish();
     }
@@ -157,9 +179,13 @@ final class AacLcEncoder
 
     private function writeChannel(BitWriter $writer, array $spectrum, int $globalGain): void
     {
-        [$quantized, $active] = $this->quantize($spectrum, $globalGain);
         $writer->write($globalGain, 8);
+        $this->writeChannelPayload($writer, $spectrum, $globalGain);
+    }
 
+    private function writeChannelPayload(BitWriter $writer, array $spectrum, int $globalGain): void
+    {
+        [$quantized, $active] = $this->quantize($spectrum, $globalGain);
         $band = 0;
         while ($band < self::MAX_SFB) {
             $codebook = $active[$band] ? 7 : 0;
@@ -231,7 +257,7 @@ final class AacLcEncoder
     {
         $profile = 1;
         $frequencyIndex = 3;
-        $channelConfig = 2;
+        $channelConfig = $this->channels;
         return pack('C7',
             0xff,
             0xf1,

@@ -89,6 +89,11 @@ final class OpusDecoder
                 $pcm[] = $decoded[$i];
                 $pcm[] = $decoded[$i];
             }
+        } elseif ($codedChannels === 2 && $this->channels === 1) {
+            $pcm = [];
+            for ($i = 0; $i < 960; $i++) {
+                $pcm[] = ($decoded[$i * 2] + $decoded[$i * 2 + 1]) * 0.5;
+            }
         } else {
             $pcm = $decoded;
         }

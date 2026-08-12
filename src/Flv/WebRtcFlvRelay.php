@@ -58,7 +58,7 @@ final class WebRtcFlvRelay
         $this->clientId = $clientId;
         $this->streamId = $streamId;
         $this->pusher = $pusher ?? new FlvSinglePusher($streamId, $pushUrl);
-        $this->transcoder = $transcoder ?? new OpusToAacTranscoder();
+        $this->transcoder = $transcoder ?? new OpusToAacTranscoder(64000, 1);
         $this->statsStartedNs = hrtime(true);
     }
 
@@ -69,8 +69,8 @@ final class WebRtcFlvRelay
                 throw new RuntimeException("Unable to connect ws-flv destination for stream {$this->streamId}");
             }
             $this->write("FLV\x01\x05\x00\x00\x00\x09\x00\x00\x00\x00");
-            $this->write(self::buildFlvTag(18, 0, self::buildOnMetaData()));
-            $this->write(self::buildFlvTag(8, 0, "\xAF\x00" . $this->transcoder->getAudioSpecificConfig()));
+            $this->write(self::buildFlvTag(18, 0, self::buildOnMetaData($this->transcoder->channels())));
+            $this->write(self::buildFlvTag(8, 0, $this->audioTagHeader() . "\x00" . $this->transcoder->getAudioSpecificConfig()));
         } catch (\Throwable $e) {
             $this->closed = true;
             $this->pusher->close();
@@ -254,7 +254,7 @@ final class WebRtcFlvRelay
         return $frames;
     }
 
-    public static function buildOnMetaData(): string
+    public static function buildOnMetaData(int $audioChannels = 2): string
     {
         $metadata = [
             'duration' => 0.0,
@@ -264,7 +264,7 @@ final class WebRtcFlvRelay
             'audiocodecid' => 10.0,
             'audiosamplerate' => 48000.0,
             'audiosamplesize' => 16.0,
-            'stereo' => true,
+            'stereo' => $audioChannels === 2,
         ];
         $body = "\x02" . pack('n', 10) . 'onMetaData' . "\x08" . pack('N', count($metadata));
         foreach ($metadata as $key => $value) {
@@ -515,12 +515,17 @@ final class WebRtcFlvRelay
         $this->writeAacFrames($adts);
     }
 
+    private function audioTagHeader(): string
+    {
+        return chr(0xae | ($this->transcoder->channels() === 2 ? 1 : 0));
+    }
+
     private function writeAacFrames(string $adts, bool $allowClosed = false): void
     {
         foreach (self::parseAdtsFrames($adts) as $rawAac) {
             $timestamp = ($this->audioArrivalOffsetMs ?? 0)
                 + (int) round($this->audioFrameIndex * 1024 * 1000 / 48000);
-            $this->write(self::buildFlvTag(8, $timestamp, "\xAF\x01" . $rawAac), $allowClosed);
+            $this->write(self::buildFlvTag(8, $timestamp, $this->audioTagHeader() . "\x01" . $rawAac), $allowClosed);
             ++$this->aacTagCount;
             $this->lastAudioTagTimestampMs = $timestamp;
             ++$this->audioFrameIndex;

@@ -8,28 +8,32 @@ use Xiaosongshu\Flv2mp4\Aac\AacLcEncoder;
 
 class OpusToAacTranscoder
 {
-    private const CHANNELS = 2;
     private const SAMPLE_RATE = 48000;
 
+    private int $channels;
     private OpusDecoder $decoder;
     private AacLcEncoder $encoder;
     private bool $finished = false;
 
-    public function __construct(int $bitrate = 128000)
+    public function __construct(int $bitrate = 128000, int $channels = 2)
     {
-        $this->decoder = new OpusDecoder(self::CHANNELS, self::SAMPLE_RATE);
-        $this->encoder = new AacLcEncoder($bitrate);
+        if ($channels !== 1 && $channels !== 2) {
+            throw new InvalidArgumentException('AAC channel count must be 1 or 2');
+        }
+        $this->channels = $channels;
+        $this->decoder = new OpusDecoder($channels, self::SAMPLE_RATE);
+        $this->encoder = new AacLcEncoder($bitrate, $channels);
     }
 
     public static function transcodeOgg(string $oggData, int $bitrate = 128000): string
     {
         $reader = new OggOpusReader($oggData);
         $head = $reader->head();
-        if ($reader->channels() !== self::CHANNELS || $head['mappingFamily'] !== 0) {
-            throw new LogicException('Ogg Opus transcoding currently supports mapping-family-0 stereo only');
+        if (($reader->channels() !== 1 && $reader->channels() !== 2) || $head['mappingFamily'] !== 0) {
+            throw new LogicException('Ogg Opus transcoding currently supports mapping-family-0 mono or stereo only');
         }
 
-        $transcoder = new self($bitrate);
+        $transcoder = new self($bitrate, $reader->channels());
         $output = '';
         foreach ($reader->audioPackets() as $packet) {
             $output .= $transcoder->pushPacketTrimmed(
@@ -68,6 +72,11 @@ class OpusToAacTranscoder
         return $this->encoder->getAudioSpecificConfig();
     }
 
+    public function channels(): int
+    {
+        return $this->channels;
+    }
+
     private function pushPacketTrimmed(
         string $packet,
         ?int $sampleCount,
@@ -88,8 +97,8 @@ class OpusToAacTranscoder
             throw new InvalidArgumentException('Invalid Opus packet trimming');
         }
 
-        $start = $trimStart * self::CHANNELS;
-        $length = ($decodedSamples - $trimStart - $trimEnd) * self::CHANNELS;
+        $start = $trimStart * $this->channels;
+        $length = ($decodedSamples - $trimStart - $trimEnd) * $this->channels;
         if ($start !== 0 || $length !== count($pcm)) {
             $pcm = array_slice($pcm, $start, $length);
         }

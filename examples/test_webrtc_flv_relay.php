@@ -1,5 +1,6 @@
 <?php
 
+use Xiaosongshu\Flv2mp4\Aac\AacLcEncoder;
 use Xiaosongshu\Flv2mp4\Flv\FlvSinglePusher;
 use Xiaosongshu\Flv2mp4\Flv\WebRtcFlvRelay;
 use Xiaosongshu\Flv2mp4\Opus\OpusToAacTranscoder;
@@ -71,6 +72,11 @@ final class FailingAudioTranscoder extends OpusToAacTranscoder
     {
         return "\x11\x90";
     }
+
+    public function channels(): int
+    {
+        return 2;
+    }
 }
 
 function testRtp(int $pt, int $seq, int $timestamp, string $payload, bool $marker = true): string
@@ -84,6 +90,12 @@ function assertTest(bool $condition, string $message): void
         throw new RuntimeException($message);
     }
 }
+
+$monoEncoder = new AacLcEncoder(64000, 1);
+assertTest($monoEncoder->getAudioSpecificConfig() === "\x11\x88", 'mono AAC ASC is invalid');
+$monoAdts = $monoEncoder->encodeFloat(array_fill(0, AacLcEncoder::FRAME_SAMPLES, 0.0));
+assertTest(strlen($monoAdts) > 7, 'mono AAC frame was not encoded');
+assertTest((ord($monoAdts[2]) & 1) === 0 && (ord($monoAdts[3]) >> 6) === 1, 'mono ADTS channel configuration is invalid');
 
 $sps = "\x67\x42\x00\x1e\x95\xa8\x14\x01\x6e\x9b\x80";
 $pps = "\x68\xce\x3c\x80";
