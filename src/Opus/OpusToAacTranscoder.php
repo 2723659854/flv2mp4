@@ -6,14 +6,13 @@ use InvalidArgumentException;
 use LogicException;
 use Xiaosongshu\Flv2mp4\Aac\AacLcEncoder;
 
-final class OpusToAacTranscoder
+class OpusToAacTranscoder
 {
     private const CHANNELS = 2;
     private const SAMPLE_RATE = 48000;
 
     private OpusDecoder $decoder;
     private AacLcEncoder $encoder;
-    private array $pcmFifo = [];
     private bool $finished = false;
 
     public function __construct(int $bitrate = 128000)
@@ -56,17 +55,17 @@ final class OpusToAacTranscoder
         }
         $this->finished = true;
 
-        $output = '';
-        if ($this->pcmFifo !== []) {
-            $output .= $this->encoder->encodeFloat($this->pcmFifo);
-            $this->pcmFifo = [];
-        }
-        return $output . $this->encoder->flush();
+        return $this->encoder->flush();
     }
 
     public function aacFrameCount(): int
     {
         return $this->encoder->frameCount();
+    }
+
+    public function getAudioSpecificConfig(): string
+    {
+        return $this->encoder->getAudioSpecificConfig();
     }
 
     private function pushPacketTrimmed(
@@ -91,7 +90,9 @@ final class OpusToAacTranscoder
 
         $start = $trimStart * self::CHANNELS;
         $length = ($decodedSamples - $trimStart - $trimEnd) * self::CHANNELS;
-        $pcm = array_slice($pcm, $start, $length);
+        if ($start !== 0 || $length !== count($pcm)) {
+            $pcm = array_slice($pcm, $start, $length);
+        }
         if ($gainQ8 !== 0) {
             $gain = pow(10.0, $gainQ8 / (20.0 * 256.0));
             foreach ($pcm as &$sample) {
@@ -99,13 +100,6 @@ final class OpusToAacTranscoder
             }
             unset($sample);
         }
-        array_push($this->pcmFifo, ...$pcm);
-
-        $output = '';
-        $frameSize = AacLcEncoder::FRAME_SAMPLES * self::CHANNELS;
-        while (count($this->pcmFifo) >= $frameSize) {
-            $output .= $this->encoder->encodeFloat(array_splice($this->pcmFifo, 0, $frameSize));
-        }
-        return $output;
+        return $this->encoder->encodeFloat($pcm);
     }
 }

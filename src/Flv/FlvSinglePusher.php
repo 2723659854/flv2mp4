@@ -68,6 +68,9 @@ class FlvSinglePusher
         // 保持阻塞模式，确保数据能完整发送
         if ($result) {
             stream_set_blocking($this->socket, true);
+            $this->closed = false;
+        } else {
+            $this->close();
         }
 
         return $result;
@@ -161,10 +164,10 @@ class FlvSinglePusher
         return true;
     }
 
-    public function write($data)
+    public function write($data): bool
     {
         if (!$this->socket || $this->closed) {
-            return;
+            return false;
         }
 
         try {
@@ -180,7 +183,7 @@ class FlvSinglePusher
                 $this->flush();
                 if ($this->sendBufferSize + $frameSize > $this->maxBufferSize) {
                     $this->close();
-                    return;
+                    return false;
                 }
             }
 
@@ -190,7 +193,8 @@ class FlvSinglePusher
             if ($this->sendBufferSize > 4396 || (microtime(true) - $this->lastFlushTime) > 0.005) {
                 $this->flush();
             }
-        } catch (\Exception $e) {
+            return !$this->closed;
+        } catch (\Throwable $e) {
             $this->close();
             throw $e;
         }
@@ -244,7 +248,8 @@ class FlvSinglePusher
             while ($totalWritten < $bufferLen) {
                 $written = fwrite($this->socket, substr($this->sendBuffer, $totalWritten));
                 if ($written === false || $written === 0) {
-                    break;
+                    $this->close();
+                    return;
                 }
                 $totalWritten += $written;
             }

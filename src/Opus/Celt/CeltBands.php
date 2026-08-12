@@ -29,6 +29,7 @@ final class CeltBands
         int $lm,
         bool $transient,
         int $totalBits,
+        int $channels,
         int $seed
     ): array {
         $m = 1 << $lm;
@@ -86,7 +87,11 @@ final class CeltBands
                 $count = $offset;
                 for ($j = 0; $j < $count; $j++) $norm[$j] = (($norm[$j] ?? 0.0) + ($norm2[$j] ?? 0.0)) * 0.5;
             }
-            if ($dual) {
+            if ($channels === 1) {
+                $xb = self::quantBand($ctx, $n, $b, $blocks, $lowX, $lm, 1.0, $fillX);
+                $yb = ['vector' => array_fill(0, $n, 0.0), 'mask' => 0];
+                $cmX = $xb['mask']; $cmY = 0;
+            } elseif ($dual) {
                 $xb = self::quantBand($ctx, $n, intdiv($b, 2), $blocks, $lowX, $lm, 1.0, $fillX);
                 $yb = self::quantBand($ctx, $n, intdiv($b, 2), $blocks, $lowY, $lm, 1.0, $fillY);
                 $cmX = $xb['mask']; $cmY = $yb['mask'];

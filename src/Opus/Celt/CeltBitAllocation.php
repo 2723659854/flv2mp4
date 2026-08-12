@@ -69,9 +69,9 @@ final class CeltBitAllocation
         $tbits = ($frameBits << 3) - $decoder->tellFrac() - 1;
         $anti = $transient && $lm >= 2 && $tbits >= (($lm + 2) << 3) ? 8 : 0; $tbits -= $anti;
         $skipBit = $tbits >= 8 ? 8 : 0; $tbits -= $skipBit;
-        $intensityBits = self::LOG2_FRAC[21]; $dualBits = 0;
-        if ($intensityBits <= $tbits) { $tbits -= $intensityBits; if ($tbits >= 8) { $dualBits = 8; $tbits -= 8; } }
-        else $intensityBits = 0;
+        $intensityBits = $channels === 2 ? self::LOG2_FRAC[21] : 0; $dualBits = 0;
+        if ($intensityBits > 0 && $intensityBits <= $tbits) { $tbits -= $intensityBits; if ($tbits >= 8) { $dualBits = 8; $tbits -= 8; } }
+        elseif ($intensityBits > $tbits) $intensityBits = 0;
 
         $threshold = $trimOffset = array_fill(0, 21, 0); $skipStart = 0;
         for ($i = 0; $i < 21; $i++) {

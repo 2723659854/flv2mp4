@@ -18,6 +18,7 @@ final class AacLcEncoder
 
     private int $bitrate;
     private array $pending = [];
+    private int $pendingOffset = 0;
     private array $overlap = [[], []];
     private int $frameCount = 0;
 
@@ -56,12 +57,14 @@ final class AacLcEncoder
 
     public function flush(): string
     {
-        if ($this->pending === []) {
+        if (count($this->pending) === $this->pendingOffset) {
+            $this->pending = [];
+            $this->pendingOffset = 0;
             return '';
         }
-        $needed = self::FRAME_SAMPLES * self::CHANNELS - count($this->pending);
-        if ($needed > 0) {
-            array_push($this->pending, ...array_fill(0, $needed, 0.0));
+        $needed = self::FRAME_SAMPLES * self::CHANNELS - (count($this->pending) - $this->pendingOffset);
+        while ($needed-- > 0) {
+            $this->pending[] = 0.0;
         }
         return $this->drain(true);
     }
@@ -80,17 +83,22 @@ final class AacLcEncoder
     {
         $output = '';
         $frameSize = self::FRAME_SAMPLES * self::CHANNELS;
-        while (count($this->pending) >= $frameSize) {
-            $frame = array_splice($this->pending, 0, $frameSize);
+        $pendingCount = count($this->pending);
+        while ($pendingCount - $this->pendingOffset >= $frameSize) {
             $channels = [[], []];
+            $offset = $this->pendingOffset;
             for ($i = 0; $i < self::FRAME_SAMPLES; ++$i) {
-                $channels[0][$i] = $frame[$i * 2];
-                $channels[1][$i] = $frame[$i * 2 + 1];
+                $channels[0][$i] = $this->pending[$offset++];
+                $channels[1][$i] = $this->pending[$offset++];
             }
+            $this->pendingOffset = $offset;
             $output .= $this->encodeFrame($channels);
         }
-        if ($flush) {
-            $this->pending = [];
+        if ($flush || $this->pendingOffset >= $frameSize * 8) {
+            $this->pending = $flush
+                ? []
+                : array_slice($this->pending, $this->pendingOffset, $pendingCount - $this->pendingOffset);
+            $this->pendingOffset = 0;
         }
         return $output;
     }
@@ -101,7 +109,13 @@ final class AacLcEncoder
         foreach ([0, 1] as $ch) {
             $input = array_merge($this->overlap[$ch], $channels[$ch]);
             $this->overlap[$ch] = $channels[$ch];
-            $spectra[$ch] = $this->mdct($input);
+            $spectrum = $this->mdct($input);
+            for ($i = 0; $i < 1024; ++$i) {
+                $value = $spectrum[$i];
+                $magnitude = pow(abs($value), 0.75);
+                $spectrum[$i] = $value < 0.0 ? -$magnitude : $magnitude;
+            }
+            $spectra[$ch] = $spectrum;
         }
         $targetBits = (int) floor($this->bitrate * 1024 / self::SAMPLE_RATE);
         $best = null;
@@ -198,8 +212,7 @@ final class AacLcEncoder
             $end = AacTables::SWB_48K[$band + 1];
             for ($i = $start; $i < $end; ++$i) {
                 $magnitude = abs($spectrum[$i]);
-                $q = (int) floor(pow($magnitude, 0.75) * $quantizer + 0.4054);
-                $q = min(7, $q);
+                $q = min(7, (int) floor($magnitude * $quantizer + 0.4054));
                 if ($q !== 0) {
                     $quantized[$i] = $spectrum[$i] < 0.0 ? -$q : $q;
                     $active[$band] = true;

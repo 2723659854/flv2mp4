@@ -58,7 +58,7 @@ final class CeltFrameDecoder
         $allocation = CeltBitAllocation::decode($decoder, $lm, $transient, $channels, $totalBits);
         $coarse = CeltEnergy::decodeFine($decoder, $coarse, $allocation['fine'], $channels);
         try {
-            $bands = CeltBands::decode($decoder, $allocation, $lm, $transient, $totalBits, $this->rng);
+            $bands = CeltBands::decode($decoder, $allocation, $lm, $transient, $totalBits, $channels, $this->rng);
         } catch (\Throwable $error) {
             throw new LogicException(sprintf(
                 'CELT PVQ failed (LM=%d, codedBands=%d, intensity=%d, dual=%d, tellFrac=%d/%d): %s; refusing to synthesize unverified PCM',
@@ -80,7 +80,7 @@ final class CeltFrameDecoder
                 );
             }
         }
-        $pcm = [];
+        $pcm = array_fill(0, $frameSamples * $channels, 0.0);
         $finalSpectra = [];
         $blocks = $transient ? 1 << $lm : 1;
         for ($channel = 0; $channel < $channels; $channel++) {
@@ -97,7 +97,6 @@ final class CeltFrameDecoder
                 $pcm[$i * $channels + $channel] = $samples[$i];
             }
         }
-        ksort($pcm);
         $this->debugFrame = [
             'energy' => $coarse,
             'spectrum' => $finalSpectra,

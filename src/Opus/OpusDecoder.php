@@ -69,12 +69,29 @@ final class OpusDecoder
         if ($this->lastPacket['mode'] !== 'CELT') {
             throw new LogicException($this->lastPacket['mode'] . ' audio decoding is not implemented; refusing to fabricate PCM');
         }
-        if ($this->sampleRate !== 48000 || $this->channels !== 2 || !$this->lastPacket['stereo']
-            || $this->lastPacket['bandwidth'] !== 'FB' || $this->lastPacket['frameDurationSamples'] !== 960
-            || $this->lastPacket['frameCount'] !== 1) {
-            throw new LogicException('CELT decoder currently validates only 48 kHz stereo fullband 20 ms single-frame packets');
+        if ($this->sampleRate !== 48000 || $this->lastPacket['bandwidth'] !== 'FB'
+            || $this->lastPacket['frameDurationSamples'] !== 960 || $this->lastPacket['frameCount'] !== 1
+            || ($this->channels !== 1 && $this->channels !== 2)) {
+            throw new LogicException(sprintf(
+                'Unsupported CELT packet: sampleRate=%d bandwidth=%s codedChannels=%d frameSamples=%d frameCount=%d',
+                $this->sampleRate,
+                $this->lastPacket['bandwidth'],
+                $this->lastPacket['stereo'] ? 2 : 1,
+                $this->lastPacket['frameDurationSamples'],
+                $this->lastPacket['frameCount']
+            ));
         }
-        $pcm = $this->celtDecoder->decode($this->lastPacket['frames'][0], 960, 2);
+        $codedChannels = $this->lastPacket['stereo'] ? 2 : 1;
+        $decoded = $this->celtDecoder->decode($this->lastPacket['frames'][0], 960, $codedChannels);
+        if ($codedChannels === 1 && $this->channels === 2) {
+            $pcm = [];
+            for ($i = 0; $i < 960; $i++) {
+                $pcm[] = $decoded[$i];
+                $pcm[] = $decoded[$i];
+            }
+        } else {
+            $pcm = $decoded;
+        }
         $this->lastSampleCount = intdiv(count($pcm), $this->channels);
         return $pcm;
     }

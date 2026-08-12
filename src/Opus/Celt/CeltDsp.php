@@ -143,7 +143,17 @@ final class CeltDsp
         $newPeriod = $period ?? 15;
         $newGain = $period === null ? 0.0 : $gain;
         $history = $this->postfilterHistory;
-        $input = array_merge($history, array_map('floatval', $samples));
+        $input = array_merge($history, $samples);
+        if ($this->postfilterOldGain === 0.0 && $this->postfilterGain === 0.0 && $newGain === 0.0) {
+            $this->postfilterHistory = array_slice($input, -1024);
+            $this->postfilterOldPeriod = $this->postfilterPeriod;
+            $this->postfilterOldGain = 0.0;
+            $this->postfilterOldTapset = $this->postfilterTapset;
+            $this->postfilterPeriod = $newPeriod;
+            $this->postfilterGain = 0.0;
+            $this->postfilterTapset = $tapset;
+            return $samples;
+        }
         $historyLength = count($history);
         $output = [];
         $window = CeltWindow::coefficients();

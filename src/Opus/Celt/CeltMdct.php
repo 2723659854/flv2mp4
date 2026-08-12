@@ -14,6 +14,9 @@ final class CeltMdct
 {
     public const LENGTHS = [120, 240, 480, 960];
 
+    private static array $inverseTables = [];
+    private static array $fftSwaps = [];
+
     /**
      * Returns the middle half of the inverse MDCT, which is the layout consumed
      * by CELT's 120-sample overlap-add stage.
@@ -24,31 +27,21 @@ final class CeltMdct
         self::validateLength($length);
         self::validateNumeric($coefficients);
 
-        $fftLength = 1;
-        while ($fftLength < 3 * $length - 2) {
-            $fftLength <<= 1;
-        }
+        $table = self::$inverseTables[$length] ??= self::buildInverseTable($length);
+        $fftLength = $table['fftLength'];
         $real = array_fill(0, $fftLength, 0.0);
         $imaginary = array_fill(0, $fftLength, 0.0);
-        $kernelReal = array_fill(0, $fftLength, 0.0);
-        $kernelImaginary = array_fill(0, $fftLength, 0.0);
-        $factor = M_PI / $length;
         $offset = $length - 1;
 
         for ($i = 0; $i < $length; $i++) {
-            $angle = $factor * (($length + 0.5) * $i + 0.5 * $i * $i);
             $value = (float) $coefficients[$i];
-            $real[$i] = $value * cos($angle);
-            $imaginary[$i] = $value * sin($angle);
+            $real[$i] = $value * $table['inputReal'][$i];
+            $imaginary[$i] = $value * $table['inputImaginary'][$i];
         }
-        for ($i = -$length + 1; $i < $length; $i++) {
-            $angle = -0.5 * $factor * $i * $i;
-            $kernelReal[$offset + $i] = cos($angle);
-            $kernelImaginary[$offset + $i] = sin($angle);
-        }
+        $kernelReal = $table['kernelReal'];
+        $kernelImaginary = $table['kernelImaginary'];
 
         self::fft($real, $imaginary, false);
-        self::fft($kernelReal, $kernelImaginary, false);
         for ($i = 0; $i < $fftLength; $i++) {
             $r = $real[$i] * $kernelReal[$i] - $imaginary[$i] * $kernelImaginary[$i];
             $imaginary[$i] = $real[$i] * $kernelImaginary[$i] + $imaginary[$i] * $kernelReal[$i];
@@ -57,13 +50,44 @@ final class CeltMdct
         self::fft($real, $imaginary, true);
 
         $output = [];
-        $scale = 1.0 / 32768.0;
+        $scale = 1.0 / (32768.0 * $fftLength);
         for ($i = 0; $i < $length; $i++) {
-            $angle = $factor * (0.5 * ($i + $length + 0.5) + 0.5 * $i * $i);
             $position = $offset + $i;
-            $output[] = ($real[$position] * cos($angle) - $imaginary[$position] * sin($angle)) * $scale;
+            $output[] = ($real[$position] * $table['outputReal'][$i]
+                - $imaginary[$position] * $table['outputImaginary'][$i]) * $scale;
         }
         return $output;
+    }
+
+    private static function buildInverseTable(int $length): array
+    {
+        $fftLength = 1;
+        while ($fftLength < 3 * $length - 2) {
+            $fftLength <<= 1;
+        }
+        $inputReal = $inputImaginary = $outputReal = $outputImaginary = [];
+        $kernelReal = array_fill(0, $fftLength, 0.0);
+        $kernelImaginary = array_fill(0, $fftLength, 0.0);
+        $factor = M_PI / $length;
+        $offset = $length - 1;
+        for ($i = 0; $i < $length; $i++) {
+            $angle = $factor * (($length + 0.5) * $i + 0.5 * $i * $i);
+            $inputReal[$i] = cos($angle);
+            $inputImaginary[$i] = sin($angle);
+            $angle = $factor * (0.5 * ($i + $length + 0.5) + 0.5 * $i * $i);
+            $outputReal[$i] = cos($angle);
+            $outputImaginary[$i] = sin($angle);
+        }
+        for ($i = -$length + 1; $i < $length; $i++) {
+            $angle = -0.5 * $factor * $i * $i;
+            $kernelReal[$offset + $i] = cos($angle);
+            $kernelImaginary[$offset + $i] = sin($angle);
+        }
+        self::fft($kernelReal, $kernelImaginary, false);
+        return compact(
+            'fftLength', 'inputReal', 'inputImaginary', 'kernelReal', 'kernelImaginary',
+            'outputReal', 'outputImaginary'
+        );
     }
 
     /**
@@ -95,17 +119,28 @@ final class CeltMdct
     private static function fft(array &$real, array &$imaginary, bool $inverse): void
     {
         $length = count($real);
-        for ($i = 1, $j = 0; $i < $length; $i++) {
-            $bit = $length >> 1;
-            while (($j & $bit) !== 0) {
+        if (!isset(self::$fftSwaps[$length])) {
+            $swaps = [];
+            for ($i = 1, $j = 0; $i < $length; $i++) {
+                $bit = $length >> 1;
+                while (($j & $bit) !== 0) {
+                    $j ^= $bit;
+                    $bit >>= 1;
+                }
                 $j ^= $bit;
-                $bit >>= 1;
+                if ($i < $j) {
+                    $swaps[] = [$i, $j];
+                }
             }
-            $j ^= $bit;
-            if ($i < $j) {
-                [$real[$i], $real[$j]] = [$real[$j], $real[$i]];
-                [$imaginary[$i], $imaginary[$j]] = [$imaginary[$j], $imaginary[$i]];
-            }
+            self::$fftSwaps[$length] = $swaps;
+        }
+        foreach (self::$fftSwaps[$length] as [$i, $j]) {
+            $temporary = $real[$i];
+            $real[$i] = $real[$j];
+            $real[$j] = $temporary;
+            $temporary = $imaginary[$i];
+            $imaginary[$i] = $imaginary[$j];
+            $imaginary[$j] = $temporary;
         }
 
         for ($size = 2; $size <= $length; $size <<= 1) {
@@ -129,12 +164,6 @@ final class CeltMdct
                     $wi = $wr * $stepImaginary + $wi * $stepReal;
                     $wr = $nextWr;
                 }
-            }
-        }
-        if ($inverse) {
-            for ($i = 0; $i < $length; $i++) {
-                $real[$i] /= $length;
-                $imaginary[$i] /= $length;
             }
         }
     }
