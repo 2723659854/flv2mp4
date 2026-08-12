@@ -7,15 +7,16 @@ use RuntimeException;
 use UnexpectedValueException;
 use Xiaosongshu\Flv2mp4\Opus\OpusPacketParser;
 use Xiaosongshu\Flv2mp4\Opus\OpusToAacTranscoder;
+use Xiaosongshu\Flv2mp4\Opus\OpusWorkerClient;
 
 final class WebRtcFlvRelay
 {
     private int $clientId;
     private string $streamId;
     private FlvSinglePusher $pusher;
-    private OpusToAacTranscoder $transcoder;
+    private ?OpusToAacTranscoder $transcoder;
+    private ?OpusWorkerClient $workerClient = null;
     private bool $closed = false;
-    private bool $audioEnabled = true;
     private ?string $lastAudioError = null;
     private ?array $opusFormatPending = null;
     private bool $avcSequenceHeaderPending = false;
@@ -33,17 +34,6 @@ final class WebRtcFlvRelay
     private bool $videoStarted = false;
     private bool $accessUnitCorrupt = false;
     private ?int $lastVideoTimestamp = null;
-    private int $statsStartedNs = 0;
-    private int $audioPacketCount = 0;
-    private int $videoPacketCount = 0;
-    private int $aacTagCount = 0;
-    private int $avcTagCount = 0;
-    private float $audioProcessMs = 0.0;
-    private float $videoProcessMs = 0.0;
-    private float $maxAudioProcessMs = 0.0;
-    private float $maxVideoProcessMs = 0.0;
-    private ?int $lastAudioTagTimestampMs = null;
-    private ?int $lastVideoTagTimestampMs = null;
 
     public function __construct(
         int $clientId,
@@ -58,8 +48,7 @@ final class WebRtcFlvRelay
         $this->clientId = $clientId;
         $this->streamId = $streamId;
         $this->pusher = $pusher ?? new FlvSinglePusher($streamId, $pushUrl);
-        $this->transcoder = $transcoder ?? new OpusToAacTranscoder(64000, 1);
-        $this->statsStartedNs = hrtime(true);
+        $this->transcoder = $transcoder;
     }
 
     public function connect(): void
@@ -68,11 +57,16 @@ final class WebRtcFlvRelay
             if (!$this->pusher->connect()) {
                 throw new RuntimeException("Unable to connect ws-flv destination for stream {$this->streamId}");
             }
+            if ($this->transcoder === null) {
+                $this->workerClient = new OpusWorkerClient();
+                $this->workerClient->connect($this->streamId, 64000, 1);
+            }
             $this->write("FLV\x01\x05\x00\x00\x00\x09\x00\x00\x00\x00");
-            $this->write(self::buildFlvTag(18, 0, self::buildOnMetaData($this->transcoder->channels())));
-            $this->write(self::buildFlvTag(8, 0, $this->audioTagHeader() . "\x00" . $this->transcoder->getAudioSpecificConfig()));
+            $this->write(self::buildFlvTag(18, 0, self::buildOnMetaData($this->channels())));
+            $this->write(self::buildFlvTag(8, 0, $this->audioTagHeader() . "\x00" . $this->audioSpecificConfig()));
         } catch (\Throwable $e) {
             $this->closed = true;
+            $this->workerClient?->close();
             $this->pusher->close();
             throw $e;
         }
@@ -107,34 +101,6 @@ final class WebRtcFlvRelay
         return $format;
     }
 
-    public function consumeStats(): ?array
-    {
-        $now = hrtime(true);
-        $elapsedMs = ($now - $this->statsStartedNs) / 1000000;
-        if ($elapsedMs < 5000) {
-            return null;
-        }
-        $stats = [
-            'elapsedMs' => $elapsedMs,
-            'audioPackets' => $this->audioPacketCount,
-            'videoPackets' => $this->videoPacketCount,
-            'aacTags' => $this->aacTagCount,
-            'avcTags' => $this->avcTagCount,
-            'audioProcessMs' => $this->audioProcessMs,
-            'videoProcessMs' => $this->videoProcessMs,
-            'maxAudioProcessMs' => $this->maxAudioProcessMs,
-            'maxVideoProcessMs' => $this->maxVideoProcessMs,
-            'audioTimestampMs' => $this->lastAudioTagTimestampMs,
-            'videoTimestampMs' => $this->lastVideoTagTimestampMs,
-        ];
-        $this->statsStartedNs = $now;
-        $this->audioPacketCount = $this->videoPacketCount = 0;
-        $this->aacTagCount = $this->avcTagCount = 0;
-        $this->audioProcessMs = $this->videoProcessMs = 0.0;
-        $this->maxAudioProcessMs = $this->maxVideoProcessMs = 0.0;
-        return $stats;
-    }
-
     public function consumeAvcSequenceHeaderSent(): bool
     {
         $sent = $this->avcSequenceHeaderPending;
@@ -147,21 +113,14 @@ final class WebRtcFlvRelay
         if ($this->closed) {
             return;
         }
+        $this->pumpWorker();
         $rtp = self::parseRtp($plainRtp);
         $arrivalOffset = $this->arrivalOffsetMs();
-        $startedNs = hrtime(true);
         if ($kind === 'video') {
-            ++$this->videoPacketCount;
             $this->pushH264($rtp, $arrivalOffset);
-            $elapsedMs = (hrtime(true) - $startedNs) / 1000000;
-            $this->videoProcessMs += $elapsedMs;
-            $this->maxVideoProcessMs = max($this->maxVideoProcessMs, $elapsedMs);
         } elseif ($kind === 'audio') {
-            ++$this->audioPacketCount;
-            $this->pushOpus($rtp['payload'], $arrivalOffset);
-            $elapsedMs = (hrtime(true) - $startedNs) / 1000000;
-            $this->audioProcessMs += $elapsedMs;
-            $this->maxAudioProcessMs = max($this->maxAudioProcessMs, $elapsedMs);
+            $this->pushOpus($rtp, $arrivalOffset);
+            $this->pumpWorker();
         }
     }
 
@@ -172,11 +131,18 @@ final class WebRtcFlvRelay
         }
         $this->closed = true;
         try {
-            if ($this->audioEnabled && $this->audioArrivalOffsetMs !== null) {
-                $this->writeAacFrames($this->transcoder->finish(), true);
+            if ($this->audioArrivalOffsetMs !== null) {
+                if ($this->transcoder !== null) {
+                    $this->writeAacFrames($this->transcoder->finish(), true);
+                } elseif ($this->workerClient !== null) {
+                    foreach ($this->workerClient->finish(2.0) as $response) {
+                        $this->handleWorkerResponse($response, true);
+                    }
+                }
             }
             $this->pusher->flush();
         } finally {
+            $this->workerClient?->close();
             $this->pusher->close();
         }
     }
@@ -465,8 +431,6 @@ final class WebRtcFlvRelay
         $timestampMs = ($this->videoArrivalOffsetMs ?? 0) + (int) round($delta / 90);
         $body = chr($keyframe ? 0x17 : 0x27) . "\x01\x00\x00\x00" . $avcc;
         $this->write(self::buildFlvTag(9, $timestampMs, $body));
-        ++$this->avcTagCount;
-        $this->lastVideoTagTimestampMs = $timestampMs;
         $this->lastVideoTimestamp = $timestamp;
     }
 
@@ -487,9 +451,10 @@ final class WebRtcFlvRelay
         $this->avcSequenceHeaderPending = true;
     }
 
-    private function pushOpus(string $packet, int $arrivalOffset): void
+    private function pushOpus(array $rtp, int $arrivalOffset): void
     {
-        if (!$this->audioEnabled || $packet === '') {
+        $packet = $rtp['payload'];
+        if ($packet === '') {
             return;
         }
         if ($this->audioArrivalOffsetMs === null) {
@@ -506,18 +471,63 @@ final class WebRtcFlvRelay
             ];
         }
         try {
-            $adts = $this->transcoder->pushPacket($packet);
+            if ($this->transcoder !== null) {
+                $this->writeAacFrames($this->transcoder->pushPacket($packet));
+                return;
+            }
+            if ($this->workerClient === null) {
+                throw new RuntimeException('Opus worker client is unavailable');
+            }
+            $this->workerClient->push($rtp['seq'], $rtp['ts'], $packet);
         } catch (\Throwable $e) {
-            $this->audioEnabled = false;
-            $this->lastAudioError = $e->getMessage();
+            $this->failAudio($e);
+        }
+    }
+
+    private function pumpWorker(): void
+    {
+        if ($this->workerClient === null) {
             return;
         }
-        $this->writeAacFrames($adts);
+        try {
+            foreach ($this->workerClient->pump() as $response) {
+                $this->handleWorkerResponse($response);
+            }
+        } catch (\Throwable $e) {
+            $this->failAudio($e);
+        }
+    }
+
+    private function failAudio(\Throwable $e): never
+    {
+        $this->lastAudioError = $e->getMessage();
+        $this->closed = true;
+        $this->workerClient?->close();
+        $this->pusher->close();
+        throw $e;
+    }
+
+    private function handleWorkerResponse(array $response, bool $allowClosed = false): void
+    {
+        if ($response['type'] !== 'aac') {
+            return;
+        }
+        $this->writeAacFrames($response['adts'], $allowClosed);
+    }
+
+    private function channels(): int
+    {
+        return $this->transcoder?->channels() ?? 1;
+    }
+
+    private function audioSpecificConfig(): string
+    {
+        return $this->transcoder?->getAudioSpecificConfig() ?? "\x11\x88";
     }
 
     private function audioTagHeader(): string
     {
-        return chr(0xae | ($this->transcoder->channels() === 2 ? 1 : 0));
+        return chr(0xae | ($this->channels() === 2 ? 1 : 0));
     }
 
     private function writeAacFrames(string $adts, bool $allowClosed = false): void
@@ -526,8 +536,6 @@ final class WebRtcFlvRelay
             $timestamp = ($this->audioArrivalOffsetMs ?? 0)
                 + (int) round($this->audioFrameIndex * 1024 * 1000 / 48000);
             $this->write(self::buildFlvTag(8, $timestamp, $this->audioTagHeader() . "\x01" . $rawAac), $allowClosed);
-            ++$this->aacTagCount;
-            $this->lastAudioTagTimestampMs = $timestamp;
             ++$this->audioFrameIndex;
         }
     }

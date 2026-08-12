@@ -6,6 +6,7 @@
  */
 
 use Xiaosongshu\Flv2mp4\Flv\WebRtcFlvRelay;
+use Xiaosongshu\Flv2mp4\Opus\OpusWorkerClient;
 use Xiaosongshu\Webrtc\WebRTCServer;
 
 require_once __DIR__."/vendor/autoload.php";
@@ -33,6 +34,42 @@ $closeFlvRelay = static function (int $clientId, WebRTCServer $srv) use (&$flvRe
     }
     unset($flvRelays[$clientId]);
 };
+$shuttingDown = false;
+$shutdown = static function () use (&$shuttingDown, &$flvRelays, $server): void {
+    if ($shuttingDown) {
+        return;
+    }
+    $shuttingDown = true;
+    foreach (array_keys($flvRelays) as $clientId) {
+        try {
+            $flvRelays[$clientId]->finish();
+        } catch (\Throwable $e) {
+            $server->_log_std("[ws-flv] client={$clientId} shutdown failed: {$e->getMessage()}\n");
+        }
+        unset($flvRelays[$clientId]);
+    }
+    OpusWorkerClient::shutdownOwnedWorkers();
+};
+register_shutdown_function($shutdown);
+if (PHP_OS_FAMILY === 'Windows' && function_exists('sapi_windows_set_ctrl_handler')) {
+    sapi_windows_set_ctrl_handler(static function (int $event) use ($shutdown): bool {
+        if ($event === PHP_WINDOWS_EVENT_CTRL_C || $event === PHP_WINDOWS_EVENT_CTRL_BREAK) {
+            $shutdown();
+            exit(0);
+        }
+        return false;
+    });
+} elseif (function_exists('pcntl_async_signals') && function_exists('pcntl_signal')) {
+    pcntl_async_signals(true);
+    pcntl_signal(SIGINT, static function () use ($shutdown): void {
+        $shutdown();
+        exit(0);
+    });
+    pcntl_signal(SIGTERM, static function () use ($shutdown): void {
+        $shutdown();
+        exit(0);
+    });
+}
 
 $server->onOpen = function ($label, $clientId, WebRTCServer $srv) use (&$rooms) {
     $total = count($srv->getClientIds());

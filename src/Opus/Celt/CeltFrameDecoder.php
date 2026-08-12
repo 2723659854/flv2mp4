@@ -80,19 +80,31 @@ final class CeltFrameDecoder
                 );
             }
         }
-        $pcm = array_fill(0, $frameSamples * $channels, 0.0);
+        $pcm = [];
         $blocks = $transient ? 1 << $lm : 1;
-        for ($channel = 0; $channel < $channels; $channel++) {
-            $spectrum = $this->denormalize($spectra[$channel], $coarse[$channel], $lm);
-            $samples = $this->dsp[$channel]->synthesize(
+        if ($channels === 1) {
+            $spectrum = $this->denormalize($spectra[0], $coarse[0], $lm);
+            $pcm = $this->dsp[0]->synthesize(
                 $spectrum,
                 $blocks,
                 $postfilter['period'] ?? null,
                 $postfilter['gain'] ?? 0.0,
                 $postfilter['tapset'] ?? 0
             );
-            for ($i = 0; $i < $frameSamples; $i++) {
-                $pcm[$i * $channels + $channel] = $samples[$i];
+        } else {
+            $pcm = array_fill(0, $frameSamples * $channels, 0.0);
+            for ($channel = 0; $channel < $channels; $channel++) {
+                $spectrum = $this->denormalize($spectra[$channel], $coarse[$channel], $lm);
+                $samples = $this->dsp[$channel]->synthesize(
+                    $spectrum,
+                    $blocks,
+                    $postfilter['period'] ?? null,
+                    $postfilter['gain'] ?? 0.0,
+                    $postfilter['tapset'] ?? 0
+                );
+                for ($i = 0; $i < $frameSamples; $i++) {
+                    $pcm[$i * $channels + $channel] = $samples[$i];
+                }
             }
         }
         $this->debugFrame = [

@@ -44,8 +44,9 @@ final class CeltBands
         $ctx->seed = $seed;
 
         $x = array_fill(0, $size, 0.0);
-        $y = array_fill(0, $size, 0.0);
-        $norm = $norm2 = [];
+        $y = $channels === 1 ? [] : array_fill(0, $size, 0.0);
+        $norm = [];
+        $norm2 = $channels === 1 ? null : [];
         $collapse = array_fill(0, 42, 0);
         $balance = $allocation['extra'];
         $lowbandOffset = 0;
@@ -70,26 +71,28 @@ final class CeltBands
 
             if (($offset - $n >= 0 || $band === 1) && ($updateLowband || $lowbandOffset === 0)) $lowbandOffset = $band;
             $effective = -1;
-            $fillX = $fillY = (1 << $blocks) - 1;
+            $fillX = (1 << $blocks) - 1;
+            $fillY = $channels === 1 ? 0 : $fillX;
             if ($lowbandOffset !== 0) {
                 $effective = max(0, (CeltBitAllocation::BAND_EDGES[$lowbandOffset] << $lm) - $n);
                 $fillX = $fillY = 0;
                 for ($j = max(0, $lowbandOffset - 1); $j < $band; $j++) {
                     $fillX |= $collapse[2 * $j];
-                    $fillY |= $collapse[2 * $j + 1];
+                    if ($channels !== 1) {
+                        $fillY |= $collapse[2 * $j + 1];
+                    }
                 }
             }
             $lowX = $effective >= 0 ? array_slice($norm, $effective, $n) : null;
-            $lowY = $effective >= 0 ? array_slice($norm2, $effective, $n) : null;
+            $lowY = $channels !== 1 && $effective >= 0 ? array_slice($norm2, $effective, $n) : null;
 
-            if ($dual && $band === $allocation['intensity']) {
+            if ($channels !== 1 && $dual && $band === $allocation['intensity']) {
                 $dual = false;
                 $count = $offset;
                 for ($j = 0; $j < $count; $j++) $norm[$j] = (($norm[$j] ?? 0.0) + ($norm2[$j] ?? 0.0)) * 0.5;
             }
             if ($channels === 1) {
                 $xb = self::quantBand($ctx, $n, $b, $blocks, $lowX, $lm, 1.0, $fillX);
-                $yb = ['vector' => array_fill(0, $n, 0.0), 'mask' => 0];
                 $cmX = $xb['mask']; $cmY = 0;
             } elseif ($dual) {
                 $xb = self::quantBand($ctx, $n, intdiv($b, 2), $blocks, $lowX, $lm, 1.0, $fillX);
@@ -100,11 +103,24 @@ final class CeltBands
                 $xb = ['vector' => $st['x']]; $yb = ['vector' => $st['y']];
                 $cmX = $cmY = $st['mask'];
             }
-            array_splice($x, $offset, $n, $xb['vector']);
-            array_splice($y, $offset, $n, $yb['vector']);
+            for ($j = 0; $j < $n; $j++) {
+                $x[$offset + $j] = $xb['vector'][$j];
+            }
+            if ($channels !== 1) {
+                for ($j = 0; $j < $n; $j++) {
+                    $y[$offset + $j] = $yb['vector'][$j];
+                }
+            }
             if ($band < 20) {
-                array_splice($norm, $offset, $n, array_map(static fn(float $v): float => $v * sqrt($n), $xb['vector']));
-                array_splice($norm2, $offset, $n, array_map(static fn(float $v): float => $v * sqrt($n), $yb['vector']));
+                $scale = sqrt($n);
+                for ($j = 0; $j < $n; $j++) {
+                    $norm[$offset + $j] = $xb['vector'][$j] * $scale;
+                }
+                if ($channels !== 1) {
+                    for ($j = 0; $j < $n; $j++) {
+                        $norm2[$offset + $j] = $yb['vector'][$j] * $scale;
+                    }
+                }
             }
             $collapse[2 * $band] = $cmX;
             $collapse[2 * $band + 1] = $cmY;
@@ -207,8 +223,10 @@ final class CeltBands
         while ($ctx->remaining < 0 && $q > 0) { $ctx->remaining += $cost; $q--; $cost = CeltTables::pulsesToBits($ctx->band, $lm, $q); $ctx->remaining -= $cost; }
         if ($q > 0) {
             $k = CeltTables::pulseCount($q);
-            $decoded = CeltPvq::decodePulses($ctx->decoder, $n, $k); $vector = CeltPvq::normalizePulses($decoded['vector'], $gain);
-            $vector = CeltPvq::expRotation($vector, $blocks, $k, $ctx->spread); return ['vector' => $vector, 'mask' => CeltPvq::collapseMask($decoded['vector'], $blocks)];
+            $decoded = CeltPvq::decodePulses($ctx->decoder, $n, $k);
+            $vector = CeltPvq::normalizePulses($decoded['vector'], $gain, $decoded['normSquared']);
+            $vector = CeltPvq::expRotation($vector, $blocks, $k, $ctx->spread, false, true);
+            return ['vector' => $vector, 'mask' => CeltPvq::collapseMask($decoded['vector'], $blocks, true)];
         }
         $mask = (1 << $blocks) - 1; $fill &= $mask;
         if ($fill === 0) return ['vector' => array_fill(0, $n, 0.0), 'mask' => 0];

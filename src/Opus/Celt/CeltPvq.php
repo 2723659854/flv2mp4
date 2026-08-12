@@ -121,21 +121,27 @@ final class CeltPvq
         return ['vector' => $vector, 'normSquared' => $normSquared];
     }
 
-    public static function normalizePulses(array $pulses, float $gain = 1.0): array
+    public static function normalizePulses(array $pulses, float $gain = 1.0, ?int $normSquared = null): array
     {
-        self::validateNumericVector($pulses, true);
         if (!is_finite($gain)) {
             throw new InvalidArgumentException('PVQ gain must be finite');
         }
-        $normSquared = 0;
-        foreach ($pulses as $pulse) {
-            $normSquared += $pulse * $pulse;
+        if ($normSquared === null) {
+            self::validateNumericVector($pulses, true);
+            $normSquared = 0;
+            foreach ($pulses as $pulse) {
+                $normSquared += $pulse * $pulse;
+            }
         }
         if ($normSquared <= 0) {
             throw new InvalidArgumentException('Cannot normalize a zero pulse vector');
         }
         $scale = $gain / sqrt($normSquared);
-        return array_map(static fn (int $pulse): float => $pulse * $scale, $pulses);
+        $result = [];
+        foreach ($pulses as $pulse) {
+            $result[] = $pulse * $scale;
+        }
+        return $result;
     }
 
     public static function expRotation(
@@ -143,9 +149,12 @@ final class CeltPvq
         int $blocks,
         int $pulses,
         int $spread,
-        bool $encode = false
+        bool $encode = false,
+        bool $trusted = false
     ): array {
-        self::validateNumericVector($vector, false);
+        if (!$trusted) {
+            self::validateNumericVector($vector, false);
+        }
         $length = count($vector);
         if ($blocks < 1 || $blocks > 16 || $length % $blocks !== 0) {
             throw new InvalidArgumentException('Rotation blocks must divide the vector length and be 1..16');
@@ -188,9 +197,11 @@ final class CeltPvq
         return $result;
     }
 
-    public static function collapseMask(array $pulses, int $blocks): int
+    public static function collapseMask(array $pulses, int $blocks, bool $trusted = false): int
     {
-        self::validateNumericVector($pulses, true);
+        if (!$trusted) {
+            self::validateNumericVector($pulses, true);
+        }
         $length = count($pulses);
         if ($blocks < 1 || $blocks > 16 || $length % $blocks !== 0) {
             throw new InvalidArgumentException('Collapse-mask blocks must divide the vector length and be 1..16');

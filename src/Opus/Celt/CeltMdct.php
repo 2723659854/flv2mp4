@@ -16,6 +16,7 @@ final class CeltMdct
 
     private static array $inverseTables = [];
     private static array $fftSwaps = [];
+    private static array $fftTwiddles = [];
 
     /**
      * Returns the middle half of the inverse MDCT, which is the layout consumed
@@ -143,26 +144,36 @@ final class CeltMdct
             $imaginary[$j] = $temporary;
         }
 
+        $direction = $inverse ? 1 : -1;
+        if (!isset(self::$fftTwiddles[$length][$direction])) {
+            $stages = [];
+            for ($size = 2; $size <= $length; $size <<= 1) {
+                $half = $size >> 1;
+                $realTwiddles = $imaginaryTwiddles = [];
+                $factor = $direction * 2.0 * M_PI / $size;
+                for ($i = 0; $i < $half; $i++) {
+                    $realTwiddles[$i] = cos($factor * $i);
+                    $imaginaryTwiddles[$i] = sin($factor * $i);
+                }
+                $stages[$size] = [$realTwiddles, $imaginaryTwiddles];
+            }
+            self::$fftTwiddles[$length][$direction] = $stages;
+        }
+        $stages = self::$fftTwiddles[$length][$direction];
         for ($size = 2; $size <= $length; $size <<= 1) {
-            $angle = ($inverse ? 2.0 : -2.0) * M_PI / $size;
-            $stepReal = cos($angle);
-            $stepImaginary = sin($angle);
             $half = $size >> 1;
+            $wr = $stages[$size][0];
+            $wi = $stages[$size][1];
             for ($start = 0; $start < $length; $start += $size) {
-                $wr = 1.0;
-                $wi = 0.0;
                 for ($i = 0; $i < $half; $i++) {
                     $even = $start + $i;
                     $odd = $even + $half;
-                    $tr = $wr * $real[$odd] - $wi * $imaginary[$odd];
-                    $ti = $wr * $imaginary[$odd] + $wi * $real[$odd];
+                    $tr = $wr[$i] * $real[$odd] - $wi[$i] * $imaginary[$odd];
+                    $ti = $wr[$i] * $imaginary[$odd] + $wi[$i] * $real[$odd];
                     $real[$odd] = $real[$even] - $tr;
                     $imaginary[$odd] = $imaginary[$even] - $ti;
                     $real[$even] += $tr;
                     $imaginary[$even] += $ti;
-                    $nextWr = $wr * $stepReal - $wi * $stepImaginary;
-                    $wi = $wr * $stepImaginary + $wi * $stepReal;
-                    $wr = $nextWr;
                 }
             }
         }

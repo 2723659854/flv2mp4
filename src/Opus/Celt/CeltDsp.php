@@ -59,12 +59,16 @@ final class CeltDsp
                 $buffer[$i] = $this->outMemory[$i];
             }
         }
-        for ($block = 0; $block < $shortBlocks; $block++) {
-            $spectrum = [];
-            for ($i = 0; $i < $blockSize; $i++) {
-                $spectrum[] = $coefficients[$block + $i * $shortBlocks];
+        if ($shortBlocks === 1) {
+            CeltWindow::overlapAdd($buffer, CeltMdct::inverse($coefficients), 0);
+        } else {
+            for ($block = 0; $block < $shortBlocks; $block++) {
+                $spectrum = [];
+                for ($i = 0; $i < $blockSize; $i++) {
+                    $spectrum[] = $coefficients[$block + $i * $shortBlocks];
+                }
+                CeltWindow::overlapAdd($buffer, CeltMdct::inverse($spectrum), $block * $blockSize);
             }
-            CeltWindow::overlapAdd($buffer, CeltMdct::inverse($spectrum), $block * $blockSize);
         }
         $output = array_slice($buffer, 0, $frameSize);
         $this->outMemory = array_slice($buffer, $frameSize, $overlap);

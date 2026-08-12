@@ -104,16 +104,26 @@ $stapA = "\x78" . pack('n', strlen($sps)) . $sps
     . pack('n', strlen($pps)) . $pps
     . pack('n', strlen($idr)) . $idr;
 
-$pusher = new RelayTestPusher();
+$audioFailurePusher = new RelayTestPusher();
 $transcoder = new FailingAudioTranscoder();
-$relay = new WebRtcFlvRelay(1, 'test', 'ws://127.0.0.1/live/test', $pusher, $transcoder);
+$audioFailureRelay = new WebRtcFlvRelay(1, 'test-audio-failure', 'ws://127.0.0.1/live/test', $audioFailurePusher, $transcoder);
+$audioFailureRelay->connect();
+$audioFailed = false;
+try {
+    $audioFailureRelay->pushRtp(testRtp(111, 1, 48000, "\x00"), 'audio');
+} catch (LogicException $e) {
+    $audioFailed = true;
+}
+assertTest($audioFailed, 'audio failure was not propagated');
+assertTest($audioFailureRelay->consumeAudioError() === 'unsupported synthetic Opus packet', 'audio failure was not exposed');
+assertTest(!$audioFailureRelay->isHealthy(), 'audio failure did not close the relay');
+assertTest($transcoder->pushCount === 1, 'failing transcoder push count is invalid');
+
+$pusher = new RelayTestPusher();
+$relay = new WebRtcFlvRelay(2, 'test', 'ws://127.0.0.1/live/test', $pusher, new FailingAudioTranscoder());
 $relay->connect();
-$relay->pushRtp(testRtp(111, 1, 48000, "\x00"), 'audio');
-assertTest($relay->consumeAudioError() === 'unsupported synthetic Opus packet', 'audio failure was not exposed');
-$relay->pushRtp(testRtp(111, 2, 48960, "\x00"), 'audio');
-assertTest($transcoder->pushCount === 1, 'disabled audio was transcoded again');
 $relay->pushRtp(testRtp(96, 3, 90000, $stapA), 'video');
-assertTest($relay->isHealthy(), 'audio failure closed the relay');
+assertTest($relay->isHealthy(), 'video-only regression relay is unhealthy');
 assertTest($relay->consumeAvcSequenceHeaderSent(), 'AVC sequence-header state was not exposed');
 assertTest(isset($pusher->writes[1]) && ord($pusher->writes[1][0]) === 18, 'metadata script tag missing');
 assertTest(strpos($pusher->writes[1], 'onMetaData') !== false, 'onMetaData payload missing');
