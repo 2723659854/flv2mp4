@@ -39,14 +39,22 @@ final class OpusWorkerServer
             }
             $read = [$this->server];
             $write = [];
+            $bufferedFrameReady = false;
             foreach ($this->connections as $connection) {
                 $read[] = $connection['socket'];
                 if ($connection['output'] !== '') {
                     $write[] = $connection['socket'];
                 }
+                $inputLength = strlen($connection['input']);
+                if ($inputLength >= 4) {
+                    $bodyLength = unpack('N', substr($connection['input'], 0, 4))[1];
+                    if ($inputLength >= 4 + $bodyLength) {
+                        $bufferedFrameReady = true;
+                    }
+                }
             }
             $except = null;
-            if (@stream_select($read, $write, $except, 0, 200000) === false) {
+            if (@stream_select($read, $write, $except, 0, $bufferedFrameReady ? 0 : 200000) === false) {
                 continue;
             }
             if (in_array($this->server, $read, true)) {
@@ -59,6 +67,10 @@ final class OpusWorkerServer
                         'output' => '',
                         'transcoder' => null,
                         'frameIndex' => 0,
+                        // #region debug-point G:worker-throughput-state
+                        'debugPackets' => 0,
+                        'debugStartedAt' => microtime(true),
+                        // #endregion
                         'finished' => false,
                     ];
                 }
@@ -142,6 +154,12 @@ final class OpusWorkerServer
                 $frameCount = $this->countAdtsFrames($adts);
                 $this->connections[$id]['frameIndex'] += $frameCount;
                 $this->queue($id, OpusWorkerProtocol::aac($values['requestId'], $firstFrame, $adts));
+                // #region debug-point G:worker-throughput
+                ++$this->connections[$id]['debugPackets'];
+                if ($this->connections[$id]['debugPackets'] % 500 === 0) {
+                    @file_get_contents('http://127.0.0.1:7777/event', false, stream_context_create(['http' => ['method' => 'POST', 'header' => "Content-Type: application/json\r\n", 'content' => json_encode(['sessionId' => 'worker-autoload-disconnect', 'runId' => 'post-fix-2', 'hypothesisId' => 'G', 'location' => 'OpusWorkerServer::handleMessage', 'msg' => '[DEBUG] Long-run worker throughput', 'data' => ['packets' => $this->connections[$id]['debugPackets'], 'elapsedMs' => (microtime(true) - $this->connections[$id]['debugStartedAt']) * 1000, 'inputBytes' => strlen($this->connections[$id]['input']), 'outputBytes' => strlen($this->connections[$id]['output'])], 'ts' => (int) (microtime(true) * 1000)]), 'timeout' => 0.2, 'ignore_errors' => true]]));
+                }
+                // #endregion
             } catch (Throwable $e) {
                 $this->queue($id, OpusWorkerProtocol::error($values['requestId'], $e->getMessage()));
                 $this->connections[$id]['finished'] = true;

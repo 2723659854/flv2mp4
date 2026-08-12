@@ -18,7 +18,11 @@ class OpusToAacTranscoder
     private int $channels;
     private OpusDecoder $decoder;
     private AacLcEncoder $encoder;
-
+    // #region debug-point E:timing-state
+    private int $debugPackets = 0;
+    private float $debugDecodeMicros = 0.0;
+    private float $debugEncodeMicros = 0.0;
+    // #endregion
     private bool $finished = false;
 
     public function __construct(int $bitrate = 128000, int $channels = 2)
@@ -94,7 +98,11 @@ class OpusToAacTranscoder
             throw new LogicException('Cannot push an Opus packet after finish');
         }
 
+        // #region debug-point E:decode-timing
+        $debugDecodeStartedAt = hrtime(true);
         $pcm = $this->decoder->decodeFloat($packet);
+        $this->debugDecodeMicros += (hrtime(true) - $debugDecodeStartedAt) / 1000;
+        // #endregion
         $decodedSamples = $this->decoder->lastSampleCount();
         if ($sampleCount !== null && $sampleCount !== $decodedSamples) {
             throw new InvalidArgumentException("Opus packet sample count is {$decodedSamples}, expected {$sampleCount}");
@@ -115,7 +123,15 @@ class OpusToAacTranscoder
             }
             unset($sample);
         }
+        // #region debug-point E:encode-timing
+        $debugStartedAt = hrtime(true);
         $adts = $this->encoder->encodeFloat($pcm);
+        $this->debugEncodeMicros += (hrtime(true) - $debugStartedAt) / 1000;
+        ++$this->debugPackets;
+        if ($this->debugPackets % 500 === 0) {
+            @file_get_contents('http://127.0.0.1:7777/event', false, stream_context_create(['http' => ['method' => 'POST', 'header' => "Content-Type: application/json\r\n", 'content' => json_encode(['sessionId' => 'worker-autoload-disconnect', 'runId' => 'post-fix-2', 'hypothesisId' => 'G', 'location' => 'OpusToAacTranscoder::pushPacketTrimmed', 'msg' => '[DEBUG] Long-run transcoder timing', 'data' => ['packets' => $this->debugPackets, 'decodeAverageMicros' => $this->debugDecodeMicros / $this->debugPackets, 'encodeAverageMicros' => $this->debugEncodeMicros / $this->debugPackets], 'ts' => (int) (microtime(true) * 1000)]), 'timeout' => 0.2, 'ignore_errors' => true]]));
+        }
+        // #endregion
         return $adts;
     }
 }
