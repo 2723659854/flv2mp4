@@ -54,7 +54,8 @@ final class OpusWorkerServer
                 }
             }
             $except = null;
-            if (@stream_select($read, $write, $except, 0, $bufferedFrameReady ? 0 : 200000) === false) {
+            /** opus转aac属于密集型计算，并且数据包很大，所以不可等待，否则导致音视频漂移而断开连接 */
+            if (@stream_select($read, $write, $except, 0, $bufferedFrameReady ? 0 : 1) === false) {
                 continue;
             }
             if (in_array($this->server, $read, true)) {
