@@ -64,9 +64,6 @@ final class OpusWorkerClient
         $requestId = $this->nextRequestId++;
         $frame = OpusWorkerProtocol::push($requestId, $sequence, $timestamp, $payload);
         if ($this->pendingPackets >= self::MAX_PENDING_PACKETS || strlen($this->output) + strlen($frame) > self::MAX_OUTPUT_BYTES) {
-            // #region debug-point C-D:queue-overflow
-            @file_get_contents('http://127.0.0.1:7777/event', false, stream_context_create(['http' => ['method' => 'POST', 'header' => "Content-Type: application/json\r\n", 'content' => json_encode(['sessionId' => 'worker-cleanup-regression', 'runId' => 'post-fix', 'hypothesisId' => 'C,D', 'location' => 'OpusWorkerClient::push', 'msg' => '[DEBUG] Worker queue overflow', 'data' => ['pendingPackets' => $this->pendingPackets, 'outputBytes' => strlen($this->output), 'inputBytes' => strlen($this->input), 'nextRequestId' => $this->nextRequestId], 'ts' => (int) (microtime(true) * 1000)]), 'timeout' => 0.2, 'ignore_errors' => true]]));
-            // #endregion
             throw new RuntimeException('Opus worker input queue limit exceeded');
         }
         $this->output .= $frame;

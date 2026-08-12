@@ -54,10 +54,6 @@ final class OpusWorkerServer
                         'output' => '',
                         'transcoder' => null,
                         'frameIndex' => 0,
-                        // #region debug-point B-D:worker-state
-                        'debugProcessed' => 0,
-                        'debugStartedAt' => microtime(true),
-                        // #endregion
                         'finished' => false,
                     ];
                 }
@@ -137,12 +133,6 @@ final class OpusWorkerServer
             try {
                 $transcoder = $this->connections[$id]['transcoder'];
                 $adts = $transcoder->pushPacket(substr($body, 11));
-                // #region debug-point B-D:worker-throughput
-                ++$this->connections[$id]['debugProcessed'];
-                if ($this->connections[$id]['debugProcessed'] === 100) {
-                    @file_get_contents('http://127.0.0.1:7777/event', false, stream_context_create(['http' => ['method' => 'POST', 'header' => "Content-Type: application/json\r\n", 'content' => json_encode(['sessionId' => 'worker-cleanup-regression', 'runId' => 'post-fix', 'hypothesisId' => 'B,D', 'location' => 'OpusWorkerServer::handleMessage', 'msg' => '[DEBUG] Worker throughput aggregate', 'data' => ['processed' => $this->connections[$id]['debugProcessed'], 'elapsedMs' => (microtime(true) - $this->connections[$id]['debugStartedAt']) * 1000, 'inputBytes' => strlen($this->connections[$id]['input']), 'outputBytes' => strlen($this->connections[$id]['output'])], 'ts' => (int) (microtime(true) * 1000)]), 'timeout' => 0.2, 'ignore_errors' => true]]));
-                }
-                // #endregion
                 $firstFrame = $this->connections[$id]['frameIndex'];
                 $frameCount = $this->countAdtsFrames($adts);
                 $this->connections[$id]['frameIndex'] += $frameCount;
