@@ -4,15 +4,10 @@ namespace Xiaosongshu\Flv2mp4\Opus\Celt;
 
 use Xiaosongshu\Flv2mp4\Opus\RangeDecoder;
 
-/*
- * Copyright (c) 2007-2010 Xiph.Org Foundation
- * Copyright (c) 2007-2010 Timothy B. Terriberry
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the above copyright notice and
- * this permission notice are retained. THIS SOFTWARE IS PROVIDED BY THE
- * COPYRIGHT HOLDERS AND CONTRIBUTORS ``AS IS'' AND ANY EXPRESS OR IMPLIED
- * WARRANTIES ARE DISCLAIMED.
+/**
+ * @purpose CELT 频带能量包络提取与增益控制单元
+ * @author yanglong
+ * @time 2026年8月12日17:17:04
  */
 final class CeltEnergy
 {

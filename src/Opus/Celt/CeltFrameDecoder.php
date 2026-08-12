@@ -5,12 +5,10 @@ namespace Xiaosongshu\Flv2mp4\Opus\Celt;
 use LogicException;
 use Xiaosongshu\Flv2mp4\Opus\RangeDecoder;
 
-/*
- * Copyright (c) 2007-2010 Xiph.Org Foundation
- * Copyright (c) 2007-2010 Timothy B. Terriberry
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that this notice is retained.
- * THIS SOFTWARE IS PROVIDED ``AS IS'', WITHOUT WARRANTY.
+/**
+ * @purpose CELT 帧解码器
+ * @author yanglong
+ * @time 2026年8月12日17:17:56
  */
 final class CeltFrameDecoder
 {

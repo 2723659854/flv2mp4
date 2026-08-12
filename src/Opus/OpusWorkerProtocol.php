@@ -5,6 +5,11 @@ namespace Xiaosongshu\Flv2mp4\Opus;
 use InvalidArgumentException;
 use UnexpectedValueException;
 
+/**
+ * @purpose opus转码自定义协议
+ * @author yanglong
+ * @time 2026年8月12日17:25:08
+ */
 final class OpusWorkerProtocol
 {
     public const OPEN = 1;

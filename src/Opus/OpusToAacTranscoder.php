@@ -6,6 +6,11 @@ use InvalidArgumentException;
 use LogicException;
 use Xiaosongshu\Flv2mp4\Aac\AacLcEncoder;
 
+/**
+ * @purpose opus转aac核心类
+ * @author yanglong
+ * @time 2026年8月12日17:23:59
+ */
 class OpusToAacTranscoder
 {
     private const SAMPLE_RATE = 48000;

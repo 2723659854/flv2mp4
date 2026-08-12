@@ -6,6 +6,11 @@ use RuntimeException;
 use Throwable;
 use UnexpectedValueException;
 
+/**
+ * @purpose opus转码子进程服务端
+ * @author yanglong
+ * @time 2026年8月12日17:25:59
+ */
 final class OpusWorkerServer
 {
     private const MAX_CONNECTION_BUFFER = 2097152;

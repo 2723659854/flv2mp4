@@ -5,9 +5,9 @@ namespace Xiaosongshu\Flv2mp4\Aac;
 use InvalidArgumentException;
 
 /**
- * Pure PHP AAC-LC encoder for 48 kHz mono or interleaved stereo PCM.
- * Bitstream syntax and tables follow ISO/IEC 14496-3; the transform, rate loop,
- * psychoacoustic thresholds and quantizer are an independent implementation.
+ * @purpose 纯 PHP 实现的 AAC-LC 编码器，适用于 48 kHz 单声道或交错立体声 PCM
+ * @author yanglong
+ * @time 2026年8月12日17:08:03
  */
 final class AacLcEncoder
 {

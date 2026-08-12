@@ -5,6 +5,11 @@ namespace Xiaosongshu\Flv2mp4\Opus;
 use RuntimeException;
 use UnexpectedValueException;
 
+/**
+ * @purpose opus子进程客户端
+ * @author yanglong
+ * @time 2026年8月12日17:24:31
+ */
 final class OpusWorkerClient
 {
     private const MAX_OUTPUT_BYTES = 262144;

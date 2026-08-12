@@ -2,7 +2,11 @@
 
 namespace Xiaosongshu\Flv2mp4\Aac;
 
-/* ISO/IEC 14496-3 AAC-LC canonical Huffman and 48 kHz scalefactor-band tables. */
+/**
+ * @purpose ISO/IEC 14496-3 AAC-LC 规范中规定的霍夫曼编码表以及适用于 48 kHz 采样率的比例因子带表。
+ * @author yanglong
+ * @time 2026年8月12日17:08:52
+ */
 final class AacTables
 {
     public const SWB_48K = [

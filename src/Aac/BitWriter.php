@@ -2,6 +2,11 @@
 
 namespace Xiaosongshu\Flv2mp4\Aac;
 
+/**
+ * @purpose bit写入工具
+ * @author yanglong
+ * @time 2026年8月12日17:09:23
+ */
 final class BitWriter
 {
     private string $data = '';

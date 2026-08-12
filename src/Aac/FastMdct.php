@@ -2,6 +2,11 @@
 
 namespace Xiaosongshu\Flv2mp4\Aac;
 
+/**
+ * @purpose 改进型离散余弦变换器
+ * @author yanglong
+ * @time 2026年8月12日17:10:32
+ */
 final class FastMdct
 {
     private const SIZE = 2048;

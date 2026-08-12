@@ -5,12 +5,10 @@ namespace Xiaosongshu\Flv2mp4\Opus;
 use InvalidArgumentException;
 use RuntimeException;
 
-/*
- * Derived from RFC 6716/libopus range coder Code Components.
- * Copyright (c) 2001-2011 Timothy B. Terriberry and Xiph.Org Foundation.
- * Redistribution and use in source and binary forms, with or without modification,
- * are permitted provided that this notice is retained. THIS SOFTWARE IS PROVIDED
- * "AS IS", WITHOUT WARRANTY; contributors are not liable for any damages.
+/**
+ * @purpose 区间解码器
+ * @author yanglong
+ * @time 2026年8月12日17:27:57
  */
 final class RangeDecoder
 {

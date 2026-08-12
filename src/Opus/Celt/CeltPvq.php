@@ -5,19 +5,10 @@ namespace Xiaosongshu\Flv2mp4\Opus\Celt;
 use InvalidArgumentException;
 use Xiaosongshu\Flv2mp4\Opus\RangeDecoder;
 
-/*
- * Copyright (c) 2007-2008 CSIRO
- * Copyright (c) 2007-2009 Xiph.Org Foundation
- * Copyright (c) 2007-2009 Timothy B. Terriberry
- * Written by Timothy B. Terriberry and Jean-Marc Valin
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the above copyright notice and
- * this permission notice are retained. THIS SOFTWARE IS PROVIDED BY THE
- * COPYRIGHT HOLDERS AND CONTRIBUTORS ``AS IS'' AND ANY EXPRESS OR IMPLIED
- * WARRANTIES ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR
- * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
- * EXEMPLARY, OR CONSEQUENTIAL DAMAGES.
+/**
+ * @purpose CELT 感知向量量化器
+ * @author yanglong
+ * @time 2026年8月12日17:19:29
  */
 final class CeltPvq
 {

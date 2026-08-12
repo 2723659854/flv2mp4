@@ -4,6 +4,11 @@ namespace Xiaosongshu\Flv2mp4\Opus\Celt;
 
 use Xiaosongshu\Flv2mp4\Opus\RangeDecoder;
 
+/**
+ * @purpose CELT 比特分配器
+ * @author yanglong
+ * @time 2026年8月12日17:15:10
+ */
 final class CeltBitAllocation
 {
     public const BAND_EDGES = [0,1,2,3,4,5,6,7,8,10,12,14,16,20,24,28,34,40,48,60,78,100];

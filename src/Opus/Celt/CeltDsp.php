@@ -4,11 +4,10 @@ namespace Xiaosongshu\Flv2mp4\Opus\Celt;
 
 use InvalidArgumentException;
 
-/*
- * Portions follow RFC 6716 Code Components, Copyright (c) 2012 IETF Trust.
- * Redistribution and use in source and binary forms, with or without modification,
- * are permitted provided that this notice is retained. THIS SOFTWARE IS PROVIDED
- * "AS IS", WITHOUT WARRANTY; contributors are not liable for any damages.
+/**
+ * @purpose CELT 数字信号处理器
+ * @author yanglong
+ * @time 2026年8月12日17:16:12
  */
 final class CeltDsp
 {

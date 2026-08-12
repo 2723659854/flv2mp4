@@ -6,16 +6,10 @@ use LogicException;
 use stdClass;
 use Xiaosongshu\Flv2mp4\Opus\RangeDecoder;
 
-/*
- * Copyright (c) 2007-2008 CSIRO
- * Copyright (c) 2007-2009 Xiph.Org Foundation
- * Copyright (c) 2008-2009 Gregory Maxwell
- * Written by Jean-Marc Valin and Gregory Maxwell
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the copyright notice and this
- * permission notice are retained. THIS SOFTWARE IS PROVIDED ``AS IS'',
- * WITHOUT WARRANTY; contributors are not liable for any damages.
+/**
+ * @purpose CELT 频带处理类
+ * @author yanglong
+ * @time 2026年8月12日17:12:42
  */
 final class CeltBands
 {
