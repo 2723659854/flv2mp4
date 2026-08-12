@@ -2,6 +2,8 @@
 
 namespace Xiaosongshu\Flv2mp4\Manage;
 
+use Xiaosongshu\Flv2mp4\Flv\SPSParser;
+
 /**
  * @purpose 标准flv文件转码mp4文件操作类
  * @author yanglong
@@ -309,33 +311,19 @@ class FlvToMp4
 
     private function parseSpsForDimensions(string $sps): void
     {
-        if (strlen($sps) < 10) return;
+        if (strlen($sps) < 4) return;
 
-        $pos = 0;
-        if (ord($sps[0]) & 0x80) $pos++;
-        $pos += 3;
-        $pos++;
-        $pos = $this->skipUEG($sps, $pos);
-        $picOrderCntType = $this->readUEG($sps, $pos);
-        $pos = $this->skipUEG($sps, $pos);
-
-        if ($picOrderCntType == 0) {
-            $pos = $this->skipUEG($sps, $pos);
-            $pos = $this->skipUEG($sps, $pos);
-        } elseif ($picOrderCntType == 1) {
-            $pos = $this->skipUEG($sps, $pos);
-            $pos = $this->skipUEG($sps, $pos);
-            $pos = $this->skipUEG($sps, $pos);
-            $pos = $this->skipUEG($sps, $pos);
-            $numRefFrames = $this->readUEG($sps, $pos);
-            $pos = $this->skipUEG($sps, $pos);
-            for ($i = 0; $i < $numRefFrames; $i++) {
-                $pos = $this->skipSEG($sps, $pos);
+        try {
+            $config = SPSParser::parseSPS($sps);
+            $this->videoWidth = (int)($config['present_size']['width'] ?? $config['codec_size']['width'] ?? 0);
+            $this->videoHeight = (int)($config['present_size']['height'] ?? $config['codec_size']['height'] ?? 0);
+            $fps = (float)($config['frame_rate']['fps'] ?? 0);
+            if ($fps > 0 && $fps <= 120) {
+                $this->videoFrameRate = $fps;
             }
+        } catch (\Throwable $e) {
+            return;
         }
-
-        $pos = $this->skipUEG($sps, $pos);
-        $pos++;
     }
 
     private function readUEG(string $data, int &$pos): int
@@ -657,7 +645,8 @@ class FlvToMp4
             $stsc = $this->buildStsc($samples);
             $stsz = $this->buildStsz($samples);
             $stco = $this->buildVideoStco($stcoBase);
-            return $this->box('stbl', $stsd, $stts, $ctts, $stsc, $stsz, $stco);
+            $stss = $this->buildStss();
+            return $this->box('stbl', $stsd, $stts, $ctts, $stsc, $stsz, $stco, $stss);
         } else {
             $samples = $this->getSortedAudioSamples();
             $stsd = $this->buildAudioStsd();
@@ -873,6 +862,24 @@ class FlvToMp4
         }
 
         return $this->box('stsc', $data);
+    }
+
+    private function buildStss(): string
+    {
+        $samples = $this->getSortedVideoSamples();
+        $keyframes = [];
+        foreach ($samples as $index => $sample) {
+            if (!empty($sample['keyframe'])) {
+                $keyframes[] = $index + 1;
+            }
+        }
+
+        $data = pack('N', 0) . pack('N', count($keyframes));
+        foreach ($keyframes as $sampleNumber) {
+            $data .= pack('N', $sampleNumber);
+        }
+
+        return $this->box('stss', $data);
     }
 
     private function buildStsz(array $samples): string
