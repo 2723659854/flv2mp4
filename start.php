@@ -19,6 +19,7 @@ $server->isDev = true;
 
 $rooms = [];
 $flvRelays = [];
+$opusWorkerPort = 8330;
 $wsFlvPushUrl = getenv('WS_FLV_PUSH_URL') ?: 'ws://127.0.0.1:8501/live/{streamId}';
 $makeFlvPushUrl = static function (string $streamId) use ($wsFlvPushUrl): string {
     return str_replace('{streamId}', rawurlencode($streamId), $wsFlvPushUrl);
@@ -113,7 +114,7 @@ $server->onJoin = function (int $clientId, array $msg, WebRTCServer $srv, &$hand
 
 };
 
-$server->onPublisher = function (int $clientId, array $ctx, WebRTCServer $srv) use (&$rooms, &$flvRelays, $makeFlvPushUrl, $closeFlvRelay) {
+$server->onPublisher = function (int $clientId, array $ctx, WebRTCServer $srv) use (&$rooms, &$flvRelays, $makeFlvPushUrl, $closeFlvRelay,$opusWorkerPort) {
     $streamId = (string)($ctx['streamId'] ?? '');
     $localSsrc = $ctx['localSsrc'] ?? [];
     $videoPTs = array_keys($ctx['videoPTs'] ?? []);
@@ -154,7 +155,7 @@ $server->onPublisher = function (int $clientId, array $ctx, WebRTCServer $srv) u
         if ($existing === null) {
             $relay = null;
             try {
-                $relay = new WebRtcFlvRelay($clientId, $streamId, $makeFlvPushUrl($streamId));
+                $relay = new WebRtcFlvRelay($clientId, $streamId, $makeFlvPushUrl($streamId), null, null, $opusWorkerPort);
                 $relay->connect();
                 $flvRelays[$clientId] = $relay;
                 $srv->_log_std("[ws-flv] relay connected client={$clientId} streamId={$streamId}\n");

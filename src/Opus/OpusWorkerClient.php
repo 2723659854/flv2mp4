@@ -7,7 +7,6 @@ use UnexpectedValueException;
 
 final class OpusWorkerClient
 {
-    private const ADDRESS = 'tcp://127.0.0.1:8330';
     private const MAX_OUTPUT_BYTES = 262144;
     private const MAX_INPUT_BYTES = 1048576;
     private const MAX_PENDING_PACKETS = 100;
@@ -22,6 +21,13 @@ final class OpusWorkerClient
     private bool $finishSent = false;
     private bool $finished = false;
 
+    public function __construct(private readonly int $port = 8330)
+    {
+        if ($port < 1 || $port > 65535) {
+            throw new RuntimeException('Opus worker port must be between 1 and 65535');
+        }
+    }
+
     public function connect(string $streamId, int $bitrate = 64000, int $channels = 1): void
     {
         if ($this->socket !== null) {
@@ -29,7 +35,7 @@ final class OpusWorkerClient
         }
         $socket = $this->openSocket(0.1);
         if ($socket === false) {
-            self::startWorker();
+            self::startWorker($this->port);
             $deadline = microtime(true) + 2.0;
             do {
                 usleep(20000);
@@ -37,7 +43,7 @@ final class OpusWorkerClient
             } while ($socket === false && microtime(true) < $deadline);
         }
         if ($socket === false) {
-            throw new RuntimeException('Unable to connect to Opus worker on 127.0.0.1:8330');
+            throw new RuntimeException("Unable to connect to Opus worker on 127.0.0.1:{$this->port}");
         }
         $this->socket = $socket;
         stream_set_blocking($this->socket, false);
@@ -212,7 +218,7 @@ final class OpusWorkerClient
 
     private function openSocket(float $timeout)
     {
-        return @stream_socket_client(self::ADDRESS, $errno, $error, $timeout, STREAM_CLIENT_CONNECT);
+        return @stream_socket_client("tcp://127.0.0.1:{$this->port}", $errno, $error, $timeout, STREAM_CLIENT_CONNECT);
     }
 
     public static function shutdownOwnedWorkers(): void
@@ -230,7 +236,7 @@ final class OpusWorkerClient
         self::$processes = [];
     }
 
-    private static function startWorker(): void
+    private static function startWorker(int $port): void
     {
         $entry = dirname(__DIR__, 2) . DIRECTORY_SEPARATOR . 'bin' . DIRECTORY_SEPARATOR . 'opus-worker.php';
         $null = PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null';
@@ -243,7 +249,7 @@ final class OpusWorkerClient
         if (PHP_OS_FAMILY === 'Windows') {
             $options['create_process_group'] = true;
         }
-        $process = @proc_open([PHP_BINARY, $entry, '--owned'], $descriptor, $pipes, dirname($entry), null, $options);
+        $process = @proc_open([PHP_BINARY, $entry, '--owned', "--port={$port}"], $descriptor, $pipes, dirname($entry), null, $options);
         if (!is_resource($process)) {
             throw new RuntimeException('Unable to start Opus worker process');
         }

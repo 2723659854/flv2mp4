@@ -16,6 +16,7 @@ final class WebRtcFlvRelay
     private FlvSinglePusher $pusher;
     private ?OpusToAacTranscoder $transcoder;
     private ?OpusWorkerClient $workerClient = null;
+    private int $opusWorkerPort;
     private bool $closed = false;
     private ?string $lastAudioError = null;
     private ?array $opusFormatPending = null;
@@ -40,7 +41,8 @@ final class WebRtcFlvRelay
         string $streamId,
         string $pushUrl,
         ?FlvSinglePusher $pusher = null,
-        ?OpusToAacTranscoder $transcoder = null
+        ?OpusToAacTranscoder $transcoder = null,
+        int $opusWorkerPort = 8330
     ) {
         if ($streamId === '') {
             throw new InvalidArgumentException('streamId must not be empty');
@@ -49,6 +51,7 @@ final class WebRtcFlvRelay
         $this->streamId = $streamId;
         $this->pusher = $pusher ?? new FlvSinglePusher($streamId, $pushUrl);
         $this->transcoder = $transcoder;
+        $this->opusWorkerPort = $opusWorkerPort;
     }
 
     public function connect(): void
@@ -58,7 +61,7 @@ final class WebRtcFlvRelay
                 throw new RuntimeException("Unable to connect ws-flv destination for stream {$this->streamId}");
             }
             if ($this->transcoder === null) {
-                $this->workerClient = new OpusWorkerClient();
+                $this->workerClient = new OpusWorkerClient($this->opusWorkerPort);
                 $this->workerClient->connect($this->streamId, 64000, 1);
             }
             $this->write("FLV\x01\x05\x00\x00\x00\x09\x00\x00\x00\x00");
