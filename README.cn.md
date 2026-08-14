@@ -1,4 +1,4 @@
-# FLV ↔ MP4 / HLS 转换工具 + H264 重编码工具
+# FLV ↔ MP4 / HLS 转换工具 + H264 重编码工具 + OPUS2AAC
 <p align="center">
 <img src="https://img.shields.io/badge/PHP-8.1%2B-blue" />
 <img src="https://img.shields.io/badge/License-Apache%202.0-green" />
@@ -48,18 +48,19 @@
 
 ## 🎯 核心功能
 
-| 功能 | 方向 | 说明 |
-|------|------|------|
-| 封装转换 | FLV ↔ MP4 / FMP4 | 生成标准 MP4 或分离的 fMP4 切片（兼容 MSE） |
-| HLS 切片 | FLV → HLS | 生成 M3U8 + TS 切片，兼容 hls.js、VLC 等 |
-| HLS 还原 | HLS → FLV | 将 HLS 切片合并还原为单 FLV 文件 |
-| MP4 ↔ FLV | MP4 → FLV / FMP4 → FLV | 多容器格式互转 |
-| 直播网关 | FLV 网关 | 高性能多级转发，支持高并发连接 |
-| 静态文件服务 | HTTP 文件网关 | 轻量级文件服务器，支持目录浏览 |
-| 推流客户端 | FLV / MP4 → RTMP/HTTP-FLV/WS-FLV | 将静态文件以伪直播方式推流 |
-| 拉流客户端 | RTMP/HTTP-FLV/WS-FLV → FLV | 从直播流拉取并保存为本地 FLV |
-| 转播客户端 | 多协议输入 → 多协议输出 | 一路拉流，多路转发 |
-| **H.264 重编码** | 解码 → 缩放 → 编码 | 支持 Baseline Profile，为多码率 HLS 提供核心支持 |
+| 功能            | 方向                               | 说明                                  |
+|---------------|----------------------------------|-------------------------------------|
+| 封装转换          | FLV ↔ MP4 / FMP4                 | 生成标准 MP4 或分离的 fMP4 切片（兼容 MSE）       |
+| HLS 切片        | FLV → HLS                        | 生成 M3U8 + TS 切片，兼容 hls.js、VLC 等     |
+| HLS 还原        | HLS → FLV                        | 将 HLS 切片合并还原为单 FLV 文件               |
+| MP4 ↔ FLV     | MP4 → FLV / FMP4 → FLV           | 多容器格式互转                             |
+| 直播网关          | FLV 网关                           | 高性能多级转发，支持高并发连接                     |
+| 静态文件服务        | HTTP 文件网关                        | 轻量级文件服务器，支持目录浏览                     |
+| 推流客户端         | FLV / MP4 → RTMP/HTTP-FLV/WS-FLV | 将静态文件以伪直播方式推流                       |
+| 拉流客户端         | RTMP/HTTP-FLV/WS-FLV → FLV       | 从直播流拉取并保存为本地 FLV                    |
+| 转播客户端         | 多协议输入 → 多协议输出                    | 一路拉流，多路转发                           |
+| **H.264 重编码** | 解码 → 缩放 → 编码                     | 支持 Baseline Profile，为多码率 HLS 提供核心支持 |
+| **OPUS→AAC**  | opus→pcm→aac                   | 支持 webrtc的音频opus转码为AAC-LC           |
 
 ---
 
@@ -291,6 +292,8 @@ php forward.php
 
 支持 Baseline Profile 的 H.264 解码、缩放、重新编码，为以下场景提供核心能力：
 
+通过 Composer 安装后无需手动运行 Opus/HLS/FLV/MP4 Worker；程序会使用当前 PHP CLI 和宿主 `vendor/autoload.php` 自动启动。多进程模式要求启用 `proc_open`，建议在 CLI 环境运行。
+
 | 应用场景 | 说明 |
 |----------|------|
 | **多码率 HLS** | 将单路 FLV 转码为多分辨率 HLS 切片（自适应码率） |
@@ -325,7 +328,8 @@ $profiles = [
         'watermark_file'=> __DIR__."/src/Static/watermark_80x16.yuv",// 水印文件
     ]
 ];
-$generator = new \Xiaosongshu\Flv2mp4\Recode\PurePhpHlsGenerator($profiles, __DIR__ . '/hls/output');
+// 如果重编码质量要求高，那么开启多进程加速，低码率则不需要加速
+$generator = new \Xiaosongshu\Flv2mp4\Recode\PurePhpHlsGenerator($profiles, __DIR__ . '/hls/output',true);
 $generator->processFlv(__DIR__ . '/input.flv');
 echo "索引地址: hls/output/master.m3u8\n";
 echo "所有处理完成！\n";
@@ -346,8 +350,8 @@ $config = [
     'watermark'=>true,     // 是否添加水印
     'watermark_file'=> __DIR__."/src/Static/watermark_80x16.yuv",// 水印文件
 ];
-
-$recoder = new \Xiaosongshu\Flv2mp4\Recode\FlvRecoder($config);
+// 如果重编码质量要求高，那么开启多进程加速，低码率则不需要加速
+$recoder = new \Xiaosongshu\Flv2mp4\Recode\FlvRecoder($config,true);
 $recoder->setMaxFrames(50);  // 可选：限制处理帧数
 $recoder->processFlv(__DIR__ . '/input.flv', __DIR__.'/output.flv');
 echo "flv重编码完成\r\n";
@@ -368,7 +372,8 @@ $config = [
     'watermark'=>true,     // 是否添加水印
     'watermark_file'=> __DIR__."/src/Static/watermark_80x16.yuv",// 水印文件
 ];
-$recoder = new \Xiaosongshu\Flv2mp4\Recode\Mp4Recoder($config);
+// 如果重编码质量要求高，那么开启多进程加速，低码率则不需要加速
+$recoder = new \Xiaosongshu\Flv2mp4\Recode\Mp4Recoder($config,true);
 $recoder->setMaxFrames(50); // 可选：限制处理帧数
 $recoder->processMp4(__DIR__ . '/input.mp4', __DIR__ . '/output.mp4');
 echo "mp4重编码完成\r\n";

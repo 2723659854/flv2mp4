@@ -16,9 +16,22 @@ try {
             }
         }
     }
-    $autoload ??= dirname(__DIR__) . '/vendor/autoload.php';
-    if (!is_file($autoload)) {
-        throw new RuntimeException("Composer autoload file not found: {$autoload}");
+    if ($autoload === null) {
+        $candidates = [];
+        if (isset($_composer_autoload_path) && is_string($_composer_autoload_path)) {
+            $candidates[] = $_composer_autoload_path;
+        }
+        $candidates[] = dirname(__DIR__) . '/vendor/autoload.php';
+        $candidates[] = dirname(__DIR__, 3) . '/autoload.php';
+        foreach ($candidates as $candidate) {
+            if (is_file($candidate)) {
+                $autoload = $candidate;
+                break;
+            }
+        }
+    }
+    if ($autoload === null || !is_file($autoload)) {
+        throw new RuntimeException('Composer autoload file not found; pass --autoload=/path/to/vendor/autoload.php');
     }
     require_once $autoload;
     (new OpusWorkerServer())->run("tcp://127.0.0.1:{$port}", $owned ? 1.0 : null);

@@ -146,19 +146,28 @@ final class HlsPipelineClient
 
     private function waitWorkers(): void
     {
-        foreach ($this->processes as $process) {
+        $error = null;
+        foreach ($this->processes as $key => $process) {
+            if (!is_resource($process)) { unset($this->processes[$key]); continue; }
             $deadline = microtime(true) + 15;
             do { $status = proc_get_status($process); if (!$status['running']) break; usleep(50000); } while (microtime(true) < $deadline);
-            if ($status['running']) { proc_terminate($process); throw new RuntimeException('HLS worker 结束超时'); }
-            $exit = proc_close($process); if ($exit !== 0 && $exit !== -1) throw new RuntimeException("HLS worker 异常退出: {$exit}");
+            $timedOut = $status['running'];
+            if ($timedOut) @proc_terminate($process);
+            $exit = proc_close($process); unset($this->processes[$key]);
+            if ($error === null && $timedOut) $error = new RuntimeException('HLS worker 结束超时');
+            elseif ($error === null && $exit !== 0 && $exit !== -1) $error = new RuntimeException("HLS worker 异常退出: {$exit}");
         }
-        $this->processes = [];
+        if ($error !== null) throw $error;
     }
 
     private function terminateWorkers(): void
     {
-        foreach ($this->processes as $process) { $status = proc_get_status($process); if ($status['running']) @proc_terminate($process); @proc_close($process); }
-        $this->processes = [];
+        foreach ($this->processes as $key => $process) {
+            if (!is_resource($process)) { unset($this->processes[$key]); continue; }
+            $status = @proc_get_status($process);
+            if ($status !== false && $status['running']) @proc_terminate($process);
+            @proc_close($process); unset($this->processes[$key]);
+        }
     }
 
     private function reserveAddress(): array
