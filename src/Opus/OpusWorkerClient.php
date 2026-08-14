@@ -77,6 +77,21 @@ final class OpusWorkerClient
         }
         $requestId = $this->nextRequestId++;
         $frame = OpusWorkerProtocol::push($requestId, $sequence, $timestamp, $payload);
+        return $this->enqueue($requestId, $frame);
+    }
+
+    public function pushGap(int $sampleCount): int
+    {
+        $this->ensureUsable();
+        if ($this->finishSent) {
+            throw new RuntimeException('Cannot push Opus GAP after FINISH');
+        }
+        $requestId = $this->nextRequestId++;
+        return $this->enqueue($requestId, OpusWorkerProtocol::gap($requestId, $sampleCount));
+    }
+
+    private function enqueue(int $requestId, string $frame): int
+    {
         // #region debug-point opus-client-push-critical
         if ($this->pendingPackets === 90 || $this->pendingPackets === 99 || $this->pendingPackets >= self::MAX_PENDING_PACKETS || strlen($this->output) + strlen($frame) > self::MAX_OUTPUT_BYTES) { $event = json_encode(['sessionId' => 'webrtc-relay-disconnect', 'runId' => 'post-fix', 'hypothesisId' => 'H2/H4', 'location' => 'OpusWorkerClient::push', 'msg' => $this->pendingPackets >= self::MAX_PENDING_PACKETS || strlen($this->output) + strlen($frame) > self::MAX_OUTPUT_BYTES ? 'queue rejection' : 'queue critical', 'data' => ['pendingPackets' => $this->pendingPackets, 'outputBytes' => strlen($this->output), 'frameBytes' => strlen($frame), 'requestId' => $requestId], 'ts' => microtime(true)]); if ($event !== false && ($debug = @stream_socket_client('tcp://127.0.0.1:7777', $debugErrno, $debugError, 0.05))) { @stream_set_timeout($debug, 0, 50000); @fwrite($debug, "POST /event HTTP/1.1\r\nHost: 127.0.0.1:7777\r\nContent-Type: application/json\r\nContent-Length: " . strlen($event) . "\r\nConnection: close\r\n\r\n" . $event); @fclose($debug); } }
         // #endregion

@@ -18,6 +18,8 @@ final class OpusWorkerProtocol
     public const ERROR = 4;
     public const FINISH = 5;
     public const FINISHED = 6;
+    public const GAP = 7;
+    public const MAX_GAP_SAMPLES = 5760;
     public const MAX_BODY_LENGTH = 1048576;
 
     public static function frame(string $body): string
@@ -61,6 +63,14 @@ final class OpusWorkerProtocol
             throw new InvalidArgumentException('Invalid Opus payload length');
         }
         return self::frame(chr(self::PUSH) . pack('NnN', $requestId, $sequence, $timestamp) . $payload);
+    }
+
+    public static function gap(int $requestId, int $sampleCount): string
+    {
+        if ($requestId <= 0 || $sampleCount <= 0 || $sampleCount > self::MAX_GAP_SAMPLES) {
+            throw new InvalidArgumentException('Invalid Opus worker GAP parameters');
+        }
+        return self::frame(chr(self::GAP) . pack('NN', $requestId, $sampleCount));
     }
 
     public static function finish(): string

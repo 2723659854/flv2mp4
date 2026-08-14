@@ -8,9 +8,11 @@ use UnexpectedValueException;
 use Xiaosongshu\Flv2mp4\Opus\OpusPacketParser;
 use Xiaosongshu\Flv2mp4\Opus\OpusToAacTranscoder;
 use Xiaosongshu\Flv2mp4\Opus\OpusWorkerClient;
+use Xiaosongshu\Flv2mp4\Opus\OpusWorkerProtocol;
 
 final class WebRtcFlvRelay
 {
+    private const MAX_PENDING_OPUS_GAP_SAMPLES = 14400000;
     private int $clientId;
     private string $streamId;
     private FlvSinglePusher $pusher;
@@ -21,6 +23,7 @@ final class WebRtcFlvRelay
     private ?string $lastAudioError = null;
     private int $droppedOpusPackets = 0;
     private int $consecutiveDroppedOpusPackets = 0;
+    private int $pendingOpusGapSamples = 0;
     private float $lastOpusDropReportAt = 0.0;
     private ?array $opusFormatPending = null;
     private bool $avcSequenceHeaderPending = false;
@@ -141,6 +144,19 @@ final class WebRtcFlvRelay
                 if ($this->transcoder !== null) {
                     $this->writeAacFrames($this->transcoder->finish(), true);
                 } elseif ($this->workerClient !== null) {
+                    $deadline = microtime(true) + 2.0;
+                    while ($this->pendingOpusGapSamples > 0 && microtime(true) < $deadline) {
+                        $this->enqueuePendingOpusGaps();
+                        if ($this->pendingOpusGapSamples > 0) {
+                            foreach ($this->workerClient->pump() as $response) {
+                                $this->handleWorkerResponse($response, true);
+                            }
+                            usleep(1000);
+                        }
+                    }
+                    if ($this->pendingOpusGapSamples > 0) {
+                        throw new RuntimeException('Timed out enqueueing Opus GAP before FINISH');
+                    }
                     foreach ($this->workerClient->finish(2.0) as $response) {
                         $this->handleWorkerResponse($response, true);
                     }
@@ -478,50 +494,98 @@ final class WebRtcFlvRelay
         }
         try {
             if ($this->transcoder !== null) {
-                $this->writeAacFrames($this->transcoder->pushPacket($packet));
+                try {
+                    $adts = $this->transcoder->pushPacket($packet);
+                } catch (\LogicException $e) {
+                    if (!$this->isUnsupportedDecoderException($e)) {
+                        throw $e;
+                    }
+                    $adts = $this->transcoder->pushSilence($this->opusPacketSamples($packet));
+                }
+                $this->writeAacFrames($adts);
                 return;
             }
             if ($this->workerClient === null) {
                 throw new RuntimeException('Opus worker client is unavailable');
             }
             if (!$this->workerClient->canAcceptPacket()) {
-                // #region debug-point relay-drain-before
-                $event = json_encode(['sessionId' => 'webrtc-relay-disconnect', 'runId' => 'post-fix', 'hypothesisId' => 'H1/H2/H4', 'location' => 'WebRtcFlvRelay::pushOpus', 'msg' => 'drain before', 'data' => ['phase' => 'before-50ms-drain', 'streamId' => $this->streamId, 'sequence' => $rtp['seq'], 'timestamp' => $rtp['ts'], 'canAcceptPacket' => false], 'ts' => microtime(true)]); if ($event !== false && ($debug = @stream_socket_client('tcp://127.0.0.1:7777', $debugErrno, $debugError, 0.05))) { @stream_set_timeout($debug, 0, 50000); @fwrite($debug, "POST /event HTTP/1.1\r\nHost: 127.0.0.1:7777\r\nContent-Type: application/json\r\nContent-Length: " . strlen($event) . "\r\nConnection: close\r\n\r\n" . $event); @fclose($debug); }
-                // #endregion
-                $deadline = microtime(true) + 0.05;
-                do {
-                    foreach ($this->workerClient->pump() as $response) {
-                        $this->handleWorkerResponse($response);
-                    }
-                    if ($this->workerClient->canAcceptPacket()) {
-                        break;
-                    }
-                    usleep(1000);
-                } while (microtime(true) < $deadline);
-                if (!$this->workerClient->canAcceptPacket()) {
-                    ++$this->droppedOpusPackets;
-                    ++$this->consecutiveDroppedOpusPackets;
-                    $now = microtime(true);
-                    if ($this->consecutiveDroppedOpusPackets === 1 || $this->droppedOpusPackets % 100 === 0 || $now - $this->lastOpusDropReportAt >= 5.0) {
-                        $this->lastOpusDropReportAt = $now;
-                        // #region debug-point relay-overload-drop
-                        $event = json_encode(['sessionId' => 'webrtc-relay-disconnect', 'runId' => 'post-fix', 'hypothesisId' => 'H4', 'location' => 'WebRtcFlvRelay::pushOpus', 'msg' => 'overload packet dropped; session continuing', 'data' => ['phase' => 'after-50ms-drain', 'streamId' => $this->streamId, 'sequence' => $rtp['seq'], 'timestamp' => $rtp['ts'], 'canAcceptPacket' => false, 'droppedPackets' => $this->droppedOpusPackets, 'consecutiveDroppedPackets' => $this->consecutiveDroppedOpusPackets], 'ts' => $now]); if ($event !== false && ($debug = @stream_socket_client('tcp://127.0.0.1:7777', $debugErrno, $debugError, 0.05))) { @stream_set_timeout($debug, 0, 50000); @fwrite($debug, "POST /event HTTP/1.1\r\nHost: 127.0.0.1:7777\r\nContent-Type: application/json\r\nContent-Length: " . strlen($event) . "\r\nConnection: close\r\n\r\n" . $event); @fclose($debug); }
-                        // #endregion
-                    }
-                    return;
-                }
+                $this->drainWorkerForCapacity($rtp);
+            }
+            $this->enqueuePendingOpusGaps();
+            if ($this->pendingOpusGapSamples > 0 || !$this->workerClient->canAcceptPacket()) {
+                $this->recordDroppedOpusPacket($packet, $rtp);
+                return;
             }
             $recoveredAfterDrops = $this->consecutiveDroppedOpusPackets;
             $this->workerClient->push($rtp['seq'], $rtp['ts'], $packet);
             $this->consecutiveDroppedOpusPackets = 0;
             if ($recoveredAfterDrops > 0) {
                 // #region debug-point relay-overload-recovered
-                $event = json_encode(['sessionId' => 'webrtc-relay-disconnect', 'runId' => 'post-fix', 'hypothesisId' => 'H4', 'location' => 'WebRtcFlvRelay::pushOpus', 'msg' => 'worker queue recovered', 'data' => ['streamId' => $this->streamId, 'sequence' => $rtp['seq'], 'timestamp' => $rtp['ts'], 'canAcceptPacket' => $this->workerClient->canAcceptPacket(), 'droppedPackets' => $this->droppedOpusPackets, 'recoveredAfterConsecutiveDrops' => $recoveredAfterDrops], 'ts' => microtime(true)]); if ($event !== false && ($debug = @stream_socket_client('tcp://127.0.0.1:7777', $debugErrno, $debugError, 0.05))) { @stream_set_timeout($debug, 0, 50000); @fwrite($debug, "POST /event HTTP/1.1\r\nHost: 127.0.0.1:7777\r\nContent-Type: application/json\r\nContent-Length: " . strlen($event) . "\r\nConnection: close\r\n\r\n" . $event); @fclose($debug); }
+                $event = json_encode(['sessionId' => 'webrtc-relay-disconnect', 'runId' => 'post-fix-3', 'hypothesisId' => 'H4', 'location' => 'WebRtcFlvRelay::pushOpus', 'msg' => 'worker queue recovered after GAP', 'data' => ['streamId' => $this->streamId, 'sequence' => $rtp['seq'], 'timestamp' => $rtp['ts'], 'canAcceptPacket' => $this->workerClient->canAcceptPacket(), 'droppedPackets' => $this->droppedOpusPackets, 'recoveredAfterConsecutiveDrops' => $recoveredAfterDrops], 'ts' => microtime(true)]); if ($event !== false && ($debug = @stream_socket_client('tcp://127.0.0.1:7777', $debugErrno, $debugError, 0.05))) { @stream_set_timeout($debug, 0, 50000); @fwrite($debug, "POST /event HTTP/1.1\r\nHost: 127.0.0.1:7777\r\nContent-Type: application/json\r\nContent-Length: " . strlen($event) . "\r\nConnection: close\r\n\r\n" . $event); @fclose($debug); }
                 // #endregion
             }
         } catch (\Throwable $e) {
             $this->failAudio($e);
         }
+    }
+
+    private function drainWorkerForCapacity(array $rtp): void
+    {
+        // #region debug-point relay-drain-before
+        $event = json_encode(['sessionId' => 'webrtc-relay-disconnect', 'runId' => 'post-fix', 'hypothesisId' => 'H1/H2/H4', 'location' => 'WebRtcFlvRelay::pushOpus', 'msg' => 'drain before', 'data' => ['phase' => 'before-50ms-drain', 'streamId' => $this->streamId, 'sequence' => $rtp['seq'], 'timestamp' => $rtp['ts'], 'canAcceptPacket' => false], 'ts' => microtime(true)]); if ($event !== false && ($debug = @stream_socket_client('tcp://127.0.0.1:7777', $debugErrno, $debugError, 0.05))) { @stream_set_timeout($debug, 0, 50000); @fwrite($debug, "POST /event HTTP/1.1\r\nHost: 127.0.0.1:7777\r\nContent-Type: application/json\r\nContent-Length: " . strlen($event) . "\r\nConnection: close\r\n\r\n" . $event); @fclose($debug); }
+        // #endregion
+        $deadline = microtime(true) + 0.05;
+        do {
+            foreach ($this->workerClient->pump() as $response) {
+                $this->handleWorkerResponse($response);
+            }
+            if ($this->workerClient->canAcceptPacket()) {
+                break;
+            }
+            usleep(1000);
+        } while (microtime(true) < $deadline);
+    }
+
+    private function enqueuePendingOpusGaps(): void
+    {
+        while ($this->pendingOpusGapSamples > 0 && $this->workerClient->canAcceptPacket()) {
+            $sampleCount = min($this->pendingOpusGapSamples, OpusWorkerProtocol::MAX_GAP_SAMPLES);
+            $this->workerClient->pushGap($sampleCount);
+            $this->pendingOpusGapSamples -= $sampleCount;
+            // #region debug-point relay-gap-enqueue
+            if ($this->pendingOpusGapSamples === 0 || $this->pendingOpusGapSamples % 48000 === 0) { $event = json_encode(['sessionId' => 'webrtc-relay-disconnect', 'runId' => 'post-fix-3', 'hypothesisId' => 'H4', 'location' => 'WebRtcFlvRelay::enqueuePendingOpusGaps', 'msg' => 'gap enqueued before next Opus packet', 'data' => ['streamId' => $this->streamId, 'sampleCount' => $sampleCount, 'remainingSamples' => $this->pendingOpusGapSamples], 'ts' => microtime(true)]); if ($event !== false && ($debug = @stream_socket_client('tcp://127.0.0.1:7777', $debugErrno, $debugError, 0.05))) { @stream_set_timeout($debug, 0, 50000); @fwrite($debug, "POST /event HTTP/1.1\r\nHost: 127.0.0.1:7777\r\nContent-Type: application/json\r\nContent-Length: " . strlen($event) . "\r\nConnection: close\r\n\r\n" . $event); @fclose($debug); } }
+            // #endregion
+        }
+    }
+
+    private function recordDroppedOpusPacket(string $packet, array $rtp): void
+    {
+        $sampleCount = $this->opusPacketSamples($packet);
+        if ($this->pendingOpusGapSamples > self::MAX_PENDING_OPUS_GAP_SAMPLES - $sampleCount) {
+            throw new RuntimeException('Opus worker gap backlog exceeded the recoverable limit');
+        }
+        $this->pendingOpusGapSamples += $sampleCount;
+        ++$this->droppedOpusPackets;
+        ++$this->consecutiveDroppedOpusPackets;
+        $now = microtime(true);
+        if ($this->consecutiveDroppedOpusPackets === 1 || $this->droppedOpusPackets % 100 === 0 || $now - $this->lastOpusDropReportAt >= 5.0) {
+            $this->lastOpusDropReportAt = $now;
+            // #region debug-point relay-overload-drop
+            $event = json_encode(['sessionId' => 'webrtc-relay-disconnect', 'runId' => 'post-fix-3', 'hypothesisId' => 'H4', 'location' => 'WebRtcFlvRelay::pushOpus', 'msg' => 'overload packet replaced by pending GAP', 'data' => ['phase' => 'after-50ms-drain', 'streamId' => $this->streamId, 'sequence' => $rtp['seq'], 'timestamp' => $rtp['ts'], 'canAcceptPacket' => false, 'droppedPackets' => $this->droppedOpusPackets, 'consecutiveDroppedPackets' => $this->consecutiveDroppedOpusPackets, 'sampleCount' => $sampleCount, 'pendingGapSamples' => $this->pendingOpusGapSamples], 'ts' => $now]); if ($event !== false && ($debug = @stream_socket_client('tcp://127.0.0.1:7777', $debugErrno, $debugError, 0.05))) { @stream_set_timeout($debug, 0, 50000); @fwrite($debug, "POST /event HTTP/1.1\r\nHost: 127.0.0.1:7777\r\nContent-Type: application/json\r\nContent-Length: " . strlen($event) . "\r\nConnection: close\r\n\r\n" . $event); @fclose($debug); }
+            // #endregion
+        }
+    }
+
+    private function opusPacketSamples(string $packet): int
+    {
+        $description = OpusPacketParser::parse($packet);
+        return $description['frameDurationSamples'] * $description['frameCount'];
+    }
+
+    private function isUnsupportedDecoderException(\LogicException $e): bool
+    {
+        return str_contains($e->getMessage(), ' decoding is not implemented;')
+            || str_starts_with($e->getMessage(), 'Unsupported CELT packet:');
     }
 
     private function pumpWorker(): void
