@@ -19,6 +19,7 @@ final class OpusWorkerProtocol
     public const FINISH = 5;
     public const FINISHED = 6;
     public const GAP = 7;
+    public const PCM = 8;
     public const MAX_GAP_SAMPLES = 5760;
     public const MAX_BODY_LENGTH = 1048576;
 
@@ -50,6 +51,20 @@ final class OpusWorkerProtocol
 
     public static function open(string $streamId, int $bitrate, int $channels): string
     {
+        return self::encoderOpen($streamId, $bitrate, $channels);
+    }
+
+    public static function decoderOpen(string $streamId, int $channels): string
+    {
+        $length = strlen($streamId);
+        if ($length === 0 || $length > 1024 || ($channels !== 1 && $channels !== 2)) {
+            throw new InvalidArgumentException('Invalid Opus decoder OPEN parameters');
+        }
+        return self::frame(chr(self::OPEN) . pack('nC', $length, $channels) . $streamId);
+    }
+
+    public static function encoderOpen(string $streamId, int $bitrate, int $channels): string
+    {
         $length = strlen($streamId);
         if ($length === 0 || $length > 1024 || $bitrate < 8000 || $bitrate > 512000 || ($channels !== 1 && $channels !== 2)) {
             throw new InvalidArgumentException('Invalid Opus worker OPEN parameters');
@@ -59,8 +74,8 @@ final class OpusWorkerProtocol
 
     public static function push(int $requestId, int $sequence, int $timestamp, string $payload): string
     {
-        if ($payload === '' || strlen($payload) > 65535) {
-            throw new InvalidArgumentException('Invalid Opus payload length');
+        if ($requestId <= 0 || $payload === '' || strlen($payload) > 65535) {
+            throw new InvalidArgumentException('Invalid Opus PUSH parameters');
         }
         return self::frame(chr(self::PUSH) . pack('NnN', $requestId, $sequence, $timestamp) . $payload);
     }
@@ -71,6 +86,15 @@ final class OpusWorkerProtocol
             throw new InvalidArgumentException('Invalid Opus worker GAP parameters');
         }
         return self::frame(chr(self::GAP) . pack('NN', $requestId, $sampleCount));
+    }
+
+    public static function pcm(int $requestId, int $sequence, int $timestamp, int $sampleCount, int $channels, string $payload): string
+    {
+        if ($requestId <= 0 || $sampleCount <= 0 || $sampleCount > self::MAX_GAP_SAMPLES
+            || ($channels !== 1 && $channels !== 2) || strlen($payload) !== $sampleCount * $channels * 4) {
+            throw new InvalidArgumentException('Invalid PCM worker parameters');
+        }
+        return self::frame(chr(self::PCM) . pack('NnNNC', $requestId, $sequence, $timestamp, $sampleCount, $channels) . $payload);
     }
 
     public static function finish(): string
@@ -85,8 +109,7 @@ final class OpusWorkerProtocol
 
     public static function error(int $requestId, string $message): string
     {
-        $message = substr($message, 0, 4096);
-        return self::frame(chr(self::ERROR) . pack('N', $requestId) . $message);
+        return self::frame(chr(self::ERROR) . pack('N', $requestId) . substr($message, 0, 4096));
     }
 
     public static function finished(): string

@@ -21,6 +21,7 @@ final class CeltFrameDecoder
     private array $dsp;
     private int $rng = 0;
     private ?array $debugFrame = null;
+    private array $debugStageMs = [];
 
     public function __construct()
     {
@@ -33,6 +34,7 @@ final class CeltFrameDecoder
         $this->energy->reset();
         $this->rng = 0;
         $this->debugFrame = null;
+        $this->debugStageMs = [];
         foreach ($this->dsp as $dsp) {
             $dsp->reset();
         }
@@ -41,20 +43,35 @@ final class CeltFrameDecoder
     public function decode(string $frame, int $frameSamples, int $channels): array
     {
         $lm = match ($frameSamples) { 120 => 0, 240 => 1, 480 => 2, 960 => 3 };
+        // #region debug-point celt-stage-timing
+        $stageStarted = hrtime(true);
+        $stageMark = $stageStarted;
+        $stages = [];
+        // #endregion
         $totalBits = strlen($frame) * 8;
         $decoder = new RangeDecoder($frame);
         $silence = $decoder->tell() === 1 && $decoder->decodeBitLogp(15) === 1;
         if ($silence) {
             $silentEnergy = [array_fill(0, 21, -28.0), array_fill(0, 21, -28.0)];
             $this->energy->finishFrame($silentEnergy, false, $channels);
+            // #region debug-point celt-stage-timing
+            $elapsed = (hrtime(true) - $stageStarted) / 1000000;
+            $this->debugStageMs = ['headerEnergy' => $elapsed, 'allocationFine' => 0.0, 'bandsPvq' => 0.0, 'collapseSynthesis' => 0.0, 'total' => $elapsed];
+            // #endregion
             return array_fill(0, $frameSamples * $channels, 0.0);
         }
         $postfilter = $this->decodePostfilter($decoder, $totalBits);
         $transient = $lm > 0 && $decoder->tell() + 3 <= $totalBits && $decoder->decodeBitLogp(3) === 1;
         $intra = $decoder->tell() + 3 <= $totalBits && $decoder->decodeBitLogp(3) === 1;
         $coarse = $this->energy->decodeCoarse($decoder, $lm, $channels, $intra, $totalBits);
+        // #region debug-point celt-stage-timing
+        $stages['headerEnergy'] = (hrtime(true) - $stageMark) / 1000000; $stageMark = hrtime(true);
+        // #endregion
         $allocation = CeltBitAllocation::decode($decoder, $lm, $transient, $channels, $totalBits);
         $coarse = CeltEnergy::decodeFine($decoder, $coarse, $allocation['fine'], $channels);
+        // #region debug-point celt-stage-timing
+        $stages['allocationFine'] = (hrtime(true) - $stageMark) / 1000000; $stageMark = hrtime(true);
+        // #endregion
         try {
             $bands = CeltBands::decode($decoder, $allocation, $lm, $transient, $totalBits, $channels, $this->rng);
         } catch (\Throwable $error) {
@@ -63,6 +80,9 @@ final class CeltFrameDecoder
                 $lm, $allocation['coded'], $allocation['intensity'], $allocation['dual'], $decoder->tellFrac(), $totalBits * 8, $error->getMessage()
             ), 0, $error);
         }
+        // #region debug-point celt-stage-timing
+        $stages['bandsPvq'] = (hrtime(true) - $stageMark) / 1000000; $stageMark = hrtime(true);
+        // #endregion
         $antiCollapse = $allocation['anti'] !== 0 ? $decoder->rawBits(1) === 1 : false;
         $coarse = CeltEnergy::decodeFinal(
             $decoder, $coarse, $allocation['fine'], $allocation['priority'], $channels, $totalBits
@@ -113,9 +133,19 @@ final class CeltFrameDecoder
             'antiCollapse' => $antiCollapse,
             'seed' => $bands['seed'],
         ];
+        // #region debug-point celt-stage-timing
+        $stages['collapseSynthesis'] = (hrtime(true) - $stageMark) / 1000000;
+        $stages['total'] = (hrtime(true) - $stageStarted) / 1000000;
+        $this->debugStageMs = $stages;
+        // #endregion
         $this->energy->finishFrame($coarse, $transient, $channels);
         $this->rng = $decoder->range();
         return $pcm;
+    }
+
+    public function debugStageMs(): array
+    {
+        return $this->debugStageMs;
     }
 
     public function debugFrame(): ?array

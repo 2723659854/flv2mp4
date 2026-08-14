@@ -170,6 +170,10 @@ class FlvSinglePusher
             return false;
         }
 
+        // #region debug-point flv-pusher-write-slow
+        $debugWriteStartNs = hrtime(true);
+        $debugDataBytes = strlen($data);
+        // #endregion
         try {
             if ($this->isWebSocket) {
                 $frame = $this->buildWebSocketFrame($data);
@@ -197,6 +201,11 @@ class FlvSinglePusher
         } catch (\Throwable $e) {
             $this->close();
             throw $e;
+        } finally {
+            // #region debug-point flv-pusher-write-slow-report
+            $debugWriteMs = (hrtime(true) - $debugWriteStartNs) / 1000000;
+            if ($debugWriteMs >= 100.0) { $debugMeta = is_resource($this->socket) ? @stream_get_meta_data($this->socket) : []; $event = json_encode(['sessionId' => 'webrtc-relay-disconnect', 'runId' => 'block-probe', 'hypothesisId' => 'H6', 'location' => 'FlvSinglePusher::write', 'msg' => 'slow buffered pusher write', 'data' => ['dataBytes' => $debugDataBytes, 'durationMs' => round($debugWriteMs, 3), 'bufferBytes' => $this->sendBufferSize, 'closed' => $this->closed, 'transport' => $this->isWebSocket ? 'websocket' : 'http', 'stream' => ['timedOut' => (bool)($debugMeta['timed_out'] ?? false), 'blocked' => (bool)($debugMeta['blocked'] ?? false), 'eof' => (bool)($debugMeta['eof'] ?? false), 'streamType' => (string)($debugMeta['stream_type'] ?? '')]], 'ts' => microtime(true)]); if ($event !== false && ($debug = @stream_socket_client('tcp://127.0.0.1:7777', $debugErrno, $debugError, 0.01))) { @stream_set_timeout($debug, 0, 10000); @fwrite($debug, "POST /event HTTP/1.1\r\nHost: 127.0.0.1:7777\r\nContent-Type: application/json\r\nContent-Length: " . strlen($event) . "\r\nConnection: close\r\n\r\n" . $event); @fclose($debug); } }
+            // #endregion
         }
     }
 
@@ -241,12 +250,22 @@ class FlvSinglePusher
             return;
         }
 
+        // #region debug-point flv-pusher-flush-slow-start
+        $debugFlushStartNs = hrtime(true);
+        $debugIteration = 0;
+        // #endregion
         try {
             $totalWritten = 0;
             $bufferLen = $this->sendBufferSize;
             
             while ($totalWritten < $bufferLen) {
+                ++$debugIteration;
+                // #region debug-point flv-pusher-fwrite-slow
+                $debugFwriteStartNs = hrtime(true);
                 $written = fwrite($this->socket, substr($this->sendBuffer, $totalWritten));
+                $debugFwriteMs = (hrtime(true) - $debugFwriteStartNs) / 1000000;
+                if ($debugFwriteMs >= 100.0) { $debugMeta = @stream_get_meta_data($this->socket); $event = json_encode(['sessionId' => 'webrtc-relay-disconnect', 'runId' => 'block-probe', 'hypothesisId' => 'H6', 'location' => 'FlvSinglePusher::flush/fwrite', 'msg' => 'slow socket fwrite', 'data' => ['bufferLen' => $bufferLen, 'writtenBefore' => $totalWritten, 'written' => $written, 'iteration' => $debugIteration, 'durationMs' => round($debugFwriteMs, 3), 'transport' => $this->isWebSocket ? 'websocket' : 'http', 'stream' => ['timedOut' => (bool)($debugMeta['timed_out'] ?? false), 'blocked' => (bool)($debugMeta['blocked'] ?? false), 'eof' => (bool)($debugMeta['eof'] ?? false), 'streamType' => (string)($debugMeta['stream_type'] ?? '')]], 'ts' => microtime(true)]); if ($event !== false && ($debug = @stream_socket_client('tcp://127.0.0.1:7777', $debugErrno, $debugError, 0.01))) { @stream_set_timeout($debug, 0, 10000); @fwrite($debug, "POST /event HTTP/1.1\r\nHost: 127.0.0.1:7777\r\nContent-Type: application/json\r\nContent-Length: " . strlen($event) . "\r\nConnection: close\r\n\r\n" . $event); @fclose($debug); } }
+                // #endregion
                 if ($written === false || $written === 0) {
                     $this->close();
                     return;
@@ -261,6 +280,11 @@ class FlvSinglePusher
             $this->lastFlushTime = microtime(true);
         } catch (\Exception $e) {
             $this->close();
+        } finally {
+            // #region debug-point flv-pusher-flush-slow-report
+            $debugFlushMs = (hrtime(true) - $debugFlushStartNs) / 1000000;
+            if ($debugFlushMs >= 100.0) { $debugMeta = is_resource($this->socket) ? @stream_get_meta_data($this->socket) : []; $event = json_encode(['sessionId' => 'webrtc-relay-disconnect', 'runId' => 'block-probe', 'hypothesisId' => 'H6', 'location' => 'FlvSinglePusher::flush', 'msg' => 'slow socket flush', 'data' => ['bufferLen' => $bufferLen, 'written' => $totalWritten, 'iterations' => $debugIteration, 'durationMs' => round($debugFlushMs, 3), 'remainingBufferBytes' => $this->sendBufferSize, 'closed' => $this->closed, 'transport' => $this->isWebSocket ? 'websocket' : 'http', 'stream' => ['timedOut' => (bool)($debugMeta['timed_out'] ?? false), 'blocked' => (bool)($debugMeta['blocked'] ?? false), 'eof' => (bool)($debugMeta['eof'] ?? false), 'streamType' => (string)($debugMeta['stream_type'] ?? '')]], 'ts' => microtime(true)]); if ($event !== false && ($debug = @stream_socket_client('tcp://127.0.0.1:7777', $debugErrno, $debugError, 0.01))) { @stream_set_timeout($debug, 0, 10000); @fwrite($debug, "POST /event HTTP/1.1\r\nHost: 127.0.0.1:7777\r\nContent-Type: application/json\r\nContent-Length: " . strlen($event) . "\r\nConnection: close\r\n\r\n" . $event); @fclose($debug); } }
+            // #endregion
         }
     }
 
