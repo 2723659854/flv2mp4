@@ -19,6 +19,9 @@ final class WebRtcFlvRelay
     private int $opusWorkerPort;
     private bool $closed = false;
     private ?string $lastAudioError = null;
+    private int $droppedOpusPackets = 0;
+    private int $consecutiveDroppedOpusPackets = 0;
+    private float $lastOpusDropReportAt = 0.0;
     private ?array $opusFormatPending = null;
     private bool $avcSequenceHeaderPending = false;
     private ?int $baseArrivalNs = null;
@@ -482,6 +485,9 @@ final class WebRtcFlvRelay
                 throw new RuntimeException('Opus worker client is unavailable');
             }
             if (!$this->workerClient->canAcceptPacket()) {
+                // #region debug-point relay-drain-before
+                $event = json_encode(['sessionId' => 'webrtc-relay-disconnect', 'runId' => 'post-fix', 'hypothesisId' => 'H1/H2/H4', 'location' => 'WebRtcFlvRelay::pushOpus', 'msg' => 'drain before', 'data' => ['phase' => 'before-50ms-drain', 'streamId' => $this->streamId, 'sequence' => $rtp['seq'], 'timestamp' => $rtp['ts'], 'canAcceptPacket' => false], 'ts' => microtime(true)]); if ($event !== false && ($debug = @stream_socket_client('tcp://127.0.0.1:7777', $debugErrno, $debugError, 0.05))) { @stream_set_timeout($debug, 0, 50000); @fwrite($debug, "POST /event HTTP/1.1\r\nHost: 127.0.0.1:7777\r\nContent-Type: application/json\r\nContent-Length: " . strlen($event) . "\r\nConnection: close\r\n\r\n" . $event); @fclose($debug); }
+                // #endregion
                 $deadline = microtime(true) + 0.05;
                 do {
                     foreach ($this->workerClient->pump() as $response) {
@@ -492,8 +498,27 @@ final class WebRtcFlvRelay
                     }
                     usleep(1000);
                 } while (microtime(true) < $deadline);
+                if (!$this->workerClient->canAcceptPacket()) {
+                    ++$this->droppedOpusPackets;
+                    ++$this->consecutiveDroppedOpusPackets;
+                    $now = microtime(true);
+                    if ($this->consecutiveDroppedOpusPackets === 1 || $this->droppedOpusPackets % 100 === 0 || $now - $this->lastOpusDropReportAt >= 5.0) {
+                        $this->lastOpusDropReportAt = $now;
+                        // #region debug-point relay-overload-drop
+                        $event = json_encode(['sessionId' => 'webrtc-relay-disconnect', 'runId' => 'post-fix', 'hypothesisId' => 'H4', 'location' => 'WebRtcFlvRelay::pushOpus', 'msg' => 'overload packet dropped; session continuing', 'data' => ['phase' => 'after-50ms-drain', 'streamId' => $this->streamId, 'sequence' => $rtp['seq'], 'timestamp' => $rtp['ts'], 'canAcceptPacket' => false, 'droppedPackets' => $this->droppedOpusPackets, 'consecutiveDroppedPackets' => $this->consecutiveDroppedOpusPackets], 'ts' => $now]); if ($event !== false && ($debug = @stream_socket_client('tcp://127.0.0.1:7777', $debugErrno, $debugError, 0.05))) { @stream_set_timeout($debug, 0, 50000); @fwrite($debug, "POST /event HTTP/1.1\r\nHost: 127.0.0.1:7777\r\nContent-Type: application/json\r\nContent-Length: " . strlen($event) . "\r\nConnection: close\r\n\r\n" . $event); @fclose($debug); }
+                        // #endregion
+                    }
+                    return;
+                }
             }
+            $recoveredAfterDrops = $this->consecutiveDroppedOpusPackets;
             $this->workerClient->push($rtp['seq'], $rtp['ts'], $packet);
+            $this->consecutiveDroppedOpusPackets = 0;
+            if ($recoveredAfterDrops > 0) {
+                // #region debug-point relay-overload-recovered
+                $event = json_encode(['sessionId' => 'webrtc-relay-disconnect', 'runId' => 'post-fix', 'hypothesisId' => 'H4', 'location' => 'WebRtcFlvRelay::pushOpus', 'msg' => 'worker queue recovered', 'data' => ['streamId' => $this->streamId, 'sequence' => $rtp['seq'], 'timestamp' => $rtp['ts'], 'canAcceptPacket' => $this->workerClient->canAcceptPacket(), 'droppedPackets' => $this->droppedOpusPackets, 'recoveredAfterConsecutiveDrops' => $recoveredAfterDrops], 'ts' => microtime(true)]); if ($event !== false && ($debug = @stream_socket_client('tcp://127.0.0.1:7777', $debugErrno, $debugError, 0.05))) { @stream_set_timeout($debug, 0, 50000); @fwrite($debug, "POST /event HTTP/1.1\r\nHost: 127.0.0.1:7777\r\nContent-Type: application/json\r\nContent-Length: " . strlen($event) . "\r\nConnection: close\r\n\r\n" . $event); @fclose($debug); }
+                // #endregion
+            }
         } catch (\Throwable $e) {
             $this->failAudio($e);
         }
@@ -515,6 +540,9 @@ final class WebRtcFlvRelay
 
     private function failAudio(\Throwable $e): never
     {
+        // #region debug-point relay-fail-audio
+        $event = json_encode(['sessionId' => 'webrtc-relay-disconnect', 'runId' => 'post-fix', 'hypothesisId' => 'H2/H3/H4/H5', 'location' => 'WebRtcFlvRelay::failAudio', 'msg' => 'audio failure', 'data' => ['phase' => 'failAudio', 'streamId' => $this->streamId, 'exception' => get_class($e), 'message' => $e->getMessage()], 'ts' => microtime(true)]); if ($event !== false && ($debug = @stream_socket_client('tcp://127.0.0.1:7777', $debugErrno, $debugError, 0.05))) { @stream_set_timeout($debug, 0, 50000); @fwrite($debug, "POST /event HTTP/1.1\r\nHost: 127.0.0.1:7777\r\nContent-Type: application/json\r\nContent-Length: " . strlen($event) . "\r\nConnection: close\r\n\r\n" . $event); @fclose($debug); }
+        // #endregion
         $this->lastAudioError = $e->getMessage();
         $this->closed = true;
         $this->workerClient?->close();

@@ -68,6 +68,9 @@ final class OpusWorkerServer
                         'output' => '',
                         'transcoder' => null,
                         'frameIndex' => 0,
+                        // #region debug-point opus-server-push-counter
+                        'debugPushCount' => 0,
+                        // #endregion
                         'finished' => false,
                     ];
                 }
@@ -144,6 +147,9 @@ final class OpusWorkerServer
                 throw new UnexpectedValueException('PUSH before OPEN or after FINISH');
             }
             $values = unpack('NrequestId/nsequence/Ntimestamp', substr($body, 1, 10));
+            // #region debug-point opus-server-push-start
+            ++$this->connections[$id]['debugPushCount']; $debugPushStarted = hrtime(true);
+            // #endregion
             try {
                 $transcoder = $this->connections[$id]['transcoder'];
                 $adts = $transcoder->pushPacket(substr($body, 11));
@@ -151,7 +157,13 @@ final class OpusWorkerServer
                 $frameCount = $this->countAdtsFrames($adts);
                 $this->connections[$id]['frameIndex'] += $frameCount;
                 $this->queue($id, OpusWorkerProtocol::aac($values['requestId'], $firstFrame, $adts));
+                // #region debug-point opus-server-push-report
+                if ($this->connections[$id]['debugPushCount'] === 1 || $this->connections[$id]['debugPushCount'] % 25 === 0) { $event = json_encode(['sessionId' => 'webrtc-relay-disconnect', 'runId' => 'post-fix', 'hypothesisId' => 'H2', 'location' => 'OpusWorkerServer::handleMessage(PUSH)', 'msg' => 'push processed', 'data' => ['pushCount' => $this->connections[$id]['debugPushCount'], 'requestId' => $values['requestId'], 'inputBytes' => strlen($this->connections[$id]['input']), 'outputBytes' => strlen($this->connections[$id]['output']), 'transcodeMs' => (hrtime(true) - $debugPushStarted) / 1000000, 'adtsBytes' => strlen($adts), 'frameCount' => $frameCount], 'ts' => microtime(true)]); if ($event !== false && ($debug = @stream_socket_client('tcp://127.0.0.1:7777', $debugErrno, $debugError, 0.05))) { @stream_set_timeout($debug, 0, 50000); @fwrite($debug, "POST /event HTTP/1.1\r\nHost: 127.0.0.1:7777\r\nContent-Type: application/json\r\nContent-Length: " . strlen($event) . "\r\nConnection: close\r\n\r\n" . $event); @fclose($debug); } }
+                // #endregion
             } catch (Throwable $e) {
+                // #region debug-point opus-server-push-error
+                $event = json_encode(['sessionId' => 'webrtc-relay-disconnect', 'runId' => 'post-fix', 'hypothesisId' => 'H2', 'location' => 'OpusWorkerServer::handleMessage(PUSH)', 'msg' => 'transcode exception', 'data' => ['pushCount' => $this->connections[$id]['debugPushCount'], 'requestId' => $values['requestId'], 'inputBytes' => strlen($this->connections[$id]['input']), 'outputBytes' => strlen($this->connections[$id]['output']), 'transcodeMs' => (hrtime(true) - $debugPushStarted) / 1000000, 'exception' => get_class($e), 'message' => $e->getMessage()], 'ts' => microtime(true)]); if ($event !== false && ($debug = @stream_socket_client('tcp://127.0.0.1:7777', $debugErrno, $debugError, 0.05))) { @stream_set_timeout($debug, 0, 50000); @fwrite($debug, "POST /event HTTP/1.1\r\nHost: 127.0.0.1:7777\r\nContent-Type: application/json\r\nContent-Length: " . strlen($event) . "\r\nConnection: close\r\n\r\n" . $event); @fclose($debug); }
+                // #endregion
                 $this->queue($id, OpusWorkerProtocol::error($values['requestId'], $e->getMessage()));
                 $this->connections[$id]['finished'] = true;
             }

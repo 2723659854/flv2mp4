@@ -23,6 +23,9 @@ final class OpusWorkerClient
     private string $output = '';
     private int $pendingPackets = 0;
     private int $nextRequestId = 1;
+    // #region debug-point opus-client-pump-counter
+    private int $debugPumpCalls = 0;
+    // #endregion
     private bool $finishSent = false;
     private bool $finished = false;
 
@@ -74,6 +77,9 @@ final class OpusWorkerClient
         }
         $requestId = $this->nextRequestId++;
         $frame = OpusWorkerProtocol::push($requestId, $sequence, $timestamp, $payload);
+        // #region debug-point opus-client-push-critical
+        if ($this->pendingPackets === 90 || $this->pendingPackets === 99 || $this->pendingPackets >= self::MAX_PENDING_PACKETS || strlen($this->output) + strlen($frame) > self::MAX_OUTPUT_BYTES) { $event = json_encode(['sessionId' => 'webrtc-relay-disconnect', 'runId' => 'post-fix', 'hypothesisId' => 'H2/H4', 'location' => 'OpusWorkerClient::push', 'msg' => $this->pendingPackets >= self::MAX_PENDING_PACKETS || strlen($this->output) + strlen($frame) > self::MAX_OUTPUT_BYTES ? 'queue rejection' : 'queue critical', 'data' => ['pendingPackets' => $this->pendingPackets, 'outputBytes' => strlen($this->output), 'frameBytes' => strlen($frame), 'requestId' => $requestId], 'ts' => microtime(true)]); if ($event !== false && ($debug = @stream_socket_client('tcp://127.0.0.1:7777', $debugErrno, $debugError, 0.05))) { @stream_set_timeout($debug, 0, 50000); @fwrite($debug, "POST /event HTTP/1.1\r\nHost: 127.0.0.1:7777\r\nContent-Type: application/json\r\nContent-Length: " . strlen($event) . "\r\nConnection: close\r\n\r\n" . $event); @fclose($debug); } }
+        // #endregion
         if ($this->pendingPackets >= self::MAX_PENDING_PACKETS || strlen($this->output) + strlen($frame) > self::MAX_OUTPUT_BYTES) {
             throw new RuntimeException('Opus worker input queue limit exceeded');
         }
@@ -85,6 +91,9 @@ final class OpusWorkerClient
     public function pump(int $readBudget = 65536, int $writeBudget = 65536, int $responseBudget = 16): array
     {
         $this->ensureConnected();
+        // #region debug-point opus-client-pump-snapshot
+        $debugPendingBefore = $this->pendingPackets; $debugWrittenBytes = 0; $debugReadBytes = 0; ++$this->debugPumpCalls;
+        // #endregion
         if ($this->output !== '' && $writeBudget > 0) {
             $written = @fwrite($this->socket, substr($this->output, 0, $writeBudget));
             if ($written === false) {
@@ -92,6 +101,9 @@ final class OpusWorkerClient
             }
             if ($written > 0) {
                 $this->output = substr($this->output, $written);
+                // #region debug-point opus-client-pump-written
+                $debugWrittenBytes = $written;
+                // #endregion
             }
         }
         $remaining = $readBudget;
@@ -105,6 +117,9 @@ final class OpusWorkerClient
             }
             $this->input .= $data;
             $remaining -= strlen($data);
+            // #region debug-point opus-client-pump-read
+            $debugReadBytes += strlen($data);
+            // #endregion
             if (strlen($this->input) > self::MAX_INPUT_BYTES) {
                 throw new RuntimeException('Opus worker output buffer limit exceeded');
             }
@@ -116,6 +131,9 @@ final class OpusWorkerClient
         foreach (OpusWorkerProtocol::takeFrames($this->input, $responseBudget) as $body) {
             $responses[] = $this->decodeResponse($body);
         }
+        // #region debug-point opus-client-pump-report
+        if ($this->debugPumpCalls % 25 === 0 || $debugPendingBefore >= 90 || $this->pendingPackets >= 90) { $event = json_encode(['sessionId' => 'webrtc-relay-disconnect', 'runId' => 'post-fix', 'hypothesisId' => 'H2/H3', 'location' => 'OpusWorkerClient::pump', 'msg' => 'pump snapshot', 'data' => ['pumpCall' => $this->debugPumpCalls, 'writeBytes' => $debugWrittenBytes, 'readBytes' => $debugReadBytes, 'responsesParsed' => count($responses), 'pendingBefore' => $debugPendingBefore, 'pendingAfter' => $this->pendingPackets, 'inputBytes' => strlen($this->input), 'outputBytes' => strlen($this->output), 'feof' => feof($this->socket)], 'ts' => microtime(true)]); if ($event !== false && ($debug = @stream_socket_client('tcp://127.0.0.1:7777', $debugErrno, $debugError, 0.05))) { @stream_set_timeout($debug, 0, 50000); @fwrite($debug, "POST /event HTTP/1.1\r\nHost: 127.0.0.1:7777\r\nContent-Type: application/json\r\nContent-Length: " . strlen($event) . "\r\nConnection: close\r\n\r\n" . $event); @fclose($debug); } }
+        // #endregion
         return $responses;
     }
 
