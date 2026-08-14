@@ -14,8 +14,6 @@ use Xiaosongshu\Flv2mp4\Aac\AacLcEncoder;
 class OpusToAacTranscoder
 {
     private const SAMPLE_RATE = 48000;
-    private const MAX_SILENCE_SAMPLES = 14400000;
-    private const SILENCE_CHUNK_SAMPLES = 1024;
 
     private int $channels;
     private OpusDecoder $decoder;
@@ -57,24 +55,6 @@ class OpusToAacTranscoder
     public function pushPacket(string $packet, ?int $sampleCount = null): string
     {
         return $this->pushPacketTrimmed($packet, $sampleCount, 0, 0, 0);
-    }
-
-    public function pushSilence(int $sampleCount): string
-    {
-        if ($this->finished) {
-            throw new LogicException('Cannot push silence after finish');
-        }
-        if ($sampleCount <= 0 || $sampleCount > self::MAX_SILENCE_SAMPLES) {
-            throw new InvalidArgumentException('Silence sample count is outside the supported range');
-        }
-
-        $output = '';
-        while ($sampleCount > 0) {
-            $chunkSamples = min($sampleCount, self::SILENCE_CHUNK_SAMPLES);
-            $output .= $this->encoder->encodeFloat(array_fill(0, $chunkSamples * $this->channels, 0.0));
-            $sampleCount -= $chunkSamples;
-        }
-        return $output;
     }
 
     public function finish(): string

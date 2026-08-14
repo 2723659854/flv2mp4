@@ -54,11 +54,6 @@ final class OpusDecoder
         return $this->celtDecoder->debugFrame();
     }
 
-    public function debugCeltStageMs(): array
-    {
-        return $this->celtDecoder->debugStageMs();
-    }
-
     public function reset(): void
     {
         $this->lastPacket = null;
