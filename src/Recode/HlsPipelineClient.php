@@ -123,9 +123,6 @@ final class HlsPipelineClient
     {
         $chunk = @fread($socket, 65536);
         if ($chunk === false || ($chunk === '' && feof($socket))) {
-            // #region debug-point H1-H5:client-eof
-            $statuses = array_map(static fn($process) => is_resource($process) ? proc_get_status($process) : null, $this->processes); @file_get_contents('http://127.0.0.1:7777/event', false, stream_context_create(['http' => ['method' => 'POST', 'header' => "Content-Type: application/json\r\n", 'content' => json_encode(['sessionId' => 'hls-decoder-disconnect', 'runId' => 'pre-fix', 'hypothesisId' => 'H1,H2,H3,H4,H5', 'location' => 'HlsPipelineClient::readResponses', 'msg' => '[DEBUG] Main observed decoder EOF', 'data' => ['responseBytes' => strlen($buffer), 'processStatuses' => $statuses], 'ts' => (int)(microtime(true) * 1000)]), 'timeout' => 0.5, 'ignore_errors' => true]]));
-            // #endregion
             throw new RuntimeException('解码进程响应连接意外关闭');
         }
         $buffer .= $chunk;
@@ -141,12 +138,8 @@ final class HlsPipelineClient
         $options = ['bypass_shell' => true];
         if (PHP_OS_FAMILY === 'Windows') $options['create_process_group'] = true;
         $nul = PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null';
-        // #region debug-point H5:worker-stderr
-        $role = ($index = array_search('--mode', $arguments, true)) !== false ? ($arguments[$index + 1] ?? 'unknown') : 'unknown';
-        $stderr = dirname(__DIR__, 2) . DIRECTORY_SEPARATOR . '.dbg' . DIRECTORY_SEPARATOR . "hls-decoder-disconnect-{$role}.stderr.log";
-        // #endregion
         $pipes = [];
-        $process = proc_open($command, [['file', $nul, 'r'], ['file', $nul, 'a'], ['file', $stderr, 'a']], $pipes, dirname(__DIR__, 2), null, $options);
+        $process = proc_open($command, [['file', $nul, 'r'], ['file', $nul, 'a'], ['file', $nul, 'a']], $pipes, dirname(__DIR__, 2), null, $options);
         if (!is_resource($process)) throw new RuntimeException('无法启动 HLS worker');
         $this->processes[] = $process; $this->pipes[] = $pipes;
     }

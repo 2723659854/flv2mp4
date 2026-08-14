@@ -51,9 +51,6 @@ final class HlsDecoderWorkerServer
                     if (strlen($input) > HlsPipelineProtocol::MAX_BUFFER_LENGTH) throw new RuntimeException('解码进程输入缓冲超限');
                 }
                 foreach (HlsPipelineProtocol::take($input, 1) as $event) {
-                    // #region debug-point H1-H5:decoder-event
-                    if ($event['type'] === HlsPipelineProtocol::END || $event['sequence'] % 25 === 0) @file_get_contents('http://127.0.0.1:7777/event', false, stream_context_create(['http' => ['method' => 'POST', 'header' => "Content-Type: application/json\r\n", 'content' => json_encode(['sessionId' => 'hls-decoder-disconnect', 'runId' => 'pre-fix', 'hypothesisId' => 'H1,H3,H4,H5', 'location' => 'HlsDecoderWorkerServer::run', 'msg' => '[DEBUG] Decoder event state', 'data' => ['sequence' => $event['sequence'], 'type' => $event['type'], 'inputBytes' => strlen($input), 'outputBytes' => strlen($output), 'payloadBytes' => strlen($event['payload'])], 'ts' => (int)(microtime(true) * 1000)]), 'timeout' => 0.5, 'ignore_errors' => true]]));
-                    // #endregion
                     if ($event['type'] === HlsPipelineProtocol::END) {
                         $output .= HlsPipelineProtocol::frame(HlsPipelineProtocol::END, $event['sequence']);
                         $ended = true;
@@ -129,9 +126,6 @@ final class HlsDecoderWorkerServer
         $meta['decoded'] = true;
         $meta['variants'] = $variants;
         $payload = pack('N', strlen($body)) . $body . $payload;
-        // #region debug-point H1-H3:decoder-output-size
-        if ($event['sequence'] % 25 === 0 || strlen($payload) >= HlsPipelineProtocol::HIGH_WATERMARK) @file_get_contents('http://127.0.0.1:7777/event', false, stream_context_create(['http' => ['method' => 'POST', 'header' => "Content-Type: application/json\r\n", 'content' => json_encode(['sessionId' => 'hls-decoder-disconnect', 'runId' => 'post-fix', 'hypothesisId' => 'H1,H3,H5', 'location' => 'HlsDecoderWorkerServer::transform', 'msg' => '[DEBUG] Decoder transformed payload after fix', 'data' => ['sequence' => $event['sequence'], 'payloadBytes' => strlen($payload), 'variantCount' => count($variants), 'memoryUsage' => memory_get_usage(true), 'memoryPeak' => memory_get_peak_usage(true)], 'ts' => (int)(microtime(true) * 1000)]), 'timeout' => 0.5, 'ignore_errors' => true]]));
-        // #endregion
         return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, $payload);
     }
 

@@ -55,9 +55,6 @@ final class HlsOutputWorkerServer
                 }
             }
         } catch (Throwable $e) {
-            // #region debug-point H2-H4:output-exception
-            @file_get_contents('http://127.0.0.1:7777/event', false, stream_context_create(['http' => ['method' => 'POST', 'header' => "Content-Type: application/json\r\n", 'content' => json_encode(['sessionId' => 'hls-decoder-disconnect', 'runId' => 'pre-fix', 'hypothesisId' => 'H2,H4', 'location' => 'HlsOutputWorkerServer::run/catch', 'msg' => '[DEBUG] Output worker exception', 'data' => ['class' => get_class($e), 'message' => $e->getMessage(), 'expected' => $expected, 'inputBytes' => strlen($input), 'outputBytes' => strlen($output), 'finished' => $finished], 'ts' => (int)(microtime(true) * 1000)]), 'timeout' => 0.5, 'ignore_errors' => true]]));
-            // #endregion
             $errorFrame = HlsPipelineProtocol::frame(HlsPipelineProtocol::ERROR, $expected, ['message' => $e->getMessage()]);
             @stream_set_blocking($socket, true); @fwrite($socket, $errorFrame);
             throw $e;
