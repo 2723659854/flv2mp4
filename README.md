@@ -1,4 +1,4 @@
-# FLV ↔ MP4 / HLS Converter + H264 Re-encoding Tool
+# FLV ↔ MP4 / HLS Converter + H264 Re-encoding + OPUS2AAC
 <p align="center">
 <img src="https://img.shields.io/badge/PHP-8.1%2B-blue" />
 <img src="https://img.shields.io/badge/License-Apache%202.0-green" />
@@ -13,7 +13,7 @@
 
 ## Project Overview
 A lightweight media processing toolkit implemented in pure PHP 8.1+, **with zero external dependencies (no FFmpeg required)**.  
-Supports conversion between FLV, FMP4, MP4, and HLS, live streaming gateway, push, pull, relay, as well as **H.264 decoding + scaling + re-encoding** (Baseline Profile).
+Supports conversion between FLV, FMP4, MP4, and HLS, live streaming gateway, push, pull, relay, as well as **H.264 decoding + scaling + re-encoding** (Baseline Profile)+ OPUS→AAC.
 
 ---
 ## 📋 Table of Contents
@@ -33,9 +33,9 @@ Supports conversion between FLV, FMP4, MP4, and HLS, live streaming gateway, pus
 - [Testing & Playback](#-testing--playback)
 - [Use Cases](#-use-cases)
 - [H.264 Re-encoding Details](#-h264-decoding--scaling--re-encoding)
-    - [FLV → HLS Multi-bitrate Example](#flv-hls)
-    - [FLV → FLV Re-encoding Example](#flv-flv)
-    - [MP4 → MP4 Re-encoding Example](#mp4-mp4)
+    - [FLV → HLS Multi-bitrate Example](#flv-2-hls)
+    - [FLV → FLV Re-encoding Example](#flv-2-flv)
+    - [MP4 → MP4 Re-encoding Example](#mp4-2-mp4)
     - [Watermark Tools](#watermark-generation-tools)
 - [Technical Notes](#-technical-notes)
 - [License & Disclaimer](#open-source-license--disclaimer)
@@ -48,18 +48,19 @@ Supports conversion between FLV, FMP4, MP4, and HLS, live streaming gateway, pus
 
 ## 🎯 Core Features
 
-| Feature | Direction | Description |
-|---------|-----------|-------------|
-| Container Conversion | FLV ↔ MP4 / FMP4 | Generate standard MP4 or separate fMP4 segments (MSE-compatible) |
-| HLS Segmentation | FLV → HLS | Generate M3U8 + TS segments, compatible with hls.js, VLC, etc. |
-| HLS Restoration | HLS → FLV | Merge HLS segments back into a single FLV file |
-| MP4 ↔ FLV | MP4 → FLV / FMP4 → FLV | Convert between multiple container formats |
+| Feature | Direction | Description                                                           |
+|---------|-----------|-----------------------------------------------------------------------|
+| Container Conversion | FLV ↔ MP4 / FMP4 | Generate standard MP4 or separate fMP4 segments (MSE-compatible)      |
+| HLS Segmentation | FLV → HLS | Generate M3U8 + TS segments, compatible with hls.js, VLC, etc.        |
+| HLS Restoration | HLS → FLV | Merge HLS segments back into a single FLV file                        |
+| MP4 ↔ FLV | MP4 → FLV / FMP4 → FLV | Convert between multiple container formats                            |
 | Live Gateway | FLV Gateway | High-performance multi-level forwarding with high concurrency support |
-| Static File Service | HTTP File Gateway | Lightweight file server with directory browsing support |
-| Push Client | FLV / MP4 → RTMP/HTTP-FLV/WS-FLV | Push static files as pseudo-live streams |
-| Pull Client | RTMP/HTTP-FLV/WS-FLV → FLV | Pull from live streams and save as local FLV |
-| Relay Client | Multi-protocol input → Multi-protocol output | Pull once, forward to multiple destinations |
-| **H.264 Re-encoding** | Decode → Scale → Encode | Supports Baseline Profile, core support for multi-bitrate HLS |
+| Static File Service | HTTP File Gateway | Lightweight file server with directory browsing support               |
+| Push Client | FLV / MP4 → RTMP/HTTP-FLV/WS-FLV | Push static files as pseudo-live streams                              |
+| Pull Client | RTMP/HTTP-FLV/WS-FLV → FLV | Pull from live streams and save as local FLV                          |
+| Relay Client | Multi-protocol input → Multi-protocol output | Pull once, forward to multiple destinations                           |
+| **H.264 Re-encoding** | Decode → Scale → Encode | Supports Baseline Profile, core support for multi-bitrate HLS         |
+| **OPUS→AAC** | opus→pcm→aac | Convert WebRTC Opus audio to AAC-LC                                   |
 
 ---
 
@@ -289,7 +290,9 @@ php forward.php
 
 ### 🔥 H.264 Decoding + Scaling + Re-encoding
 
-Supports Baseline Profile H.264 decoding, scaling, and re-encoding, providing core capabilities for the following scenarios:
+Supports Baseline Profile H.264 decoding, scaling, and re‑encoding, providing core capabilities for the following scenarios:
+
+After installing via Composer, you do not need to manually run any Opus/HLS/FLV/MP4 Worker; the program will automatically start them using the current PHP CLI and the host's vendor/autoload.php. Multi‑process mode requires proc_open to be enabled; CLI environment is recommended.
 
 | Use Case | Description |
 |----------|-------------|
@@ -305,7 +308,7 @@ Supports Baseline Profile H.264 decoding, scaling, and re-encoding, providing co
 **Technical Positioning**: This is a complete **H.264 pixel processing pipeline** (Decode → Process → Encode), with no FFmpeg dependency, implemented in pure PHP.
 
 ---
-####  FLV → HLS
+####  FLV 2 HLS
 Example of transcoding FLV to multi-bitrate HLS:
 ```php
 <?php
@@ -325,12 +328,13 @@ $profiles = [
         'watermark_file'=> __DIR__."/src/Static/watermark_80x16.yuv",// Watermark file
     ]
 ];
-$generator = new \Xiaosongshu\Flv2mp4\Recode\PurePhpHlsGenerator($profiles, __DIR__ . '/hls/output');
+// If high quality re‑encoding is required, enable multi‑process acceleration; for low bitrates, it is not needed.
+$generator = new \Xiaosongshu\Flv2mp4\Recode\PurePhpHlsGenerator($profiles, __DIR__ . '/hls/output',true);
 $generator->processFlv(__DIR__ . '/input.flv');
 echo "Index URL: hls/output/master.m3u8\n";
 echo "All processing completed!\n";
 ```
-#### FLV → FLV
+#### FLV 2 FLV
 Re-encode FLV with new bitrate:
 ```php
 <?php
@@ -346,13 +350,13 @@ $config = [
     'watermark'=>true,     // Whether to add watermark
     'watermark_file'=> __DIR__."/src/Static/watermark_80x16.yuv",// Watermark file
 ];
-
-$recoder = new \Xiaosongshu\Flv2mp4\Recode\FlvRecoder($config);
+// If high quality re‑encoding is required, enable multi‑process acceleration; for low bitrates, it is not needed.
+$recoder = new \Xiaosongshu\Flv2mp4\Recode\FlvRecoder($config,true);
 $recoder->setMaxFrames(50);  // Optional: limit frames processed
 $recoder->processFlv(__DIR__ . '/input.flv', __DIR__.'/output.flv');
 echo "FLV re-encoding completed\r\n";
 ```
-#### MP4 → MP4
+#### MP4 2 MP4
 Re-encode MP4 file with new bitrate:
 ```php
 <?php
@@ -368,7 +372,8 @@ $config = [
     'watermark'=>true,     // Whether to add watermark
     'watermark_file'=> __DIR__."/src/Static/watermark_80x16.yuv",// Watermark file
 ];
-$recoder = new \Xiaosongshu\Flv2mp4\Recode\Mp4Recoder($config);
+// If high quality re‑encoding is required, enable multi‑process acceleration; for low bitrates, it is not needed.
+$recoder = new \Xiaosongshu\Flv2mp4\Recode\Mp4Recoder($config,true);
 $recoder->setMaxFrames(50); // Optional: limit frames processed
 $recoder->processMp4(__DIR__ . '/input.mp4', __DIR__ . '/output.mp4');
 echo "MP4 re-encoding completed\r\n";

@@ -1,4 +1,4 @@
-# FLV ↔ MP4 / HLS 转换工具 + H264 重编码工具 + OPUS2AAC
+# FLV ↔ MP4 / HLS 转换工具 + H264 重编码 + OPUS2AAC
 <p align="center">
 <img src="https://img.shields.io/badge/PHP-8.1%2B-blue" />
 <img src="https://img.shields.io/badge/License-Apache%202.0-green" />
@@ -13,7 +13,7 @@
 
 ## 项目简介
 纯 PHP 8.1+ 实现的轻量级媒体处理工具包，**零外部依赖（无需 FFmpeg）**。  
-支持 FLV、FMP4、MP4、HLS 互转，直播流网关、推流、拉流、转播，以及 **H.264 解码 + 缩放 + 重新编码**（Baseline Profile）。
+支持 FLV、FMP4、MP4、HLS 互转，直播流网关、推流、拉流、转播，以及 **H.264 解码 + 缩放 + 重新编码**（Baseline Profile）+ OPUS→AAC。
 
 ---
 ## 📋 目录
