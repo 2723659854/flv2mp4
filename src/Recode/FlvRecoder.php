@@ -77,9 +77,14 @@ class FlvRecoder
     private ?int $lastAudioOutputTimestamp = null;
     private int $positiveVideoDtsDeltaTotal = 0;
     private int $positiveVideoDtsDeltaCount = 0;
+    private bool $multi;
+    private array $config;
+    private ?string $pipelineYuv = null;
 
-    public function __construct(array $config = [])
+    public function __construct(array $config = [], bool $multi = false)
     {
+        $this->multi = $multi;
+        $this->config = $config;
         $this->targetWidth = $config['width'] ?? 0;
         $this->targetHeight = $config['height'] ?? 0;
         $this->targetBitrate = $config['bitrate'] ?? 0;
@@ -278,6 +283,10 @@ class FlvRecoder
         if (!file_exists($inputFile)) {
             throw new \Exception("FLV file not found: {$inputFile}");
         }
+        if ($this->multi) {
+            (new FlvPipelineClient($this->config, $this->maxFrames))->process($inputFile, $outputFile);
+            return;
+        }
 
         $this->resetProcessState();
         $flvData = file_get_contents($inputFile);
@@ -312,6 +321,46 @@ class FlvRecoder
             }
         }
 
+        $this->finishOutput($outputFile);
+        echo "Done! Processed {$frameCount} frames ({$videoCount} video)\n";
+        echo "Output: {$outputFile}\n";
+    }
+
+    public function processPipelineEvent(array $metadata, string $payload): void
+    {
+        if (isset($metadata['sourceFps'])) {
+            $this->sourceFps = (float)$metadata['sourceFps'];
+        }
+        $tag = new class($metadata, $payload) extends FlvTag {
+            public function __construct(private array $metadata, string $payload)
+            {
+                $this->tagType = (int)$metadata['tagType'];
+                $this->body = $payload;
+            }
+            public function getTime(): int { return (int)($this->metadata['timestamp'] ?? 0); }
+        };
+        if ($tag->tagType === 9) {
+            if (!empty($metadata['drop'])) return;
+            $this->pipelineYuv = null;
+            if (!empty($metadata['decoded'])) {
+                $bodyLength = unpack('N', substr($payload, 0, 4))[1];
+                $tag->body = substr($payload, 4, $bodyLength);
+                $this->pipelineYuv = substr($payload, 4 + $bodyLength);
+            }
+            $this->handleVideoFrame($tag);
+            $this->pipelineYuv = null;
+        } elseif ($tag->tagType === 8) {
+            $this->handleAudioFrame($tag);
+        }
+    }
+
+    public function finishPipelineOutput(string $outputFile): void
+    {
+        $this->finishOutput($outputFile);
+    }
+
+    private function finishOutput(string $outputFile): void
+    {
         $actualHasVideo = $this->outputVideoFrameCount > 0;
         $actualHasAudio = $this->outputAudioFrameCount > 0;
         $fallbackFps = ($this->effectiveTargetFps !== null && $this->effectiveTargetFps > 0)
@@ -321,20 +370,14 @@ class FlvRecoder
             ? $this->positiveVideoDtsDeltaTotal / $this->positiveVideoDtsDeltaCount
             : 1000 / $fallbackFps;
         $videoEndMs = $actualHasVideo && $this->lastVideoOutputTimestamp !== null
-            ? $this->lastVideoOutputTimestamp + $videoFrameDurationMs
-            : 0.0;
+            ? $this->lastVideoOutputTimestamp + $videoFrameDurationMs : 0.0;
         $audioSamplesPerFrame = in_array($this->audioObjectType, [5, 29], true) ? 2048 : 1024;
-        $audioFrameDurationMs = $this->audioSampleRate > 0
-            ? $audioSamplesPerFrame / $this->audioSampleRate * 1000
-            : 0.0;
+        $audioFrameDurationMs = $this->audioSampleRate > 0 ? $audioSamplesPerFrame / $this->audioSampleRate * 1000 : 0.0;
         $audioEndMs = $actualHasAudio && $this->lastAudioOutputTimestamp !== null
-            ? $this->lastAudioOutputTimestamp + $audioFrameDurationMs
-            : 0.0;
-        $duration = max($videoEndMs, $audioEndMs) / 1000;
-
+            ? $this->lastAudioOutputTimestamp + $audioFrameDurationMs : 0.0;
         if ($this->flvHeaderWritten && strlen($this->outputBuffer) >= 13) {
             $metadata = [
-                'duration' => $duration,
+                'duration' => max($videoEndMs, $audioEndMs) / 1000,
                 'width' => (float)$this->outputVideoWidth,
                 'height' => (float)$this->outputVideoHeight,
                 'videocodecid' => 'avc1',
@@ -347,17 +390,10 @@ class FlvRecoder
                 $metadata['audiosamplerate'] = (float)$this->audioSampleRate;
                 $metadata['audiochannels'] = (float)$this->audioChannels;
             }
-
             $scriptData = $this->amf0EncodeValue('onMetaData') . $this->amf0EncodeValue($metadata);
-            $scriptTag = $this->buildTag(18, $scriptData, 0);
-            $this->outputBuffer = substr($this->outputBuffer, 0, 13)
-                . $scriptTag
-                . substr($this->outputBuffer, 13);
+            $this->outputBuffer = substr($this->outputBuffer, 0, 13) . $this->buildTag(18, $scriptData, 0) . substr($this->outputBuffer, 13);
         }
-
         file_put_contents($outputFile, $this->outputBuffer);
-        echo "Done! Processed {$frameCount} frames ({$videoCount} video)\n";
-        echo "Output: {$outputFile}\n";
     }
 
     private function handleVideoFrame(FlvTag $tag): void
@@ -402,8 +438,8 @@ class FlvRecoder
         );
 
         if ($needTranscode) {
-            // 每个输入 sample 都先解码以维持 H.264 参考链，之后才决定是否输出。
-            $yuvData = $this->decodeNaluToYuv($avcData);
+            // 多进程模式中所有输入 sample 已由 decoder worker 解码；单进程仍在此维持参考链。
+            $yuvData = $this->pipelineYuv ?? $this->decodeNaluToYuv($avcData);
             if ($yuvData === null) return;
 
             if ($this->baseTimestamp === null) {
@@ -422,16 +458,17 @@ class FlvRecoder
 
             $targetW = $this->outputVideoWidth;
             $targetH = $this->outputVideoHeight;
-            if ($targetW !== $this->srcWidth || $targetH !== $this->srcHeight) {
-                $yuvData = $this->scaler->scaleYUV420P(
-                    $yuvData,
-                    $this->srcWidth, $this->srcHeight,
-                    $targetW, $targetH
-                );
-            }
-
-            if ($this->watermarkEnabled) {
-                $yuvData = $this->applyWatermark($yuvData, $targetW, $targetH);
+            if ($this->pipelineYuv === null) {
+                if ($targetW !== $this->srcWidth || $targetH !== $this->srcHeight) {
+                    $yuvData = $this->scaler->scaleYUV420P(
+                        $yuvData,
+                        $this->srcWidth, $this->srcHeight,
+                        $targetW, $targetH
+                    );
+                }
+                if ($this->watermarkEnabled) {
+                    $yuvData = $this->applyWatermark($yuvData, $targetW, $targetH);
+                }
             }
 
             $this->encoder->setResolution($targetW, $targetH);
