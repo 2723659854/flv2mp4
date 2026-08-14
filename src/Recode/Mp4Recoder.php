@@ -72,9 +72,14 @@ class Mp4Recoder
     private ?float $effectiveTargetFps = null;
     private bool $dropFrames = false;
     private ?int $firstVideoDtsMs = null;
+    private bool $multi;
+    private array $config;
+    private ?string $pipelineYuv = null;
 
-    public function __construct(array $config = [])
+    public function __construct(array $config = [], bool $multi = false)
     {
+        $this->multi = $multi;
+        $this->config = $config;
         $this->targetWidth = $config['width'] ?? 0;
         $this->targetHeight = $config['height'] ?? 0;
         $this->targetBitrate = $config['bitrate'] ?? 0;
@@ -217,6 +222,7 @@ class Mp4Recoder
         $this->effectiveTargetFps = null;
         $this->dropFrames = false;
         $this->firstVideoDtsMs = null;
+        $this->pipelineYuv = null;
         $this->audioSpecificConfig = '';
         $this->audioConfigParsed = false;
         $this->audioSampleRate = 44100;
@@ -228,6 +234,10 @@ class Mp4Recoder
     {
         if (!file_exists($inputFile)) {
             throw new \RuntimeException("MP4文件不存在: {$inputFile}");
+        }
+        if ($this->multi) {
+            (new Mp4PipelineClient($this->config, $this->maxFrames))->process($inputFile, $outputFile);
+            return;
         }
 
         $this->resetProcessState();
@@ -516,6 +526,91 @@ class Mp4Recoder
         $this->audioTimescale = $this->audioSampleRate;
     }
 
+    public function preparePipelineInput(string $inputFile): array
+    {
+        $this->resetProcessState();
+        $this->mp4Data = file_get_contents($inputFile);
+        if ($this->mp4Data === '') throw new \RuntimeException('无法读取MP4文件');
+        $this->parseMp4Boxes();
+        $this->parseTracks();
+        $samples = [];
+        if ($this->videoTrack) {
+            $video = $this->extractVideoSamples();
+            $this->configureOutputVideo($video);
+            foreach ($video as &$sample) $sample['type'] = 'video';
+            unset($sample);
+            $samples = array_merge($samples, $video);
+        }
+        if ($this->audioTrack) {
+            $audio = $this->extractAudioSamples();
+            foreach ($audio as &$sample) $sample['type'] = 'audio';
+            unset($sample);
+            $samples = array_merge($samples, $audio);
+        }
+        usort($samples, fn(array $a, array $b): int => $a['dtsMs'] <=> $b['dtsMs']);
+        return [[
+            'srcWidth' => $this->srcWidth, 'srcHeight' => $this->srcHeight,
+            'srcSps' => base64_encode($this->srcSpsData), 'srcPps' => base64_encode($this->srcPpsData),
+            'sourceFps' => $this->sourceFps, 'outputWidth' => $this->outputVideoWidth,
+            'outputHeight' => $this->outputVideoHeight, 'dropFrames' => $this->dropFrames,
+            'effectiveTargetFps' => $this->effectiveTargetFps,
+            'audioConfig' => base64_encode($this->audioSpecificConfig),
+            'audioSampleRate' => $this->audioSampleRate, 'audioChannels' => $this->audioChannels,
+            'audioObjectType' => $this->audioObjectType, 'audioTimescale' => $this->audioTimescale,
+            'hasVideo' => $this->videoTrack !== null, 'hasAudio' => $this->audioTrack !== null,
+        ], $samples];
+    }
+
+    public function initializePipelineOutput(array $metadata): void
+    {
+        $this->resetProcessState();
+        $this->srcWidth = (int)$metadata['srcWidth'];
+        $this->srcHeight = (int)$metadata['srcHeight'];
+        $this->srcSpsData = base64_decode($metadata['srcSps'], true) ?: '';
+        $this->srcPpsData = base64_decode($metadata['srcPps'], true) ?: '';
+        $this->srcInitialized = $this->srcWidth > 0;
+        $this->sourceFps = isset($metadata['sourceFps']) ? (float)$metadata['sourceFps'] : null;
+        $this->outputVideoWidth = (int)$metadata['outputWidth'];
+        $this->outputVideoHeight = (int)$metadata['outputHeight'];
+        $this->dropFrames = (bool)$metadata['dropFrames'];
+        $this->effectiveTargetFps = isset($metadata['effectiveTargetFps']) ? (float)$metadata['effectiveTargetFps'] : null;
+        $this->audioSpecificConfig = base64_decode($metadata['audioConfig'], true) ?: '';
+        $this->audioSampleRate = (int)$metadata['audioSampleRate'];
+        $this->audioChannels = (int)$metadata['audioChannels'];
+        $this->audioObjectType = (int)$metadata['audioObjectType'];
+        $this->audioTimescale = (int)$metadata['audioTimescale'];
+        $this->videoTrack = !empty($metadata['hasVideo']) ? ['pipeline' => true] : null;
+        $this->audioTrack = !empty($metadata['hasAudio']) ? ['pipeline' => true] : null;
+    }
+
+    public function processPipelineSample(array $metadata, string $payload): void
+    {
+        if (($metadata['sampleType'] ?? '') === 'audio') {
+            $this->audioSamples[] = ['data' => $payload, 'timestamp' => (int)$metadata['dtsMs']];
+            return;
+        }
+        if (!empty($metadata['drop'])) return;
+        $this->pipelineYuv = null;
+        if (!empty($metadata['decoded'])) {
+            $length = unpack('N', substr($payload, 0, 4))[1];
+            $avcData = substr($payload, 4, $length);
+            $this->pipelineYuv = substr($payload, 4 + $length);
+        } else {
+            $avcData = $payload;
+        }
+        $this->transcodeVideoSample([
+            'data' => $avcData, 'dtsMs' => (int)$metadata['dtsMs'],
+            'ctsMs' => (int)$metadata['ctsMs'], 'keyframe' => (bool)$metadata['keyframe'],
+        ]);
+        $this->pipelineYuv = null;
+    }
+
+    public function finishPipelineOutput(string $outputFile): void
+    {
+        if (!$this->videoTrack && !$this->audioTrack) throw new \RuntimeException('未找到有效的视频或音频轨道');
+        $this->buildMp4($outputFile);
+    }
+
     /* ========== 媒体数据提取与转码 ========== */
 
     private function extractAndTranscodeMediaData(): void
@@ -763,8 +858,8 @@ class Mp4Recoder
         );
 
         if ($needTranscode) {
-            // 每个输入 sample 都必须解码，以维持 H.264 参考帧链；抽帧只能发生在解码之后。
-            $yuvData = $this->decodeNaluToYuv($avcData);
+            // 多进程模式中所有输入 sample 已由 decoder worker 解码；单进程仍在此维持参考链。
+            $yuvData = $this->pipelineYuv ?? $this->decodeNaluToYuv($avcData);
             if ($yuvData === null) return;
 
             $outputCount = count($this->videoSamples);
@@ -780,16 +875,18 @@ class Mp4Recoder
                 return;
             }
 
-            if ($targetW !== $this->srcWidth || $targetH !== $this->srcHeight) {
-                $yuvData = $this->scaler->scaleYUV420P(
-                    $yuvData,
-                    $this->srcWidth, $this->srcHeight,
-                    $targetW, $targetH
-                );
-            }
+            if ($this->pipelineYuv === null) {
+                if ($targetW !== $this->srcWidth || $targetH !== $this->srcHeight) {
+                    $yuvData = $this->scaler->scaleYUV420P(
+                        $yuvData,
+                        $this->srcWidth, $this->srcHeight,
+                        $targetW, $targetH
+                    );
+                }
 
-            if ($this->watermarkEnabled) {
-                $yuvData = $this->applyWatermark($yuvData, $targetW, $targetH);
+                if ($this->watermarkEnabled) {
+                    $yuvData = $this->applyWatermark($yuvData, $targetW, $targetH);
+                }
             }
 
             $this->encoder->setResolution($targetW, $targetH);
