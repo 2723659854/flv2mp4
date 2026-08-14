@@ -70,6 +70,9 @@ class PurePhpHlsGenerator
     private array $segmentFirstFrame = [];
     private string $srcSpsData = '';
     private string $srcPpsData = '';
+    private bool $multi;
+    private ?array $pipelineVariants = null;
+    private string $pipelineYuvPayload = '';
 
     const VIDEO_FRAME_TYPE_KEY_FRAME = 1;
     const AVC_PACKET_TYPE_SEQUENCE_HEADER = 0;
@@ -77,13 +80,15 @@ class PurePhpHlsGenerator
 
     /**
      * 转码器初始化
-     * @param array $profiles
-     * @param string $outputDir
+     * @param array $profiles 规格
+     * @param string $outputDir 输出目录
+     * @param bool $multi 是否开启多进程
      */
-    public function __construct(array $profiles, string $outputDir)
+    public function __construct(array $profiles, string $outputDir,bool $multi = false)
     {
         $this->profiles = $profiles;
         $this->outputDir = rtrim($outputDir, '/');
+        $this->multi = $multi;
 
         $this->decoder = new H264Decoder();
         $this->scaler = new VideoScaler();
@@ -214,6 +219,10 @@ class PurePhpHlsGenerator
     public function processFlv(string $flvFile): void
     {
         if (!file_exists($flvFile)) throw new \Exception("FLV file not found: {$flvFile}");
+        if ($this->multi) {
+            (new HlsPipelineClient($this->profiles, $this->outputDir, $this->maxFrames))->process($flvFile);
+            return;
+        }
 
         $flvData = file_get_contents($flvFile);
         FlvParse::setFlv($flvData);
@@ -239,6 +248,36 @@ class PurePhpHlsGenerator
         $this->closeAllSegments();
         $this->generateMasterPlaylist();
         echo "Done! Processed {$frameCount} frames\n";
+    }
+
+    public function processPipelineEvent(array $metadata, string $payload): void
+    {
+        $tag = new class($metadata, $payload) {
+            public int $tagType;
+            public string $body;
+            public function __construct(private array $metadata, string $payload)
+            {
+                $this->tagType = (int)$metadata['tagType'];
+                $this->body = $payload;
+            }
+            public function getTime(): int { return (int)($this->metadata['timestamp'] ?? 0); }
+        };
+        if (!empty($metadata['decoded'])) {
+            $bodyLength = unpack('N', substr($payload, 0, 4))[1];
+            $tag->body = substr($payload, 4, $bodyLength);
+            $this->pipelineVariants = $metadata['variants'];
+            $this->pipelineYuvPayload = substr($payload, 4 + $bodyLength);
+        }
+        if ($tag->tagType === 9) $this->handleVideoFrame($tag);
+        elseif ($tag->tagType === 8) $this->handleAudioFrame($tag);
+        $this->pipelineVariants = null;
+        $this->pipelineYuvPayload = '';
+    }
+
+    public function finishPipelineOutput(): void
+    {
+        $this->closeAllSegments();
+        $this->generateMasterPlaylist();
     }
 
     /**
@@ -325,13 +364,17 @@ class PurePhpHlsGenerator
             $targetW = $profile['width'] > 0 ? $profile['width'] : $this->srcWidth;
             $targetH = $profile['height'] > 0 ? $profile['height'] : $this->srcHeight;
             $needTranscode = $this->srcInitialized && (
+                $this->pipelineVariants !== null ||
                 ($profile['width'] > 0 && $this->srcWidth !== $profile['width']) ||
                 ($profile['height'] > 0 && $this->srcHeight !== $profile['height']) ||
                 $this->profileWatermark[$name] !== null
             );
             if ($needTranscode) {
                 $cacheKey = "{$targetW}_{$targetH}";
-                if (!isset($this->decodedFrameCache[$cacheKey])) {
+                if ($this->pipelineVariants !== null && isset($this->pipelineVariants[$name])) {
+                    $variant = $this->pipelineVariants[$name];
+                    $this->decodedFrameCache[$cacheKey] = substr($this->pipelineYuvPayload, $variant['offset'], $variant['length']);
+                } elseif (!isset($this->decodedFrameCache[$cacheKey])) {
                     /** 解码h264为yuv */
                     $rawYuv = $this->decodeNaluToYuv($avcData);
                     if ($rawYuv !== null) {
@@ -349,7 +392,7 @@ class PurePhpHlsGenerator
                     /** 取出被缩放的yuv */
                     $scaledYuv = $this->decodedFrameCache[$cacheKey];
 
-                    if ($this->profileWatermark[$name] !== null) {
+                    if ($this->pipelineVariants === null && $this->profileWatermark[$name] !== null) {
                         $scaledYuv = $this->applyWatermarkToFrame($scaledYuv, $targetW, $targetH, $this->profileWatermark[$name]);
                     }
 

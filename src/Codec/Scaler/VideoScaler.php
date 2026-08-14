@@ -121,8 +121,7 @@ class VideoScaler
             return $data;
         }
 
-        $src = array_values(unpack('C*', $data));
-        $dst = [];
+        $dst = str_repeat("\0", $dstW * $dstH);
 
         $fx = (int)($srcW * 65536 / $dstW);
         $fy = (int)($srcH * 65536 / $dstH);
@@ -133,6 +132,9 @@ class VideoScaler
             $y1 = min($y0 + 1, $srcH - 1);
             $dy = $srcYFixed & 0xFFFF;
             $yd = 65536 - $dy;
+            $row0 = $y0 * $srcW;
+            $row1 = $y1 * $srcW;
+            $dstRow = $y * $dstW;
 
             for ($x = 0; $x < $dstW; $x++) {
                 $srcXFixed = $x * $fx;
@@ -141,15 +143,15 @@ class VideoScaler
                 $dx = $srcXFixed & 0xFFFF;
                 $xd = 65536 - $dx;
 
-                $v00 = $src[$y0 * $srcW + $x0] ?? 128;
-                $v01 = $src[$y0 * $srcW + $x1] ?? 128;
-                $v10 = $src[$y1 * $srcW + $x0] ?? 128;
-                $v11 = $src[$y1 * $srcW + $x1] ?? 128;
+                $v00 = ord($data[$row0 + $x0]);
+                $v01 = ord($data[$row0 + $x1]);
+                $v10 = ord($data[$row1 + $x0]);
+                $v11 = ord($data[$row1 + $x1]);
 
                 $val = ($xd * $yd * $v00 + $dx * $yd * $v01 + $xd * $dy * $v10 + $dx * $dy * $v11) >> 32;
-                $dst[] = ($val < 0) ? 0 : (($val > 255) ? 255 : $val);
+                $dst[$dstRow + $x] = chr(($val < 0) ? 0 : (($val > 255) ? 255 : $val));
             }
         }
-        return pack('C*', ...$dst);
+        return $dst;
     }
 }

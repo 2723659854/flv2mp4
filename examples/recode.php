@@ -12,10 +12,10 @@ $config = [
     'watermark_file'=> __DIR__."/src/Static/watermark_80x16.yuv",// 水印文件
 ];
 
-$recoder = new \Xiaosongshu\Flv2mp4\Recode\FlvRecoder($config);
-$recoder->setMaxFrames(50);  // 可选：限制处理帧数
-$recoder->processFlv(__DIR__ . '/test.flv', __DIR__.'/output.flv');
-echo "flv重编码完成\r\n";
+//$recoder = new \Xiaosongshu\Flv2mp4\Recode\FlvRecoder($config);
+//$recoder->setMaxFrames(50);  // 可选：限制处理帧数
+//$recoder->processFlv(__DIR__ . '/test.flv', __DIR__.'/output.flv');
+//echo "flv重编码完成\r\n";
 
 // 转码模式（改变分辨率/码率）
 $recoder = new \Xiaosongshu\Flv2mp4\Recode\Mp4Recoder($config);
