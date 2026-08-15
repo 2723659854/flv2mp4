@@ -12,9 +12,10 @@ use UnexpectedValueException;
  */
 final class OpusWorkerClient
 {
-    private const MAX_OUTPUT_BYTES = 262144;
-    private const MAX_INPUT_BYTES = 1048576;
-    private const MAX_PENDING_PACKETS = 200;
+    private const MAX_OUTPUT_BYTES = 4194304;
+    private const MAX_INPUT_BYTES = 4194304;
+    private const MAX_PENDING_PACKETS = 1000;
+    private const MAX_PUSH_FRAME_BYTES = 65550;
 
     private static array $processes = [];
     private static bool $shutdownRegistered = false;
@@ -68,17 +69,15 @@ final class OpusWorkerClient
 
     public function push(int $sequence, int $timestamp, string $payload): int
     {
-        $this->ensureUsable();
-        if ($this->finishSent) {
-            throw new RuntimeException('Cannot push Opus after FINISH');
-        }
         $requestId = $this->nextRequestId++;
-        $frame = OpusWorkerProtocol::push($requestId, $sequence, $timestamp, $payload);
-        if ($this->pendingPackets >= self::MAX_PENDING_PACKETS || strlen($this->output) + strlen($frame) > self::MAX_OUTPUT_BYTES) {
-            throw new RuntimeException('Opus worker input queue limit exceeded');
-        }
-        $this->output .= $frame;
-        ++$this->pendingPackets;
+        $this->queueRequest(OpusWorkerProtocol::push($requestId, $sequence, $timestamp, $payload));
+        return $requestId;
+    }
+
+    public function pushGap(int $sampleCount): int
+    {
+        $requestId = $this->nextRequestId++;
+        $this->queueRequest(OpusWorkerProtocol::gap($requestId, $sampleCount));
         return $requestId;
     }
 
@@ -164,7 +163,32 @@ final class OpusWorkerClient
 
     public function canAcceptPacket(): bool
     {
-        return $this->pendingPackets < self::MAX_PENDING_PACKETS;
+        return !$this->finishSent
+            && $this->pendingPackets < self::MAX_PENDING_PACKETS
+            && strlen($this->output) <= self::MAX_OUTPUT_BYTES - self::MAX_PUSH_FRAME_BYTES;
+    }
+
+    public function queueState(): array
+    {
+        return [
+            'pendingPackets' => $this->pendingPackets,
+            'pendingLimit' => self::MAX_PENDING_PACKETS,
+            'outputBytes' => strlen($this->output),
+            'outputLimitBytes' => self::MAX_OUTPUT_BYTES,
+        ];
+    }
+
+    private function queueRequest(string $frame): void
+    {
+        $this->ensureUsable();
+        if ($this->finishSent) {
+            throw new RuntimeException('Cannot push Opus after FINISH');
+        }
+        if ($this->pendingPackets >= self::MAX_PENDING_PACKETS || strlen($this->output) + strlen($frame) > self::MAX_OUTPUT_BYTES) {
+            throw new RuntimeException('Opus worker input queue limit exceeded');
+        }
+        $this->output .= $frame;
+        ++$this->pendingPackets;
     }
 
     private function decodeResponse(string $body): array
@@ -196,6 +220,17 @@ final class OpusWorkerClient
                 'firstFrame' => $values['firstFrame'],
                 'adts' => substr($body, $adtsOffset),
             ];
+        }
+        if ($type === OpusWorkerProtocol::DROPPED) {
+            if (strlen($body) < 5) {
+                throw new UnexpectedValueException('Truncated DROPPED response');
+            }
+            $requestId = unpack('N', substr($body, 1, 4))[1];
+            if ($requestId < 1 || $this->pendingPackets < 1) {
+                throw new UnexpectedValueException('Invalid DROPPED response state');
+            }
+            --$this->pendingPackets;
+            return ['type' => 'dropped', 'requestId' => $requestId, 'message' => substr($body, 5)];
         }
         if ($type === OpusWorkerProtocol::ERROR) {
             if (strlen($body) < 5) {

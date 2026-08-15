@@ -13,8 +13,8 @@ use UnexpectedValueException;
  */
 final class OpusWorkerServer
 {
-    private const MAX_CONNECTION_BUFFER = 2097152*2;
-    private const MAX_OUTPUT_BUFFER = 2097152*2;
+    private const MAX_CONNECTION_BUFFER = 8388608;
+    private const MAX_OUTPUT_BUFFER = 8388608;
 
     private $server;
     private array $connections = [];
@@ -146,15 +146,32 @@ final class OpusWorkerServer
             $values = unpack('NrequestId/nsequence/Ntimestamp', substr($body, 1, 10));
             try {
                 $transcoder = $this->connections[$id]['transcoder'];
-                $adts = $transcoder->pushPacket(substr($body, 11));
+                $adts = $transcoder->pushPacketDroppable(substr($body, 11));
                 $firstFrame = $this->connections[$id]['frameIndex'];
                 $frameCount = $this->countAdtsFrames($adts);
                 $this->connections[$id]['frameIndex'] += $frameCount;
                 $this->queue($id, OpusWorkerProtocol::aac($values['requestId'], $firstFrame, $adts));
+            } catch (OpusDecodeException $e) {
+                $this->queue($id, OpusWorkerProtocol::dropped($values['requestId'], $e->getMessage()));
             } catch (Throwable $e) {
                 $this->queue($id, OpusWorkerProtocol::error($values['requestId'], $e->getMessage()));
                 $this->connections[$id]['finished'] = true;
             }
+            return;
+        }
+        if ($type === OpusWorkerProtocol::GAP) {
+            if (strlen($body) !== 9 || $this->connections[$id]['transcoder'] === null || $this->connections[$id]['finished']) {
+                throw new UnexpectedValueException('GAP before OPEN or after FINISH');
+            }
+            $values = unpack('NrequestId/NsampleCount', substr($body, 1, 8));
+            if ($values['requestId'] < 1 || $values['sampleCount'] < 1 || $values['sampleCount'] > OpusWorkerProtocol::MAX_GAP_SAMPLES) {
+                throw new UnexpectedValueException('Invalid GAP parameters');
+            }
+            $transcoder = $this->connections[$id]['transcoder'];
+            $adts = $transcoder->pushSilence($values['sampleCount']);
+            $firstFrame = $this->connections[$id]['frameIndex'];
+            $this->connections[$id]['frameIndex'] += $this->countAdtsFrames($adts);
+            $this->queue($id, OpusWorkerProtocol::aac($values['requestId'], $firstFrame, $adts));
             return;
         }
         if ($type === OpusWorkerProtocol::FINISH) {

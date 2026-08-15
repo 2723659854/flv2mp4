@@ -57,6 +57,31 @@ class OpusToAacTranscoder
         return $this->pushPacketTrimmed($packet, $sampleCount, 0, 0, 0);
     }
 
+    /** Worker 入口；仅 Opus 解析/解码阶段会抛出可丢帧的 OpusDecodeException。 */
+    public function pushPacketDroppable(string $packet, ?int $sampleCount = null): string
+    {
+        return $this->pushPacket($packet, $sampleCount);
+    }
+
+    public function pushSilence(int $sampleCount): string
+    {
+        if ($this->finished) {
+            throw new LogicException('Cannot push silence after finish');
+        }
+        if ($sampleCount < 1 || $sampleCount > OpusWorkerProtocol::MAX_GAP_SAMPLES) {
+            throw new InvalidArgumentException('Invalid silence sample count');
+        }
+
+        $output = '';
+        $remaining = $sampleCount;
+        while ($remaining > 0) {
+            $chunkSamples = min($remaining, AacLcEncoder::FRAME_SAMPLES);
+            $output .= $this->encoder->encodeFloat(array_fill(0, $chunkSamples * $this->channels, 0.0));
+            $remaining -= $chunkSamples;
+        }
+        return $output;
+    }
+
     public function finish(): string
     {
         if ($this->finished) {
@@ -93,7 +118,11 @@ class OpusToAacTranscoder
             throw new LogicException('Cannot push an Opus packet after finish');
         }
 
-        $pcm = $this->decoder->decodeFloat($packet);
+        try {
+            $pcm = $this->decoder->decodeFloat($packet);
+        } catch (\Throwable $e) {
+            throw new OpusDecodeException($e->getMessage(), 0, $e);
+        }
         $decodedSamples = $this->decoder->lastSampleCount();
         if ($sampleCount !== null && $sampleCount !== $decodedSamples) {
             throw new InvalidArgumentException("Opus packet sample count is {$decodedSamples}, expected {$sampleCount}");

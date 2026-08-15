@@ -5,6 +5,7 @@ namespace Xiaosongshu\Flv2mp4\Flv;
 use InvalidArgumentException;
 use RuntimeException;
 use UnexpectedValueException;
+use Xiaosongshu\Flv2mp4\Opus\OpusDecodeException;
 use Xiaosongshu\Flv2mp4\Opus\OpusPacketParser;
 use Xiaosongshu\Flv2mp4\Opus\OpusToAacTranscoder;
 use Xiaosongshu\Flv2mp4\Opus\OpusWorkerClient;
@@ -29,6 +30,8 @@ final class WebRtcFlvRelay
     private float $debugLastAudioAggregateAt = 0.0;
     private float $debugLastRecoveryReportAt = 0.0;
     private float $debugLastGapReportAt = 0.0;
+    private float $debugLastWorkerDropReportAt = 0.0;
+    private int $debugWorkerDroppedOpus = 0;
     private int $debugReceivedOpus = 0;
     private int $debugPushedOpus = 0;
     private int $debugGeneratedGapPackets = 0;
@@ -511,12 +514,16 @@ final class WebRtcFlvRelay
         if ($packet === '') {
             return;
         }
+        try {
+            $description = OpusPacketParser::parse($packet);
+        } catch (\InvalidArgumentException) {
+            return;
+        }
         // #region debug-point relay-audio-received
         ++$this->debugReceivedOpus; $now = microtime(true); if ($now - $this->debugLastAudioAggregateAt >= 5.0) { $this->debugLastAudioAggregateAt = $now; $event=json_encode(['sessionId'=>'webrtc-relay-disconnect','runId'=>'pipeline-aggregate','hypothesisId'=>'H4/H7','location'=>'WebRtcFlvRelay::pushOpus','msg'=>'relay audio aggregate','data'=>['streamId'=>$this->streamId,'receivedOpus'=>$this->debugReceivedOpus,'pushedOpus'=>$this->debugPushedOpus,'generatedGapPackets'=>$this->debugGeneratedGapPackets,'generatedGapSamples'=>$this->debugGeneratedGapSamples,'pendingGapSamples'=>$this->pendingOpusGapSamples],'ts'=>$now]);if($event!==false&&($debug=@stream_socket_client('tcp://127.0.0.1:7777',$errno,$error,0.001))){@stream_set_timeout($debug,0,1000);@fwrite($debug,"POST /event HTTP/1.1\r\nHost: 127.0.0.1:7777\r\nContent-Type: application/json\r\nContent-Length: ".strlen($event)."\r\nConnection: close\r\n\r\n".$event);@fclose($debug);} }
         // #endregion
         if ($this->audioArrivalOffsetMs === null) {
             $this->audioArrivalOffsetMs = $arrivalOffset;
-            $description = OpusPacketParser::parse($packet);
             $this->opusFormatPending = [
                 'toc' => $description['toc'],
                 'mode' => $description['mode'],
@@ -531,11 +538,8 @@ final class WebRtcFlvRelay
             if ($this->transcoder !== null) {
                 try {
                     $adts = $this->transcoder->pushPacket($packet);
-                } catch (\LogicException $e) {
-                    if (!$this->isUnsupportedDecoderException($e)) {
-                        throw $e;
-                    }
-                    $adts = $this->transcoder->pushSilence($this->opusPacketSamples($packet));
+                } catch (OpusDecodeException) {
+                    return;
                 }
                 $this->writeAacFrames($adts);
                 return;
@@ -601,12 +605,6 @@ final class WebRtcFlvRelay
         return $description['frameDurationSamples'] * $description['frameCount'];
     }
 
-    private function isUnsupportedDecoderException(\LogicException $e): bool
-    {
-        return str_contains($e->getMessage(), ' decoding is not implemented;')
-            || str_starts_with($e->getMessage(), 'Unsupported CELT packet:');
-    }
-
     private function pumpWorker(): void
     {
         if ($this->workerClient === null) {
@@ -635,10 +633,20 @@ final class WebRtcFlvRelay
 
     private function handleWorkerResponse(array $response, bool $allowClosed = false): void
     {
-        if ($response['type'] !== 'aac') {
+        if ($response['type'] === 'dropped') {
+            ++$this->debugWorkerDroppedOpus;
+            $now = microtime(true);
+            if ($now - $this->debugLastWorkerDropReportAt >= 5.0) {
+                $this->debugLastWorkerDropReportAt = $now;
+                // #region debug-point opus-worker-decode-drop
+                $event = json_encode(['sessionId' => 'opus-transcode-disconnect', 'runId' => 'post-fix', 'hypothesisId' => 'H1/H5', 'location' => 'WebRtcFlvRelay::handleWorkerResponse', 'msg' => 'worker dropped undecodable Opus aggregate', 'data' => ['streamId' => $this->streamId, 'requestId' => $response['requestId'], 'message' => $response['message'], 'droppedPackets' => $this->debugWorkerDroppedOpus, 'queue' => $this->workerClient?->queueState()], 'ts' => $now]); if ($event !== false && ($debug = @stream_socket_client('tcp://127.0.0.1:7777', $debugErrno, $debugError, 0.001))) { @stream_set_timeout($debug, 0, 1000); @fwrite($debug, "POST /event HTTP/1.1\r\nHost: 127.0.0.1:7777\r\nContent-Type: application/json\r\nContent-Length: " . strlen($event) . "\r\nConnection: close\r\n\r\n" . $event); @fclose($debug); }
+                // #endregion
+            }
             return;
         }
-        $this->writeAacFrames($response['adts'], $allowClosed);
+        if ($response['type'] === 'aac') {
+            $this->writeAacFrames($response['adts'], $allowClosed);
+        }
     }
 
     private function channels(): int

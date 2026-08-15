@@ -18,7 +18,11 @@ final class OpusWorkerProtocol
     public const ERROR = 4;
     public const FINISH = 5;
     public const FINISHED = 6;
+    public const GAP = 7;
+    public const DROPPED = 8;
     public const MAX_BODY_LENGTH = 1048576;
+    /** 单条 GAP 最多 10 秒，避免构造巨量 PCM 数组或协议消息。 */
+    public const MAX_GAP_SAMPLES = 480000;
 
     public static function frame(string $body): string
     {
@@ -63,6 +67,14 @@ final class OpusWorkerProtocol
         return self::frame(chr(self::PUSH) . pack('NnN', $requestId, $sequence, $timestamp) . $payload);
     }
 
+    public static function gap(int $requestId, int $sampleCount): string
+    {
+        if ($requestId < 1 || $sampleCount < 1 || $sampleCount > self::MAX_GAP_SAMPLES) {
+            throw new InvalidArgumentException('Invalid Opus worker GAP parameters');
+        }
+        return self::frame(chr(self::GAP) . pack('NN', $requestId, $sampleCount));
+    }
+
     public static function finish(): string
     {
         return self::frame(chr(self::FINISH));
@@ -77,6 +89,15 @@ final class OpusWorkerProtocol
     {
         $message = substr($message, 0, 4096);
         return self::frame(chr(self::ERROR) . pack('N', $requestId) . $message);
+    }
+
+    public static function dropped(int $requestId, string $message): string
+    {
+        if ($requestId < 1) {
+            throw new InvalidArgumentException('Invalid dropped Opus request id');
+        }
+        $message = substr($message, 0, 4096);
+        return self::frame(chr(self::DROPPED) . pack('N', $requestId) . $message);
     }
 
     public static function finished(): string

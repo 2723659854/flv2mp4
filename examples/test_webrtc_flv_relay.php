@@ -4,6 +4,8 @@ use Xiaosongshu\Flv2mp4\Aac\AacLcEncoder;
 use Xiaosongshu\Flv2mp4\Flv\FlvSinglePusher;
 use Xiaosongshu\Flv2mp4\Flv\WebRtcFlvRelay;
 use Xiaosongshu\Flv2mp4\Opus\OpusToAacTranscoder;
+use Xiaosongshu\Flv2mp4\Opus\OpusWorkerClient;
+use Xiaosongshu\Flv2mp4\Opus\OpusWorkerProtocol;
 
 require_once dirname(__DIR__) . '/vendor/autoload.php';
 
@@ -90,6 +92,58 @@ function assertTest(bool $condition, string $message): void
         throw new RuntimeException($message);
     }
 }
+
+$gapBuffer = OpusWorkerProtocol::gap(7, 960);
+$gapBodies = OpusWorkerProtocol::takeFrames($gapBuffer);
+assertTest($gapBuffer === '' && count($gapBodies) === 1, 'GAP protocol framing did not round-trip');
+assertTest(ord($gapBodies[0][0]) === OpusWorkerProtocol::GAP, 'GAP protocol type is invalid');
+$gapValues = unpack('NrequestId/NsampleCount', substr($gapBodies[0], 1));
+assertTest($gapValues['requestId'] === 7 && $gapValues['sampleCount'] === 960, 'GAP protocol values are invalid');
+
+$clientReflection = new ReflectionClass(OpusWorkerClient::class);
+$client = $clientReflection->newInstanceWithoutConstructor();
+$pendingProperty = $clientReflection->getProperty('pendingPackets');
+$pendingProperty->setValue($client, 1);
+$decodeResponse = $clientReflection->getMethod('decodeResponse');
+$droppedFrame = OpusWorkerProtocol::dropped(9, 'unsupported Hybrid frame');
+$droppedBodies = OpusWorkerProtocol::takeFrames($droppedFrame);
+$dropped = $decodeResponse->invoke($client, $droppedBodies[0]);
+assertTest($dropped['type'] === 'dropped' && $dropped['requestId'] === 9, 'DROPPED response was not decoded');
+assertTest($pendingProperty->getValue($client) === 0 && !$client->isFinished(), 'DROPPED response did not release pending state');
+$outputProperty = $clientReflection->getProperty('output');
+$outputProperty->setValue($client, str_repeat('x', 4194304 - 65550 + 1));
+assertTest(!$client->canAcceptPacket(), 'client accepted a packet without sufficient output byte headroom');
+$outputProperty->setValue($client, '');
+$pendingProperty->setValue($client, 1000);
+assertTest(!$client->canAcceptPacket(), 'client accepted a packet at the pending packet limit');
+
+$workerPort = random_int(20000, 40000);
+$worker = new OpusWorkerClient($workerPort);
+$worker->connect('worker-regression', 64000, 1);
+$hybridRequest = $worker->push(1, 0, "\x60");
+$workerResponses = [];
+$deadline = microtime(true) + 2.0;
+do {
+    $workerResponses = array_merge($workerResponses, $worker->pump());
+    if ($workerResponses === []) {
+        usleep(1000);
+    }
+} while ($workerResponses === [] && microtime(true) < $deadline);
+assertTest(($workerResponses[0]['type'] ?? null) === 'dropped' && $workerResponses[0]['requestId'] === $hybridRequest, 'Hybrid frame did not produce DROPPED');
+assertTest(!$worker->isFinished(), 'Hybrid frame terminated the Worker connection');
+$gapRequest = $worker->pushGap(960);
+$gapResponses = [];
+$deadline = microtime(true) + 2.0;
+do {
+    $gapResponses = array_merge($gapResponses, $worker->pump());
+    if ($gapResponses === []) {
+        usleep(1000);
+    }
+} while ($gapResponses === [] && microtime(true) < $deadline);
+assertTest(($gapResponses[0]['type'] ?? null) === 'aac' && $gapResponses[0]['requestId'] === $gapRequest, 'Worker GAP did not return AAC');
+$worker->finish();
+$worker->close();
+OpusWorkerClient::shutdownOwnedWorkers();
 
 $monoEncoder = new AacLcEncoder(64000, 1);
 assertTest($monoEncoder->getAudioSpecificConfig() === "\x11\x88", 'mono AAC ASC is invalid');
