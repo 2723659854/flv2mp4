@@ -404,8 +404,6 @@ class PurePhpHlsGenerator
                     $encoder->setQp($profile['qp'] ?? 26);
                     /** 将被缩放后的yuv重新编码为h264 */
                     $encodedNals = $encoder->encodeFrame($scaledYuv, $isKeyFrame);
-                    static $debugFrameCount2 = 0;
-                    $debugFrameCount2++;
                     $outputData = '';
                     $outputSpsPps = '';
                     foreach ($encodedNals as $nal) {
