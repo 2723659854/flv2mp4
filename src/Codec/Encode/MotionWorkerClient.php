@@ -130,13 +130,7 @@ final class MotionWorkerClient
     private function writeSocket(int $worker): void
     {
         $written = @fwrite($this->sockets[$worker], $this->outputs[$worker]);
-        if ($written === false || ($written === 0 && feof($this->sockets[$worker]))) {
-            // #region debug-point B:client-write-failure
-            $statuses = []; foreach ($this->processes as $process) if (is_resource($process)) $statuses[] = proc_get_status($process);
-            $this->debug('B', 'client-write-failure', ['worker' => $worker, 'pendingBytes' => strlen($this->outputs[$worker]), 'feof' => feof($this->sockets[$worker]), 'processes' => $statuses, 'memory' => memory_get_usage(true)]);
-            // #endregion
-            throw new RuntimeException('Failed writing motion worker');
-        }
+        if ($written === false || ($written === 0 && feof($this->sockets[$worker]))) throw new RuntimeException('Failed writing motion worker');
         if ($written > 0) $this->outputs[$worker] = substr($this->outputs[$worker], $written);
     }
 
@@ -146,10 +140,6 @@ final class MotionWorkerClient
         if ($data === false || ($data === '' && feof($this->sockets[$worker]))) throw new RuntimeException('Motion worker closed');
         $this->inputs[$worker] .= $data;
     }
-
-    // #region debug-point B:client-log
-    private function debug(string $hypothesis, string $message, array $data): void { $env = @parse_ini_file(dirname(__DIR__, 3).'/.dbg/motion-worker-write-failure.env'); $url = $env['DEBUG_SERVER_URL'] ?? ''; $session = $env['DEBUG_SESSION_ID'] ?? ''; if ($url === '' || $session === '') return; $payload = json_encode(['sessionId' => $session, 'runId' => 'post-fix', 'hypothesisId' => $hypothesis, 'location' => __FILE__, 'msg' => '[DEBUG] '.$message, 'data' => $data, 'ts' => (int)(microtime(true) * 1000)]); $context = stream_context_create(['http' => ['method' => 'POST', 'header' => 'Content-Type: application/json', 'content' => $payload, 'timeout' => 0.2]]); @file_get_contents($url, false, $context); }
-    // #endregion
 
     public function __destruct()
     {

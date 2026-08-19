@@ -52,9 +52,6 @@ final class MotionWorkerServer
                         if ($message[0] === MotionWorkerProtocol::LOAD_REFERENCE) {
                             [, $frameId, $width, $height, $aw, $ah, $refY, $refU, $refV] = $message;
                             $connections[$connectionId]['frames'] = [$frameId => [$width, $height, $aw, $ah, $refY, $refU, $refV]];
-                            // #region debug-point E:reference-cache-growth
-                            $frameCount = count($connections[$connectionId]['frames']); if ($frameCount === 1 || $frameCount % 10 === 0) $this->debug('E', 'reference-cache-growth', ['frames' => $frameCount, 'memory' => memory_get_usage(true), 'peak' => memory_get_peak_usage(true), 'frameBytes' => strlen($refY) + strlen($refU) + strlen($refV)]);
-                            // #endregion
                             continue;
                         }
                         [, $frameId, $request, $qp, $blocks] = $message;
@@ -65,9 +62,6 @@ final class MotionWorkerServer
                         foreach ($blocks as $index => $block) $result[$index] = $helper->prepare($block);
                         $connections[$connectionId]['output'] .= MotionWorkerProtocol::response($request, $result);
                     } catch (Throwable $exception) {
-                        // #region debug-point C:server-request-failure
-                        $this->debug('C', 'server-request-failure', ['request' => $request, 'class' => get_class($exception), 'message' => $exception->getMessage(), 'bodyBytes' => strlen($body), 'inputBytes' => strlen($connections[$connectionId]['input']), 'outputBytes' => strlen($connections[$connectionId]['output']), 'frames' => count($connections[$connectionId]['frames']), 'memory' => memory_get_usage(true)]);
-                        // #endregion
                         fwrite(STDERR, "Motion worker request {$request} failed: {$exception->getMessage()}\n");
                         $connections[$connectionId]['output'] .= MotionWorkerProtocol::error($request, $exception->getMessage());
                     }
@@ -86,10 +80,6 @@ final class MotionWorkerServer
             }
         }
     }
-
-    // #region debug-point C:server-log
-    private function debug(string $hypothesis, string $message, array $data): void { $env = @parse_ini_file(dirname(__DIR__, 3).'/.dbg/motion-worker-write-failure.env'); $url = $env['DEBUG_SERVER_URL'] ?? ''; $session = $env['DEBUG_SESSION_ID'] ?? ''; if ($url === '' || $session === '') return; $payload = json_encode(['sessionId' => $session, 'runId' => 'post-fix', 'hypothesisId' => $hypothesis, 'location' => __FILE__, 'msg' => '[DEBUG] '.$message, 'data' => $data, 'ts' => (int)(microtime(true) * 1000)]); $context = stream_context_create(['http' => ['method' => 'POST', 'header' => 'Content-Type: application/json', 'content' => $payload, 'timeout' => 0.2]]); @file_get_contents($url, false, $context); }
-    // #endregion
 }
 
 final class MotionWorkerHelper
