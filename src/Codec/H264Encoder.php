@@ -8,6 +8,7 @@ use Xiaosongshu\Flv2mp4\Codec\Encode\InterPredTrait;
 use Xiaosongshu\Flv2mp4\Codec\Encode\IntraPredTrait;
 use Xiaosongshu\Flv2mp4\Codec\Encode\MotionTrait;
 use Xiaosongshu\Flv2mp4\Codec\Encode\SliceEncodeTrait;
+use Xiaosongshu\Flv2mp4\Codec\Encode\MotionWorkerClient;
 use Xiaosongshu\Flv2mp4\Codec\Encode\SpsPpsTrait;
 use Xiaosongshu\Flv2mp4\Codec\Encode\TransformTrait;
 
@@ -474,5 +475,7 @@ class H264Encoder
     public $mvTopRow = [];
     public $picWidthInMbs = 0;
     public $lastMbWasSkip = false; // 上一个宏块是否为P_Skip
+    public $motionWorkerClient = null;
+    public array $motionWorkerResults = [];
 
 }

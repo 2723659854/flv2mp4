@@ -78,6 +78,9 @@ final class HlsDecoderWorkerServer
                 }
             }
         } catch (Throwable $e) {
+            // #region debug-point C:decoder-worker-error
+            $this->debug('C', 'decoder-worker-error', ['message' => $e->getMessage(), 'class' => get_class($e), 'memory' => memory_get_usage(true)]);
+            // #endregion
             @fclose($upstream);
             @fclose($downstream);
             throw $e;
@@ -86,6 +89,10 @@ final class HlsDecoderWorkerServer
             if (is_resource($downstream)) @fclose($downstream);
         }
     }
+
+    // #region debug-point C:decoder-worker-log
+    private function debug(string $hypothesis, string $message, array $data): void { $env = @parse_ini_file(dirname(__DIR__, 2).'/.dbg/pipeline-worker-disconnect.env'); $url = $env['DEBUG_SERVER_URL'] ?? ''; $session = $env['DEBUG_SESSION_ID'] ?? ''; if ($url === '' || $session === '') return; $payload = json_encode(['sessionId' => $session, 'runId' => 'pre-fix', 'hypothesisId' => $hypothesis, 'location' => __FILE__, 'msg' => '[DEBUG] '.$message, 'data' => $data, 'ts' => (int)(microtime(true) * 1000)]); $context = stream_context_create(['http' => ['method' => 'POST', 'header' => 'Content-Type: application/json', 'content' => $payload, 'timeout' => 0.1]]); @file_get_contents($url, false, $context); }
+    // #endregion
 
     private function transform(array $event): string
     {

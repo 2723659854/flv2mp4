@@ -55,6 +55,9 @@ final class HlsOutputWorkerServer
                 }
             }
         } catch (Throwable $e) {
+            // #region debug-point B:output-worker-error
+            $this->debug('B', 'output-worker-error', ['message' => $e->getMessage(), 'class' => get_class($e), 'sequence' => $expected, 'memory' => memory_get_usage(true)]);
+            // #endregion
             $errorFrame = HlsPipelineProtocol::frame(HlsPipelineProtocol::ERROR, $expected, ['message' => $e->getMessage()]);
             @stream_set_blocking($socket, true); @fwrite($socket, $errorFrame);
             throw $e;
@@ -62,4 +65,8 @@ final class HlsOutputWorkerServer
             @fclose($socket);
         }
     }
+
+    // #region debug-point B:output-worker-log
+    private function debug(string $hypothesis, string $message, array $data): void { $env = @parse_ini_file(dirname(__DIR__, 2).'/.dbg/pipeline-worker-disconnect.env'); $url = $env['DEBUG_SERVER_URL'] ?? ''; $session = $env['DEBUG_SESSION_ID'] ?? ''; if ($url === '' || $session === '') return; $payload = json_encode(['sessionId' => $session, 'runId' => 'pre-fix', 'hypothesisId' => $hypothesis, 'location' => __FILE__, 'msg' => '[DEBUG] '.$message, 'data' => $data, 'ts' => (int)(microtime(true) * 1000)]); $context = stream_context_create(['http' => ['method' => 'POST', 'header' => 'Content-Type: application/json', 'content' => $payload, 'timeout' => 0.1]]); @file_get_contents($url, false, $context); }
+    // #endregion
 }

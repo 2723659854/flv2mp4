@@ -136,6 +136,25 @@ trait SliceEncodeTrait
         $leftIntra4x4Mode = [-1, -1, -1, -1];
         $topIntra4x4Mode = array_fill(0, $mbWidth * 4, -1);
 
+        // 运动估计独立于宏块邻居状态，先批量提交，编码阶段仍严格按光栅顺序消费。
+        $this->motionWorkerResults = [];
+        if ($sliceType === 0 && $this->refYPlane !== null) {
+            try {
+                $client = $this->motionWorkerClient ??= new MotionWorkerClient();
+                $jobs = [];
+                for ($y = 0; $y < $mbHeight; $y++) {
+                    for ($x = 0; $x < $mbWidth; $x++) {
+                        $block = array_fill(0, 16, array_fill(0, 16, 0));
+                        for ($by = 0; $by < 16; $by++) for ($bx = 0; $bx < 16; $bx++) $block[$by][$bx] = ord($yPlane[($y * 16 + $by) * $this->mbAlignedWidth + $x * 16 + $bx]);
+                        $jobs[$y * $mbWidth + $x] = ['x' => $x, 'y' => $y, 'range' => 32, 'block' => $block];
+                    }
+                }
+                $this->motionWorkerResults = $client->batch($this->width, $this->height, $this->mbAlignedWidth, $this->mbAlignedHeight, $this->refYPlane, $jobs);
+            } catch (Throwable $e) {
+                throw new RuntimeException('运动估计 Worker 失败: ' . $e->getMessage(), 0, $e);
+            }
+        }
+
         // 重置MV缓存（mvTopRow保留上行的MV，mvLeftCol每行重置）
         $this->mvTopRow = [];
         $this->mvLeftCol = [null, null, null, null];

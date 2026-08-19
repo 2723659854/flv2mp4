@@ -1,5 +1,9 @@
 <?php
 
+// #region debug-point C:worker-shutdown
+register_shutdown_function(function (): void { $error = error_get_last(); if ($error === null) return; $env = @parse_ini_file(dirname(__DIR__).'/.dbg/pipeline-worker-disconnect.env'); $url = $env['DEBUG_SERVER_URL'] ?? ''; $session = $env['DEBUG_SESSION_ID'] ?? ''; if ($url === '' || $session === '') return; $payload = json_encode(['sessionId' => $session, 'runId' => 'pre-fix', 'hypothesisId' => 'C', 'location' => __FILE__, 'msg' => '[DEBUG] worker-shutdown-error', 'data' => ['error' => $error, 'memory' => memory_get_usage(true)], 'ts' => (int)(microtime(true) * 1000)]); $context = stream_context_create(['http' => ['method' => 'POST', 'header' => 'Content-Type: application/json', 'content' => $payload, 'timeout' => 0.2]]); @file_get_contents($url, false, $context); });
+// #endregion
+
 try {
     $options = getopt('', ['mode:', 'autoload:', 'port:', 'output-port:', 'profiles:', 'output:']);
     $mode = $options['mode'] ?? '';
