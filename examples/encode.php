@@ -48,6 +48,7 @@ $profiles = [
         'fps' => 24,
         'audioBitrate' => 48000, // 48 Kbps
         'qp' => 30,          // 保持 30 以确保稳定性
+        'motionWorkers' => 6,// 配置子进程数，用于开启多进程加速
     ],
 
 //    '180p' => [
