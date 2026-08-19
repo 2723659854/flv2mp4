@@ -24,6 +24,7 @@ final class HlsOutputWorkerServer
         $output = '';
         $expected = 0;
         $finished = false;
+        $lastSequence = -1;
         try {
             while (true) {
                 $read = $finished ? [] : [$socket];
@@ -39,6 +40,7 @@ final class HlsOutputWorkerServer
                 }
                 foreach (HlsPipelineProtocol::take($input, 1) as $event) {
                     if ($event['sequence'] !== $expected) throw new RuntimeException("媒体事件 sequence 不连续，期望 {$expected}，实际 {$event['sequence']}");
+                    $lastSequence = $event['sequence'];
                     $expected++;
                     if ($event['type'] === HlsPipelineProtocol::END) {
                         $generator->finishPipelineOutput(count($this->profiles) > 1);
@@ -55,7 +57,8 @@ final class HlsOutputWorkerServer
                 }
             }
         } catch (Throwable $e) {
-            $errorFrame = HlsPipelineProtocol::frame(HlsPipelineProtocol::ERROR, $expected, ['message' => $e->getMessage()]);
+            fwrite(STDERR, "Profile output worker failed at sequence {$lastSequence}: {$e->getMessage()}\n");
+            $errorFrame = HlsPipelineProtocol::frame(HlsPipelineProtocol::ERROR, $expected, ['message' => $e->getMessage(), 'sequence' => $lastSequence, 'expected' => $expected, 'profile' => array_key_first($this->profiles)]);
             @stream_set_blocking($socket, true); @fwrite($socket, $errorFrame);
             throw $e;
         } finally {

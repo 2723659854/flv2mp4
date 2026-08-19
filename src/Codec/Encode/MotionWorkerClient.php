@@ -10,17 +10,14 @@ final class MotionWorkerClient
     private array $outputs = [];
     private array $processes = [];
     private array $references = [];
+    private array $workerPorts = [];
     private int $id = 1;
 
     public function __construct(private int $port = 0, private int $workers = 0)
     {
         $this->workers = $workers > 0 ? $workers : max(1, min(4, (int)(getenv('NUMBER_OF_PROCESSORS') ?: 2)));
-        if ($this->port === 0) {
-            $server = @stream_socket_server('tcp://127.0.0.1:0', $errno, $error);
-            if ($server === false) throw new RuntimeException("Unable to reserve motion worker ports: {$error} ({$errno})");
-            $name = stream_socket_get_name($server, false);
-            fclose($server);
-            $this->port = (int)substr(strrchr($name, ':'), 1);
+        if ($this->port !== 0) {
+            for ($worker = 0; $worker < $this->workers; $worker++) $this->workerPorts[$worker] = $this->port + $worker;
         }
     }
 
@@ -77,12 +74,27 @@ final class MotionWorkerClient
         return $result;
     }
 
+    private function allocatePort(): int
+    {
+        $server = @stream_socket_server('tcp://127.0.0.1:0', $errno, $error);
+        if ($server === false) throw new RuntimeException("Unable to reserve motion worker port: {$error} ({$errno})");
+        $name = stream_socket_get_name($server, false);
+        fclose($server);
+        return (int)substr(strrchr($name, ':'), 1);
+    }
+
     private function connectAll(): void
     {
         for ($worker = 0; $worker < $this->workers; $worker++) {
             if (isset($this->sockets[$worker]) && is_resource($this->sockets[$worker])) continue;
-            $port = $this->port + $worker;
-            $socket = @stream_socket_client("tcp://127.0.0.1:{$port}", $errno, $error, 0.1);
+            $lock = null;
+            if (!isset($this->workerPorts[$worker])) {
+                $lock = fopen(sys_get_temp_dir() . '/flv2mp4-motion-worker-port.lock', 'c');
+                if ($lock === false || !flock($lock, LOCK_EX)) throw new RuntimeException('Unable to lock motion worker port allocation');
+                $this->workerPorts[$worker] = $this->allocatePort();
+            }
+            $port = $this->workerPorts[$worker];
+            $socket = $this->port === 0 ? false : @stream_socket_client("tcp://127.0.0.1:{$port}", $errno, $error, 0.1);
             if ($socket === false) {
                 $entry = dirname(__DIR__, 3) . '/bin/motion-worker.php';
                 $autoload = dirname((new \ReflectionClass(\Composer\Autoload\ClassLoader::class))->getFileName(), 2) . '/autoload.php';
@@ -96,7 +108,11 @@ final class MotionWorkerClient
                     $socket = @stream_socket_client("tcp://127.0.0.1:{$port}", $errno, $error, 0.1);
                 } while ($socket === false && microtime(true) < $end);
             }
-            if ($socket === false) throw new RuntimeException("Unable to connect motion worker {$port}: {$error} ({$errno})");
+            if ($socket === false) {
+                if (is_resource($lock)) { flock($lock, LOCK_UN); fclose($lock); }
+                throw new RuntimeException("Unable to connect motion worker {$port}: {$error} ({$errno})");
+            }
+            if (is_resource($lock)) { flock($lock, LOCK_UN); fclose($lock); }
             stream_set_blocking($socket, false);
             $this->sockets[$worker] = $socket;
             $this->inputs[$worker] = '';

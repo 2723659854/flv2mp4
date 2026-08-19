@@ -164,6 +164,13 @@ final class HlsScaleWorkerServer
     private function writeAll($socket, string $data): void
     {
         stream_set_blocking($socket, true); $offset = 0;
-        while ($offset < strlen($data)) { $n = @fwrite($socket, substr($data, $offset)); if ($n === false || $n === 0) throw new RuntimeException('无法发送缩放进程响应'); $offset += $n; }
+        while ($offset < strlen($data)) {
+            $n = @fwrite($socket, substr($data, $offset));
+            if ($n === false || $n === 0) {
+                fwrite(STDERR, "Scale worker response connection closed; pending bytes=" . (strlen($data) - $offset) . "\n");
+                throw new RuntimeException('无法发送缩放进程响应');
+            }
+            $offset += $n;
+        }
     }
 }
