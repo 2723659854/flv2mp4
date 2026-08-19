@@ -8,6 +8,91 @@ namespace Xiaosongshu\Flv2mp4\Codec\Encode;
  */
 trait InterPredTrait
 {
+    public function preparePMacroblock(
+        int $mbX,
+        int $mbY,
+        string $luma,
+        string $refYPlane,
+        string $refUPlane,
+        string $refVPlane,
+        int $motionRange = 32
+    ): array {
+        $lumaPixels = array_fill(0, 16, array_fill(0, 16, 0));
+        for ($y = 0; $y < 16; $y++) {
+            for ($x = 0; $x < 16; $x++) {
+                $lumaPixels[$y][$x] = ord($luma[$y * 16 + $x]);
+            }
+        }
+
+        [$mvX, $mvY, $sad] = $this->motionEstimate16x16($lumaPixels, $refYPlane, $mbX, $mbY, $motionRange);
+        $refX = $mbX * 64 + $mvX;
+        $refY = $mbY * 64 + $mvY;
+        $predBlock = $this->mcLumaBlock($refYPlane, $refX, $refY, $this->mbAlignedWidth, $this->mbAlignedHeight);
+        $nzCache = array_fill(0, 24, 0);
+        $cbpLuma = 0;
+        $quantResidual = [];
+
+        for ($by = 0; $by < 4; $by++) {
+            for ($bx = 0; $bx < 4; $bx++) {
+                $blkIdx = $by * 4 + $bx;
+                $blk4x4 = array_fill(0, 4, array_fill(0, 4, 0));
+                for ($y = 0; $y < 4; $y++) {
+                    for ($x = 0; $x < 4; $x++) {
+                        $blk4x4[$y][$x] = $lumaPixels[$by * 4 + $y][$bx * 4 + $x] - $predBlock[$by * 4 + $y][$bx * 4 + $x];
+                    }
+                }
+                $quantBlock = $this->quantize($this->dct($blk4x4), 0, true);
+                $nz = 0;
+                $quantResidual[$blkIdx] = array_fill(0, 16, 0);
+                for ($y = 0; $y < 4; $y++) {
+                    for ($x = 0; $x < 4; $x++) {
+                        $value = $quantBlock[$y][$x];
+                        $quantResidual[$blkIdx][$y * 4 + $x] = $value;
+                        if ($value != 0) $nz++;
+                    }
+                }
+                $nzCache[$blkIdx] = min(15, $nz);
+                if ($nz > 0) $cbpLuma |= 1 << (intdiv($by, 2) * 2 + intdiv($bx, 2));
+            }
+        }
+        for ($blkIdx = 0; $blkIdx < 16; $blkIdx++) {
+            $block8x8Idx = intdiv(intdiv($blkIdx, 4), 2) * 2 + intdiv($blkIdx % 4, 2);
+            if (!($cbpLuma & (1 << $block8x8Idx))) $nzCache[$blkIdx] = 0;
+        }
+
+        $reconY = str_repeat("\0", 256);
+        for ($by = 0; $by < 4; $by++) {
+            for ($bx = 0; $bx < 4; $bx++) {
+                $blkIdx = $by * 4 + $bx;
+                $block8x8Idx = intdiv($by, 2) * 2 + intdiv($bx, 2);
+                $idctResult = null;
+                if ($cbpLuma & (1 << $block8x8Idx)) {
+                    $acDequant = $this->dequantize4x4($quantResidual[$blkIdx], 0, $this->qp);
+                    $acBlock = array_fill(0, 4, array_fill(0, 4, 0));
+                    for ($y = 0; $y < 4; $y++) for ($x = 0; $x < 4; $x++) $acBlock[$y][$x] = $acDequant[$y * 4 + $x];
+                    $idctResult = $this->idct4x4($acBlock);
+                }
+                for ($y = 0; $y < 4; $y++) {
+                    for ($x = 0; $x < 4; $x++) {
+                        $value = $predBlock[$by * 4 + $y][$bx * 4 + $x] + ($idctResult[$y][$x] ?? 0);
+                        $reconY[($by * 4 + $y) * 16 + $bx * 4 + $x] = chr(max(0, min(255, $value)));
+                    }
+                }
+            }
+        }
+
+        $chromaW = intdiv($this->mbAlignedWidth, 2);
+        $chromaH = intdiv($this->mbAlignedHeight, 2);
+        $chromaRefX = $mbX * 64 + $mvX;
+        $chromaRefY = $mbY * 64 + $mvY;
+        $cbPred = $this->mcChromaBlock($refUPlane, $chromaRefX, $chromaRefY, $chromaW, $chromaH);
+        $crPred = $this->mcChromaBlock($refVPlane, $chromaRefX, $chromaRefY, $chromaW, $chromaH);
+        $reconU = $reconV = '';
+        for ($y = 0; $y < 8; $y++) for ($x = 0; $x < 8; $x++) { $reconU .= chr($cbPred[$y][$x]); $reconV .= chr($crPred[$y][$x]); }
+
+        return [$mvX, $mvY, $sad, $cbpLuma, $nzCache, $quantResidual, $reconY, $reconU, $reconV];
+    }
+
     /**
      * 编码P帧宏块（P_16x16模式）
      * 包含运动估计、MVP预测、MVD编码、残差编码
@@ -30,82 +115,12 @@ trait InterPredTrait
     ): string {
         $bits = '';
 
-        // 提取当前宏块像素
-        $lumaPixels = array_fill(0, 16, array_fill(0, 16, 128));
+        $prepared = $this->motionWorkerResults[$mbY * $this->picWidthInMbs + $mbX] ?? null;
+        if ($prepared === null) {
+            throw new \RuntimeException("缺少 P 宏块 Worker 结果 ({$mbX},{$mbY})");
+        }
+        [$mvX, $mvY, $sad, $cbpLuma, $nzCache, $quantResidual, $workerReconY, $workerReconU, $workerReconV] = $prepared;
         $reconStride = $this->mbAlignedWidth;
-        for ($y = 0; $y < 16; $y++) {
-            $py = $mbY * 16 + $y;
-            for ($x = 0; $x < 16; $x++) {
-                $px = $mbX * 16 + $x;
-                $idx = $py * $reconStride + $px;
-                $lumaPixels[$y][$x] = ord($yPlane[$idx]);
-            }
-        }
-
-        // 运动估计（返回1/4像素单位的MV）
-        // 预取结果仅替换估计阶段，宏块仍按原光栅顺序完成编码。
-        $motion = $this->motionWorkerResults[$mbY * $this->picWidthInMbs + $mbX] ?? null;
-        list($mvX, $mvY, $sad) = $motion ?? $this->motionEstimate16x16($lumaPixels, $refYPlane, $mbX, $mbY, 32);
-
-        // 亮度MC预测（1/4像素精度）
-        $refX = $mbX * 64 + $mvX;
-        $refY = $mbY * 64 + $mvY;
-        $predBlock = $this->mcLumaBlock($refYPlane, $refX, $refY, $this->mbAlignedWidth, $this->mbAlignedHeight);
-
-        // 计算残差
-        $residual = array_fill(0, 16, array_fill(0, 16, 0));
-        for ($y = 0; $y < 16; $y++) {
-            for ($x = 0; $x < 16; $x++) {
-                $residual[$y][$x] = $lumaPixels[$y][$x] - $predBlock[$y][$x];
-            }
-        }
-
-        // DCT和量化
-        $nzCache = array_fill(0, 24, 0);
-        $cbpLuma = 0;
-        $quantResidual = [];
-
-        for ($by = 0; $by < 4; $by++) {
-            for ($bx = 0; $bx < 4; $bx++) {
-                $blkIdx = $by * 4 + $bx;
-                $blk4x4 = array_fill(0, 4, array_fill(0, 4, 0));
-
-                for ($y = 0; $y < 4; $y++) {
-                    for ($x = 0; $x < 4; $x++) {
-                        $blk4x4[$y][$x] = $residual[$by * 4 + $y][$bx * 4 + $x];
-                    }
-                }
-
-                $dctBlock = $this->dct($blk4x4);
-                $quantBlock = $this->quantize($dctBlock, 0, true);
-
-                $nz = 0;
-                $quantResidual[$blkIdx] = array_fill(0, 16, 0);
-                for ($y = 0; $y < 4; $y++) {
-                    for ($x = 0; $x < 4; $x++) {
-                        $quantResidual[$blkIdx][$y * 4 + $x] = $quantBlock[$y][$x];
-                        if ($quantBlock[$y][$x] != 0) $nz++;
-                    }
-                }
-
-                $nzCache[$blkIdx] = min(15, $nz);
-                // cbpLuma: 4位，每个位对应一个8x8块
-                $subY = intdiv($blkIdx, 4);
-                $subX = $blkIdx % 4;
-                $block8x8Idx = intdiv($subY, 2) * 2 + intdiv($subX, 2);
-                if ($nz > 0) $cbpLuma |= (1 << $block8x8Idx);
-            }
-        }
-
-        // 对于未编码的8x8块，nzCache必须置0（与解码器一致）
-        for ($blkIdx = 0; $blkIdx < 16; $blkIdx++) {
-            $subY = intdiv($blkIdx, 4);
-            $subX = $blkIdx % 4;
-            $block8x8Idx = intdiv($subY, 2) * 2 + intdiv($subX, 2);
-            if (!($cbpLuma & (1 << $block8x8Idx))) {
-                $nzCache[$blkIdx] = 0;
-            }
-        }
 
         // === 计算P_Skip的MVP（与解码器predictMvPSkip一致） ===
         // P_Skip的MV = skipMVP，解码器用此MV做MC
@@ -135,30 +150,14 @@ trait InterPredTrait
             // 保存MV供后续宏块预测（MV=skipMVP, refIdx=0）
             $this->saveMv16x16($mbX, $skipMvpX, $skipMvpY, 0);
 
-            // P_Skip亮度重建: MC预测在MV=skipMVP位置（=实际MV，predBlock已正确）
-            // 使用mbAlignedWidth作为步长（与I帧重建存储格式一致）
             for ($y = 0; $y < 16; $y++) {
-                for ($x = 0; $x < 16; $x++) {
-                    $py = $mbY * 16 + $y;
-                    $px = $mbX * 16 + $x;
-                    $this->reconYPlane[$py * $reconStride + $px] = chr(max(0, min(255, $predBlock[$y][$x])));
-                }
+                $offset = ($mbY * 16 + $y) * $reconStride + $mbX * 16;
+                $this->reconYPlane = substr_replace($this->reconYPlane, substr($workerReconY, $y * 16, 16), $offset, 16);
             }
-
-            // P_Skip色度重建: 使用与解码器一致的1/8像素双线性插值MC
-            // 亮度MV（1/4像素单位）直接作为色度MV（1/8像素单位），无需移位
-            $chromaRefX = $mbX * 64 + $skipMvpX;
-            $chromaRefY = $mbY * 64 + $skipMvpY;
-            $cbPred = $this->mcChromaBlock($this->refUPlane, $chromaRefX, $chromaRefY, $chromaW, $chromaH);
-            $crPred = $this->mcChromaBlock($this->refVPlane, $chromaRefX, $chromaRefY, $chromaW, $chromaH);
             for ($y = 0; $y < 8; $y++) {
-                for ($x = 0; $x < 8; $x++) {
-                    $py = $mbY * 8 + $y;
-                    $px = $mbX * 8 + $x;
-                    $idx = $py * $chromaW + $px;
-                    $this->reconUPlane[$idx] = chr($cbPred[$y][$x]);
-                    $this->reconVPlane[$idx] = chr($crPred[$y][$x]);
-                }
+                $offset = ($mbY * 8 + $y) * $chromaW + $mbX * 8;
+                $this->reconUPlane = substr_replace($this->reconUPlane, substr($workerReconU, $y * 8, 8), $offset, 8);
+                $this->reconVPlane = substr_replace($this->reconVPlane, substr($workerReconV, $y * 8, 8), $offset, 8);
             }
 
             return '';
@@ -236,58 +235,14 @@ trait InterPredTrait
         // 保存当前MV供后续宏块预测（与解码器saveMvForPrediction一致）
         $this->saveMv16x16($mbX, $mvX, $mvY, $refIdx);
 
-        // === P帧亮度本地解码重建 ===
-        // 使用mbAlignedWidth作为步长（与I帧重建存储格式一致）
-        for ($by = 0; $by < 4; $by++) {
-            for ($bx = 0; $bx < 4; $bx++) {
-                $blkIdx = $by * 4 + $bx;
-                $block8x8Idx = intdiv($by, 2) * 2 + intdiv($bx, 2);
-
-                if ($cbpLuma & (1 << $block8x8Idx)) {
-                    // 有残差: 反量化 + IDCT + 加到MC预测
-                    $acDequant = $this->dequantize4x4($quantResidual[$blkIdx], 0, $this->qp);
-                    $acBlock = array_fill(0, 4, array_fill(0, 4, 0));
-                    for ($y = 0; $y < 4; $y++) for ($x = 0; $x < 4; $x++) $acBlock[$y][$x] = $acDequant[$y * 4 + $x];
-                    $idctResult = $this->idct4x4($acBlock);
-
-                    for ($y = 0; $y < 4; $y++) {
-                        for ($x = 0; $x < 4; $x++) {
-                            $py = $mbY * 16 + $by * 4 + $y;
-                            $px = $mbX * 16 + $bx * 4 + $x;
-                            $val = $predBlock[$by * 4 + $y][$bx * 4 + $x] + $idctResult[$y][$x];
-                            $val = max(0, min(255, $val));
-                            $this->reconYPlane[$py * $reconStride + $px] = chr($val);
-                        }
-                    }
-                } else {
-                    // 无残差: 直接使用MC预测
-                    for ($y = 0; $y < 4; $y++) {
-                        for ($x = 0; $x < 4; $x++) {
-                            $py = $mbY * 16 + $by * 4 + $y;
-                            $px = $mbX * 16 + $bx * 4 + $x;
-                            $val = max(0, min(255, $predBlock[$by * 4 + $y][$bx * 4 + $x]));
-                            $this->reconYPlane[$py * $reconStride + $px] = chr($val);
-                        }
-                    }
-                }
-            }
+        for ($y = 0; $y < 16; $y++) {
+            $offset = ($mbY * 16 + $y) * $reconStride + $mbX * 16;
+            $this->reconYPlane = substr_replace($this->reconYPlane, substr($workerReconY, $y * 16, 16), $offset, 16);
         }
-
-        // === P帧色度本地解码重建 ===
-        // P帧cbpChroma=0, 解码器直接做色度MC(无残差)
-        // 亮度MV（1/4像素单位）直接作为色度MV（1/8像素单位），无需移位
-        $chromaRefX = $mbX * 64 + $mvX;
-        $chromaRefY = $mbY * 64 + $mvY;
-        $cbPred = $this->mcChromaBlock($this->refUPlane, $chromaRefX, $chromaRefY, $chromaW, $chromaH);
-        $crPred = $this->mcChromaBlock($this->refVPlane, $chromaRefX, $chromaRefY, $chromaW, $chromaH);
         for ($y = 0; $y < 8; $y++) {
-            for ($x = 0; $x < 8; $x++) {
-                $py = $mbY * 8 + $y;
-                $px = $mbX * 8 + $x;
-                $idx = $py * $chromaW + $px;
-                $this->reconUPlane[$idx] = chr($cbPred[$y][$x]);
-                $this->reconVPlane[$idx] = chr($crPred[$y][$x]);
-            }
+            $offset = ($mbY * 8 + $y) * $chromaW + $mbX * 8;
+            $this->reconUPlane = substr_replace($this->reconUPlane, substr($workerReconU, $y * 8, 8), $offset, 8);
+            $this->reconVPlane = substr_replace($this->reconVPlane, substr($workerReconV, $y * 8, 8), $offset, 8);
         }
 
         return $bits;

@@ -144,12 +144,12 @@ trait SliceEncodeTrait
                 $jobs = [];
                 for ($y = 0; $y < $mbHeight; $y++) {
                     for ($x = 0; $x < $mbWidth; $x++) {
-                        $block = array_fill(0, 16, array_fill(0, 16, 0));
-                        for ($by = 0; $by < 16; $by++) for ($bx = 0; $bx < 16; $bx++) $block[$by][$bx] = ord($yPlane[($y * 16 + $by) * $this->mbAlignedWidth + $x * 16 + $bx]);
-                        $jobs[$y * $mbWidth + $x] = ['x' => $x, 'y' => $y, 'range' => 32, 'block' => $block];
+                        $block = '';
+                        for ($by = 0; $by < 16; $by++) $block .= substr($yPlane, ($y * 16 + $by) * $this->mbAlignedWidth + $x * 16, 16);
+                        $jobs[$y * $mbWidth + $x] = [$x, $y, $block, 32];
                     }
                 }
-                $this->motionWorkerResults = $client->batch($this->width, $this->height, $this->mbAlignedWidth, $this->mbAlignedHeight, $this->refYPlane, $jobs);
+                $this->motionWorkerResults = $client->batch($this->width, $this->height, $this->mbAlignedWidth, $this->mbAlignedHeight, $this->qp, $this->refYPlane, $this->refUPlane, $this->refVPlane, $jobs);
             } catch (Throwable $e) {
                 throw new RuntimeException('运动估计 Worker 失败: ' . $e->getMessage(), 0, $e);
             }
