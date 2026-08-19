@@ -1,7 +1,7 @@
 <?php
 
 try {
-    $options = getopt('', ['mode:', 'autoload:', 'port:', 'output-port:', 'profiles:', 'output:']);
+    $options = getopt('', ['mode:', 'autoload:', 'port:', 'output-port:', 'output-ports:', 'profiles:', 'output:']);
     $mode = $options['mode'] ?? '';
     if (empty($options['autoload']) || empty($options['port']) || empty($options['profiles'])) {
         throw new RuntimeException('HLS worker 参数不完整');
@@ -17,6 +17,15 @@ try {
         (new \Xiaosongshu\Flv2mp4\Recode\HlsDecoderWorkerServer($profiles))->run(
             'tcp://127.0.0.1:' . (int)$options['port'],
             'tcp://127.0.0.1:' . (int)$options['output-port']
+        );
+    } elseif ($mode === 'scale') {
+        if (!isset($options['output'], $options['output-ports'])) throw new RuntimeException('缩放 worker 参数不完整');
+        $outputPorts = json_decode(base64_decode($options['output-ports'], true), true, 32, JSON_THROW_ON_ERROR);
+        $outputAddresses = [];
+        foreach ($outputPorts as $name => $port) $outputAddresses[$name] = 'tcp://127.0.0.1:' . (int)$port;
+        (new \Xiaosongshu\Flv2mp4\Recode\HlsScaleWorkerServer($profiles, $options['output']))->run(
+            'tcp://127.0.0.1:' . (int)$options['port'],
+            $outputAddresses
         );
     } elseif ($mode === 'output') {
         if (!isset($options['output'])) throw new RuntimeException('输出 worker 缺少 output');

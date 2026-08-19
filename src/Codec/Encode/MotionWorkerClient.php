@@ -2,16 +2,146 @@
 namespace Xiaosongshu\Flv2mp4\Codec\Encode;
 
 use RuntimeException;
+
 final class MotionWorkerClient
 {
-    private array $sockets=[]; private array $inputs=[]; private array $outputs=[]; private array $processes=[]; private int $id=1;
-    public function __construct(private int $port=8340, private int $workers=0){$this->workers=$workers>0?$workers:max(1,min(4,(int)(getenv('NUMBER_OF_PROCESSORS')?:2)));}
-    public function batch(int $width,int $height,int $aw,int $ah,int $qp,string $refY,string $refU,string $refV,array $blocks): array {
-        $this->connectAll();$chunks=array_fill(0,$this->workers,[]);foreach($blocks as $k=>$v)$chunks[$k%$this->workers][$k]=$v;$ids=[];
-        foreach($chunks as $i=>$chunk){if(!$chunk)continue;$id=$this->id++;$ids[$i]=$id;$this->outputs[$i].=MotionWorkerProtocol::batch($id,$width,$height,$aw,$ah,$qp,$refY,$refU,$refV,$chunk);}
-        $result=[];$deadline=microtime(true)+30;while(count($result)<count($blocks)&&microtime(true)<$deadline){foreach($ids as $i=>$id){$this->pump($i);foreach(MotionWorkerProtocol::takeFrames($this->inputs[$i],16) as $body){[$rid,$ok,$part]=unserialize($body,['allowed_classes'=>false]);if($rid!==$id)throw new RuntimeException("Unexpected motion worker response {$rid}");if(!$ok)throw new RuntimeException('Motion worker failed: '.$part);foreach($part as $k=>$v)$result[$k]=$v;unset($ids[$i]);}}if(count($result)<count($blocks))usleep(1000);}if(count($result)!==count($blocks))throw new RuntimeException('Timed out motion worker batch');ksort($result);return $result;
+    private array $sockets = [];
+    private array $inputs = [];
+    private array $outputs = [];
+    private array $processes = [];
+    private array $references = [];
+    private int $id = 1;
+
+    public function __construct(private int $port = 0, private int $workers = 0)
+    {
+        $this->workers = $workers > 0 ? $workers : max(1, min(4, (int)(getenv('NUMBER_OF_PROCESSORS') ?: 2)));
+        if ($this->port === 0) {
+            $server = @stream_socket_server('tcp://127.0.0.1:0', $errno, $error);
+            if ($server === false) throw new RuntimeException("Unable to reserve motion worker ports: {$error} ({$errno})");
+            $name = stream_socket_get_name($server, false);
+            fclose($server);
+            $this->port = (int)substr(strrchr($name, ':'), 1);
+        }
     }
-    private function connectAll(): void {for($i=0;$i<$this->workers;$i++){if(isset($this->sockets[$i])&&is_resource($this->sockets[$i]))continue;$port=$this->port+$i;$socket=@stream_socket_client("tcp://127.0.0.1:{$port}",$e,$m,.1);if($socket===false){$entry=dirname(__DIR__,3).'/bin/motion-worker.php';$autoload=dirname((new \ReflectionClass(\Composer\Autoload\ClassLoader::class))->getFileName(),2).'/autoload.php';$d=[fopen('php://stdin','r'),fopen('php://stdout','a'),fopen('php://stderr','a')];$p=@proc_open([PHP_BINARY,$entry,'--owned',"--port={$port}","--autoload={$autoload}"],$d,$pipes,null,null,['bypass_shell'=>true]);if(!is_resource($p))throw new RuntimeException('Unable to start motion worker');$this->processes[]=$p;$end=microtime(true)+2;do{usleep(20000);$socket=@stream_socket_client("tcp://127.0.0.1:{$port}",$e,$m,.1);}while($socket===false&&microtime(true)<$end);}if($socket===false)throw new RuntimeException("Unable to connect motion worker {$port}");stream_set_blocking($socket,false);$this->sockets[$i]=$socket;$this->inputs[$i]='';$this->outputs[$i]='';}}
-    private function pump(int $i): void {$s=$this->sockets[$i];if($this->outputs[$i]!==''){$n=@fwrite($s,$this->outputs[$i]);if($n===false)throw new RuntimeException('Failed writing motion worker');if($n)$this->outputs[$i]=substr($this->outputs[$i],$n);}while(($d=@fread($s,65536))!==false&&$d!=='')$this->inputs[$i].=$d;if(feof($s))throw new RuntimeException('Motion worker closed');}
-    public function __destruct(){foreach($this->sockets as $s)if(is_resource($s))@fclose($s);foreach($this->processes as $p){if(is_resource($p)){if((proc_get_status($p)['running']??false))@proc_terminate($p);@proc_close($p);}}}
+
+    public function batch(int $width, int $height, int $aw, int $ah, int $qp, string $refY, string $refU, string $refV, array $blocks): array
+    {
+        $this->connectAll();
+        $frameId = MotionWorkerProtocol::referenceId($width, $height, $aw, $ah, $refY, $refU, $refV);
+        $chunks = array_fill(0, $this->workers, []);
+        foreach ($blocks as $key => $block) $chunks[$key % $this->workers][$key] = $block;
+        $ids = [];
+        foreach ($chunks as $worker => $chunk) {
+            if ($chunk === []) continue;
+            $id = $this->id++;
+            $ids[$worker] = $id;
+            $frameKey = bin2hex($frameId);
+            if (($this->references[$worker] ?? null) !== $frameKey) {
+                $this->outputs[$worker] .= MotionWorkerProtocol::loadReference($frameId, $width, $height, $aw, $ah, $refY, $refU, $refV);
+                $this->references[$worker] = $frameKey;
+            }
+            $this->outputs[$worker] .= MotionWorkerProtocol::batch($id, $frameId, $qp, $chunk);
+        }
+
+        $result = [];
+        $deadline = microtime(true) + 30;
+        while ($ids !== []) {
+            $remaining = $deadline - microtime(true);
+            if ($remaining <= 0) throw new RuntimeException('Timed out motion worker batch');
+            $read = [];
+            $write = [];
+            foreach (array_keys($ids) as $worker) {
+                $read[] = $this->sockets[$worker];
+                if ($this->outputs[$worker] !== '') $write[] = $this->sockets[$worker];
+            }
+            $except = null;
+            $seconds = (int)$remaining;
+            $microseconds = (int)(($remaining - $seconds) * 1000000);
+            $ready = @stream_select($read, $write, $except, $seconds, $microseconds);
+            if ($ready === false) throw new RuntimeException('Failed waiting for motion worker');
+            foreach ($write as $socket) $this->writeSocket($this->workerFor($socket));
+            foreach ($read as $socket) {
+                $worker = $this->workerFor($socket);
+                $this->readSocket($worker);
+                foreach (MotionWorkerProtocol::takeFrames($this->inputs[$worker], 16) as $body) {
+                    [$responseId, $ok, $part] = MotionWorkerProtocol::decodeResponse($body);
+                    if ($responseId !== $ids[$worker]) throw new RuntimeException("Unexpected motion worker response {$responseId}");
+                    if (!$ok) throw new RuntimeException('Motion worker failed: ' . $part);
+                    foreach ($part as $key => $value) $result[$key] = $value;
+                    unset($ids[$worker]);
+                }
+            }
+        }
+        if (count($result) !== count($blocks)) throw new RuntimeException('Incomplete motion worker batch');
+        ksort($result);
+        return $result;
+    }
+
+    private function connectAll(): void
+    {
+        for ($worker = 0; $worker < $this->workers; $worker++) {
+            if (isset($this->sockets[$worker]) && is_resource($this->sockets[$worker])) continue;
+            $port = $this->port + $worker;
+            $socket = @stream_socket_client("tcp://127.0.0.1:{$port}", $errno, $error, 0.1);
+            if ($socket === false) {
+                $entry = dirname(__DIR__, 3) . '/bin/motion-worker.php';
+                $autoload = dirname((new \ReflectionClass(\Composer\Autoload\ClassLoader::class))->getFileName(), 2) . '/autoload.php';
+                $descriptors = [fopen('php://stdin', 'r'), fopen('php://stdout', 'a'), fopen('php://stderr', 'a')];
+                $process = @proc_open([PHP_BINARY, $entry, '--owned', "--port={$port}", "--autoload={$autoload}"], $descriptors, $pipes, null, null, ['bypass_shell' => true]);
+                if (!is_resource($process)) throw new RuntimeException('Unable to start motion worker');
+                $this->processes[] = $process;
+                $end = microtime(true) + 2;
+                do {
+                    usleep(20000);
+                    $socket = @stream_socket_client("tcp://127.0.0.1:{$port}", $errno, $error, 0.1);
+                } while ($socket === false && microtime(true) < $end);
+            }
+            if ($socket === false) throw new RuntimeException("Unable to connect motion worker {$port}: {$error} ({$errno})");
+            stream_set_blocking($socket, false);
+            $this->sockets[$worker] = $socket;
+            $this->inputs[$worker] = '';
+            $this->outputs[$worker] = '';
+            unset($this->references[$worker]);
+        }
+    }
+
+    private function workerFor($socket): int
+    {
+        foreach ($this->sockets as $worker => $candidate) if ($candidate === $socket) return $worker;
+        throw new RuntimeException('Unknown motion worker socket');
+    }
+
+    private function writeSocket(int $worker): void
+    {
+        $written = @fwrite($this->sockets[$worker], $this->outputs[$worker]);
+        if ($written === false || ($written === 0 && feof($this->sockets[$worker]))) {
+            // #region debug-point B:client-write-failure
+            $statuses = []; foreach ($this->processes as $process) if (is_resource($process)) $statuses[] = proc_get_status($process);
+            $this->debug('B', 'client-write-failure', ['worker' => $worker, 'pendingBytes' => strlen($this->outputs[$worker]), 'feof' => feof($this->sockets[$worker]), 'processes' => $statuses, 'memory' => memory_get_usage(true)]);
+            // #endregion
+            throw new RuntimeException('Failed writing motion worker');
+        }
+        if ($written > 0) $this->outputs[$worker] = substr($this->outputs[$worker], $written);
+    }
+
+    private function readSocket(int $worker): void
+    {
+        $data = @fread($this->sockets[$worker], 65536);
+        if ($data === false || ($data === '' && feof($this->sockets[$worker]))) throw new RuntimeException('Motion worker closed');
+        $this->inputs[$worker] .= $data;
+    }
+
+    // #region debug-point B:client-log
+    private function debug(string $hypothesis, string $message, array $data): void { $env = @parse_ini_file(dirname(__DIR__, 3).'/.dbg/motion-worker-write-failure.env'); $url = $env['DEBUG_SERVER_URL'] ?? ''; $session = $env['DEBUG_SESSION_ID'] ?? ''; if ($url === '' || $session === '') return; $payload = json_encode(['sessionId' => $session, 'runId' => 'post-fix', 'hypothesisId' => $hypothesis, 'location' => __FILE__, 'msg' => '[DEBUG] '.$message, 'data' => $data, 'ts' => (int)(microtime(true) * 1000)]); $context = stream_context_create(['http' => ['method' => 'POST', 'header' => 'Content-Type: application/json', 'content' => $payload, 'timeout' => 0.2]]); @file_get_contents($url, false, $context); }
+    // #endregion
+
+    public function __destruct()
+    {
+        foreach ($this->sockets as $socket) if (is_resource($socket)) @fclose($socket);
+        foreach ($this->processes as $process) {
+            if (!is_resource($process)) continue;
+            if ((proc_get_status($process)['running'] ?? false)) @proc_terminate($process);
+            @proc_close($process);
+        }
+    }
 }

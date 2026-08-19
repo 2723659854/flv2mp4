@@ -11,7 +11,7 @@ use Xiaosongshu\Flv2mp4\Codec\Scaler\VideoScaler;
 final class HlsDecoderWorkerServer
 {
     private H264Decoder $decoder;
-    private VideoScaler $scaler;
+    private ?VideoScaler $scaler;
     private string $sps = '';
     private string $pps = '';
     private int $width = 0;
@@ -20,7 +20,7 @@ final class HlsDecoderWorkerServer
     public function __construct(private array $profiles)
     {
         $this->decoder = new H264Decoder();
-        $this->scaler = new VideoScaler();
+        $this->scaler = count($profiles) === 1 ? new VideoScaler() : null;
     }
 
     public function run(string $listenAddress, string $outputAddress): void
@@ -78,8 +78,9 @@ final class HlsDecoderWorkerServer
                 }
             }
         } catch (Throwable $e) {
-            @fclose($upstream);
-            @fclose($downstream);
+            if (is_resource($upstream)) {
+                try { $this->writeAll($upstream, HlsPipelineProtocol::frame(HlsPipelineProtocol::ERROR, 0, ['message' => $e->getMessage()])); } catch (Throwable) {}
+            }
             throw $e;
         } finally {
             if (is_resource($upstream)) @fclose($upstream);
@@ -107,25 +108,20 @@ final class HlsDecoderWorkerServer
         if ($this->pps !== '') array_unshift($nals, ['type' => 8, 'data' => $this->pps]);
         $frame = $this->decoder->decode($nals);
         if (!$frame || empty($frame['data'])) return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, $body);
-        $payload = '';
-        $variants = [];
-        $scaledCache = [];
-        foreach ($this->profiles as $name => $profile) {
-            $w = ($profile['width'] ?? 0) > 0 ? (int)$profile['width'] : $this->width;
-            $h = ($profile['height'] ?? 0) > 0 ? (int)$profile['height'] : $this->height;
-            $key = "{$w}x{$h}";
-            if (!isset($scaledCache[$key])) {
-                $scaledCache[$key] = ($w === $this->width && $h === $this->height)
-                    ? $frame['data'] : $this->scaler->scaleYUV420P($frame['data'], $this->width, $this->height, $w, $h);
-            }
-            $yuv = $scaledCache[$key];
-            if (!empty($profile['watermark']) && !empty($profile['watermark_file'])) $yuv = $this->applyWatermark($yuv, $w, $h, $profile['watermark_file']);
-            $variants[$name] = ['offset' => strlen($payload), 'length' => strlen($yuv), 'width' => $w, 'height' => $h];
-            $payload .= $yuv;
-        }
         $meta['decoded'] = true;
-        $meta['variants'] = $variants;
-        $payload = pack('N', strlen($body)) . $body . $payload;
+        $meta['sourceWidth'] = $this->width;
+        $meta['sourceHeight'] = $this->height;
+        $yuv = $frame['data'];
+        if ($this->scaler !== null) {
+            $name = array_key_first($this->profiles);
+            $profile = $this->profiles[$name];
+            $width = ($profile['width'] ?? 0) > 0 ? (int)$profile['width'] : $this->width;
+            $height = ($profile['height'] ?? 0) > 0 ? (int)$profile['height'] : $this->height;
+            if ($width !== $this->width || $height !== $this->height) $yuv = $this->scaler->scaleYUV420P($yuv, $this->width, $this->height, $width, $height);
+            if (!empty($profile['watermark']) && !empty($profile['watermark_file'])) $yuv = $this->applyWatermark($yuv, $width, $height, $profile['watermark_file']);
+            $meta['variants'] = [$name => ['offset' => 0, 'length' => strlen($yuv), 'width' => $width, 'height' => $height]];
+        }
+        $payload = pack('N', strlen($body)) . $body . $yuv;
         return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, $payload);
     }
 

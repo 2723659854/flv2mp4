@@ -10,7 +10,6 @@ use Throwable;
 final class HlsPipelineClient
 {
     private array $processes = [];
-    private array $pipes = [];
 
     public function __construct(private array $profiles, private string $outputDir, private ?int $maxFrames)
     {
@@ -19,21 +18,32 @@ final class HlsPipelineClient
     public function process(string $flvFile): void
     {
         [$decoderAddress, $decoderPort] = $this->reserveAddress();
-        [$outputAddress, $outputPort] = $this->reserveAddress();
         $autoload = $this->locateAutoload();
         $worker = dirname(__DIR__, 2) . DIRECTORY_SEPARATOR . 'bin' . DIRECTORY_SEPARATOR . 'hls-worker.php';
         try {
-            $this->startWorker([$worker, '--mode', 'output', '--autoload', $autoload, '--port', (string)$outputPort, '--profiles', base64_encode(json_encode($this->profiles, JSON_THROW_ON_ERROR)), '--output', $this->outputDir]);
-            $this->startWorker([$worker, '--mode', 'decoder', '--autoload', $autoload, '--port', (string)$decoderPort, '--output-port', (string)$outputPort, '--profiles', base64_encode(json_encode($this->profiles, JSON_THROW_ON_ERROR))]);
+            if (count($this->profiles) === 1) {
+                [, $outputPort] = $this->reserveAddress();
+                $this->startWorker([$worker, '--mode', 'output', '--autoload', $autoload, '--port', (string)$outputPort, '--profiles', $this->encodeOption($this->profiles), '--output', $this->outputDir]);
+                $decoderOutputPort = $outputPort;
+            } else {
+                [, $scalePort] = $this->reserveAddress();
+                $profilePorts = [];
+                foreach ($this->profiles as $name => $profile) {
+                    [, $port] = $this->reserveAddress();
+                    $profilePorts[$name] = $port;
+                    $singleProfile = [$name => $profile];
+                    $this->startWorker([$worker, '--mode', 'output', '--autoload', $autoload, '--port', (string)$port, '--profiles', $this->encodeOption($singleProfile), '--output', $this->outputDir]);
+                }
+                $this->startWorker([$worker, '--mode', 'scale', '--autoload', $autoload, '--port', (string)$scalePort, '--output-ports', $this->encodeOption($profilePorts), '--profiles', $this->encodeOption($this->profiles), '--output', $this->outputDir]);
+                $decoderOutputPort = $scalePort;
+            }
+            $this->startWorker([$worker, '--mode', 'decoder', '--autoload', $autoload, '--port', (string)$decoderPort, '--output-port', (string)$decoderOutputPort, '--profiles', $this->encodeOption($this->profiles)]);
             $socket = $this->connect($decoderAddress);
             stream_set_blocking($socket, false);
             $sequence = 0; $frameCount = 0; $videoCount = 0; $buffer = ''; $response = ''; $finished = false;
             foreach ($this->readFlvTags($flvFile) as $tag) {
                 if ($tag['tagType'] === 8 || $tag['tagType'] === 9) {
-                    $buffer .= HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $sequence++, [
-                        'tagType' => $tag['tagType'],
-                        'timestamp' => $tag['timestamp'],
-                    ], $tag['body']);
+                    $buffer .= HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $sequence++, ['tagType' => $tag['tagType'], 'timestamp' => $tag['timestamp']], $tag['body']);
                     if ($tag['tagType'] === 9) $videoCount++;
                     $this->drainUntilLow($socket, $buffer, $response);
                 }
@@ -70,7 +80,6 @@ final class HlsPipelineClient
             if ($headerSize < 9) throw new RuntimeException('FLV Header 长度无效');
             if ($headerSize > 9) $this->readExact($handle, $headerSize - 9);
             $this->readExact($handle, 4);
-
             while (!feof($handle)) {
                 $tagHeader = fread($handle, 11);
                 if ($tagHeader === false) throw new RuntimeException('读取 FLV Tag Header 失败');
@@ -84,9 +93,7 @@ final class HlsPipelineClient
                 $this->readExact($handle, 4);
                 yield ['tagType' => $tagType, 'timestamp' => $timestamp, 'body' => $body];
             }
-        } finally {
-            fclose($handle);
-        }
+        } finally { fclose($handle); }
     }
 
     private function readExact($handle, int $length): string
@@ -122,13 +129,11 @@ final class HlsPipelineClient
     private function readResponses($socket, string &$buffer, bool &$finished): void
     {
         $chunk = @fread($socket, 65536);
-        if ($chunk !== false && $chunk !== '') {
-            $buffer .= $chunk;
-        }
+        if ($chunk !== false && $chunk !== '') $buffer .= $chunk;
         $events = HlsPipelineProtocol::take($buffer, 4);
         if ($events === [] && ($chunk === false || ($chunk === '' && feof($socket)))) {
             $status = [];
-            foreach ($this->processes as $process) { if (is_resource($process)) $status[] = proc_get_status($process); }
+            foreach ($this->processes as $process) if (is_resource($process)) $status[] = proc_get_status($process);
             throw new RuntimeException('解码进程响应连接意外关闭；Worker 状态: ' . json_encode($status, JSON_UNESCAPED_UNICODE));
         }
         foreach ($events as $event) {
@@ -142,13 +147,10 @@ final class HlsPipelineClient
         $command = array_merge([PHP_BINARY], $arguments);
         $options = ['bypass_shell' => true];
         if (PHP_OS_FAMILY === 'Windows') $options['create_process_group'] = true;
-        $stdin = fopen('php://stdin', 'r');
-        $stdout = fopen('php://stdout', 'a');
-        $stderr = fopen('php://stderr', 'a');
         $pipes = [];
-        $process = proc_open($command, [$stdin, $stdout, $stderr], $pipes, dirname(__DIR__, 2), null, $options);
+        $process = proc_open($command, [fopen('php://stdin', 'r'), fopen('php://stdout', 'a'), fopen('php://stderr', 'a')], $pipes, dirname(__DIR__, 2), null, $options);
         if (!is_resource($process)) throw new RuntimeException('无法启动 HLS worker');
-        $this->processes[] = $process; $this->pipes[] = $pipes;
+        $this->processes[] = $process;
     }
 
     private function waitWorkers(): void
@@ -199,5 +201,10 @@ final class HlsPipelineClient
         $path = dirname($reflection->getFileName(), 2) . DIRECTORY_SEPARATOR . 'autoload.php';
         if (!is_file($path)) throw new RuntimeException('无法定位宿主 Composer autoload.php');
         return $path;
+    }
+
+    private function encodeOption(array $value): string
+    {
+        return base64_encode(json_encode($value, JSON_THROW_ON_ERROR));
     }
 }

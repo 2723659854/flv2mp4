@@ -274,10 +274,10 @@ class PurePhpHlsGenerator
         $this->pipelineYuvPayload = '';
     }
 
-    public function finishPipelineOutput(): void
+    public function finishPipelineOutput(bool $generateMasterPlaylist = true): void
     {
         $this->closeAllSegments();
-        $this->generateMasterPlaylist();
+        if ($generateMasterPlaylist) $this->generateMasterPlaylist();
     }
 
     /**

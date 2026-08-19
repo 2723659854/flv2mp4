@@ -41,7 +41,7 @@ final class HlsOutputWorkerServer
                     if ($event['sequence'] !== $expected) throw new RuntimeException("媒体事件 sequence 不连续，期望 {$expected}，实际 {$event['sequence']}");
                     $expected++;
                     if ($event['type'] === HlsPipelineProtocol::END) {
-                        $generator->finishPipelineOutput();
+                        $generator->finishPipelineOutput(count($this->profiles) > 1);
                         $output .= HlsPipelineProtocol::frame(HlsPipelineProtocol::FINISHED, $event['sequence']);
                         $finished = true;
                     } elseif ($event['type'] === HlsPipelineProtocol::EVENT) {
