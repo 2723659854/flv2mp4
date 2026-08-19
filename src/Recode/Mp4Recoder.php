@@ -95,6 +95,7 @@ class Mp4Recoder
 
         $this->decoder = new H264Decoder();
         $this->encoder = new H264Encoder();
+        $this->encoder->motionWorkers = max(1, (int)($config['motionWorkers'] ?? 4));
         $this->scaler = new VideoScaler();
     }
 
@@ -198,6 +199,7 @@ class Mp4Recoder
     {
         $this->decoder = new H264Decoder();
         $this->encoder = new H264Encoder();
+        $this->encoder->motionWorkers = max(1, (int)($this->config['motionWorkers'] ?? 4));
         $this->mp4Data = '';
         $this->boxTree = [];
         $this->videoTrack = null;
