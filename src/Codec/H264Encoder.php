@@ -476,6 +476,7 @@ class H264Encoder
     public $picWidthInMbs = 0;
     public $lastMbWasSkip = false; // 上一个宏块是否为P_Skip
     public $motionWorkerClient = null;
+    public int $motionWorkers = 4;
     public array $motionWorkerResults = [];
 
 }

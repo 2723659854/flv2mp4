@@ -140,7 +140,7 @@ trait SliceEncodeTrait
         $this->motionWorkerResults = [];
         if ($sliceType === 0 && $this->refYPlane !== null) {
             try {
-                $client = $this->motionWorkerClient ??= new MotionWorkerClient();
+                $client = $this->motionWorkerClient ??= new MotionWorkerClient(workers: $this->motionWorkers);
                 $jobs = [];
                 for ($y = 0; $y < $mbHeight; $y++) {
                     for ($x = 0; $x < $mbWidth; $x++) {

@@ -95,6 +95,7 @@ class PurePhpHlsGenerator
 
         foreach ($this->profiles as $name => $profile) {
             $this->encoders[$name] = new H264Encoder();
+            $this->encoders[$name]->motionWorkers = max(1, (int)($profile['motionWorkers'] ?? 4));
             $dir = "{$this->outputDir}/{$name}/";
             if (!is_dir($dir)) mkdir($dir, 0777, true);
 
