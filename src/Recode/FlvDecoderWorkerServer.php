@@ -63,6 +63,11 @@ final class FlvDecoderWorkerServer
                     if ($event['type'] === HlsPipelineProtocol::FINISHED) { $this->writeAll($upstream, HlsPipelineProtocol::frame(HlsPipelineProtocol::FINISHED, $event['sequence'])); return; }
                 }
             }
+        } catch (Throwable $e) {
+            if (is_resource($upstream)) {
+                try { $this->writeAll($upstream, HlsPipelineProtocol::frame(HlsPipelineProtocol::ERROR, 0, ['message' => $e->getMessage()])); } catch (Throwable) {}
+            }
+            throw $e;
         } finally { if (is_resource($upstream)) @fclose($upstream); if (is_resource($downstream)) @fclose($downstream); }
     }
 

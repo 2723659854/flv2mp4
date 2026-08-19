@@ -125,9 +125,14 @@ final class FlvPipelineClient
     private function readResponses($socket, string &$buffer, bool &$finished): void
     {
         $chunk = @fread($socket, 65536);
-        if ($chunk === false || ($chunk === '' && feof($socket))) throw new RuntimeException('解码进程响应连接意外关闭');
-        $buffer .= $chunk;
-        foreach (HlsPipelineProtocol::take($buffer, 4) as $event) {
+        if ($chunk !== false && $chunk !== '') $buffer .= $chunk;
+        $events = HlsPipelineProtocol::take($buffer, 4);
+        if ($events === [] && ($chunk === false || ($chunk === '' && feof($socket)))) {
+            $status = [];
+            foreach ($this->processes as $process) if (is_resource($process)) $status[] = proc_get_status($process);
+            throw new RuntimeException('解码进程响应连接意外关闭；Worker 状态: ' . json_encode($status, JSON_UNESCAPED_UNICODE));
+        }
+        foreach ($events as $event) {
             if ($event['type'] === HlsPipelineProtocol::ERROR) throw new RuntimeException($event['metadata']['message'] ?? '流水线失败');
             if ($event['type'] === HlsPipelineProtocol::FINISHED) $finished = true;
         }
@@ -136,8 +141,8 @@ final class FlvPipelineClient
     private function startWorker(array $arguments): void
     {
         $options = ['bypass_shell' => true]; if (PHP_OS_FAMILY === 'Windows') $options['create_process_group'] = true;
-        $nul = PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null'; $pipes = [];
-        $process = proc_open(array_merge([PHP_BINARY], $arguments), [['file', $nul, 'r'], ['file', $nul, 'a'], ['file', $nul, 'a']], $pipes, dirname(__DIR__, 2), null, $options);
+        $pipes = [];
+        $process = proc_open(array_merge([PHP_BINARY], $arguments), [fopen('php://stdin', 'r'), fopen('php://stdout', 'a'), fopen('php://stderr', 'a')], $pipes, dirname(__DIR__, 2), null, $options);
         if (!is_resource($process)) throw new RuntimeException('无法启动 FLV recode worker');
         $this->processes[] = $process;
     }
