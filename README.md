@@ -489,6 +489,7 @@ if ($result && file_exists($outputFile1)) {
 - Implemented in pure PHP 8.1+, no FFmpeg dependency
 - This project was initially developed primarily to provide services for [xiaosongshu/rtmp_server](https://github.com/2723659854/rtmp-server)
 - [PHPStan](https://phpstan.org/) Level 8 is recommended for static analysis
+- The H.264 re-encoding process employs a distributed architecture to maximize the utilization of multi-CPU resources. On single‑core servers, it is advisable to deactivate this distributed mode.
 
 ## Open Source License & Disclaimer
 
