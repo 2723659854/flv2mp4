@@ -592,6 +592,10 @@ class Mp4Recoder
             return;
         }
         if (!empty($metadata['drop'])) return;
+        if (!empty($metadata['gopEncoded']['profiles']['default'])) {
+            $this->appendPipelineEncodedSample($metadata, $metadata['gopEncoded']['profiles']['default']);
+            return;
+        }
         $this->pipelineYuv = null;
         if (!empty($metadata['decoded'])) {
             $length = unpack('N', substr($payload, 0, 4))[1];
@@ -605,6 +609,22 @@ class Mp4Recoder
             'ctsMs' => (int)$metadata['ctsMs'], 'keyframe' => (bool)$metadata['keyframe'],
         ]);
         $this->pipelineYuv = null;
+    }
+
+    private function appendPipelineEncodedSample(array $metadata, array $nals): void
+    {
+        if ($this->videoSamples === []) {
+            $this->extractSpsPpsFromNals($nals);
+            $this->buildEncAvccHeader();
+        }
+        $data = $this->extractVideoAvccFromNals($nals);
+        if ($data === '') return;
+        $this->videoSamples[] = [
+            'data' => $data,
+            'timestamp' => (int)$metadata['dtsMs'],
+            'cts' => 0,
+            'keyframe' => !empty($metadata['forcedIdr']),
+        ];
     }
 
     public function finishPipelineOutput(string $outputFile): void
@@ -1370,10 +1390,11 @@ class Mp4Recoder
             $stsd = $this->buildVideoStsd();
             $stts = $this->buildVideoStts();
             $ctts = $this->buildCtts();
+            $stss = $this->buildStss();
             $stsc = $this->buildStsc($samples);
             $stsz = $this->buildStsz($samples);
             $stco = $this->buildVideoStco($stcoBase);
-            return $this->box('stbl', $stsd, $stts, $ctts, $stsc, $stsz, $stco);
+            return $this->box('stbl', $stsd, $stts, $ctts, $stss, $stsc, $stsz, $stco);
         } else {
             $samples = $this->audioSamples;
             $stsd = $this->buildAudioStsd();
@@ -1554,6 +1575,23 @@ class Mp4Recoder
         }
 
         return $this->box('ctts', $data);
+    }
+
+    private function buildStss(): string
+    {
+        $syncSamples = [];
+        foreach ($this->videoSamples as $index => $sample) {
+            if (!empty($sample['keyframe'])) {
+                $syncSamples[] = $index + 1;
+            }
+        }
+
+        $data = pack('N', 0) . pack('N', count($syncSamples));
+        foreach ($syncSamples as $sampleNumber) {
+            $data .= pack('N', $sampleNumber);
+        }
+
+        return $this->box('stss', $data);
     }
 
     private function buildStsc(array $samples): string

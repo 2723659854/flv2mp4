@@ -50,7 +50,10 @@ final class HlsDecoderWorkerServer
                     $input .= $chunk;
                     if (strlen($input) > HlsPipelineProtocol::MAX_BUFFER_LENGTH) throw new RuntimeException('解码进程输入缓冲超限');
                 }
-                foreach (HlsPipelineProtocol::take($input, 1) as $event) {
+                $events = strlen($output) < HlsPipelineProtocol::HIGH_WATERMARK
+                    ? HlsPipelineProtocol::take($input, 1)
+                    : [];
+                foreach ($events as $event) {
                     if ($event['type'] === HlsPipelineProtocol::END) {
                         $output .= HlsPipelineProtocol::frame(HlsPipelineProtocol::END, $event['sequence']);
                         $ended = true;

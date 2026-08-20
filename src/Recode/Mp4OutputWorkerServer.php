@@ -21,6 +21,10 @@ final class Mp4OutputWorkerServer
         $recoder = new Mp4Recoder($this->config, false);
         $recoder->initializePipelineOutput($this->config['pipeline']);
         $input = ''; $output = ''; $expected = 0; $finished = false;
+        $gopWorkers = max(1, (int)($this->config['gopWorkers'] ?? 1));
+        $profiles = ['default' => array_merge($this->config, ['width' => $this->config['pipeline']['outputWidth'], 'height' => $this->config['pipeline']['outputHeight']])];
+        $pool = $gopWorkers > 1 ? new GopPool($gopWorkers, (int)($this->config['motionWorkersPerGop'] ?? 1), (float)($this->config['gopSeconds'] ?? 2.0)) : null;
+        $replay = static fn(array $queued) => $recoder->processPipelineSample($queued['metadata'], $queued['payload']);
         try {
             while (true) {
                 $read = $finished ? [] : [$socket]; $write = $output === '' ? [] : [$socket];
@@ -34,8 +38,13 @@ final class Mp4OutputWorkerServer
                 foreach (HlsPipelineProtocol::take($input, 1) as $event) {
                     if ($event['sequence'] !== $expected) throw new RuntimeException("媒体事件 sequence 不连续，期望 {$expected}，实际 {$event['sequence']}");
                     $expected++;
-                    if ($event['type'] === HlsPipelineProtocol::END) { $recoder->finishPipelineOutput($this->outputFile); $output .= HlsPipelineProtocol::frame(HlsPipelineProtocol::FINISHED, $event['sequence']); $finished = true; }
-                    elseif ($event['type'] === HlsPipelineProtocol::EVENT) $recoder->processPipelineSample($event['metadata'], $event['payload']);
+                    if ($event['type'] === HlsPipelineProtocol::END) {
+                        if ($pool !== null) $pool->finish($profiles, $replay);
+                        $recoder->finishPipelineOutput($this->outputFile); $output .= HlsPipelineProtocol::frame(HlsPipelineProtocol::FINISHED, $event['sequence']); $finished = true;
+                    } elseif ($event['type'] === HlsPipelineProtocol::EVENT) {
+                        if ($pool !== null) $pool->push($event, $profiles, $replay);
+                        else $recoder->processPipelineSample($event['metadata'], $event['payload']);
+                    }
                     else throw new RuntimeException('输出进程收到未知事件');
                 }
                 if ($write !== []) { $n = @fwrite($socket, substr($output, 0, 65536)); if ($n === false || ($n === 0 && feof($socket))) throw new RuntimeException('无法发送输出完成响应'); if ($n > 0) $output = substr($output, $n); }

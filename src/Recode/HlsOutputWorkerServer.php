@@ -24,6 +24,11 @@ final class HlsOutputWorkerServer
         $output = '';
         $expected = 0;
         $finished = false;
+        $lastProgressAt = microtime(true);
+        $firstProfile = reset($this->profiles) ?: [];
+        $gopWorkers = max(1, (int)($firstProfile['gopWorkers'] ?? 1));
+        $pool = $gopWorkers > 1 ? new GopPool($gopWorkers, (int)($firstProfile['motionWorkersPerGop'] ?? 1), (float)($firstProfile['gopSeconds'] ?? 2.0)) : null;
+        $replay = static fn(array $queued) => $generator->processPipelineEvent($queued['metadata'], $queued['payload']);
         try {
             while (true) {
                 $read = $finished ? [] : [$socket];
@@ -41,11 +46,13 @@ final class HlsOutputWorkerServer
                     if ($event['sequence'] !== $expected) throw new RuntimeException("媒体事件 sequence 不连续，期望 {$expected}，实际 {$event['sequence']}");
                     $expected++;
                     if ($event['type'] === HlsPipelineProtocol::END) {
+                        if ($pool !== null) $pool->finish($this->profiles, $replay);
                         $generator->finishPipelineOutput(count($this->profiles) > 1);
                         $output .= HlsPipelineProtocol::frame(HlsPipelineProtocol::FINISHED, $event['sequence']);
                         $finished = true;
                     } elseif ($event['type'] === HlsPipelineProtocol::EVENT) {
-                        $generator->processPipelineEvent($event['metadata'], $event['payload']);
+                        if ($pool !== null) $pool->push($event, $this->profiles, $replay);
+                        else $generator->processPipelineEvent($event['metadata'], $event['payload']);
                     } else throw new RuntimeException('编码进程收到未知事件');
                 }
                 if ($write !== []) {

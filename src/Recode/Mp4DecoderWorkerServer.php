@@ -99,6 +99,7 @@ final class Mp4DecoderWorkerServer
         $yuv = ($srcW === $outW && $srcH === $outH) ? $frame['data'] : $this->scaler->scaleYUV420P($frame['data'], $srcW, $srcH, $outW, $outH);
         if (!empty($this->config['watermark']) && !empty($this->config['watermark_file'])) $yuv = $this->applyWatermark($yuv, $outW, $outH, $this->config['watermark_file']);
         $meta['decoded'] = true;
+        $meta['variants'] = ['default' => ['offset' => 0, 'length' => strlen($yuv), 'width' => $outW, 'height' => $outH]];
         return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, pack('N', strlen($payload)) . $payload . $yuv);
     }
 

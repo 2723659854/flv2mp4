@@ -80,6 +80,8 @@ class FlvRecoder
     private bool $multi;
     private array $config;
     private ?string $pipelineYuv = null;
+    private ?array $pipelineEncoded = null;
+    private bool $pipelineForcedIdr = false;
 
     public function __construct(array $config = [], bool $multi = false)
     {
@@ -344,6 +346,8 @@ class FlvRecoder
         if ($tag->tagType === 9) {
             if (!empty($metadata['drop'])) return;
             $this->pipelineYuv = null;
+            $this->pipelineEncoded = $metadata['gopEncoded']['profiles']['default'] ?? null;
+            $this->pipelineForcedIdr = !empty($metadata['forcedIdr']);
             if (!empty($metadata['decoded'])) {
                 $bodyLength = unpack('N', substr($payload, 0, 4))[1];
                 $tag->body = substr($payload, 4, $bodyLength);
@@ -351,6 +355,8 @@ class FlvRecoder
             }
             $this->handleVideoFrame($tag);
             $this->pipelineYuv = null;
+            $this->pipelineEncoded = null;
+            $this->pipelineForcedIdr = false;
         } elseif ($tag->tagType === 8) {
             $this->handleAudioFrame($tag);
         }
@@ -484,7 +490,8 @@ class FlvRecoder
                 $this->encoder->setFps(max(1, (int)round($encoderFps)));
             }
 
-            $encodedNals = $this->encoder->encodeFrame($yuvData, $this->outputVideoFrameCount === 0 || $isKeyFrame);
+            $encodedNals = $this->pipelineEncoded ?? $this->encoder->encodeFrame($yuvData, $this->outputVideoFrameCount === 0 || $isKeyFrame);
+            $isKeyFrame = $this->pipelineForcedIdr || $isKeyFrame;
             $this->videoFrameCount++;
 
             if ($this->outputVideoFrameCount === 0) {

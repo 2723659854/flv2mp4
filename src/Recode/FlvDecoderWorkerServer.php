@@ -97,6 +97,7 @@ final class FlvDecoderWorkerServer
         $yuv = ($w === $this->width && $h === $this->height) ? $frame['data'] : $this->scaler->scaleYUV420P($frame['data'], $this->width, $this->height, $w, $h);
         if (!empty($this->config['watermark']) && !empty($this->config['watermark_file'])) $yuv = $this->applyWatermark($yuv, $w, $h, $this->config['watermark_file']);
         $meta['decoded'] = true;
+        $meta['variants'] = ['default' => ['offset' => 0, 'length' => strlen($yuv), 'width' => $w, 'height' => $h]];
         return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, pack('N', strlen($body)) . $body . $yuv);
     }
 
