@@ -20,10 +20,6 @@ final class FlvOutputWorkerServer
         stream_set_blocking($socket, false);
         $recoder = new FlvRecoder($this->config, false);
         $input = ''; $output = ''; $expected = 0; $finished = false;
-        $gopWorkers = max(1, (int)($this->config['gopWorkers'] ?? 1));
-        $profiles = ['default' => $this->config];
-        $pool = $gopWorkers > 1 ? new GopPool($gopWorkers, (int)($this->config['motionWorkersPerGop'] ?? 1), (float)($this->config['gopSeconds'] ?? 2.0)) : null;
-        $replay = static fn(array $queued) => $recoder->processPipelineEvent($queued['metadata'], $queued['payload']);
         try {
             while (true) {
                 $read = $finished ? [] : [$socket]; $write = $output === '' ? [] : [$socket];
@@ -38,11 +34,9 @@ final class FlvOutputWorkerServer
                     if ($event['sequence'] !== $expected) throw new RuntimeException("媒体事件 sequence 不连续，期望 {$expected}，实际 {$event['sequence']}");
                     $expected++;
                     if ($event['type'] === HlsPipelineProtocol::END) {
-                        if ($pool !== null) $pool->finish($profiles, $replay);
                         $recoder->finishPipelineOutput($this->outputFile); $output .= HlsPipelineProtocol::frame(HlsPipelineProtocol::FINISHED, $event['sequence']); $finished = true;
                     } elseif ($event['type'] === HlsPipelineProtocol::EVENT) {
-                        if ($pool !== null) $pool->push($event, $profiles, $replay);
-                        else $recoder->processPipelineEvent($event['metadata'], $event['payload']);
+                        $recoder->processPipelineEvent($event['metadata'], $event['payload']);
                     }
                     else throw new RuntimeException('输出进程收到未知事件');
                 }
