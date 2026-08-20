@@ -13,8 +13,10 @@ class Mp4ToFlv
     private $inputFile;
     private $outputFile;
     private $flvHandle;
+    private $inputHandle;
+    private $inputSize = 0;
+    private $temporaryOutputFile;
 
-    private $mp4Data;
     private $boxTree;
     private $videoTrack = null;
     private $audioTrack = null;
@@ -53,32 +55,49 @@ class Mp4ToFlv
 
     public function run(): bool
     {
-        $this->mp4Data = file_get_contents($this->inputFile);
-        if (empty($this->mp4Data)) {
-            throw new \RuntimeException("无法读取MP4文件");
+        $this->inputHandle = fopen($this->inputFile, 'rb');
+        if (!$this->inputHandle) {
+            throw new \RuntimeException("无法读取MP4文件: {$this->inputFile}");
+        }
+        $stat = fstat($this->inputHandle);
+        $this->inputSize = (int)($stat['size'] ?? 0);
+        if ($this->inputSize < 8) {
+            fclose($this->inputHandle);
+            $this->inputHandle = null;
+            throw new \RuntimeException("MP4文件为空或不完整");
         }
 
-        $this->parseMp4Boxes();
-
-        $this->flvHandle = fopen($this->outputFile, 'wb');
-        if (!$this->flvHandle) {
-            throw new \RuntimeException("无法创建输出文件: {$this->outputFile}");
-        }
-
+        $this->temporaryOutputFile = $this->outputFile . '.part.' . bin2hex(random_bytes(6));
         try {
+            $this->parseMp4Boxes();
             $this->parseTracks();
+
+            $this->flvHandle = fopen($this->temporaryOutputFile, 'w+b');
+            if (!$this->flvHandle) {
+                throw new \RuntimeException("无法创建临时输出文件: {$this->temporaryOutputFile}");
+            }
+
             $this->writeFLVHeader();
             $this->extractAndWriteMediaData();
+            if (!fflush($this->flvHandle)) {
+                throw new \RuntimeException("无法刷新FLV临时文件");
+            }
+            fclose($this->flvHandle);
+            $this->flvHandle = null;
 
-//            echo "音频类型: " . $this->getAudioTypeName() . "\n";
-//            echo "输出采样率: {$this->audioSampleRate} Hz\n";
-//            echo "声道数: {$this->audioChannels}\n";
-//            echo "AudioSpecificConfig (" . strlen($this->audioSpecificConfig) . " bytes): " . bin2hex($this->audioSpecificConfig) . "\n";
-//            echo "是否是 HE-AAC: " . ($this->isHeAac ? '是' : '否') . "\n";
-
+            if (!@rename($this->temporaryOutputFile, $this->outputFile)) {
+                throw new \RuntimeException("无法原子输出FLV文件: {$this->outputFile}");
+            }
+            $this->temporaryOutputFile = null;
             return true;
         } finally {
-            fclose($this->flvHandle);
+            if (is_resource($this->flvHandle)) fclose($this->flvHandle);
+            if (is_resource($this->inputHandle)) fclose($this->inputHandle);
+            $this->flvHandle = null;
+            $this->inputHandle = null;
+            if ($this->temporaryOutputFile && is_file($this->temporaryOutputFile)) {
+                @unlink($this->temporaryOutputFile);
+            }
         }
     }
 
@@ -95,37 +114,70 @@ class Mp4ToFlv
     /* ========== Box 解析 ========== */
     private function parseMp4Boxes(): void
     {
-        $this->boxTree = $this->parseBox($this->mp4Data, 0, strlen($this->mp4Data));
+        $this->boxTree = $this->parseBox(0, $this->inputSize);
     }
 
-    private function parseBox(string $data, int $offset, int $end): array
+    private function parseBox(int $offset, int $end): array
     {
         $boxes = [];
+        $containerTypes = ['moov', 'trak', 'mdia', 'minf', 'stbl', 'edts', 'dinf', 'udta', 'meta'];
+        $metadataTypes = ['mvhd', 'tkhd', 'hdlr', 'mdhd', 'stsd', 'stsz', 'stco', 'co64', 'stsc', 'stts', 'ctts', 'stss'];
         while ($offset + 8 <= $end) {
-            $size = unpack('N', substr($data, $offset, 4))[1];
-            $type = substr($data, $offset + 4, 4);
-            if ($size == 1) {
-                if ($offset + 16 <= $end) {
-                    $size = unpack('J', substr($data, $offset + 8, 8))[1];
-                    $headerSize = 16;
-                } else break;
-            } elseif ($size == 0) {
+            $header = $this->readAt($offset, 8);
+            $size = unpack('N', substr($header, 0, 4))[1];
+            $type = substr($header, 4, 4);
+            $headerSize = 8;
+            if ($size === 1) {
+                if ($offset + 16 > $end) break;
+                $parts = unpack('Nhigh/Nlow', $this->readAt($offset + 8, 8));
+                $size = $parts['high'] * 4294967296 + $parts['low'];
+                $headerSize = 16;
+            } elseif ($size === 0) {
                 $size = $end - $offset;
-                $headerSize = 8;
-            } else {
-                $headerSize = 8;
             }
-            $boxEnd = $offset + $size;
+            if ($size < $headerSize || $size > PHP_INT_MAX - $offset) break;
+            $boxEnd = $offset + (int)$size;
             if ($boxEnd > $end) break;
-            $boxData = substr($data, $offset + $headerSize, $size - $headerSize);
-            $box = ['type' => $type, 'size' => $size, 'offset' => $offset, 'data' => $boxData, 'children' => []];
-            if ($size > $headerSize) {
-                $box['children'] = $this->parseBox($data, $offset + $headerSize, $boxEnd);
+
+            $payloadOffset = $offset + $headerSize;
+            $payloadSize = (int)$size - $headerSize;
+            $box = [
+                'type' => $type,
+                'size' => (int)$size,
+                'offset' => $offset,
+                'dataOffset' => $payloadOffset,
+                'data' => '',
+                'children' => []
+            ];
+            if (in_array($type, $containerTypes, true)) {
+                $childrenOffset = $payloadOffset + ($type === 'meta' ? 4 : 0);
+                $box['children'] = $this->parseBox($childrenOffset, $boxEnd);
+            } elseif (in_array($type, $metadataTypes, true) && $payloadSize > 0) {
+                $box['data'] = $this->readAt($payloadOffset, $payloadSize);
             }
             $boxes[] = $box;
             $offset = $boxEnd;
         }
         return $boxes;
+    }
+
+    private function readAt(int $offset, int $length): string
+    {
+        if ($offset < 0 || $length < 0 || $offset > $this->inputSize - $length) {
+            throw new \RuntimeException("MP4读取范围无效: offset={$offset}, length={$length}");
+        }
+        if (fseek($this->inputHandle, $offset, SEEK_SET) !== 0) {
+            throw new \RuntimeException("无法定位MP4偏移: {$offset}");
+        }
+        $data = '';
+        while (strlen($data) < $length) {
+            $chunk = fread($this->inputHandle, $length - strlen($data));
+            if ($chunk === false || $chunk === '') {
+                throw new \RuntimeException("MP4数据读取不完整: offset={$offset}, length={$length}");
+            }
+            $data .= $chunk;
+        }
+        return $data;
     }
 
     private function findBox(array $boxes, string $type): ?array
@@ -167,9 +219,12 @@ class Mp4ToFlv
                 $duration = unpack('N', substr($mvhdData, 16, 4))[1];
             } else {
                 $timescale = unpack('N', substr($mvhdData, 20, 4))[1];
-                $duration = unpack('J', substr($mvhdData, 24, 8))[1];
+                $durationParts = unpack('Nhigh/Nlow', substr($mvhdData, 24, 8));
+                $duration = $durationParts['high'] * 4294967296 + $durationParts['low'];
             }
-            $this->duration = round($duration * 1000 / $timescale) / 1000;
+            if ($timescale > 0) {
+                $this->duration = round($duration * 1000 / $timescale) / 1000;
+            }
         }
 
         $traks = $this->findAllBoxes([$moov], 'trak');
@@ -430,39 +485,39 @@ class Mp4ToFlv
     /* ========== 媒体数据提取 ========== */
     private function extractAndWriteMediaData(): void
     {
-        $mdat = $this->findBox($this->boxTree, 'mdat');
-        if (!$mdat) throw new \RuntimeException("未找到mdat盒子");
+        if (!$this->findBox($this->boxTree, 'mdat')) {
+            throw new \RuntimeException("未找到mdat盒子");
+        }
         $moov = $this->findBox($this->boxTree, 'moov');
         if (!$moov) return;
 
-        $allSamples = [];
-        $traks = $this->findAllBoxes([$moov], 'trak');
-        foreach ($traks as $trak) {
+        $videoSamples = [];
+        $audioSamples = [];
+        foreach ($this->findAllBoxes([$moov], 'trak') as $trak) {
             $mdia = $this->findBox([$trak], 'mdia');
-            if (!$mdia) continue;
-            $hdlr = $this->findBox([$mdia], 'hdlr');
-            if (!$hdlr) continue;
+            $hdlr = $mdia ? $this->findBox([$mdia], 'hdlr') : null;
+            $stbl = $mdia ? $this->findBox([$mdia], 'stbl') : null;
+            if (!$hdlr || !$stbl) continue;
             $handlerType = substr($hdlr['data'], 8, 4);
-            $stbl = $this->findBox([$mdia], 'stbl');
-            if (!$stbl) continue;
-
-            $samples = $this->extractSamplesFromStbl($stbl, $handlerType);
-            foreach ($samples as &$s) {
-                $s['type'] = ($handlerType === 'vide') ? 'video' : 'audio';
+            if ($handlerType === 'vide') {
+                $videoSamples = $this->extractSamplesFromStbl($stbl, $handlerType);
+            } elseif ($handlerType === 'soun') {
+                $audioSamples = $this->extractSamplesFromStbl($stbl, $handlerType);
             }
-            unset($s);
-            $allSamples = array_merge($allSamples, $samples);
         }
 
-        usort($allSamples, function($a, $b) {
-            return $a['dtsMs'] - $b['dtsMs'];
-        });
-
-        foreach ($allSamples as $sample) {
-            if ($sample['type'] === 'video') {
-                $this->writeVideoSample($sample['data'], $sample['dtsMs'], $sample['ctsMs'] ?? 0, $sample['keyframe']);
+        $videoIndex = 0;
+        $audioIndex = 0;
+        while ($videoIndex < count($videoSamples) || $audioIndex < count($audioSamples)) {
+            $writeVideo = $videoIndex < count($videoSamples)
+                && ($audioIndex >= count($audioSamples)
+                    || $videoSamples[$videoIndex]['dtsMs'] <= $audioSamples[$audioIndex]['dtsMs']);
+            $sample = $writeVideo ? $videoSamples[$videoIndex++] : $audioSamples[$audioIndex++];
+            $data = $this->readAt($sample['offset'], $sample['size']);
+            if ($writeVideo) {
+                $this->writeVideoSample($data, $sample['dtsMs'], $sample['ctsMs'], $sample['keyframe']);
             } else {
-                $this->writeAudioSample($sample['data'], $sample['dtsMs']);
+                $this->writeAudioSample($data, $sample['dtsMs']);
             }
         }
     }
@@ -471,12 +526,13 @@ class Mp4ToFlv
     {
         $stsz = $this->findBox([$stbl], 'stsz');
         $stco = $this->findBox([$stbl], 'stco');
+        $co64 = $this->findBox([$stbl], 'co64');
         $stsc = $this->findBox([$stbl], 'stsc');
         $stts = $this->findBox([$stbl], 'stts');
         $ctts = $this->findBox([$stbl], 'ctts');
         $stss = $this->findBox([$stbl], 'stss');
 
-        if (!$stsz || !$stco || !$stsc || !$stts) return [];
+        if (!$stsz || (!$stco && !$co64) || !$stsc || !$stts) return [];
 
         $timescale = ($handlerType === 'vide')
             ? ($this->videoTrack['timescale'] ?? 90000)
@@ -505,12 +561,18 @@ class Mp4ToFlv
             $chunkMap[$firstChunk] = $samplesPerChunk;
         }
 
-        // 解析 STCO
-        $stcoData = $stco['data'];
-        $chunkCount = unpack('N', substr($stcoData, 4, 4))[1];
+        // 解析 STCO / CO64
+        $chunkOffsetBox = $stco ?: $co64;
+        $chunkOffsetData = $chunkOffsetBox['data'];
+        $chunkCount = unpack('N', substr($chunkOffsetData, 4, 4))[1];
         $chunkOffsets = [];
         for ($i = 0; $i < $chunkCount; $i++) {
-            $chunkOffsets[] = unpack('N', substr($stcoData, 8 + $i * 4, 4))[1];
+            if ($stco) {
+                $chunkOffsets[] = unpack('N', substr($chunkOffsetData, 8 + $i * 4, 4))[1];
+            } else {
+                $parts = unpack('Nhigh/Nlow', substr($chunkOffsetData, 8 + $i * 8, 8));
+                $chunkOffsets[] = (int)($parts['high'] * 4294967296 + $parts['low']);
+            }
         }
 
         // 每个 chunk 的样本数
@@ -555,11 +617,15 @@ class Mp4ToFlv
         $ctOffsets = [];
         if ($ctts && $handlerType === 'vide') {
             $cttsData = $ctts['data'];
+            $cttsVersion = ord($cttsData[0]);
             $cttsEntries = unpack('N', substr($cttsData, 4, 4))[1];
             $pos = 8;
             for ($i = 0; $i < $cttsEntries; $i++) {
                 $count = unpack('N', substr($cttsData, $pos, 4))[1];
                 $offset = unpack('N', substr($cttsData, $pos + 4, 4))[1];
+                if ($cttsVersion === 1 && ($offset & 0x80000000)) {
+                    $offset -= 0x100000000;
+                }
                 $pos += 8;
                 for ($j = 0; $j < $count; $j++) {
                     $ctOffsets[] = $offset;
@@ -577,24 +643,23 @@ class Mp4ToFlv
             }
         }
 
-        // 构建样本
+        // 构建仅包含索引信息的样本；payload 在归并写入时按 offset 读取。
         $samples = [];
         $dtsTicks = 0;
         for ($i = 0; $i < count($sampleSizes) && $i < count($sampleOffsets); $i++) {
             $offset = $sampleOffsets[$i];
-            if ($offset < 0 || $offset + $sampleSizes[$i] > strlen($this->mp4Data)) continue;
-            $rawData = substr($this->mp4Data, $offset, $sampleSizes[$i]);
+            $size = $sampleSizes[$i];
+            if ($offset < 0 || $size < 0 || $offset > $this->inputSize - $size) {
+                throw new \RuntimeException("MP4 sample范围无效: offset={$offset}, size={$size}");
+            }
 
             $ctsTicks = $ctOffsets[$i] ?? 0;
-            $dtsMs = (int)round($dtsTicks * 1000 / $timescale);
-            $ctsMs = (int)round($ctsTicks * 1000 / $timescale);
-            $isKeyframe = isset($keyframeSet[$i]);
-
             $samples[] = [
-                'data' => $rawData,
-                'dtsMs' => $dtsMs,
-                'ctsMs' => $ctsMs,
-                'keyframe' => $isKeyframe
+                'offset' => $offset,
+                'size' => $size,
+                'dtsMs' => (int)round($dtsTicks * 1000 / $timescale),
+                'ctsMs' => (int)round($ctsTicks * 1000 / $timescale),
+                'keyframe' => $handlerType !== 'vide' || !$stss || isset($keyframeSet[$i])
             ];
 
             $dtsTicks += $timeDeltas[$i] ?? 0;
@@ -692,9 +757,8 @@ class Mp4ToFlv
 
     private function writeMetaData(): void
     {
-        $duration = max($this->maxVideoDtsMs, $this->maxAudioDtsMs) / 1000;
         $metaData = [
-            'duration' => $duration,
+            'duration' => (float)$this->duration,
             'width' => (float)($this->videoWidth ?: 720),
             'height' => (float)($this->videoHeight ?: 480),
             'videocodecid' => 'avc1',

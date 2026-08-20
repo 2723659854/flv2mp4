@@ -33,25 +33,39 @@ class Client
         if (!self::isFlvFile($inputFile)) {
             throw new \RuntimeException("only support flv file!");
         }
-        if (!is_dir($outputDir)) mkdir($outputDir, 0777, true);
-        array_map('unlink', glob("$outputDir/*"));
-        $flvBinary = file_get_contents($inputFile);
+        if (!is_dir($outputDir) && !mkdir($outputDir, 0777, true) && !is_dir($outputDir)) {
+            throw new \RuntimeException("cannot create output directory: {$outputDir}");
+        }
 
         $flv2fmp4 = new Flv2Fmp4();
         $initSegment = null;
-        $segments = [];
         $segmentIndex = 0;
+        $pendingFiles = [];
+        $temporaryFiles = [];
+        $fullHandle = null;
+        $fullTemp = null;
+        $mp4Path = null;
 
-        /** 切片缓冲区 */
-        $buffer = [];
+        $bufferHandle = null;
+        $bufferTemp = null;
+        $bufferBytes = 0;
         $index = 1;
 
-        $flv2fmp4->onInitSegment = function ($data) use (&$initSegment, $outputDir, $flv2fmp4) {
+        $flv2fmp4->onInitSegment = function ($data) use (&$initSegment, $outputDir, $flv2fmp4, &$pendingFiles, &$temporaryFiles, &$fullHandle, &$fullTemp) {
             echo "\n[回调] 初始化段生成\n";
             echo "大小: " . strlen($data) . " bytes\n";
             $initSegment = $data;
-            file_put_contents("$outputDir/init.mp4", $data);
-            echo "已写入: $outputDir/init.mp4\n";
+            $initPath = "$outputDir/init.mp4";
+            $initTemp = self::temporaryPath($initPath);
+            self::writeFile($initTemp, $data);
+            $pendingFiles[$initPath] = $initTemp;
+            $temporaryFiles[] = $initTemp;
+
+            $fullTemp = self::temporaryPath("$outputDir/output.mp4");
+            $fullHandle = self::openOutput($fullTemp);
+            $temporaryFiles[] = $fullTemp;
+            self::writeAll($fullHandle, $data);
+            echo "已准备: $outputDir/init.mp4\n";
 
             // 生成 meta.json
             $meta = [];
@@ -65,84 +79,64 @@ class Client
                 }
             }
             if (!empty($meta)) {
-                file_put_contents("$outputDir/meta.json", json_encode($meta));
-                echo "已写入: $outputDir/meta.json\n";
+                $metaPath = "$outputDir/meta.json";
+                $metaTemp = self::temporaryPath($metaPath);
+                self::writeFile($metaTemp, json_encode($meta));
+                $pendingFiles[$metaPath] = $metaTemp;
+                $temporaryFiles[] = $metaTemp;
+                echo "已准备: $metaPath\n";
                 echo "编解码器信息: " . json_encode($meta) . "\n";
             }
         };
 
         $segmentIndex = 0;
-        $buffer = [];
-        $index = 1;
         $segmentStartDts = -1;
-        $segmentFirstVideoDts = -1;
-        $segmentLastVideoDts = -1;
+        $segmentEndDts = -1;
         $readyToCut = false;
         $allSegments = [];
+        $actualDuration = 0;
 
-        $flv2fmp4->onMediaSegment = function ($data, $value) use (&$segments, &$segmentIndex, $outputDir, &$buffer, &$index, $targetSegmentDuration, $maxSegmentDuration, &$segmentStartDts, &$segmentFirstVideoDts, &$segmentLastVideoDts, &$readyToCut, &$allSegments) {
+        $flushSegment = function () use (&$bufferHandle, &$bufferTemp, &$bufferBytes, &$index, &$segmentStartDts, &$segmentEndDts, &$allSegments, &$pendingFiles, &$temporaryFiles, $outputDir) {
+            if ($bufferHandle === null || $bufferBytes === 0) return;
+            if (!fflush($bufferHandle)) throw new \RuntimeException('cannot flush media fragment');
+            fclose($bufferHandle);
+            $bufferHandle = null;
+            $path = "$outputDir/segment_$index.m4s";
+            $duration = max(0, $segmentEndDts - $segmentStartDts);
+            $pendingFiles[$path] = $bufferTemp;
+            $temporaryFiles[] = $bufferTemp;
+            $allSegments[] = ['path' => $path, 'duration' => $duration];
+            echo "已准备: $path (大小: {$bufferBytes} bytes, 时长: " . ($duration / 1000) . "s)\n";
+            $bufferTemp = null;
+            $bufferBytes = 0;
+            $segmentStartDts = -1;
+            $segmentEndDts = -1;
+            $index++;
+        };
+
+        $flv2fmp4->onMediaSegment = function ($data, $value) use (&$segmentIndex, $outputDir, &$bufferHandle, &$bufferTemp, &$bufferBytes, &$fullHandle, &$index, $targetSegmentDuration, $maxSegmentDuration, &$segmentStartDts, &$segmentEndDts, &$readyToCut, &$actualDuration, $flushSegment) {
             $info = $value['info'] ?? null;
             $track = $value['track'] ?? '';
-            $isKeyframe = isset($value['isKeyframe']) ? $value['isKeyframe'] : false;
+            $isKeyframe = (bool)($value['isKeyframe'] ?? false);
+            $beginDts = $info ? ($info->originalBeginDts ?? $info->beginDts ?? 0) : 0;
+            $endDts = $info ? ($info->originalEndDts ?? $info->endDts ?? $beginDts) : $beginDts;
 
-            $buffer[] = $data;
-            $segments[] = $data;
-
-            $shouldFlush = false;
-
-            if ($info) {
-                $currentEndDts = $info->originalEndDts ?? $info->endDts ?? 0;
-
-                if ($segmentStartDts < 0) {
-                    $segmentStartDts = $info->originalBeginDts ?? $info->beginDts ?? 0;
-                }
-
-                if ($track == 'video') {
-                    if ($segmentFirstVideoDts < 0) {
-                        $segmentFirstVideoDts = $info->originalBeginDts ?? $info->beginDts ?? 0;
-                    }
-                    $segmentLastVideoDts = $info->originalEndDts ?? $info->endDts ?? 0;
-
-                    if ($readyToCut && $isKeyframe) {
-                        $shouldFlush = true;
-                        $readyToCut = false;
-                    } else {
-                        $duration = $currentEndDts - $segmentStartDts;
-                        if ($duration >= $maxSegmentDuration) {
-                            $shouldFlush = true;
-                            $readyToCut = false;
-                        } elseif ($duration >= $targetSegmentDuration) {
-                            $readyToCut = true;
-                        }
-                    }
-                } else {
-                    $duration = $currentEndDts - $segmentStartDts;
-                    if ($duration >= $maxSegmentDuration) {
-                        $readyToCut = true;
-                    } elseif ($duration >= $targetSegmentDuration) {
-                        $readyToCut = true;
-                    }
-                }
+            if ($bufferBytes > 0 && $track === 'video' && $isKeyframe && ($readyToCut || $endDts - $segmentStartDts >= $maxSegmentDuration)) {
+                $flushSegment();
+                $readyToCut = false;
             }
-
-            if ($shouldFlush && !empty($buffer)) {
-                $segmentData = implode("", $buffer);
-                $segmentDuration = 0;
-                if ($segmentFirstVideoDts >= 0 && $segmentLastVideoDts >= 0) {
-                    $segmentDuration = $segmentLastVideoDts - $segmentFirstVideoDts;
-                }
-
-                file_put_contents("$outputDir/segment_$index.m4s", $segmentData);
-                echo "已写入: $outputDir/segment_$index.m4s (大小: " . strlen($segmentData) . " bytes, 时长: " . ($segmentDuration / 1000) . "s)\n";
-
-                $allSegments[] = ['path' => "$outputDir/segment_$index.m4s", 'duration' => $segmentDuration];
-                $buffer = [];
-                $index++;
-
-                $segmentStartDts = -1;
-                $segmentFirstVideoDts = -1;
-                $segmentLastVideoDts = -1;
+            if ($bufferHandle === null) {
+                $bufferTemp = self::temporaryPath("$outputDir/segment_$index.m4s");
+                $bufferHandle = self::openOutput($bufferTemp);
             }
+            self::writeAll($bufferHandle, $data);
+            if ($fullHandle === null) throw new \RuntimeException('missing fMP4 init segment');
+            self::writeAll($fullHandle, $data);
+            $bufferBytes += strlen($data);
+            if ($segmentStartDts < 0) $segmentStartDts = $beginDts;
+            $segmentEndDts = max($segmentEndDts, $endDts);
+            $actualDuration = max($actualDuration, $endDts);
+            if ($segmentEndDts - $segmentStartDts >= $targetSegmentDuration) $readyToCut = true;
 
             $segmentIndex++;
             echo "\n[回调] 媒体段#$segmentIndex\n";
@@ -160,43 +154,37 @@ class Client
         };
 
         try {
-            $flv2fmp4->setflv($flvBinary, 0);
-        } catch (\Exception $e) {
-            throw new \RuntimeException("error:" . $e->getMessage());
-        }
+            self::streamFlvTags($inputFile, $flv2fmp4);
+            $flushSegment();
+            if ($initSegment === null || $fullHandle === null || $segmentIndex === 0) throw new \RuntimeException('no fMP4 media was generated');
 
-        // 写入剩余的缓冲区内容
-        $finalSegmentCount = $index;
-        if (!empty($buffer)) {
-            $segmentData = implode("", $buffer);
-            $segmentDuration = 0;
-            if ($segmentFirstVideoDts >= 0 && $segmentLastVideoDts >= 0) {
-                $segmentDuration = $segmentLastVideoDts - $segmentFirstVideoDts;
-            }
-            file_put_contents("$outputDir/segment_$index.m4s", $segmentData);
-            echo "\n已写入剩余切片: $outputDir/segment_$index.m4s (大小: " . strlen($segmentData) . " bytes, 时长: " . ($segmentDuration / 1000) . "s)\n";
-            $allSegments[] = ['path' => "$outputDir/segment_$index.m4s", 'duration' => $segmentDuration];
-            $finalSegmentCount = $index;
-        }
+            $initSegment = self::updateInitSegmentDuration($initSegment, $actualDuration);
+            self::writeFile($pendingFiles["$outputDir/init.mp4"], $initSegment);
+            if (fseek($fullHandle, 0) !== 0) throw new \RuntimeException('cannot update fMP4 init segment');
+            self::writeAll($fullHandle, $initSegment);
+            if (!fflush($fullHandle)) throw new \RuntimeException('cannot flush fMP4 output');
+            fclose($fullHandle);
+            $fullHandle = null;
 
-        if ($initSegment && !empty($segments)) {
-            // 计算实际的 duration 并更新初始化片段
-            $actualDuration = self::calculateDurationFromSegments($segments, $initSegment);
-            if ($actualDuration > 0) {
-                $initSegment = self::updateInitSegmentDuration($initSegment, $actualDuration);
-            }
-
-            $fullBinary = $initSegment . implode('', $segments);
             $mp4Name = date("Y_m_d_H_i_s") . "_" . uniqid() . '.mp4';
-            file_put_contents("$outputDir/$mp4Name", $fullBinary);
+            $mp4Path = "$outputDir/$mp4Name";
+            $pendingFiles[$mp4Path] = $fullTemp;
+            $m3u8Path = "$outputDir/index.m3u8";
+            $m3u8Temp = self::temporaryPath($m3u8Path);
+            self::writeFile($m3u8Temp, self::mixedM3u8Content($allSegments));
+            $pendingFiles[$m3u8Path] = $m3u8Temp;
+            $temporaryFiles[] = $m3u8Temp;
 
-            // 生成 m3u8 索引文件（使用实际切片时长）
-            $m3u8Path = self::generateMixedM3u8WithDurations($outputDir, $allSegments, $actualDuration);
+            foreach ($pendingFiles as $path => $temp) self::atomicReplace($temp, $path);
             echo "\n已写入 m3u8 索引文件: $m3u8Path\n";
-
-            return "$outputDir/$mp4Name";
-        } else {
-            return "";
+            return $mp4Path;
+        } catch (\Throwable $e) {
+            if (is_resource($bufferHandle)) fclose($bufferHandle);
+            if (is_resource($fullHandle)) fclose($fullHandle);
+            foreach (array_unique(array_filter(array_merge($temporaryFiles, [$bufferTemp, $fullTemp]))) as $temp) {
+                if (is_file($temp)) @unlink($temp);
+            }
+            throw new \RuntimeException("error:" . $e->getMessage(), 0, $e);
         }
     }
 
@@ -226,7 +214,6 @@ class Client
             }
         }
 
-        $flvBinary = file_get_contents($inputFile);
         $flv2fmp4 = new Flv2Fmp4();
 
         $audioSegmentIndex = 0;
@@ -420,9 +407,9 @@ class Client
         };
 
         try {
-            $flv2fmp4->setflv($flvBinary, 0);
+            self::streamFlvTags($inputFile, $flv2fmp4);
         } catch (\Exception $e) {
-            throw new \RuntimeException("error:" . $e->getMessage());
+            throw new \RuntimeException("error:" . $e->getMessage(), 0, $e);
         }
 
         // 写入剩余的音频缓冲区内容
@@ -493,6 +480,98 @@ class Client
         echo "\n已写入主 m3u8 索引文件: $masterM3u8\n";
 
         return $outputFiles;
+    }
+
+    private static function streamFlvTags(string $inputFile, Flv2Fmp4 $converter): void
+    {
+        $handle = @fopen($inputFile, 'rb');
+        if ($handle === false) throw new \RuntimeException("cannot open FLV: {$inputFile}");
+        \Xiaosongshu\Flv2mp4\Flv\FlvParse::reset();
+        try {
+            $header = self::readExact($handle, 9);
+            if (substr($header, 0, 3) !== 'FLV' || ord($header[3]) !== 1) throw new \RuntimeException('invalid FLV header');
+            $headerSize = unpack('N', substr($header, 5, 4))[1];
+            if ($headerSize < 9) throw new \RuntimeException('invalid FLV header size');
+            if ($headerSize > 9) $header .= self::readExact($handle, $headerSize - 9);
+            $previousTagSize = self::readExact($handle, 4);
+            $first = true;
+            while (true) {
+                $tagHeader = fread($handle, 11);
+                if ($tagHeader === false) throw new \RuntimeException('cannot read FLV tag header');
+                if ($tagHeader === '') break;
+                if (strlen($tagHeader) !== 11) throw new \RuntimeException('truncated FLV tag header');
+                $dataSize = unpack('N', "\0" . substr($tagHeader, 1, 3))[1];
+                $tag = $tagHeader . self::readExact($handle, $dataSize) . self::readExact($handle, 4);
+                $converter->setflv($first ? $header . $previousTagSize . $tag : $tag, 0);
+                $first = false;
+            }
+        } finally {
+            fclose($handle);
+            \Xiaosongshu\Flv2mp4\Flv\FlvParse::reset();
+        }
+    }
+
+    private static function readExact($handle, int $length): string
+    {
+        $data = '';
+        while (strlen($data) < $length) {
+            $chunk = fread($handle, $length - strlen($data));
+            if ($chunk === false || $chunk === '') throw new \RuntimeException('truncated FLV file');
+            $data .= $chunk;
+        }
+        return $data;
+    }
+
+    private static function temporaryPath(string $path): string
+    {
+        return $path . '.part.' . bin2hex(random_bytes(6));
+    }
+
+    private static function openOutput(string $path)
+    {
+        $handle = @fopen($path, 'w+b');
+        if ($handle === false) throw new \RuntimeException("cannot create temporary output: {$path}");
+        return $handle;
+    }
+
+    private static function writeAll($handle, string $data): void
+    {
+        for ($offset = 0, $length = strlen($data); $offset < $length;) {
+            $written = fwrite($handle, substr($data, $offset));
+            if ($written === false || $written === 0) throw new \RuntimeException('cannot write output');
+            $offset += $written;
+        }
+    }
+
+    private static function writeFile(string $path, string $data): void
+    {
+        $handle = self::openOutput($path);
+        try {
+            self::writeAll($handle, $data);
+            if (!fflush($handle)) throw new \RuntimeException("cannot flush output: {$path}");
+        } finally {
+            fclose($handle);
+        }
+    }
+
+    private static function atomicReplace(string $temporary, string $path): void
+    {
+        if (!@rename($temporary, $path)) throw new \RuntimeException("cannot replace output atomically: {$path}");
+    }
+
+    private static function mixedM3u8Content(array $segments): string
+    {
+        $lines = ['#EXTM3U', '#EXT-X-VERSION:7', '#EXT-X-MEDIA-SEQUENCE:1', '#EXT-X-INDEPENDENT-SEGMENTS', '#EXT-X-MAP:URI="init.mp4"'];
+        $maxDuration = 0.001;
+        foreach ($segments as $i => $segment) {
+            $duration = max(0.001, round($segment['duration'] / 1000, 3));
+            $maxDuration = max($maxDuration, $duration);
+            $lines[] = "#EXTINF:{$duration},";
+            $lines[] = 'segment_' . ($i + 1) . '.m4s';
+        }
+        $lines[] = '#EXT-X-TARGETDURATION:' . (int)ceil($maxDuration);
+        $lines[] = '#EXT-X-ENDLIST';
+        return implode("\n", $lines) . "\n";
     }
 
     /**

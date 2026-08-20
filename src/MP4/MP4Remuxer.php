@@ -582,7 +582,8 @@ class MP4Remuxer
             'type' => 'video',
             'data' => $merged,
             'sampleCount' => count($mp4Samples),
-            'info' => $info
+            'info' => $info,
+            'isKeyframe' => $mp4Samples[0]['isKeyframe']
         ]);
     }
 }

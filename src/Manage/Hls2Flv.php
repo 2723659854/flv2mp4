@@ -3,228 +3,260 @@
 namespace Xiaosongshu\Flv2mp4\Manage;
 
 /**
- * @purpose HLS转FLV工具（修复版）
- * @author yanglong
- * @time 2026年6月3日
- * @note 本工具对于标准的h264 + aac编码的切片可以合成正确的flv,如果合成的flv有错误一般是切片本身有问题或者格式不兼容。
+ * 将本地 HLS（H.264 + AAC）转换为 FLV。
  */
 class Hls2Flv
 {
-    private $outputFile;
-    private $flvHandle;
-    private $sps = '';
-    private $pps = '';
-    private $audioSpecificConfig = '';
-    private $hasWrittenHeader = false;
-    private $hasWrittenVideoHeader = false;
-    private $hasWrittenAudioHeader = false;
-    private $pesBuffers = [];
-    private $videoFrames = [];  // 缓存视频帧，按DTS排序
-    private $audioFrames = [];  // 缓存音频帧，按PTS排序
-    private $videoBuffer = '';  // 视频PES数据缓冲区
-    private $videoBufferDts = null;  // 缓冲区数据的DTS
-    private $videoBufferPts = null;  // 缓冲区数据的PTS
-    private $lastVideoTimestamp = 0;
-    private $lastAudioTimestamp = 0;
-    private $videoBaseTimestamp = null;
-    private $audioBaseTimestamp = null;
-    private $firstTimestamp = null;
+    private const TS_PACKET_SIZE = 188;
+    private const REORDER_WINDOW = 180000; // 90kHz，2 秒
+    private const MAX_REORDER_FRAMES = 128;
 
-    /**
-     * 构造函数
-     * @param string $outputFile 输出的FLV文件路径
-     */
+    private string $outputFile;
+    /** @var resource|null */
+    private $flvHandle = null;
+    private string $sps = '';
+    private string $pps = '';
+    private string $audioSpecificConfig = '';
+    private bool $hasWrittenHeader = false;
+    private bool $hasWrittenVideoHeader = false;
+    private bool $hasWrittenAudioHeader = false;
+    private array $pesBuffers = [];
+    private array $continuityCounters = [];
+    private array $reorderFrames = [];
+    private int $frameSequence = 0;
+    private ?int $timestampAnchor = null;
+    private ?int $firstTimestamp = null;
+    private int $lastFlvTimestamp = 0;
+
     public function __construct(string $outputFile)
     {
         $this->outputFile = $outputFile;
         $dir = dirname($outputFile);
-        if (!is_dir($dir)) {
-            mkdir($dir, 0777, true);
+        if (!is_dir($dir) && !mkdir($dir, 0777, true) && !is_dir($dir)) {
+            throw new \RuntimeException("无法创建输出目录: {$dir}");
         }
     }
 
-    /**
-     * 运行转换
-     * @param string $m3u8File M3U8文件路径
-     * @return bool
-     */
     public function run(string $m3u8File): bool
     {
-        if (!file_exists($m3u8File)) {
+        if (!is_file($m3u8File)) {
             throw new \RuntimeException("M3U8文件不存在: {$m3u8File}");
         }
 
         $tsFiles = $this->parseM3U8($m3u8File);
-        if (empty($tsFiles)) {
-            throw new \RuntimeException("未找到TS文件");
+        if ($tsFiles === []) {
+            throw new \RuntimeException('未找到TS文件');
         }
 
-        $this->flvHandle = fopen($this->outputFile, 'wb');
-        if (!$this->flvHandle) {
-            throw new \RuntimeException("无法创建输出文件: {$this->outputFile}");
+        $temporaryFile = $this->outputFile . '.part';
+        $this->flvHandle = @fopen($temporaryFile, 'wb');
+        if ($this->flvHandle === false) {
+            throw new \RuntimeException("无法创建临时输出文件: {$temporaryFile}");
         }
 
         try {
             $m3u8Dir = dirname($m3u8File);
             foreach ($tsFiles as $tsFile) {
-                $tsPath = $m3u8Dir . DIRECTORY_SEPARATOR . $tsFile;
-                if (file_exists($tsPath)) {
-                    $this->processTSFile($tsPath);
+                $tsPath = $this->resolveTsPath($m3u8Dir, $tsFile);
+                if (!is_file($tsPath)) {
+                    throw new \RuntimeException("TS文件不存在: {$tsPath}");
                 }
+                $this->processTSFile($tsPath);
             }
 
-            // 确保写入FLV头
+            $this->flushPesBuffers();
+            $this->flushReorderFrames(true);
             if (!$this->hasWrittenHeader) {
                 $this->writeFLVHeader();
             }
-
-            // 写入缓存的帧数据
-            $this->flushFrames();
-
-            return true;
-        } finally {
+        } catch (\Throwable $e) {
             fclose($this->flvHandle);
+            $this->flvHandle = null;
+            @unlink($temporaryFile);
+            throw $e;
         }
+
+        if (!fflush($this->flvHandle)) {
+            fclose($this->flvHandle);
+            $this->flvHandle = null;
+            @unlink($temporaryFile);
+            throw new \RuntimeException('刷新FLV临时文件失败');
+        }
+        fclose($this->flvHandle);
+        $this->flvHandle = null;
+
+        if (is_file($this->outputFile) && !@unlink($this->outputFile)) {
+            @unlink($temporaryFile);
+            throw new \RuntimeException("无法替换输出文件: {$this->outputFile}");
+        }
+        if (!@rename($temporaryFile, $this->outputFile)) {
+            @unlink($temporaryFile);
+            throw new \RuntimeException("无法完成输出文件: {$this->outputFile}");
+        }
+
+        return true;
     }
 
-    /**
-     * 解析M3U8文件
-     * @param string $m3u8File
-     * @return array
-     */
     private function parseM3U8(string $m3u8File): array
     {
         $content = file_get_contents($m3u8File);
-        $lines = explode("\n", $content);
-        $tsFiles = [];
-
-        foreach ($lines as $line) {
-            $line = trim($line);
-            if (empty($line) || strpos($line, '#') === 0) {
-                continue;
-            }
-            if (pathinfo($line, PATHINFO_EXTENSION) === 'ts') {
-                $tsFiles[] = $line;
-            }
+        if ($content === false) {
+            throw new \RuntimeException("无法读取M3U8文件: {$m3u8File}");
         }
 
+        $tsFiles = [];
+        foreach (preg_split('/\r?\n/', $content) as $line) {
+            $line = trim($line);
+            if ($line !== '' && $line[0] !== '#') {
+                $path = parse_url($line, PHP_URL_PATH);
+                if (is_string($path) && strtolower(pathinfo($path, PATHINFO_EXTENSION)) === 'ts') {
+                    $tsFiles[] = $line;
+                }
+            }
+        }
         return $tsFiles;
     }
 
-    /**
-     * 处理TS文件
-     * @param string $tsFile
-     * @return void
-     */
+    private function resolveTsPath(string $m3u8Dir, string $tsFile): string
+    {
+        $path = parse_url($tsFile, PHP_URL_PATH);
+        $path = $path === false ? $tsFile : urldecode($path);
+        if (preg_match('/^(?:[A-Za-z]:[\\\\\/]|[\\\\\/]{2})/', $path)) {
+            return $path;
+        }
+        return $m3u8Dir . DIRECTORY_SEPARATOR . str_replace(['/', '\\'], DIRECTORY_SEPARATOR, ltrim($path, '/\\'));
+    }
+
     private function processTSFile(string $tsFile): void
     {
-        $tsData = file_get_contents($tsFile);
-        $offset = 0;
-        $len = strlen($tsData);
+        $handle = @fopen($tsFile, 'rb');
+        if ($handle === false) {
+            throw new \RuntimeException("无法打开TS文件: {$tsFile}");
+        }
 
-        while ($offset + 188 <= $len) {
-            $packet = substr($tsData, $offset, 188);
-            $this->processTSPacket($packet);
-            $offset += 188;
+        try {
+            while (!feof($handle)) {
+                $packet = $this->readPacket($handle);
+                if ($packet === null) {
+                    break;
+                }
+                $this->processTSPacket($packet);
+            }
+        } finally {
+            fclose($handle);
         }
     }
 
-    /**
-     * 处理单个TS包
-     * @param string $packet
-     * @return void
-     */
+    private function readPacket($handle): ?string
+    {
+        $packet = '';
+        while (strlen($packet) < self::TS_PACKET_SIZE && !feof($handle)) {
+            $chunk = fread($handle, self::TS_PACKET_SIZE - strlen($packet));
+            if ($chunk === false) {
+                throw new \RuntimeException('读取TS packet失败');
+            }
+            if ($chunk === '') {
+                break;
+            }
+            $packet .= $chunk;
+        }
+        if ($packet === '') {
+            return null;
+        }
+        if (strlen($packet) !== self::TS_PACKET_SIZE) {
+            throw new \RuntimeException('TS文件末尾包含不完整的packet');
+        }
+        if ($packet[0] !== "\x47") {
+            throw new \RuntimeException('TS packet同步字节错误');
+        }
+        return $packet;
+    }
+
     private function processTSPacket(string $packet): void
     {
-        if (strlen($packet) < 4) return;
-
-        $syncByte = ord($packet[0]);
-        if ($syncByte !== 0x47) return;
-
-        $pid = ((ord($packet[1]) & 0x1F) << 8) | ord($packet[2]);
-        $afc = (ord($packet[3]) >> 4) & 0x03;
-
-        $payloadOffset = 4;
-
-        if ($afc === 2 || $afc === 3) {
-            $adaptationLength = ord($packet[$payloadOffset]);
-            $payloadOffset += 1 + $adaptationLength;
+        $second = ord($packet[1]);
+        if (($second & 0x80) !== 0) {
+            return;
         }
 
+        $pid = (($second & 0x1F) << 8) | ord($packet[2]);
+        $afc = (ord($packet[3]) >> 4) & 0x03;
         if ($afc === 0 || $afc === 2) {
             return;
         }
 
-        if ($payloadOffset >= 188) return;
-
-        $payload = substr($packet, $payloadOffset);
-        $pusi = (ord($packet[1]) >> 6) & 0x01;
-
-        $this->processPESPayload($pid, $payload, $pusi === 1);
-    }
-
-    /**
-     * 处理PES负载
-     * @param int $pid
-     * @param string $payload
-     * @param bool $isStart
-     * @return void
-     */
-    private function processPESPayload(int $pid, string $payload, bool $isStart): void
-    {
-        if (!isset($this->pesBuffers[$pid])) {
-            $this->pesBuffers[$pid] = '';
+        $payloadOffset = 4;
+        if ($afc === 3) {
+            $payloadOffset += 1 + ord($packet[4]);
+        }
+        if ($payloadOffset >= self::TS_PACKET_SIZE) {
+            return;
         }
 
-        if ($isStart) {
-            if (!empty($this->pesBuffers[$pid])) {
-                $this->processCompletePES($this->pesBuffers[$pid]);
+        $counter = ord($packet[3]) & 0x0F;
+        if (isset($this->continuityCounters[$pid])) {
+            $expected = ($this->continuityCounters[$pid] + 1) & 0x0F;
+            if ($counter === $this->continuityCounters[$pid]) {
+                return;
             }
-            $this->pesBuffers[$pid] = $payload;
-        } else {
+            if ($counter !== $expected) {
+                unset($this->pesBuffers[$pid]);
+            }
+        }
+        $this->continuityCounters[$pid] = $counter;
+
+        $payload = substr($packet, $payloadOffset);
+        $isStart = ($second & 0x40) !== 0;
+        if ($isStart) {
+            if (isset($this->pesBuffers[$pid])) {
+                $this->processCompletePES($this->pesBuffers[$pid]);
+                unset($this->pesBuffers[$pid]);
+            }
+            if (strncmp($payload, "\x00\x00\x01", 3) === 0) {
+                $this->pesBuffers[$pid] = $payload;
+            }
+        } elseif (isset($this->pesBuffers[$pid])) {
             $this->pesBuffers[$pid] .= $payload;
         }
     }
 
-    /**
-     * 处理完整的PES包
-     * @param string $pesData
-     * @return void
-     */
+    private function flushPesBuffers(): void
+    {
+        foreach ($this->pesBuffers as $pesData) {
+            $this->processCompletePES($pesData);
+        }
+        $this->pesBuffers = [];
+    }
+
     private function processCompletePES(string $pesData): void
     {
-        if (strlen($pesData) < 6) return;
+        if (strlen($pesData) < 9 || strncmp($pesData, "\x00\x00\x01", 3) !== 0) {
+            return;
+        }
 
-        $packetStartCode = substr($pesData, 0, 3);
-        if ($packetStartCode !== "\x00\x00\x01") return;
+        $pesLength = unpack('n', substr($pesData, 4, 2))[1];
+        if ($pesLength > 0) {
+            $pesData = substr($pesData, 0, min(strlen($pesData), 6 + $pesLength));
+        }
 
         $streamId = ord($pesData[3]);
-        $headerLength = 6;
+        $flags = ord($pesData[7]) >> 6;
+        $headerDataLength = ord($pesData[8]);
+        $headerLength = 9 + $headerDataLength;
+        if (strlen($pesData) < $headerLength) {
+            return;
+        }
+
         $pts = null;
         $dts = null;
-
-        if (strlen($pesData) >= 9) {
-            $ptsDtsFlags = ord($pesData[7]) >> 6;
-            $headerDataLength = ord($pesData[8]);
-            $headerLength += 3 + $headerDataLength;
-
-            if ($headerDataLength > 0 && strlen($pesData) >= $headerLength) {
-                $timestampData = substr($pesData, 9, $headerDataLength);
-                $offset = 0;
-
-                if ($ptsDtsFlags & 0x02) {
-                    $pts = $this->decodeTimestamp(substr($timestampData, $offset, 5));
-                    $offset += 5;
-                }
-
-                if ($ptsDtsFlags & 0x01) {
-                    $dts = $this->decodeTimestamp(substr($timestampData, $offset, 5));
-                }
-            }
+        if (($flags & 0x02) !== 0 && $headerDataLength >= 5) {
+            $pts = $this->decodeTimestamp(substr($pesData, 9, 5));
+        }
+        if (($flags & 0x01) !== 0 && $headerDataLength >= 10) {
+            $dts = $this->decodeTimestamp(substr($pesData, 14, 5));
         }
 
         $payload = substr($pesData, $headerLength);
-
         if ($streamId >= 0xE0 && $streamId <= 0xEF) {
             $this->processVideoPES($payload, $pts, $dts);
         } elseif ($streamId >= 0xC0 && $streamId <= 0xDF) {
@@ -232,641 +264,275 @@ class Hls2Flv
         }
     }
 
-    /**
-     * 解码时间戳
-     * @param string $data
-     * @return int
-     */
     private function decodeTimestamp(string $data): int
     {
-        if (strlen($data) < 5) return 0;
-
-        $b0 = ord($data[0]);
-        $b1 = ord($data[1]);
-        $b2 = ord($data[2]);
-        $b3 = ord($data[3]);
-        $b4 = ord($data[4]);
-
-        $ts = (($b0 >> 1) & 0x07) << 30;
-        $ts |= $b1 << 22;
-        $ts |= (($b2 >> 1) & 0x7F) << 15;
-        $ts |= $b3 << 7;
-        $ts |= (($b4 >> 1) & 0x7F);
-
-        return $ts;
+        return (((ord($data[0]) >> 1) & 0x07) << 30)
+            | (ord($data[1]) << 22)
+            | (((ord($data[2]) >> 1) & 0x7F) << 15)
+            | (ord($data[3]) << 7)
+            | ((ord($data[4]) >> 1) & 0x7F);
     }
 
-    /**
-     * 处理视频PES
-     * @param string $payload
-     * @param int|null $pts
-     * @param int|null $dts
-     * @return void
-     */
     private function processVideoPES(string $payload, ?int $pts, ?int $dts): void
     {
-        if (empty($payload)) return;
-
-        // 更新缓冲区的时间戳（使用第一个非空时间戳）
-        if ($this->videoBufferDts === null && $dts !== null) {
-            $this->videoBufferDts = $dts;
-        }
-        if ($this->videoBufferPts === null && $pts !== null) {
-            $this->videoBufferPts = $pts;
+        if ($payload === '' || ($pts === null && $dts === null)) {
+            return;
         }
 
-        // 将当前PES数据追加到缓冲区
-        $this->videoBuffer .= $payload;
-
-        // 尝试从缓冲区中提取完整的访问单元
-        $this->extractCompleteAccessUnits();
-    }
-
-    /**
-     * 从缓冲区中提取完整的访问单元
-     * 访问单元必须至少包含一个slice NALU（类型1-5）
-     */
-    private function extractCompleteAccessUnits(): void
-    {
-        if (empty($this->videoBuffer)) return;
-
-        // 提取NALU及其在原始数据中的位置信息
-        $naluInfos = $this->extractNalusWithPositions($this->videoBuffer);
-        if (empty($naluInfos)) return;
-
-        // 先处理SPS/PPS（这些是序列参数，不应该放在访问单元中）
-        foreach ($naluInfos as $info) {
-            $nalu = $info['nalu'];
-            if (strlen($nalu) < 1) continue;
-            $naluType = ord($nalu[0]) & 0x1F;
-
-            if ($naluType === 7 && empty($this->sps)) {
-                $this->sps = $nalu;
-            } elseif ($naluType === 8 && empty($this->pps)) {
-                $this->pps = $nalu;
-            }
-        }
-
-        // 检查并写入头信息
-        if (!$this->hasWrittenHeader && !empty($this->sps) && !empty($this->pps)) {
-            $this->writeFLVHeader();
-        }
-
-        if ($this->hasWrittenHeader && !$this->hasWrittenVideoHeader && !empty($this->sps) && !empty($this->pps)) {
-            $this->writeAVCSequenceHeader();
-        }
-
-        // 寻找完整的访问单元
-        // 访问单元结构：[AUD] [SEI] [slice(s)]
-        // 遇到AUD(9)或IDR slice(5)表示新的访问单元开始
-        // 一个访问单元包含从当前开始标记到下一个开始标记之前的所有NALU
-        $accessUnits = [];
-        $currentAU = [];
-        $currentAUHasSlice = false;
-        $auStartOffset = 0;
-        $firstAU = true;
-
-        foreach ($naluInfos as $idx => $info) {
-            $nalu = $info['nalu'];
-            $naluOffset = $info['offset'];
-            if (strlen($nalu) < 1) continue;
-            $naluType = ord($nalu[0]) & 0x1F;
-
-            // 跳过SPS/PPS，它们不应该出现在访问单元中
-            if ($naluType === 7 || $naluType === 8) {
-                // 更新起始偏移
-                $auStartOffset = $naluOffset + $info['startCodeLen'] + strlen($nalu);
+        $nalus = $this->extractNalusFromAnnexB($payload);
+        $frameNalus = [];
+        $isKeyFrame = false;
+        $hasSlice = false;
+        foreach ($nalus as $nalu) {
+            if ($nalu === '') {
                 continue;
             }
-
-            // AUD(9)或IDR slice(5)表示新的访问单元开始
-            // 如果当前已有未完成的访问单元，先保存它
-            if (($naluType === 9 || $naluType === 5) && !$firstAU && !empty($currentAU)) {
-                if ($currentAUHasSlice) {
-                    $accessUnits[] = $currentAU;
-                }
-                $currentAU = [];
-                $currentAUHasSlice = false;
-                // 记录新AU的起始位置
-                $auStartOffset = $naluOffset;
+            $type = ord($nalu[0]) & 0x1F;
+            if ($type === 7) {
+                $this->sps = $nalu;
+                continue;
             }
-            $firstAU = false;
-
-            // 添加当前NALU到访问单元
-            $currentAU[] = $nalu;
-
-            // slice类型: 1-5 (P/B/I/SI/SP slice)
-            if ($naluType >= 1 && $naluType <= 5) {
-                $currentAUHasSlice = true;
+            if ($type === 8) {
+                $this->pps = $nalu;
+                continue;
+            }
+            if ($type >= 1 && $type <= 5) {
+                $hasSlice = true;
+                $isKeyFrame = $isKeyFrame || $type === 5;
+            }
+            if ($type !== 9) {
+                $frameNalus[] = $nalu;
             }
         }
 
-        // 添加最后一个访问单元（如果包含slice）
-        if ($currentAUHasSlice && !empty($currentAU)) {
-            $accessUnits[] = $currentAU;
+        if ($hasSlice && $frameNalus !== []) {
+            $dts ??= $pts;
+            $pts ??= $dts;
+            $this->queueFrame([
+                'type' => 9,
+                'time' => $dts,
+                'pts' => $pts,
+                'nalus' => $frameNalus,
+                'isKeyFrame' => $isKeyFrame,
+            ]);
         }
-
-        // 输出所有完整的访问单元
-        foreach ($accessUnits as $au) {
-            $this->outputAccessUnit($au);
-        }
-
-        // 更新缓冲区：保留未输出的数据（如果有）
-        if (!empty($accessUnits)) {
-            // 找到最后一个输出的AU结束位置
-            $lastAuEndOffset = 0;
-            foreach ($naluInfos as $info) {
-                $lastAuEndOffset = $info['offset'] + $info['startCodeLen'] + strlen($info['nalu']);
-            }
-            // 如果还有未处理的数据，保留到缓冲区
-            if ($lastAuEndOffset < strlen($this->videoBuffer)) {
-                $this->videoBuffer = substr($this->videoBuffer, $lastAuEndOffset);
-            } else {
-                $this->videoBuffer = '';
-                $this->videoBufferDts = null;
-                $this->videoBufferPts = null;
-            }
-        }
-        // 否则保留缓冲区中的数据（纯辅助数据）与下一个PES包合并
     }
 
-    /**
-     * 从AnnexB格式提取NALU及其位置信息
-     * @param string $data
-     * @return array
-     */
-    private function extractNalusWithPositions(string $data): array
-    {
-        $naluInfos = [];
-        $offset = 0;
-        $len = strlen($data);
-
-        while ($offset < $len) {
-            // 查找起始码
-            $pos4 = strpos($data, "\x00\x00\x00\x01", $offset);
-            $pos3 = strpos($data, "\x00\x00\x01", $offset);
-            
-            // 选择最早出现的起始码
-            if ($pos4 !== false && $pos3 !== false) {
-                $pos = min($pos4, $pos3);
-                $startCodeLen = ($pos === $pos4) ? 4 : 3;
-            } elseif ($pos4 !== false) {
-                $pos = $pos4;
-                $startCodeLen = 4;
-            } elseif ($pos3 !== false) {
-                $pos = $pos3;
-                $startCodeLen = 3;
-            } else {
-                // 没有找到起始码，检查是否还有剩余数据
-                if ($offset < $len) {
-                    $remaining = substr($data, $offset);
-                    if (strlen($remaining) > 0) {
-                        // 没有起始码的数据，可能是截断的NALU，保留到下次处理
-                        break;
-                    }
-                }
-                break;
-            }
-
-            // 查找下一个起始码位置
-            $nextPos4 = strpos($data, "\x00\x00\x00\x01", $pos + $startCodeLen);
-            $nextPos3 = strpos($data, "\x00\x00\x01", $pos + $startCodeLen);
-            
-            if ($nextPos4 !== false && $nextPos3 !== false) {
-                $nextPos = min($nextPos4, $nextPos3);
-            } elseif ($nextPos4 !== false) {
-                $nextPos = $nextPos4;
-            } elseif ($nextPos3 !== false) {
-                $nextPos = $nextPos3;
-            } else {
-                $nextPos = $len;
-            }
-
-            $naluStart = $pos + $startCodeLen;
-            $naluEnd = $nextPos;
-
-            if ($naluStart < $naluEnd) {
-                $naluInfos[] = [
-                    'nalu' => substr($data, $naluStart, $naluEnd - $naluStart),
-                    'offset' => $pos,
-                    'startCodeLen' => $startCodeLen
-                ];
-            }
-
-            $offset = $nextPos;
-        }
-
-        return $naluInfos;
-    }
-
-    /**
-     * 输出一个完整的访问单元
-     * @param array $nalus
-     */
-    private function outputAccessUnit(array $nalus): void
-    {
-        if (empty($nalus) || !$this->hasWrittenHeader) return;
-
-        $isKeyFrame = false;
-        foreach ($nalus as $nalu) {
-            if (strlen($nalu) < 1) continue;
-            $naluType = ord($nalu[0]) & 0x1F;
-            if ($naluType === 5) {
-                $isKeyFrame = true;
-                break;
-            }
-        }
-
-        $dts = $this->videoBufferDts;
-        $pts = $this->videoBufferPts;
-        if ($dts === null) {
-            $dts = $pts;
-        }
-        if ($pts === null) {
-            $pts = $dts;
-        }
-
-        // 缓存帧数据，按DTS排序
-        $this->videoFrames[] = [
-            'nalus' => $nalus,
-            'isKeyFrame' => $isKeyFrame,
-            'dts' => $dts,
-            'pts' => $pts
-        ];
-    }
-
-    /**
-     * 从AnnexB格式提取NALU
-     * @param string $data
-     * @return array
-     */
     private function extractNalusFromAnnexB(string $data): array
     {
         $nalus = [];
-        $offset = 0;
-        $len = strlen($data);
-
-        while ($offset < $len) {
-            $pos = strpos($data, "\x00\x00\x00\x01", $offset);
-            if ($pos === false) {
-                $pos = strpos($data, "\x00\x00\x01", $offset);
-            }
-
-            if ($pos === false) {
-                if ($offset < $len) {
-                    $remaining = substr($data, $offset);
-                    if (strlen($remaining) > 0) {
-                        $nalus[] = $remaining;
-                    }
-                }
-                break;
-            }
-
-            $startCodeLen = (substr($data, $pos, 4) === "\x00\x00\x00\x01") ? 4 : 3;
-            $nextPos = strpos($data, "\x00\x00\x00\x01", $pos + $startCodeLen);
-            if ($nextPos === false) {
-                $nextPos = strpos($data, "\x00\x00\x01", $pos + $startCodeLen);
-            }
-
-            $naluStart = $pos + $startCodeLen;
-            $naluEnd = ($nextPos !== false) ? $nextPos : $len;
-
-            if ($naluStart < $naluEnd) {
-                $nalus[] = substr($data, $naluStart, $naluEnd - $naluStart);
-            }
-
-            $offset = $naluEnd;
+        if (!preg_match_all('/(?:\x00\x00\x00\x01|\x00\x00\x01)/', $data, $matches, PREG_OFFSET_CAPTURE)) {
+            return $nalus;
         }
-
+        $count = count($matches[0]);
+        for ($i = 0; $i < $count; $i++) {
+            $start = $matches[0][$i][1] + strlen($matches[0][$i][0]);
+            $end = $i + 1 < $count ? $matches[0][$i + 1][1] : strlen($data);
+            if ($end > $start) {
+                $nalus[] = substr($data, $start, $end - $start);
+            }
+        }
         return $nalus;
     }
 
-    /**
-     * 处理音频PES
-     * @param string $payload
-     * @param int|null $pts
-     * @return void
-     */
     private function processAudioPES(string $payload, ?int $pts): void
     {
-        if (empty($payload)) return;
+        if ($payload === '' || $pts === null) {
+            return;
+        }
 
         $offset = 0;
-        $len = strlen($payload);
-
-        while ($offset + 7 <= $len) {
-            $syncWord = substr($payload, $offset, 2);
-            if ($syncWord !== "\xFF\xF1" && $syncWord !== "\xFF\xF9") {
+        $frameIndex = 0;
+        $length = strlen($payload);
+        while ($offset + 7 <= $length) {
+            if (ord($payload[$offset]) !== 0xFF || (ord($payload[$offset + 1]) & 0xF6) !== 0xF0) {
                 $offset++;
                 continue;
             }
 
-            $adtsHeader = substr($payload, $offset, 7);
-            $frameLength = ((ord($adtsHeader[3]) & 0x03) << 11) | (ord($adtsHeader[4]) << 3) | ((ord($adtsHeader[5]) >> 5) & 0x07);
-
-            if ($frameLength < 7) {
-                $offset++;
-                continue;
+            $protectionAbsent = ord($payload[$offset + 1]) & 0x01;
+            $headerLength = $protectionAbsent ? 7 : 9;
+            $frameLength = ((ord($payload[$offset + 3]) & 0x03) << 11)
+                | (ord($payload[$offset + 4]) << 3)
+                | ((ord($payload[$offset + 5]) >> 5) & 0x07);
+            if ($frameLength < $headerLength || $offset + $frameLength > $length) {
+                break;
             }
 
-            $aacData = substr($payload, $offset + 7, $frameLength - 7);
-
-            if (empty($this->audioSpecificConfig)) {
-                $this->extractAudioSpecificConfig($adtsHeader);
+            $header = substr($payload, $offset, 7);
+            if ($this->audioSpecificConfig === '') {
+                $this->extractAudioSpecificConfig($header);
             }
-
-            // 检查并写入头信息
-            if (!$this->hasWrittenHeader && !empty($this->sps) && !empty($this->pps)) {
-                $this->writeFLVHeader();
-            }
-
-            if ($this->hasWrittenHeader && !$this->hasWrittenAudioHeader && !empty($this->audioSpecificConfig)) {
-                $this->writeAACSequenceHeader();
-            }
-
-            if (!empty($aacData) && $this->hasWrittenHeader && $pts !== null) {
-                // 缓存音频帧
-                $this->audioFrames[] = [
-                    'data' => $aacData,
-                    'pts' => $pts
-                ];
-            }
-
+            $sampleRate = $this->getAdtsSampleRate($header);
+            $framePts = $pts + (int)round($frameIndex * 1024 * 90000 / $sampleRate);
+            $this->queueFrame([
+                'type' => 8,
+                'time' => $framePts,
+                'data' => substr($payload, $offset + $headerLength, $frameLength - $headerLength),
+            ]);
+            $frameIndex++;
             $offset += $frameLength;
         }
     }
 
-    /**
-     * 从ADTS头提取AudioSpecificConfig
-     * @param string $adtsHeader
-     * @return void
-     */
     private function extractAudioSpecificConfig(string $adtsHeader): void
     {
         $profile = ((ord($adtsHeader[2]) >> 6) & 0x03) + 1;
-        $freqIndex = ((ord($adtsHeader[2]) >> 2) & 0x0F);
+        $frequencyIndex = (ord($adtsHeader[2]) >> 2) & 0x0F;
         $channelConfig = ((ord($adtsHeader[2]) & 0x01) << 2) | ((ord($adtsHeader[3]) >> 6) & 0x03);
-
-        $asc = ($profile << 11) | ($freqIndex << 7) | ($channelConfig << 3);
-        $this->audioSpecificConfig = pack('n', $asc);
+        $this->audioSpecificConfig = pack('n', ($profile << 11) | ($frequencyIndex << 7) | ($channelConfig << 3));
     }
 
-    /**
-     * 刷新缓存的帧数据
-     */
-    private function flushFrames(): void
+    private function getAdtsSampleRate(string $adtsHeader): int
     {
-        // 处理缓冲区中剩余的数据
-        if (!empty($this->videoBuffer)) {
-            $nalus = $this->extractNalusFromAnnexB($this->videoBuffer);
-            if (!empty($nalus)) {
-                // 检查是否包含slice
-                $hasSlice = false;
-                foreach ($nalus as $nalu) {
-                    if (strlen($nalu) >= 1) {
-                        $naluType = ord($nalu[0]) & 0x1F;
-                        if ($naluType >= 1 && $naluType <= 5) {
-                            $hasSlice = true;
-                            break;
-                        }
-                    }
-                }
-                if ($hasSlice) {
-                    $this->outputAccessUnit($nalus);
-                }
-                // 如果不包含slice，直接丢弃这些纯辅助数据
+        $rates = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350];
+        $index = (ord($adtsHeader[2]) >> 2) & 0x0F;
+        return $rates[$index] ?? 44100;
+    }
+
+    private function queueFrame(array $frame): void
+    {
+        if ($this->timestampAnchor === null) {
+            $this->timestampAnchor = $frame['time'];
+        } else {
+            $frame['time'] = $this->unwrapTimestamp($frame['time'], $this->timestampAnchor);
+            if (isset($frame['pts'])) {
+                $frame['pts'] = $this->unwrapTimestamp($frame['pts'], $frame['time']);
             }
-            $this->videoBuffer = '';
-            $this->videoBufferDts = null;
-            $this->videoBufferPts = null;
+            $this->timestampAnchor = max($this->timestampAnchor, $frame['time']);
+        }
+        $frame['sequence'] = $this->frameSequence++;
+        $this->reorderFrames[] = $frame;
+        $this->flushReorderFrames(false);
+    }
+
+    private function unwrapTimestamp(int $timestamp, int $reference): int
+    {
+        $wrap = 1 << 33;
+        $candidate = $timestamp + (int)round(($reference - $timestamp) / $wrap) * $wrap;
+        return $candidate;
+    }
+
+    private function flushReorderFrames(bool $all): void
+    {
+        if ($this->reorderFrames === []) {
+            return;
         }
 
-        // 按DTS排序视频帧
-        usort($this->videoFrames, function($a, $b) {
-            return $a['dts'] - $b['dts'];
+        usort($this->reorderFrames, static function (array $a, array $b): int {
+            return ($a['time'] <=> $b['time']) ?: ($a['sequence'] <=> $b['sequence']);
         });
 
-        // 按PTS排序音频帧
-        usort($this->audioFrames, function($a, $b) {
-            return $a['pts'] - $b['pts'];
-        });
-
-        // 设置基准时间戳
-        if (!empty($this->videoFrames) || !empty($this->audioFrames)) {
-            $minTimestamp = PHP_INT_MAX;
-
-            foreach ($this->videoFrames as $frame) {
-                if ($frame['dts'] < $minTimestamp) {
-                    $minTimestamp = $frame['dts'];
-                }
-            }
-
-            foreach ($this->audioFrames as $frame) {
-                if ($frame['pts'] < $minTimestamp) {
-                    $minTimestamp = $frame['pts'];
-                }
-            }
-
-            $this->firstTimestamp = $minTimestamp;
-        }
-
-        // 写入视频帧
-        $videoIndex = 0;
-        $audioIndex = 0;
-
-        while ($videoIndex < count($this->videoFrames) || $audioIndex < count($this->audioFrames)) {
-            $writeVideo = false;
-            $writeAudio = false;
-
-            if ($videoIndex < count($this->videoFrames) && $audioIndex < count($this->audioFrames)) {
-                $videoDts = $this->videoFrames[$videoIndex]['dts'];
-                $audioPts = $this->audioFrames[$audioIndex]['pts'];
-
-                // 比较时间戳，选择较小的写入
-                if ($videoDts <= $audioPts) {
-                    $writeVideo = true;
+        if ($all) {
+            $flushCount = count($this->reorderFrames);
+        } else {
+            $newestTime = max(array_column($this->reorderFrames, 'time'));
+            $flushCount = 0;
+            foreach ($this->reorderFrames as $frame) {
+                if ($frame['time'] <= $newestTime - self::REORDER_WINDOW) {
+                    $flushCount++;
                 } else {
-                    $writeAudio = true;
+                    break;
                 }
-            } elseif ($videoIndex < count($this->videoFrames)) {
-                $writeVideo = true;
-            } elseif ($audioIndex < count($this->audioFrames)) {
-                $writeAudio = true;
             }
+            $flushCount = max($flushCount, count($this->reorderFrames) - self::MAX_REORDER_FRAMES);
+        }
 
-            if ($writeVideo) {
-                $frame = $this->videoFrames[$videoIndex];
-                $dts = $frame['dts'];
-                $pts = $frame['pts'] ?? $dts;
-
-                $timestamp = (int)(($dts - $this->firstTimestamp) / 90);
-                $cts = (int)(($pts - $dts) / 90);
-
-                // 确保时间戳不递减
-                $timestamp = max($timestamp, $this->lastVideoTimestamp);
-                $this->lastVideoTimestamp = $timestamp;
-
-                $this->writeVideoFrame($frame['nalus'], $frame['isKeyFrame'], $timestamp, $cts);
-                $videoIndex++;
-            }
-
-            if ($writeAudio) {
-                $frame = $this->audioFrames[$audioIndex];
-                $pts = $frame['pts'];
-
-                $timestamp = (int)(($pts - $this->firstTimestamp) / 90);
-
-                // 确保时间戳不递减
-                $timestamp = max($timestamp, $this->lastAudioTimestamp);
-                $this->lastAudioTimestamp = $timestamp;
-
-                $this->writeAudioFrame($frame['data'], $timestamp);
-                $audioIndex++;
-            }
+        for ($i = 0; $i < $flushCount; $i++) {
+            $this->writeQueuedFrame(array_shift($this->reorderFrames));
         }
     }
 
-    /**
-     * 写入FLV头部
-     * @return void
-     */
+    private function writeQueuedFrame(array $frame): void
+    {
+        if (!$this->hasWrittenHeader) {
+            $this->writeFLVHeader();
+        }
+        if ($this->sps !== '' && $this->pps !== '' && !$this->hasWrittenVideoHeader) {
+            $this->writeAVCSequenceHeader();
+        }
+        if ($this->audioSpecificConfig !== '' && !$this->hasWrittenAudioHeader) {
+            $this->writeAACSequenceHeader();
+        }
+
+        $this->firstTimestamp ??= $frame['time'];
+        $timestamp = max(0, (int)round(($frame['time'] - $this->firstTimestamp) / 90));
+        $timestamp = max($timestamp, $this->lastFlvTimestamp);
+        $this->lastFlvTimestamp = $timestamp;
+
+        if ($frame['type'] === 9) {
+            $cts = (int)round(($frame['pts'] - $frame['time']) / 90);
+            $this->writeVideoFrame($frame['nalus'], $frame['isKeyFrame'], $timestamp, $cts);
+        } else {
+            $this->writeAudioFrame($frame['data'], $timestamp);
+        }
+    }
+
     private function writeFLVHeader(): void
     {
-        if ($this->hasWrittenHeader) return;
-
-        $flags = 0;
-        if (!empty($this->sps) && !empty($this->pps)) $flags |= 0x01;
-        if (!empty($this->audioSpecificConfig)) $flags |= 0x04;
-
-        $header = "FLV\x01" . chr($flags) . "\x00\x00\x00\x09";
-        fwrite($this->flvHandle, $header);
-        fwrite($this->flvHandle, "\x00\x00\x00\x00");
-
+        if ($this->hasWrittenHeader) {
+            return;
+        }
+        $flags = ($this->sps !== '' && $this->pps !== '' ? 0x01 : 0)
+            | ($this->audioSpecificConfig !== '' ? 0x04 : 0);
+        $this->writeBytes("FLV\x01" . chr($flags) . "\x00\x00\x00\x09\x00\x00\x00\x00");
         $this->hasWrittenHeader = true;
     }
 
-    /**
-     * 写入AVC序列头
-     * @return void
-     */
     private function writeAVCSequenceHeader(): void
     {
-        if (empty($this->sps) || empty($this->pps) || $this->hasWrittenVideoHeader) return;
-
-        $avcConfig = "\x01";
-        $avcConfig .= substr($this->sps, 1, 3);
-        $avcConfig .= "\xFF\xE1";
-        $avcConfig .= pack('n', strlen($this->sps));
-        $avcConfig .= $this->sps;
-        $avcConfig .= "\x01";
-        $avcConfig .= pack('n', strlen($this->pps));
-        $avcConfig .= $this->pps;
-
-        $videoData = "\x17\x00\x00\x00\x00" . $avcConfig;
-
-        $this->writeFLVTag(9, $videoData, 0);
+        $config = "\x01" . substr($this->sps, 1, 3) . "\xFF\xE1"
+            . pack('n', strlen($this->sps)) . $this->sps . "\x01"
+            . pack('n', strlen($this->pps)) . $this->pps;
+        $this->writeFLVTag(9, "\x17\x00\x00\x00\x00" . $config, 0);
         $this->hasWrittenVideoHeader = true;
     }
 
-    /**
-     * 写入AAC序列头
-     * @return void
-     */
     private function writeAACSequenceHeader(): void
     {
-        if (empty($this->audioSpecificConfig) || $this->hasWrittenAudioHeader) return;
-
-        $audioData = "\xAF\x00" . $this->audioSpecificConfig;
-        $this->writeFLVTag(8, $audioData, 0);
+        $this->writeFLVTag(8, "\xAF\x00" . $this->audioSpecificConfig, 0);
         $this->hasWrittenAudioHeader = true;
     }
 
-    /**
-     * 写入视频帧
-     * @param array $nalus
-     * @param bool $isKeyFrame
-     * @param int $timestamp
-     * @param int $cts
-     * @return void
-     */
     private function writeVideoFrame(array $nalus, bool $isKeyFrame, int $timestamp, int $cts): void
     {
-        $codecId = 7;
-        $frameType = $isKeyFrame ? 1 : 2;
-        $frameType = ($frameType << 4) | $codecId;
-
-        $avccData = $this->annexbToAvcc($nalus);
-
-        $cts = max(0, $cts);
+        $avccData = '';
+        foreach ($nalus as $nalu) {
+            $avccData .= pack('N', strlen($nalu)) . $nalu;
+        }
+        $cts &= 0xFFFFFF;
         $ctsBytes = chr(($cts >> 16) & 0xFF) . chr(($cts >> 8) & 0xFF) . chr($cts & 0xFF);
-        $videoData = chr($frameType) . "\x01" . $ctsBytes . $avccData;
-
-        $this->writeFLVTag(9, $videoData, $timestamp);
+        $frameHeader = chr((($isKeyFrame ? 1 : 2) << 4) | 7);
+        $this->writeFLVTag(9, $frameHeader . "\x01" . $ctsBytes . $avccData, $timestamp);
     }
 
-    /**
-     * 写入音频帧
-     * @param string $aacData
-     * @param int $timestamp
-     * @return void
-     */
     private function writeAudioFrame(string $aacData, int $timestamp): void
     {
-        $soundFormat = 10;
-        $soundRate = 3;
-        $soundSize = 1;
-        $soundType = 1;
-
-        $audioHeader = (($soundFormat << 4) | ($soundRate << 2) | ($soundSize << 1) | $soundType);
-        $audioData = chr($audioHeader) . "\x01" . $aacData;
-
-        $this->writeFLVTag(8, $audioData, $timestamp);
+        $this->writeFLVTag(8, "\xAF\x01" . $aacData, $timestamp);
     }
 
-    /**
-     * AnnexB转AVCC
-     * @param array $nalus
-     * @return string
-     */
-    private function annexbToAvcc(array $nalus): string
-    {
-        $result = '';
-        foreach ($nalus as $nalu) {
-            if (strlen($nalu) > 0) {
-                $result .= pack('N', strlen($nalu)) . $nalu;
-            }
-        }
-        return $result;
-    }
-
-    /**
-     * 写入FLV Tag
-     * @param int $tagType
-     * @param string $data
-     * @param int $timestamp
-     * @return void
-     */
     private function writeFLVTag(int $tagType, string $data, int $timestamp): void
     {
         $dataSize = strlen($data);
+        $timestamp &= 0xFFFFFFFF;
+        $header = chr($tagType)
+            . substr(pack('N', $dataSize), 1)
+            . substr(pack('N', $timestamp), 1)
+            . chr(($timestamp >> 24) & 0xFF)
+            . "\x00\x00\x00";
+        $this->writeBytes($header . $data . pack('N', 11 + $dataSize));
+    }
 
-        // 确保时间戳在有效范围内（0-16777215，即24位）
-        $timestamp = $timestamp & 0xFFFFFF;
-        $timestampExtended = ($timestamp >> 24) & 0xFF;
-        $timestampLower = $timestamp & 0xFFFFFF;
-
-        $tagHeader = chr($tagType);
-        $tagHeader .= chr(($dataSize >> 16) & 0xFF);
-        $tagHeader .= chr(($dataSize >> 8) & 0xFF);
-        $tagHeader .= chr($dataSize & 0xFF);
-        $tagHeader .= chr(($timestampLower >> 16) & 0xFF);
-        $tagHeader .= chr(($timestampLower >> 8) & 0xFF);
-        $tagHeader .= chr($timestampLower & 0xFF);
-        $tagHeader .= chr($timestampExtended);
-        $tagHeader .= "\x00\x00\x00";
-
-        fwrite($this->flvHandle, $tagHeader);
-        fwrite($this->flvHandle, $data);
-        fwrite($this->flvHandle, pack('N', 11 + $dataSize));
+    private function writeBytes(string $data): void
+    {
+        $length = strlen($data);
+        $offset = 0;
+        while ($offset < $length) {
+            $written = fwrite($this->flvHandle, substr($data, $offset));
+            if ($written === false || $written === 0) {
+                throw new \RuntimeException('写入FLV临时文件失败');
+            }
+            $offset += $written;
+        }
     }
 }
