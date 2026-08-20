@@ -488,6 +488,7 @@ if ($result && file_exists($outputFile1)) {
 - 纯 PHP 8.1+ 实现，无 FFmpeg 依赖
 - 当前项目最初主要是为 [xiaosongshu/rtmp_server](https://github.com/2723659854/rtmp-server) 提供服务
 - 建议使用 [PHPStan](https://phpstan.org/) Level 8 进行静态分析
+- h264重编码，采用分布式架构，充分利用多CPU资源，若服务器是单核则建议关闭分布式。
 
 ## 开源协议 & 免责声明
 
