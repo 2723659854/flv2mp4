@@ -40,7 +40,7 @@ final class HlsDecoderWorkerServer
         try {
             while (true) {
                 $read = [$downstream];
-                if (!$ended && strlen($output) < HlsPipelineProtocol::HIGH_WATERMARK) $read[] = $upstream;
+                if (!$ended && strlen($input) < HlsPipelineProtocol::HIGH_WATERMARK) $read[] = $upstream;
                 $write = $output === '' ? [] : [$downstream];
                 $except = null;
                 @stream_select($read, $write, $except, 0, 200000);

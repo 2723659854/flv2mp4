@@ -62,6 +62,9 @@ class FlvRecoder
 
     private string $outputBuffer = '';
     private bool $flvHeaderWritten = false;
+    private $pipelineOutputHandle = null;
+    private ?string $pipelinePartFile = null;
+    private ?string $pipelineOutputFile = null;
 
     private ?int $maxFrames = null;
 
@@ -362,6 +365,31 @@ class FlvRecoder
         }
     }
 
+    public function beginPipelineOutput(string $outputFile): void
+    {
+        $this->resetProcessState();
+        $this->pipelineOutputFile = $outputFile;
+        $this->pipelinePartFile = $outputFile . '.part';
+        $this->pipelineOutputHandle = @fopen($this->pipelinePartFile, 'w+b');
+        if ($this->pipelineOutputHandle === false) {
+            $this->pipelineOutputHandle = null;
+            throw new \RuntimeException("无法创建临时输出文件: {$this->pipelinePartFile}");
+        }
+    }
+
+    public function abortPipelineOutput(): void
+    {
+        if (is_resource($this->pipelineOutputHandle)) {
+            @fclose($this->pipelineOutputHandle);
+        }
+        $this->pipelineOutputHandle = null;
+        if ($this->pipelinePartFile !== null && is_file($this->pipelinePartFile)) {
+            @unlink($this->pipelinePartFile);
+        }
+        $this->pipelinePartFile = null;
+        $this->pipelineOutputFile = null;
+    }
+
     public function finishPipelineOutput(string $outputFile): void
     {
         $this->finishOutput($outputFile);
@@ -383,7 +411,8 @@ class FlvRecoder
         $audioFrameDurationMs = $this->audioSampleRate > 0 ? $audioSamplesPerFrame / $this->audioSampleRate * 1000 : 0.0;
         $audioEndMs = $actualHasAudio && $this->lastAudioOutputTimestamp !== null
             ? $this->lastAudioOutputTimestamp + $audioFrameDurationMs : 0.0;
-        if ($this->flvHeaderWritten && strlen($this->outputBuffer) >= 13) {
+        $metadataTag = '';
+        if ($this->flvHeaderWritten) {
             $metadata = [
                 'duration' => max($videoEndMs, $audioEndMs) / 1000,
                 'width' => (float)$this->outputVideoWidth,
@@ -399,9 +428,72 @@ class FlvRecoder
                 $metadata['audiochannels'] = (float)$this->audioChannels;
             }
             $scriptData = $this->amf0EncodeValue('onMetaData') . $this->amf0EncodeValue($metadata);
-            $this->outputBuffer = substr($this->outputBuffer, 0, 13) . $this->buildTag(18, $scriptData, 0) . substr($this->outputBuffer, 13);
+            $metadataTag = $this->buildTag(18, $scriptData, 0);
         }
-        file_put_contents($outputFile, $this->outputBuffer);
+        if (is_resource($this->pipelineOutputHandle)) {
+            $this->finishStreamedOutput($outputFile, $metadataTag);
+            return;
+        }
+        if ($metadataTag !== '' && strlen($this->outputBuffer) >= 13) {
+            $this->outputBuffer = substr($this->outputBuffer, 0, 13) . $metadataTag . substr($this->outputBuffer, 13);
+        }
+        if (file_put_contents($outputFile, $this->outputBuffer) === false) {
+            throw new \RuntimeException("无法写入输出文件: {$outputFile}");
+        }
+    }
+
+    private function finishStreamedOutput(string $outputFile, string $metadataTag): void
+    {
+        if ($this->pipelineOutputFile !== $outputFile || $this->pipelinePartFile === null) {
+            throw new \RuntimeException('流水线输出文件不匹配');
+        }
+        $handle = $this->pipelineOutputHandle;
+        try {
+            if (!fflush($handle)) throw new \RuntimeException('无法准备补写 FLV metadata');
+            $metadataLength = strlen($metadataTag);
+            if ($metadataLength > 0) {
+                $stat = fstat($handle);
+                $fileSize = $stat['size'] ?? false;
+                if ($fileSize === false || $fileSize < 13 || !ftruncate($handle, $fileSize + $metadataLength)) {
+                    throw new \RuntimeException('无法扩展 FLV metadata 空间');
+                }
+                for ($end = $fileSize; $end > 13;) {
+                    $length = min(1048576, $end - 13);
+                    $start = $end - $length;
+                    if (fseek($handle, $start) !== 0) throw new \RuntimeException('无法读取 FLV Tag 数据');
+                    $chunk = fread($handle, $length);
+                    if ($chunk === false || strlen($chunk) !== $length || fseek($handle, $start + $metadataLength) !== 0) {
+                        throw new \RuntimeException('无法移动 FLV Tag 数据');
+                    }
+                    $this->writeAll($handle, $chunk);
+                    $end = $start;
+                }
+                if (fseek($handle, 13) !== 0) throw new \RuntimeException('无法定位 FLV metadata 写入位置');
+                $this->writeAll($handle, $metadataTag);
+                if (!fflush($handle)) throw new \RuntimeException('无法完成 FLV metadata 补写');
+            }
+            @fclose($handle);
+            $this->pipelineOutputHandle = null;
+            if (!@rename($this->pipelinePartFile, $outputFile)) {
+                throw new \RuntimeException("无法原子替换输出文件: {$outputFile}");
+            }
+            $this->pipelinePartFile = null;
+            $this->pipelineOutputFile = null;
+        } catch (\Throwable $e) {
+            $this->abortPipelineOutput();
+            throw $e;
+        }
+    }
+
+    private function writeAll($handle, string $data): void
+    {
+        $offset = 0;
+        $length = strlen($data);
+        while ($offset < $length) {
+            $written = @fwrite($handle, substr($data, $offset));
+            if ($written === false || $written === 0) throw new \RuntimeException('写入 FLV 输出失败');
+            $offset += $written;
+        }
     }
 
     private function handleVideoFrame(FlvTag $tag): void
@@ -683,7 +775,7 @@ class FlvRecoder
         $header .= pack('N', 9);
         $header .= pack('N', 0);
 
-        $this->outputBuffer .= $header;
+        $this->appendOutput($header);
         $this->flvHeaderWritten = true;
     }
 
@@ -876,7 +968,16 @@ class FlvRecoder
 
     private function writeTag(int $tagType, string $data, int $timestamp): void
     {
-        $this->outputBuffer .= $this->buildTag($tagType, $data, $timestamp);
+        $this->appendOutput($this->buildTag($tagType, $data, $timestamp));
+    }
+
+    private function appendOutput(string $data): void
+    {
+        if (is_resource($this->pipelineOutputHandle)) {
+            $this->writeAll($this->pipelineOutputHandle, $data);
+            return;
+        }
+        $this->outputBuffer .= $data;
     }
 
     private function videoFrameDataRead(string $data): ?array

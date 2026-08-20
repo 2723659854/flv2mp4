@@ -57,6 +57,7 @@ final class FlvPipelineClient
         } catch (Throwable $e) {
             if (isset($socket) && is_resource($socket)) @fclose($socket);
             $this->terminateWorkers();
+            if (is_file($outputFile . '.part')) @unlink($outputFile . '.part');
             throw $e;
         }
     }

@@ -75,6 +75,9 @@ class Mp4Recoder
     private bool $multi;
     private array $config;
     private ?string $pipelineYuv = null;
+    private $pipelineMediaHandle = null;
+    private ?string $pipelineTempFile = null;
+    private int $pipelineMediaSize = 0;
 
     public function __construct(array $config = [], bool $multi = false)
     {
@@ -225,6 +228,7 @@ class Mp4Recoder
         $this->dropFrames = false;
         $this->firstVideoDtsMs = null;
         $this->pipelineYuv = null;
+        $this->pipelineMediaSize = 0;
         $this->audioSpecificConfig = '';
         $this->audioConfigParsed = false;
         $this->audioSampleRate = 44100;
@@ -563,9 +567,20 @@ class Mp4Recoder
         ], $samples];
     }
 
-    public function initializePipelineOutput(array $metadata): void
+    public function initializePipelineOutput(array $metadata, string $outputFile): void
     {
         $this->resetProcessState();
+        $outputDir = dirname($outputFile);
+        if (!is_dir($outputDir) && !mkdir($outputDir, 0777, true) && !is_dir($outputDir)) {
+            throw new \RuntimeException("无法创建输出目录: {$outputDir}");
+        }
+        $this->pipelineTempFile = $outputFile . '.media.' . bin2hex(random_bytes(8)) . '.tmp';
+        $this->pipelineMediaHandle = @fopen($this->pipelineTempFile, 'x+b');
+        if (!is_resource($this->pipelineMediaHandle)) {
+            $this->pipelineTempFile = null;
+            throw new \RuntimeException('无法创建临时媒体文件');
+        }
+        $this->writeAll($this->pipelineMediaHandle, pack('N', 0) . 'mdat');
         $this->srcWidth = (int)$metadata['srcWidth'];
         $this->srcHeight = (int)$metadata['srcHeight'];
         $this->srcSpsData = base64_decode($metadata['srcSps'], true) ?: '';
@@ -588,7 +603,9 @@ class Mp4Recoder
     public function processPipelineSample(array $metadata, string $payload): void
     {
         if (($metadata['sampleType'] ?? '') === 'audio') {
-            $this->audioSamples[] = ['data' => $payload, 'timestamp' => (int)$metadata['dtsMs']];
+            $this->storePipelineSample($this->audioSamples, $payload, [
+                'timestamp' => (int)$metadata['dtsMs'],
+            ]);
             return;
         }
         if (!empty($metadata['drop'])) return;
@@ -619,18 +636,25 @@ class Mp4Recoder
         }
         $data = $this->extractVideoAvccFromNals($nals);
         if ($data === '') return;
-        $this->videoSamples[] = [
-            'data' => $data,
+        $this->storePipelineSample($this->videoSamples, $data, [
             'timestamp' => (int)$metadata['dtsMs'],
             'cts' => 0,
             'keyframe' => !empty($metadata['forcedIdr']),
-        ];
+        ]);
     }
 
     public function finishPipelineOutput(string $outputFile): void
     {
         if (!$this->videoTrack && !$this->audioTrack) throw new \RuntimeException('未找到有效的视频或音频轨道');
-        $this->buildMp4($outputFile);
+        $this->buildPipelineMp4($outputFile);
+    }
+
+    public function cleanupPipelineOutput(): void
+    {
+        if (is_resource($this->pipelineMediaHandle)) fclose($this->pipelineMediaHandle);
+        $this->pipelineMediaHandle = null;
+        if ($this->pipelineTempFile !== null && is_file($this->pipelineTempFile)) @unlink($this->pipelineTempFile);
+        $this->pipelineTempFile = null;
     }
 
     /* ========== 媒体数据提取与转码 ========== */
@@ -940,24 +964,26 @@ class Mp4Recoder
                 ? (int)round($frameIndex * 1000 / $this->effectiveTargetFps)
                 : $dtsMs;
 
-            $this->videoSamples[] = [
-                'data' => $videoAvcc,
+            $sampleMetadata = [
                 'timestamp' => $transcodeTimestamp,
                 'cts' => 0,
                 'keyframe' => $frameIndex === 0 || $isKeyFrame,
             ];
+            if (is_resource($this->pipelineMediaHandle)) $this->storePipelineSample($this->videoSamples, $videoAvcc, $sampleMetadata);
+            else $this->videoSamples[] = ['data' => $videoAvcc] + $sampleMetadata;
         } else {
             if (empty($this->videoSamples)) {
                 $this->outputVideoWidth = $this->srcWidth;
                 $this->outputVideoHeight = $this->srcHeight;
                 $this->buildSrcAvccHeader();
             }
-            $this->videoSamples[] = [
-                'data' => $avcData,
+            $sampleMetadata = [
                 'timestamp' => $dtsMs,
                 'cts' => $ctsMs,
                 'keyframe' => $isKeyFrame,
             ];
+            if (is_resource($this->pipelineMediaHandle)) $this->storePipelineSample($this->videoSamples, $avcData, $sampleMetadata);
+            else $this->videoSamples[] = ['data' => $avcData] + $sampleMetadata;
         }
     }
 
@@ -1112,6 +1138,72 @@ class Mp4Recoder
     }
 
     /* ========== MP4 构建 ========== */
+
+    private function storePipelineSample(array &$samples, string $data, array $metadata): void
+    {
+        if (!is_resource($this->pipelineMediaHandle)) throw new \RuntimeException('临时媒体文件未初始化');
+        $size = strlen($data);
+        $offset = $this->pipelineMediaSize;
+        $this->writeAll($this->pipelineMediaHandle, $data);
+        $this->pipelineMediaSize += $size;
+        $samples[] = $metadata + ['size' => $size, 'mediaOffset' => $offset];
+    }
+
+    private function writeAll($handle, string $data): void
+    {
+        $offset = 0;
+        $length = strlen($data);
+        while ($offset < $length) {
+            $written = @fwrite($handle, substr($data, $offset));
+            if ($written === false || $written === 0) throw new \RuntimeException('写入临时媒体文件失败');
+            $offset += $written;
+        }
+    }
+
+    private function buildPipelineMp4(string $outputFile): void
+    {
+        if (!is_resource($this->pipelineMediaHandle) || $this->pipelineTempFile === null) {
+            throw new \RuntimeException('临时媒体文件未初始化');
+        }
+        $this->videoTimescale = 1000;
+        $this->sortAndNormalizeSamples();
+        $ftyp = $this->buildFtyp();
+        $moov = $this->buildMoov();
+        do {
+            $mediaBase = strlen($ftyp) + strlen($moov) + 8;
+            $nextMoov = $this->buildMoov($mediaBase, $mediaBase);
+            $stable = strlen($nextMoov) === strlen($moov);
+            $moov = $nextMoov;
+        } while (!$stable);
+
+        if ($this->pipelineMediaSize > 0xFFFFFFFF - 8) throw new \RuntimeException('临时媒体数据超过 32 位 mdat 限制');
+        if (@fseek($this->pipelineMediaHandle, 0) !== 0) throw new \RuntimeException('无法定位临时媒体文件');
+        $this->writeAll($this->pipelineMediaHandle, pack('N', $this->pipelineMediaSize + 8) . 'mdat');
+        if (!@fflush($this->pipelineMediaHandle)) throw new \RuntimeException('无法刷新临时媒体文件');
+        fclose($this->pipelineMediaHandle);
+        $this->pipelineMediaHandle = null;
+
+        $finalTemp = $outputFile . '.final.' . bin2hex(random_bytes(8)) . '.tmp';
+        $source = null;
+        $target = null;
+        try {
+            $source = @fopen($this->pipelineTempFile, 'rb');
+            $target = @fopen($finalTemp, 'x+b');
+            if (!is_resource($source) || !is_resource($target)) throw new \RuntimeException('无法创建最终临时文件');
+            $this->writeAll($target, $ftyp . $moov);
+            if (stream_copy_to_stream($source, $target) === false) throw new \RuntimeException('复制临时媒体数据失败');
+            if (!fflush($target)) throw new \RuntimeException('无法刷新最终临时文件');
+            fclose($source); $source = null;
+            fclose($target); $target = null;
+            if (!@rename($finalTemp, $outputFile)) throw new \RuntimeException("无法原子替换输出文件: {$outputFile}");
+            @unlink($this->pipelineTempFile);
+            $this->pipelineTempFile = null;
+        } finally {
+            if (is_resource($source)) fclose($source);
+            if (is_resource($target)) fclose($target);
+            if (is_file($finalTemp)) @unlink($finalTemp);
+        }
+    }
 
     private function buildMp4(string $outputFile): void
     {
@@ -1623,7 +1715,7 @@ class Mp4Recoder
         $data .= pack('N', $count);
 
         foreach ($samples as $sample) {
-            $data .= pack('N', strlen($sample['data']));
+            $data .= pack('N', $sample['size'] ?? strlen($sample['data']));
         }
 
         return $this->box('stsz', $data);
@@ -1639,8 +1731,9 @@ class Mp4Recoder
 
         $offset = $baseOffset;
         foreach ($samples as $sample) {
-            $data .= pack('N', $offset);
-            $offset += strlen($sample['data']);
+            $sampleOffset = isset($sample['mediaOffset']) ? $baseOffset + $sample['mediaOffset'] : $offset;
+            $data .= pack('N', $sampleOffset);
+            $offset += $sample['size'] ?? strlen($sample['data']);
         }
 
         return $this->box('stco', $data);
@@ -1656,8 +1749,9 @@ class Mp4Recoder
 
         $offset = $baseOffset;
         foreach ($samples as $sample) {
-            $data .= pack('N', $offset);
-            $offset += strlen($sample['data']);
+            $sampleOffset = isset($sample['mediaOffset']) ? $baseOffset + $sample['mediaOffset'] : $offset;
+            $data .= pack('N', $sampleOffset);
+            $offset += $sample['size'] ?? strlen($sample['data']);
         }
 
         return $this->box('stco', $data);

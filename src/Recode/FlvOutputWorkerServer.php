@@ -21,6 +21,7 @@ final class FlvOutputWorkerServer
         $recoder = new FlvRecoder($this->config, false);
         $input = ''; $output = ''; $expected = 0; $finished = false;
         try {
+            $recoder->beginPipelineOutput($this->outputFile);
             while (true) {
                 $read = $finished ? [] : [$socket]; $write = $output === '' ? [] : [$socket];
                 if ($read === [] && $write === []) return;
@@ -43,6 +44,7 @@ final class FlvOutputWorkerServer
                 if ($write !== []) { $n = @fwrite($socket, substr($output, 0, 65536)); if ($n === false || ($n === 0 && feof($socket))) throw new RuntimeException('无法发送输出完成响应'); if ($n > 0) $output = substr($output, $n); }
             }
         } catch (Throwable $e) {
+            $recoder->abortPipelineOutput();
             @stream_set_blocking($socket, true); @fwrite($socket, HlsPipelineProtocol::frame(HlsPipelineProtocol::ERROR, $expected, ['message' => $e->getMessage()]));
             throw $e;
         } finally { @fclose($socket); }

@@ -36,7 +36,7 @@ final class FlvDecoderWorkerServer
         $input = ''; $output = ''; $response = ''; $ended = false;
         try {
             while (true) {
-                $read = [$downstream]; if (!$ended && strlen($output) < HlsPipelineProtocol::HIGH_WATERMARK) $read[] = $upstream;
+                $read = [$downstream]; if (!$ended && strlen($input) < HlsPipelineProtocol::HIGH_WATERMARK) $read[] = $upstream;
                 $write = $output === '' ? [] : [$downstream]; $except = null; @stream_select($read, $write, $except, 0, 200000);
                 if (in_array($upstream, $read, true)) {
                     $chunk = @fread($upstream, 65536);
