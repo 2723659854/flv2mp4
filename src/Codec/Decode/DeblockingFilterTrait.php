@@ -46,10 +46,11 @@ trait DeblockingFilterTrait
         return (int)(($qpP + $qpQ + 1) >> 1);
     }
 
-    private function filterNormalLuma(int $p0, int $p1, int $p2, int $q0, int $q1, int $q2, int $alpha, int $beta, int $tc0): ?array
+    private function filterNormalLuma(int $p0, int $p1, int $p2, int $q0, int $q1, int $q2, int $alpha, int $beta, int $tc0,
+                                      &$newP0, &$newP1, &$newQ0, &$newQ1): bool
     {
         if (abs($p0 - $q0) >= $alpha || abs($p1 - $p0) >= $beta || abs($q1 - $q0) >= $beta) {
-            return null;
+            return false;
         }
 
         $tc = $tc0;
@@ -74,13 +75,14 @@ trait DeblockingFilterTrait
         $newP0 = $this->clipPixel($p0 + $delta);
         $newQ0 = $this->clipPixel($q0 - $delta);
 
-        return [$newP0, $newP1, $newQ0, $newQ1];
+        return true;
     }
 
-    private function filterStrongLuma(int $p0, int $p1, int $p2, int $p3, int $q0, int $q1, int $q2, int $q3, int $alpha, int $beta): ?array
+    private function filterStrongLuma(int $p0, int $p1, int $p2, int $p3, int $q0, int $q1, int $q2, int $q3, int $alpha, int $beta,
+                                      &$newP0, &$newP1, &$newP2, &$newQ0, &$newQ1, &$newQ2): bool
     {
         if (abs($p0 - $q0) >= $alpha || abs($p1 - $p0) >= $beta || abs($q1 - $q0) >= $beta) {
-            return null;
+            return false;
         }
 
         $ap = abs($p2 - $p0);
@@ -116,32 +118,34 @@ trait DeblockingFilterTrait
             $newQ2 = $q2 & 0xFF;
         }
 
-        return [$newP0, $newP1, $newP2, $newQ0, $newQ1, $newQ2];
+        return true;
     }
 
-    private function filterNormalChroma(int $p0, int $p1, int $q0, int $q1, int $alpha, int $beta, int $tc): ?array
+    private function filterNormalChroma(int $p0, int $p1, int $q0, int $q1, int $alpha, int $beta, int $tc,
+                                        &$newP0, &$newQ0): bool
     {
         if (abs($p0 - $q0) >= $alpha || abs($p1 - $p0) >= $beta || abs($q1 - $q0) >= $beta) {
-            return null;
+            return false;
         }
 
         $delta = $this->clip3(-$tc, $tc, ((($q0 - $p0) * 4 + ($p1 - $q1) + 4) >> 3));
         $newP0 = $this->clipPixel($p0 + $delta);
         $newQ0 = $this->clipPixel($q0 - $delta);
 
-        return [$newP0, $newQ0];
+        return true;
     }
 
-    private function filterStrongChroma(int $p0, int $p1, int $q0, int $q1, int $alpha, int $beta): ?array
+    private function filterStrongChroma(int $p0, int $p1, int $q0, int $q1, int $alpha, int $beta,
+                                        &$newP0, &$newQ0): bool
     {
         if (abs($p0 - $q0) >= $alpha || abs($p1 - $p0) >= $beta || abs($q1 - $q0) >= $beta) {
-            return null;
+            return false;
         }
 
         $newP0 = (int)((($p1 * 2 + $p0 + $q1 + 2) >> 2) & 0xFF);
         $newQ0 = (int)((($q1 * 2 + $q0 + $p1 + 2) >> 2) & 0xFF);
 
-        return [$newP0, $newQ0];
+        return true;
     }
 
     private function filterMbEdgeLuma(bool $isVertical, int $mbX, int $mbY, int $edge, array $bs, int $qp)
@@ -183,9 +187,10 @@ trait DeblockingFilterTrait
                 $q2 = $plane[$off + 2 * $step];
 
                 if ($curBs < 4) {
-                    $result = $this->filterNormalLuma($p0, $p1, $p2, $q0, $q1, $q2, $alpha, $beta, $tc0);
-                    if ($result !== null) {
-                        [$newP0, $newP1, $newQ0, $newQ1] = $result;
+                    if ($this->filterNormalLuma(
+                        $p0, $p1, $p2, $q0, $q1, $q2, $alpha, $beta, $tc0,
+                        $newP0, $newP1, $newQ0, $newQ1
+                    )) {
                         $plane[$off - $step] = $newP0;
                         $plane[$off - 2 * $step] = $newP1;
                         $plane[$off] = $newQ0;
@@ -194,9 +199,10 @@ trait DeblockingFilterTrait
                 } else {
                     $p3 = $plane[$off - 4 * $step];
                     $q3 = $plane[$off + 3 * $step];
-                    $result = $this->filterStrongLuma($p0, $p1, $p2, $p3, $q0, $q1, $q2, $q3, $alpha, $beta);
-                    if ($result !== null) {
-                        [$newP0, $newP1, $newP2, $newQ0, $newQ1, $newQ2] = $result;
+                    if ($this->filterStrongLuma(
+                        $p0, $p1, $p2, $p3, $q0, $q1, $q2, $q3, $alpha, $beta,
+                        $newP0, $newP1, $newP2, $newQ0, $newQ1, $newQ2
+                    )) {
                         $plane[$off - $step] = $newP0;
                         $plane[$off - 2 * $step] = $newP1;
                         $plane[$off - 3 * $step] = $newP2;
@@ -248,16 +254,16 @@ trait DeblockingFilterTrait
                     $q1 = $plane[$off + $step];
 
                     if ($curBs < 4) {
-                        $result = $this->filterNormalChroma($p0, $p1, $q0, $q1, $alpha, $beta, $tc);
-                        if ($result !== null) {
-                            [$newP0, $newQ0] = $result;
+                        if ($this->filterNormalChroma(
+                            $p0, $p1, $q0, $q1, $alpha, $beta, $tc, $newP0, $newQ0
+                        )) {
                             $plane[$off - $step] = $newP0;
                             $plane[$off] = $newQ0;
                         }
                     } else {
-                        $result = $this->filterStrongChroma($p0, $p1, $q0, $q1, $alpha, $beta);
-                        if ($result !== null) {
-                            [$newP0, $newQ0] = $result;
+                        if ($this->filterStrongChroma(
+                            $p0, $p1, $q0, $q1, $alpha, $beta, $newP0, $newQ0
+                        )) {
                             $plane[$off - $step] = $newP0;
                             $plane[$off] = $newQ0;
                         }
