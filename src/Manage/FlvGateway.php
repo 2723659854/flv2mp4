@@ -391,7 +391,7 @@ class FlvGateway
                     $write[] = $c['socket'];
 
             $except = null;
-            @stream_select($read, $write, $except, 0, 10000);
+            @stream_select($read, $write, $except, 0, 1);
             foreach ($read as $sock) {
                 if ($sock === $this->serverSocket) $this->acceptClient();
                 else {

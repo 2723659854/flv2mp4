@@ -54,7 +54,8 @@ final class MotionWorkerClient
             $except = null;
             $seconds = (int)$remaining;
             $microseconds = (int)(($remaining - $seconds) * 1000000);
-            $ready = @stream_select($read, $write, $except, $seconds, $microseconds);
+//            $ready = @stream_select($read, $write, $except, $seconds, $microseconds);
+            $ready = @stream_select($read, $write, $except, 0, 1);
             if ($ready === false) throw new RuntimeException('Failed waiting for motion worker');
             foreach ($write as $socket) $this->writeSocket($this->workerFor($socket));
             foreach ($read as $socket) {

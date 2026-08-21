@@ -121,7 +121,7 @@ class FileGatewayHttp
             }
 
             $except = null;
-            @stream_select($read, $write, $except, 0, 100000);
+            @stream_select($read, $write, $except, 0, 1);
 
             if (in_array($this->serverSocket, $read)) $this->acceptClient();
 

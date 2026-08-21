@@ -43,7 +43,7 @@ final class HlsDecoderWorkerServer
                 if (!$ended && strlen($input) < HlsPipelineProtocol::HIGH_WATERMARK) $read[] = $upstream;
                 $write = $output === '' ? [] : [$downstream];
                 $except = null;
-                @stream_select($read, $write, $except, 0, 200000);
+                @stream_select($read, $write, $except, 0, 1);
                 if (in_array($upstream, $read, true)) {
                     $chunk = @fread($upstream, 65536);
                     if ($chunk === false || ($chunk === '' && feof($upstream))) throw new RuntimeException('主进程媒体连接意外关闭');

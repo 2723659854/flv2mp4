@@ -181,7 +181,7 @@ class FileGatewaySelect
             $except = null;
 
             // select 等待（100ms 超时，避免空转）
-            $ready = @stream_select($readSockets, $writeSockets, $except, 0, 100000);
+            $ready = @stream_select($readSockets, $writeSockets, $except, 0, 1);
 
             if ($ready === false) {
                 // 被信号中断，继续循环

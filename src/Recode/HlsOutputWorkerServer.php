@@ -35,7 +35,7 @@ final class HlsOutputWorkerServer
                 $write = $output === '' ? [] : [$socket];
                 if ($read === [] && $write === []) return;
                 $except = null;
-                @stream_select($read, $write, $except, 0, 200000);
+                @stream_select($read, $write, $except, 0, 1);
                 if ($read !== []) {
                     $chunk = @fread($socket, 65536);
                     if ($chunk === false || ($chunk === '' && feof($socket))) throw new RuntimeException('解码进程媒体连接意外关闭');

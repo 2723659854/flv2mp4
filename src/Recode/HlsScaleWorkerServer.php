@@ -44,7 +44,7 @@ final class HlsScaleWorkerServer
                 $write = [];
                 foreach ($downstreams as $name => $socket) if ($outputs[$name] !== '') $write[] = $socket;
                 $except = null;
-                @stream_select($read, $write, $except, 0, 200000);
+                @stream_select($read, $write, $except, 0, 1);
 
                 if (in_array($upstream, $read, true)) {
                     $chunk = @fread($upstream, 65536);

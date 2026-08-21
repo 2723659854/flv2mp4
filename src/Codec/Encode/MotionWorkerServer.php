@@ -26,7 +26,7 @@ final class MotionWorkerServer
                 if ($connection['output'] !== '') $write[] = $connection['socket'];
             }
             $except = null;
-            if (@stream_select($read, $write, $except, 0, 1000) === false) continue;
+            if (@stream_select($read, $write, $except, 0, 1) === false) continue;
             if (in_array($server, $read, true)) {
                 while (($socket = @stream_socket_accept($server, 0)) !== false) {
                     stream_set_blocking($socket, false);

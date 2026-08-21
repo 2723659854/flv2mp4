@@ -126,8 +126,8 @@ class FlvGatewaySelect
             }
 
             $except = null;
-            $n = @stream_select($read, $write, $except, 0, 200000);
-            if ($n === false) { usleep(10000); continue; }
+            $n = @stream_select($read, $write, $except, 0, 1);
+            if ($n === false) { usleep(1); continue; }
             if ($n > 0) {
                 foreach ($read as $sock) {
                     if (!$this->isStreamValid($sock)) continue;
