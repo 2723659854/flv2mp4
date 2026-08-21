@@ -152,6 +152,8 @@ trait DeblockingFilterTrait
         }
 
         $stride = $this->width;
+        $plane = &$this->yPlane;
+        $planeSize = count($plane);
         $mbBaseOffset = ($mbY * 16) * $stride + ($mbX * 16);
 
         $edgePixelOffset = $isVertical ? ($edge * 4) : ($edge * 4 * $stride);
@@ -163,46 +165,44 @@ trait DeblockingFilterTrait
             if ($curBs == 0) {
                 continue;
             }
+            // 同一 4 像素分段共用边界强度，tc0 只查询一次。
+            $tc0 = $curBs < 4 ? $this->getTc0($qp, $this->sliceAlphaC0Offset, $curBs) : 0;
 
             for ($d = 0; $d < 4; $d++) {
                 $off = $isVertical ? ($base + ($i * 4 + $d) * $stride) : ($base + $i * 4 + $d);
 
-                if ($off - 4 * $step < 0 || $off + 3 * $step >= count($this->yPlane)) {
+                if ($off - 4 * $step < 0 || $off + 3 * $step >= $planeSize) {
                     continue;
                 }
 
-                $p0 = $this->yPlane[$off - $step];
-                $p1 = $this->yPlane[$off - 2 * $step];
-                $p2 = $this->yPlane[$off - 3 * $step];
-                $q0 = $this->yPlane[$off];
-                $q1 = $this->yPlane[$off + $step];
-                $q2 = $this->yPlane[$off + 2 * $step];
+                $p0 = $plane[$off - $step];
+                $p1 = $plane[$off - 2 * $step];
+                $p2 = $plane[$off - 3 * $step];
+                $q0 = $plane[$off];
+                $q1 = $plane[$off + $step];
+                $q2 = $plane[$off + 2 * $step];
 
                 if ($curBs < 4) {
-                    $tc0 = $this->getTc0($qp, $this->sliceAlphaC0Offset, $curBs);
                     $result = $this->filterNormalLuma($p0, $p1, $p2, $q0, $q1, $q2, $alpha, $beta, $tc0);
                     if ($result !== null) {
                         [$newP0, $newP1, $newQ0, $newQ1] = $result;
-                        $this->yPlane[$off - $step] = $newP0;
-                        $this->yPlane[$off - 2 * $step] = $newP1;
-                        $this->yPlane[$off] = $newQ0;
-                        $this->yPlane[$off + $step] = $newQ1;
+                        $plane[$off - $step] = $newP0;
+                        $plane[$off - 2 * $step] = $newP1;
+                        $plane[$off] = $newQ0;
+                        $plane[$off + $step] = $newQ1;
                     }
                 } else {
-                    if ($off - 4 * $step < 0 || $off + 3 * $step >= count($this->yPlane)) {
-                        continue;
-                    }
-                    $p3 = $this->yPlane[$off - 4 * $step];
-                    $q3 = $this->yPlane[$off + 3 * $step];
+                    $p3 = $plane[$off - 4 * $step];
+                    $q3 = $plane[$off + 3 * $step];
                     $result = $this->filterStrongLuma($p0, $p1, $p2, $p3, $q0, $q1, $q2, $q3, $alpha, $beta);
                     if ($result !== null) {
                         [$newP0, $newP1, $newP2, $newQ0, $newQ1, $newQ2] = $result;
-                        $this->yPlane[$off - $step] = $newP0;
-                        $this->yPlane[$off - 2 * $step] = $newP1;
-                        $this->yPlane[$off - 3 * $step] = $newP2;
-                        $this->yPlane[$off] = $newQ0;
-                        $this->yPlane[$off + $step] = $newQ1;
-                        $this->yPlane[$off + 2 * $step] = $newQ2;
+                        $plane[$off - $step] = $newP0;
+                        $plane[$off - 2 * $step] = $newP1;
+                        $plane[$off - 3 * $step] = $newP2;
+                        $plane[$off] = $newQ0;
+                        $plane[$off + $step] = $newQ1;
+                        $plane[$off + 2 * $step] = $newQ2;
                     }
                 }
             }
@@ -225,17 +225,20 @@ trait DeblockingFilterTrait
 
         foreach (['uPlane', 'vPlane'] as $planeName) {
             $plane = &$this->$planeName;
+            $planeSize = count($plane);
 
             for ($i = 0; $i < 4; $i++) {
                 $curBs = $bs[$i];
                 if ($curBs == 0) {
                     continue;
                 }
+                // 同一 2 像素分段共用边界强度，tc 只查询一次。
+                $tc = $curBs < 4 ? $this->getTc0($qp, $this->sliceAlphaC0Offset, $curBs) + 1 : 0;
 
                 for ($d = 0; $d < 2; $d++) {
                     $off = $isVertical ? ($base + ($i * 2 + $d) * $stride) : ($base + $i * 2 + $d);
 
-                    if ($off - 2 * $step < 0 || $off + $step >= count($plane)) {
+                    if ($off - 2 * $step < 0 || $off + $step >= $planeSize) {
                         continue;
                     }
 
@@ -245,7 +248,6 @@ trait DeblockingFilterTrait
                     $q1 = $plane[$off + $step];
 
                     if ($curBs < 4) {
-                        $tc = $this->getTc0($qp, $this->sliceAlphaC0Offset, $curBs) + 1;
                         $result = $this->filterNormalChroma($p0, $p1, $q0, $q1, $alpha, $beta, $tc);
                         if ($result !== null) {
                             [$newP0, $newQ0] = $result;
@@ -293,6 +295,22 @@ trait DeblockingFilterTrait
         $bsVertical = [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
         $bsHorizontal = [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
 
+        // 宏块外边界的邻居信息对 4 个分段相同，提前缓存避免热循环重复查表。
+        if ($mbX > 0) {
+            $leftIdx = $mbIdx - 1;
+            $leftType = $this->mbTypeForDeblock[$leftIdx] ?? -1;
+            $leftNnz = $this->mbNnzForDeblock[$leftIdx] ?? array_fill(0, 24, 0);
+            $leftMv = $this->mbMvForDeblock[$leftIdx] ?? array_fill(0, 16, [0, 0]);
+            $leftRef = $this->mbRefForDeblock[$leftIdx] ?? array_fill(0, 16, 0);
+        }
+        if ($mbY > 0) {
+            $topIdx = $mbIdx - $mbWidth;
+            $topType = $this->mbTypeForDeblock[$topIdx] ?? -1;
+            $topNnz = $this->mbNnzForDeblock[$topIdx] ?? array_fill(0, 24, 0);
+            $topMv = $this->mbMvForDeblock[$topIdx] ?? array_fill(0, 16, [0, 0]);
+            $topRef = $this->mbRefForDeblock[$topIdx] ?? array_fill(0, 16, 0);
+        }
+
         // 垂直边界: Q块在(col=edge, row=pair), P块在(col=edge-1, row=pair)
         for ($edge = 0; $edge < 4; $edge++) {
             $isMbEdge = ($edge == 0);
@@ -314,11 +332,6 @@ trait DeblockingFilterTrait
                 $pRef = 0;
 
                 if ($isMbEdge && $mbX > 0) {
-                    $leftIdx = $mbY * $mbWidth + $mbX - 1;
-                    $leftType = $this->mbTypeForDeblock[$leftIdx] ?? -1;
-                    $leftNnz = $this->mbNnzForDeblock[$leftIdx] ?? array_fill(0, 24, 0);
-                    $leftMv = $this->mbMvForDeblock[$leftIdx] ?? array_fill(0, 16, [0, 0]);
-                    $leftRef = $this->mbRefForDeblock[$leftIdx] ?? array_fill(0, 16, 0);
                     $pBx = 3;
                     $pBy = $qBy;
                     $pIdx = $pBy * 4 + $pBx;
@@ -371,11 +384,6 @@ trait DeblockingFilterTrait
                 $pRef = 0;
 
                 if ($isMbEdge && $mbY > 0) {
-                    $topIdx = ($mbY - 1) * $mbWidth + $mbX;
-                    $topType = $this->mbTypeForDeblock[$topIdx] ?? -1;
-                    $topNnz = $this->mbNnzForDeblock[$topIdx] ?? array_fill(0, 24, 0);
-                    $topMv = $this->mbMvForDeblock[$topIdx] ?? array_fill(0, 16, [0, 0]);
-                    $topRef = $this->mbRefForDeblock[$topIdx] ?? array_fill(0, 16, 0);
                     $pBx = $qBx;
                     $pBy = 3;
                     $pIdx = $pBy * 4 + $pBx;
