@@ -52,9 +52,22 @@ trait TransformTrait
     public function idct4x4(array $in): array
     {
         $block = array_fill(0, 16, 0);
-        for ($y = 0; $y < 4; $y++) for ($x = 0; $x < 4; $x++) 
+        for ($y = 0; $y < 4; $y++) for ($x = 0; $x < 4; $x++)
             $block[$y * 4 + $x] = $in[$y][$x];
 
+        $flat = $this->idct4x4Flat($block);
+        $out = array_fill(0, 4, array_fill(0, 4, 0));
+        for ($y = 0; $y < 4; $y++) for ($x = 0; $x < 4; $x++)
+            $out[$y][$x] = $flat[$y * 4 + $x];
+        return $out;
+    }
+
+    /**
+     * 4x4 IDCT整数逆变换（输入输出均为raster顺序的16个系数）
+     */
+    public function idct4x4Flat(array $in): array
+    {
+        $block = $in;
         $block[0] += 32;
 
         // 第一遍：列变换 (与FFmpeg一致: i是列索引)
@@ -71,7 +84,7 @@ trait TransformTrait
         }
 
         // 第二遍：行变换并>>6 (与FFmpeg一致)
-        $out = array_fill(0, 4, array_fill(0, 4, 0));
+        $out = array_fill(0, 16, 0);
         for ($i = 0; $i < 4; $i++) {
             $row = 4 * $i;
             $z0 = $block[$row + 0] + $block[$row + 2];
@@ -79,10 +92,10 @@ trait TransformTrait
             $z2 = ($block[$row + 1] >> 1) - $block[$row + 3];
             $z3 = $block[$row + 1] + ($block[$row + 3] >> 1);
 
-            $out[$i][0] = ($z0 + $z3) >> 6;
-            $out[$i][1] = ($z1 + $z2) >> 6;
-            $out[$i][2] = ($z1 - $z2) >> 6;
-            $out[$i][3] = ($z0 - $z3) >> 6;
+            $out[$row + 0] = ($z0 + $z3) >> 6;
+            $out[$row + 1] = ($z1 + $z2) >> 6;
+            $out[$row + 2] = ($z1 - $z2) >> 6;
+            $out[$row + 3] = ($z0 - $z3) >> 6;
         }
 
         return $out;

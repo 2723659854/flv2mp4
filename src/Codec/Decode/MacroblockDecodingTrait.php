@@ -302,10 +302,8 @@ trait MacroblockDecodingTrait
         for ($blkY = 0; $blkY < 4; $blkY++) {
             for ($blkX = 0; $blkX < 4; $blkX++) {
                 $blk = $blkY * 4 + $blkX;
-                $block = array_fill(0, 4, array_fill(0, 4, 0));
-                for ($y = 0; $y < 4; $y++) for ($x = 0; $x < 4; $x++) $block[$y][$x] = $yCoeffs[$blk][$y * 4 + $x];
-                $idct = $this->idct4x4($block);
-                for ($y = 0; $y < 4; $y++) for ($x = 0; $x < 4; $x++) $yPixels[$blkY * 4 + $y][$blkX * 4 + $x] = $idct[$y][$x];
+                $idct = $this->idct4x4Flat($yCoeffs[$blk]);
+                for ($y = 0; $y < 4; $y++) for ($x = 0; $x < 4; $x++) $yPixels[$blkY * 4 + $y][$blkX * 4 + $x] = $idct[$y * 4 + $x];
             }
         }
 
@@ -379,21 +377,17 @@ trait MacroblockDecodingTrait
 
                 if ($chromaCbp >= 2) {
                     // AC存在: 将DC放入coeffs[0], 与AC一起做IDCT
-                    $blockCb = array_fill(0, 4, array_fill(0, 4, 0));
-                    $blockCr = array_fill(0, 4, array_fill(0, 4, 0));
-                    for ($y = 0; $y < 4; $y++) for ($x = 0; $x < 4; $x++) {
-                        $blockCb[$y][$x] = $cbCoeffs[$blk][$y * 4 + $x];
-                        $blockCr[$y][$x] = $crCoeffs[$blk][$y * 4 + $x];
-                    }
-                    // 将DC残差放入位置[0][0]
-                    $blockCb[0][0] = $dcResidualCb;
-                    $blockCr[0][0] = $dcResidualCr;
-                    $acIdctCb = $this->idct4x4($blockCb);
-                    $acIdctCr = $this->idct4x4($blockCr);
+                    $blockCb = $cbCoeffs[$blk];
+                    $blockCr = $crCoeffs[$blk];
+                    // 将DC残差放入位置0
+                    $blockCb[0] = $dcResidualCb;
+                    $blockCr[0] = $dcResidualCr;
+                    $acIdctCb = $this->idct4x4Flat($blockCb);
+                    $acIdctCr = $this->idct4x4Flat($blockCr);
 
                     for ($y = 0; $y < 4; $y++) for ($x = 0; $x < 4; $x++) {
-                        $uPixels[$blkY * 4 + $y][$blkX * 4 + $x] = $acIdctCb[$y][$x];
-                        $vPixels[$blkY * 4 + $y][$blkX * 4 + $x] = $acIdctCr[$y][$x];
+                        $uPixels[$blkY * 4 + $y][$blkX * 4 + $x] = $acIdctCb[$y * 4 + $x];
+                        $vPixels[$blkY * 4 + $y][$blkX * 4 + $x] = $acIdctCr[$y * 4 + $x];
                     }
                 } else {
                     // DC-only: 应用+32>>6归一化，加到所有像素
@@ -675,18 +669,17 @@ trait MacroblockDecodingTrait
                 if ($cbpLuma !== 0) {
                     // AC存在: 将DC放入coeffs[0], 与AC一起做IDCT
                     // (匹配Rust: 单一+32偏置, 避免DC和AC分别IDCT导致的双重偏置)
-                    $acBlock = array_fill(0, 4, array_fill(0, 4, 0));
-                    for ($y = 0; $y < 4; $y++) for ($x = 0; $x < 4; $x++) $acBlock[$y][$x] = $yAcCoeffs[$blk][$y * 4 + $x];
-                    // 将DC残差放入位置[0][0] (idct4x4会对位置0加+32偏置)
-                    $acBlock[0][0] = $dcResidual;
-                    $acIdct = $this->idct4x4($acBlock);
+                    $acBlock = $yAcCoeffs[$blk];
+                    // 将DC残差放入位置0 (idct4x4Flat会对位置0加+32偏置)
+                    $acBlock[0] = $dcResidual;
+                    $acIdct = $this->idct4x4Flat($acBlock);
 
                     for ($y = 0; $y < 4; $y++) {
                         for ($x = 0; $x < 4; $x++) {
                             $py = $mbY * 16 + $blkY * 4 + $y;
                             $px = $mbX * 16 + $blkX * 4 + $x;
                             if ($py < $this->height && $px < $this->width) {
-                                $val = $lumaPred[$blkY * 4 + $y][$blkX * 4 + $x] + $acIdct[$y][$x];
+                                $val = $lumaPred[$blkY * 4 + $y][$blkX * 4 + $x] + $acIdct[$y * 4 + $x];
                                 $val = max(0, min(255, $val));
                                 $idx = $py * $this->width + $px;
                                 $this->yPlane[$idx] = $val;
@@ -730,25 +723,21 @@ trait MacroblockDecodingTrait
 
                 if ($cbpChroma >= 2) {
                     // AC存在: 将DC放入coeffs[0], 与AC一起做IDCT
-                    $cbAcBlock = array_fill(0, 4, array_fill(0, 4, 0));
-                    $crAcBlock = array_fill(0, 4, array_fill(0, 4, 0));
-                    for ($y = 0; $y < 4; $y++) for ($x = 0; $x < 4; $x++) {
-                        $cbAcBlock[$y][$x] = $cbAcCoeffs[$blk][$y * 4 + $x];
-                        $crAcBlock[$y][$x] = $crAcCoeffs[$blk][$y * 4 + $x];
-                    }
-                    // 将DC残差放入位置[0][0]
-                    $cbAcBlock[0][0] = $cbDcResidual;
-                    $crAcBlock[0][0] = $crDcResidual;
-                    $acIdctCb = $this->idct4x4($cbAcBlock);
-                    $acIdctCr = $this->idct4x4($crAcBlock);
+                    $cbAcBlock = $cbAcCoeffs[$blk];
+                    $crAcBlock = $crAcCoeffs[$blk];
+                    // 将DC残差放入位置0
+                    $cbAcBlock[0] = $cbDcResidual;
+                    $crAcBlock[0] = $crDcResidual;
+                    $acIdctCb = $this->idct4x4Flat($cbAcBlock);
+                    $acIdctCr = $this->idct4x4Flat($crAcBlock);
 
                     for ($y = 0; $y < 4; $y++) {
                         for ($x = 0; $x < 4; $x++) {
                             $py = $mbY * 8 + $blkY * 4 + $y;
                             $px = $mbX * 8 + $blkX * 4 + $x;
                             if ($py < $ch && $px < $cw) {
-                                $vu = $cbPred[$blkY * 4 + $y][$blkX * 4 + $x] + $acIdctCb[$y][$x];
-                                $vv = $crPred[$blkY * 4 + $y][$blkX * 4 + $x] + $acIdctCr[$y][$x];
+                                $vu = $cbPred[$blkY * 4 + $y][$blkX * 4 + $x] + $acIdctCb[$y * 4 + $x];
+                                $vv = $crPred[$blkY * 4 + $y][$blkX * 4 + $x] + $acIdctCr[$y * 4 + $x];
                                 $idx = $py * $cw + $px;
                                 $this->uPlane[$idx] = max(0, min(255, $vu));
                                 $this->vPlane[$idx] = max(0, min(255, $vv));
@@ -2315,9 +2304,7 @@ trait MacroblockDecodingTrait
                 $blk = $blkY * 4 + $blkX;
                 $i8x8 = (int)($blkY / 2) * 2 + (int)($blkX / 2);
                 if (($lumaCbp & (1 << $i8x8)) !== 0) {
-                    $block = array_fill(0, 4, array_fill(0, 4, 0));
-                    for ($y = 0; $y < 4; $y++) for ($x = 0; $x < 4; $x++) $block[$y][$x] = $yCoeffs[$blk][$y * 4 + $x];
-                    $idct = $this->idct4x4($block);
+                    $idct = $this->idct4x4Flat($yCoeffs[$blk]);
 
                     for ($y = 0; $y < 4; $y++) {
                         for ($x = 0; $x < 4; $x++) {
@@ -2325,7 +2312,7 @@ trait MacroblockDecodingTrait
                             $px = $mbX * 16 + $blkX * 4 + $x;
                             if ($py < $this->height && $px < $this->width) {
                                 $idx = $py * $this->width + $px;
-                                $val = $this->yPlane[$idx] + $idct[$y][$x];
+                                $val = $this->yPlane[$idx] + $idct[$y * 4 + $x];
                                 $this->yPlane[$idx] = max(0, min(255, $val));
                             }
                         }
@@ -2345,19 +2332,16 @@ trait MacroblockDecodingTrait
 
                 // Cb 处理
                 if ($chromaCbp >= 2) {
-                    $acBlockCb = array_fill(0, 4, array_fill(0, 4, 0));
-                    for ($y = 0; $y < 4; $y++) for ($x = 0; $x < 4; $x++) {
-                        $acBlockCb[$y][$x] = $cbAcCoeffs[$blk][$y * 4 + $x];
-                    }
-                    $acBlockCb[0][0] = $dcCb;
-                    $acIdctCb = $this->idct4x4($acBlockCb);
+                    $acBlockCb = $cbAcCoeffs[$blk];
+                    $acBlockCb[0] = $dcCb;
+                    $acIdctCb = $this->idct4x4Flat($acBlockCb);
                     for ($y = 0; $y < 4; $y++) {
                         for ($x = 0; $x < 4; $x++) {
                             $py = $mbY * 8 + $blkY * 4 + $y;
                             $px = $mbX * 8 + $blkX * 4 + $x;
                             if ($py < $ch && $px < $cw) {
                                 $idx = $py * $cw + $px;
-                                $val = $this->uPlane[$idx] + $acIdctCb[$y][$x];
+                                $val = $this->uPlane[$idx] + $acIdctCb[$y * 4 + $x];
                                 $this->uPlane[$idx] = max(0, min(255, $val));
                             }
                         }
@@ -2379,19 +2363,16 @@ trait MacroblockDecodingTrait
 
                 // Cr 处理
                 if ($chromaCbp >= 2) {
-                    $acBlockCr = array_fill(0, 4, array_fill(0, 4, 0));
-                    for ($y = 0; $y < 4; $y++) for ($x = 0; $x < 4; $x++) {
-                        $acBlockCr[$y][$x] = $crAcCoeffs[$blk][$y * 4 + $x];
-                    }
-                    $acBlockCr[0][0] = $dcCr;
-                    $acIdctCr = $this->idct4x4($acBlockCr);
+                    $acBlockCr = $crAcCoeffs[$blk];
+                    $acBlockCr[0] = $dcCr;
+                    $acIdctCr = $this->idct4x4Flat($acBlockCr);
                     for ($y = 0; $y < 4; $y++) {
                         for ($x = 0; $x < 4; $x++) {
                             $py = $mbY * 8 + $blkY * 4 + $y;
                             $px = $mbX * 8 + $blkX * 4 + $x;
                             if ($py < $ch && $px < $cw) {
                                 $idx = $py * $cw + $px;
-                                $val = $this->vPlane[$idx] + $acIdctCr[$y][$x];
+                                $val = $this->vPlane[$idx] + $acIdctCr[$y * 4 + $x];
                                 $this->vPlane[$idx] = max(0, min(255, $val));
                             }
                         }
