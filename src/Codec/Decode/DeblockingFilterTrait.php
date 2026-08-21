@@ -16,6 +16,9 @@ trait DeblockingFilterTrait
     public array $mbTypeForDeblock = [];
     public array $mbQpForDeblock = [];
 
+    /** @var int[] 运动向量缺失时复用的零值，避免在热循环中重复创建数组。 */
+    private array $deblockZeroMv = [0, 0];
+
     private function clip3(int $lo, int $hi, int $x): int
     {
         if ($x < $lo) return $lo;
@@ -28,11 +31,12 @@ trait DeblockingFilterTrait
         return $this->clip3(0, 255, $x);
     }
 
-    private function getThresholds(int $qp, int $alphaOffset, int $betaOffset): array
+    private function getThresholds(int $qp, int $alphaOffset, int $betaOffset, int &$alpha, int &$beta): void
     {
         $indexA = $this->clip3(0, 51, $qp + $alphaOffset);
         $indexB = $this->clip3(0, 51, $qp + $betaOffset);
-        return [self::ALPHA_TABLE[$indexA], self::BETA_TABLE[$indexB], $indexA];
+        $alpha = self::ALPHA_TABLE[$indexA];
+        $beta = self::BETA_TABLE[$indexB];
     }
 
     private function getTc0(int $qp, int $alphaOffset, int $bs): int
@@ -150,7 +154,8 @@ trait DeblockingFilterTrait
 
     private function filterMbEdgeLuma(bool $isVertical, int $mbX, int $mbY, int $edge, array $bs, int $qp)
     {
-        [$alpha, $beta, $indexA] = $this->getThresholds($qp, $this->sliceAlphaC0Offset, $this->sliceBetaOffset);
+        $alpha = $beta = 0;
+        $this->getThresholds($qp, $this->sliceAlphaC0Offset, $this->sliceBetaOffset, $alpha, $beta);
         if ($alpha == 0 || $beta == 0) {
             return;
         }
@@ -217,7 +222,8 @@ trait DeblockingFilterTrait
 
     private function filterMbEdgeChroma(bool $isVertical, int $mbX, int $mbY, int $edge, array $bs, int $qp)
     {
-        [$alpha, $beta, $indexA] = $this->getThresholds($qp, $this->sliceAlphaC0Offset, $this->sliceBetaOffset);
+        $alpha = $beta = 0;
+        $this->getThresholds($qp, $this->sliceAlphaC0Offset, $this->sliceBetaOffset, $alpha, $beta);
         if ($alpha == 0 || $beta == 0) {
             return;
         }
@@ -273,15 +279,15 @@ trait DeblockingFilterTrait
         }
     }
 
-    private function computeBoundaryStrengths(int $mbX, int $mbY): array
+    private function computeBoundaryStrengths(int $mbX, int $mbY, array &$bsVertical, array &$bsHorizontal): void
     {
         $mbWidth = $this->picWidthInMbs;
-        $mbHeight = $this->picHeightInMbs;
         $mbIdx = $mbY * $mbWidth + $mbX;
         $curType = $this->mbTypeForDeblock[$mbIdx] ?? -1;
-        $curNnz = $this->mbNnzForDeblock[$mbIdx] ?? array_fill(0, 24, 0);
-        $curMv = $this->mbMvForDeblock[$mbIdx] ?? array_fill(0, 16, [0, 0]);
-        $curRef = $this->mbRefForDeblock[$mbIdx] ?? array_fill(0, 16, 0);
+        $curNnz = $this->mbNnzForDeblock[$mbIdx] ?? [];
+        $curMv = $this->mbMvForDeblock[$mbIdx] ?? [];
+        $curRef = $this->mbRefForDeblock[$mbIdx] ?? [];
+        $zeroMv = &$this->deblockZeroMv;
         $sliceType = $this->currentSliceType;
         $isIslice = ($sliceType === 2 || $sliceType === 4);
         $isPslice = ($sliceType === 0 || $sliceType === 5);
@@ -298,23 +304,22 @@ trait DeblockingFilterTrait
             }
         }
 
-        $bsVertical = [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
-        $bsHorizontal = [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
+        // 输出容器由调用方跨宏块复用，本方法会覆盖其中全部边界强度。
 
         // 宏块外边界的邻居信息对 4 个分段相同，提前缓存避免热循环重复查表。
         if ($mbX > 0) {
             $leftIdx = $mbIdx - 1;
             $leftType = $this->mbTypeForDeblock[$leftIdx] ?? -1;
-            $leftNnz = $this->mbNnzForDeblock[$leftIdx] ?? array_fill(0, 24, 0);
-            $leftMv = $this->mbMvForDeblock[$leftIdx] ?? array_fill(0, 16, [0, 0]);
-            $leftRef = $this->mbRefForDeblock[$leftIdx] ?? array_fill(0, 16, 0);
+            $leftNnz = $this->mbNnzForDeblock[$leftIdx] ?? [];
+            $leftMv = $this->mbMvForDeblock[$leftIdx] ?? [];
+            $leftRef = $this->mbRefForDeblock[$leftIdx] ?? [];
         }
         if ($mbY > 0) {
             $topIdx = $mbIdx - $mbWidth;
             $topType = $this->mbTypeForDeblock[$topIdx] ?? -1;
-            $topNnz = $this->mbNnzForDeblock[$topIdx] ?? array_fill(0, 24, 0);
-            $topMv = $this->mbMvForDeblock[$topIdx] ?? array_fill(0, 16, [0, 0]);
-            $topRef = $this->mbRefForDeblock[$topIdx] ?? array_fill(0, 16, 0);
+            $topNnz = $this->mbNnzForDeblock[$topIdx] ?? [];
+            $topMv = $this->mbMvForDeblock[$topIdx] ?? [];
+            $topRef = $this->mbRefForDeblock[$topIdx] ?? [];
         }
 
         // 垂直边界: Q块在(col=edge, row=pair), P块在(col=edge-1, row=pair)
@@ -328,13 +333,13 @@ trait DeblockingFilterTrait
                 $qIntra = $curIntra;
                 $qIpcm = $curIpcm;
                 $qNnz = $curNnz[$qIdx] ?? 0;
-                $qMv = $curMv[$qIdx] ?? [0, 0];
+                $qMv = $curMv[$qIdx] ?? $zeroMv;
                 $qRef = $curRef[$qIdx] ?? 0;
 
                 $pIntra = $curIntra;
                 $pIpcm = $curIpcm;
                 $pNnz = 0;
-                $pMv = [0, 0];
+                $pMv = $zeroMv;
                 $pRef = 0;
 
                 if ($isMbEdge && $mbX > 0) {
@@ -342,7 +347,7 @@ trait DeblockingFilterTrait
                     $pBy = $qBy;
                     $pIdx = $pBy * 4 + $pBx;
                     $pNnz = $leftNnz[$pIdx] ?? 0;
-                    $pMv = $leftMv[$pIdx] ?? [0, 0];
+                    $pMv = $leftMv[$pIdx] ?? $zeroMv;
                     $pRef = $leftRef[$pIdx] ?? 0;
                     if ($leftType >= 0) {
                         if ($isIslice) {
@@ -358,7 +363,7 @@ trait DeblockingFilterTrait
                     $pBy = $qBy;
                     $pIdx = $pBy * 4 + $pBx;
                     $pNnz = $curNnz[$pIdx] ?? 0;
-                    $pMv = $curMv[$pIdx] ?? [0, 0];
+                    $pMv = $curMv[$pIdx] ?? $zeroMv;
                     $pRef = $curRef[$pIdx] ?? 0;
                 }
 
@@ -380,13 +385,13 @@ trait DeblockingFilterTrait
                 $qIntra = $curIntra;
                 $qIpcm = $curIpcm;
                 $qNnz = $curNnz[$qIdx] ?? 0;
-                $qMv = $curMv[$qIdx] ?? [0, 0];
+                $qMv = $curMv[$qIdx] ?? $zeroMv;
                 $qRef = $curRef[$qIdx] ?? 0;
 
                 $pIntra = $curIntra;
                 $pIpcm = $curIpcm;
                 $pNnz = 0;
-                $pMv = [0, 0];
+                $pMv = $zeroMv;
                 $pRef = 0;
 
                 if ($isMbEdge && $mbY > 0) {
@@ -394,7 +399,7 @@ trait DeblockingFilterTrait
                     $pBy = 3;
                     $pIdx = $pBy * 4 + $pBx;
                     $pNnz = $topNnz[$pIdx] ?? 0;
-                    $pMv = $topMv[$pIdx] ?? [0, 0];
+                    $pMv = $topMv[$pIdx] ?? $zeroMv;
                     $pRef = $topRef[$pIdx] ?? 0;
                     if ($topType >= 0) {
                         if ($isIslice) {
@@ -410,7 +415,7 @@ trait DeblockingFilterTrait
                     $pBy = $qBy - 1;
                     $pIdx = $pBy * 4 + $pBx;
                     $pNnz = $curNnz[$pIdx] ?? 0;
-                    $pMv = $curMv[$pIdx] ?? [0, 0];
+                    $pMv = $curMv[$pIdx] ?? $zeroMv;
                     $pRef = $curRef[$pIdx] ?? 0;
                 }
 
@@ -421,7 +426,6 @@ trait DeblockingFilterTrait
             }
         }
 
-        return [$bsVertical, $bsHorizontal];
     }
 
     private function computeBsSingle($isMbEdge, $pIntra, $qIntra, $pIpcm, $qIpcm,
@@ -453,6 +457,9 @@ trait DeblockingFilterTrait
 
         $mbWidth = $this->picWidthInMbs;
         $mbHeight = $this->picHeightInMbs;
+        $emptyStrengths = [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
+        $bsVertical = $emptyStrengths;
+        $bsHorizontal = $emptyStrengths;
 
         for ($mbY = 0; $mbY < $mbHeight; $mbY++) {
             for ($mbX = 0; $mbX < $mbWidth; $mbX++) {
@@ -464,7 +471,7 @@ trait DeblockingFilterTrait
                     continue;
                 }
 
-                [$bsVertical, $bsHorizontal] = $this->computeBoundaryStrengths($mbX, $mbY);
+                $this->computeBoundaryStrengths($mbX, $mbY, $bsVertical, $bsHorizontal);
 
                 for ($edge = 0; $edge < 4; $edge++) {
                     $isMbEdge = ($edge == 0);
