@@ -54,7 +54,7 @@ final class HlsPipelineClient
             $buffer .= HlsPipelineProtocol::frame(HlsPipelineProtocol::END, $sequence++);
             while (!$finished) {
                 $read = [$socket]; $write = $buffer === '' ? [] : [$socket]; $except = null;
-                if (@stream_select($read, $write, $except, 1) === false) continue;
+                if (@stream_select($read, $write, $except, 0,1) === false) continue;
                 if ($write !== []) $this->writeSome($socket, $buffer);
                 if ($read !== []) $this->readResponses($socket, $response, $finished);
                 if ($buffer === '' && feof($socket) && !$finished) throw new RuntimeException('解码进程未返回 FINISHED');
@@ -111,7 +111,7 @@ final class HlsPipelineClient
     {
         while (strlen($buffer) >= HlsPipelineProtocol::HIGH_WATERMARK) {
             $read = [$socket]; $write = [$socket]; $except = null;
-            if (@stream_select($read, $write, $except, 1) === false) continue;
+            if (@stream_select($read, $write, $except, 0,1) === false) continue;
             if ($write !== []) $this->writeSome($socket, $buffer);
             $ignored = false; if ($read !== []) $this->readResponses($socket, $response, $ignored);
         }
