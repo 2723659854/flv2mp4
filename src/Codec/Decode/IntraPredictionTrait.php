@@ -23,8 +23,6 @@ trait IntraPredictionTrait
         $mbPx = $mbX * 16 + $blkX * 4;
         $mbPy = $mbY * 16 + $blkY * 4;
 
-        $debugThis = !empty($this->debugFrame) && $this->frameNum === $this->debugFrame && $mbX === $this->debugMbX && $mbY === $this->debugMbY;
-
         $topAvail = ($blkY === 0 && $mbY > 0) || $blkY > 0;
         $leftAvail = ($blkX === 0 && $mbX > 0) || $blkX > 0;
         $topRightAvail = false;

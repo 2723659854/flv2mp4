@@ -15,7 +15,6 @@ trait SliceDecodingTrait
     public function decodeSlice(string $rbsp, bool $isIDR, int $nalRefIdc): void
     {
         $this->reader = new BitReader($rbsp);
-        $this->refIdxWarned = false;
         $firstMbInSlice = $this->reader->readUe();
         $sliceTypeRaw = $this->reader->readUe();
         $sliceType = $sliceTypeRaw % 5;
@@ -260,13 +259,6 @@ trait SliceDecodingTrait
         $mbSkipRun = -1;
 
         $isPSlice = ($sliceType === 0 || $sliceType === 5);
-        if ($isPSlice && $startMbIdx === 0) {
-            $this->debugPFrameCount++;
-        }
-
-        $isDebugSlice = ($this->debugTargetSlice > 0 && $this->debugSliceIndex === $this->debugTargetSlice);
-
-        $firstCodedMb = true;
         for ($mbIdx = $startMbIdx; $mbIdx < $endMbIdx; $mbIdx++) {
             $mbX = $mbIdx % $mbWidth;
             $mbY = (int)($mbIdx / $mbWidth);

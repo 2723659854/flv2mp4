@@ -135,20 +135,7 @@ class H264Decoder
     public array $mvTopLeft = [];     // 当前宏块左上方 D 邻居；在覆盖 mvTopRow 前保存
     public array $mvLeftCol = [];     // 左方宏块列的运动向量，4行4x4块
 
-    public int $debugSliceIndex = 0;
-    public int $debugTargetSlice = 0;
-    public $debugMbTraceFh = null;
-    public int $debugPFrameCount = 0;
-    public bool $debugEnable = false;
-    public ?int $debugFrame = null;
-    public int $debugMbX = 0;
-    public int $debugMbY = 0;
     public int $frameNum = 0;
-
-    public bool $refIdxWarned = false;
-
-    public int $currMbX = 0;
-    public int $currMbY = 0;
 
     // DC系数映射表：DC数组索引 -> 块索引
     public static array $dcCoeffIndex = [0, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15];
@@ -349,7 +336,6 @@ class H264Decoder
                 $nalHeader = ord($nal['raw'][0]);
                 $nalRefIdc = ($nalHeader >> 5) & 0x03;
                 $sliceCount++;
-                $this->debugSliceIndex = $sliceCount;
                 $this->frameNum++;
                 // 每帧重新初始化像素平面
                 $this->yPlane = array_fill(0, $ySize, 128);
@@ -442,11 +428,6 @@ class H264Decoder
                     $vBin .= implode('', array_map('chr', array_slice($this->vPlane, $y * $uvMbAlignedWidth, $uvWidth)));
                 }
                 $outputData .= $yBin . $uBin . $vBin;
-
-                if ($sliceCount === $this->debugTargetSlice && $this->debugMbTraceFh) {
-                    fclose($this->debugMbTraceFh);
-                    $this->debugMbTraceFh = null;
-                }
             }
         }
 

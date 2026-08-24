@@ -19,15 +19,7 @@ trait MacroblockDecodingTrait
             $val = $this->reader->readU(1) ^ 1;
             return $val;
         }
-        $val = $this->reader->readUe();
-        if ($val >= $numRef && !empty($this->debugFrame) && $this->frameNum === $this->debugFrame) {
-            $mbX = $this->currMbX ?? -1;
-            $mbY = $this->currMbY ?? -1;
-            $trace = debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS, 2);
-            $func = $trace[1]['function'] ?? 'unknown';
-            echo "  [WARNING] MB($mbX,$mbY) $func: ref_idx=$val >= numRef=$numRef\n";
-        }
-        return $val;
+        return $this->reader->readUe();
     }
 
     /**
@@ -39,9 +31,6 @@ trait MacroblockDecodingTrait
         $mbType = $this->reader->readUe();
         $mbWidth = $this->picWidthInMbs;
         $mbIdx = $mbY * $mbWidth + $mbX;
-
-        $this->currMbX = $mbX;
-        $this->currMbY = $mbY;
 
         $this->mbTypeForDeblock[$mbIdx] = $mbType;
         $this->mbNnzForDeblock[$mbIdx] = array_fill(0, 24, 0);
