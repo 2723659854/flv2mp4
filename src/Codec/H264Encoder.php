@@ -8,7 +8,6 @@ use Xiaosongshu\Flv2mp4\Codec\Encode\InterPredTrait;
 use Xiaosongshu\Flv2mp4\Codec\Encode\IntraPredTrait;
 use Xiaosongshu\Flv2mp4\Codec\Encode\MotionTrait;
 use Xiaosongshu\Flv2mp4\Codec\Encode\SliceEncodeTrait;
-use Xiaosongshu\Flv2mp4\Codec\Encode\MotionWorkerClient;
 use Xiaosongshu\Flv2mp4\Codec\Encode\SpsPpsTrait;
 use Xiaosongshu\Flv2mp4\Codec\Encode\TransformTrait;
 
@@ -358,8 +357,6 @@ class H264Encoder
     public $refInts = null;        // 参考帧Y平面整数数组缓存（优化运动估计速度）
     public $enableInter = true;   // 是否启用P帧
     public $numRefFrames = 1;      // 参考帧数量
-    public $debugStopMbX = -1;     // 调试：编码到此宏块列后停止
-    public $debugStopMbY = -1;     // 调试：编码到此宏块行后停止
 
     // 本地解码重建帧（用于正确更新参考帧，避免编解码器失配）
     public $reconYPlane = '';

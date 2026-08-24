@@ -181,12 +181,6 @@ trait SliceEncodeTrait
             // 不清空mvTopRow：保留上一行的MV作为top预测参考
             $this->mvLeftCol = [null, null, null, null];
             for ($mbX = 0; $mbX < $mbWidth; $mbX++) {
-                // DEBUG: 提前终止宏块编码用于二分定位
-                if ($this->debugStopMbY >= 0 && $this->debugStopMbX >= 0) {
-                    if ($mbY > $this->debugStopMbY || ($mbY == $this->debugStopMbY && $mbX > $this->debugStopMbX)) {
-                        break 2;
-                    }
-                }
                 if ($isPSlice) {
                     // P帧编码
                     $mbBits = $this->encodePMacroblock(

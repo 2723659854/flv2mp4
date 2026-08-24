@@ -528,14 +528,6 @@ trait MacroblockDecodingTrait
         $lumaQmul = $this->dequant4Table[0][$qpClamped][0];
         $yDcResultBlockOrder = $this->lumaDcDequantIdct($yDcRaster, $lumaQmul);
 
-        if ($mbX === 0 && $mbY === 0) {
-            $this->debugLastQp = $qp;
-            $this->debugLastDcScan = $yDcRaster;
-            $this->debugLastDcRaster = $yDcRaster;
-            $this->debugLastQmul = $lumaQmul;
-            $this->debugLastDcResult = $yDcResultBlockOrder;
-        }
-
         $yAcCoeffs = array_fill(0, 16, array_fill(0, 16, 0));
         $blockIndexToRaster = [0, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15];
 

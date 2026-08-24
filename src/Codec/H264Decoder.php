@@ -134,12 +134,6 @@ class H264Decoder
     public array $mvTopRow = [];      // 上方宏块行的运动向量，每宏块4个（4列4x4块）[colIdx] = [mvX, mvY, refIdx]
     public array $mvLeftCol = [];     // 左方宏块列的运动向量，4行4x4块
 
-    public $debugLastQp = 0;
-    public $debugLastDcScan = [];
-    public $debugLastDcRaster = [];
-    public $debugLastQmul = 0;
-    public $debugLastDcResult = [];
-
     public int $debugSliceIndex = 0;
     public int $debugTargetSlice = 0;
     public $debugMbTraceFh = null;
@@ -300,7 +294,6 @@ class H264Decoder
      */
     public function decode(array $nalUnits, bool $parseOnly = false): ?array
     {
-        //echo "[DECODER] Start decoding, " . count($nalUnits) . " NAL units, parseOnly=" . ($parseOnly ? 'true' : 'false') . PHP_EOL;
 
         // 记录之前的分辨率（用于判断是否需要重新初始化）
         $prevWidth = $this->width;
@@ -312,14 +305,11 @@ class H264Decoder
         $this->vPlane = [];
 
         // 第一轮：解析SPS/PPS获取分辨率
-        //echo "[DECODER] Step 1: Parsing SPS/PPS..." . PHP_EOL;
         foreach ($nalUnits as $nal) {
             $nalType = $nal['type'];
             if ($nalType === 7) {
-                //echo "[DECODER]   Parsing SPS (data size=" . strlen($nal['data']) . ")" . PHP_EOL;
                 $this->parseSPS($nal['data']);
             } elseif ($nalType === 8) {
-                //echo "[DECODER]   Parsing PPS (data size=" . strlen($nal['data']) . ")" . PHP_EOL;
                 $this->parsePPS($nal['data']);
             }
         }
