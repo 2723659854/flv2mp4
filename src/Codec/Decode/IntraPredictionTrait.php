@@ -101,14 +101,6 @@ trait IntraPredictionTrait
             $topLeft = $left[0];
         }
 
-        if ($debugThis) {
-            $modeNames = ['Vertical','Horizontal','DC','DDL','DDR','VR','HD','VL','HU'];
-            $modeName = $modeNames[$mode] ?? "unknown($mode)";
-            echo "    [I4x4Pred] blk($blkX,$blkY) mode=$mode($modeName) topAvail=" . ($topAvail?'Y':'N') . " leftAvail=" . ($leftAvail?'Y':'N') . "\n";
-            echo "      top=[" . implode(',', array_slice($top, 0, 4)) . "] topLeft=$topLeft left=[" . implode(',', $left) . "]\n";
-            if ($topRightAvail) echo "      topRight=[" . implode(',', array_slice($top, 4, 4)) . "]\n";
-        }
-
         switch ($mode) {
             case 0: // Vertical
                 for ($y = 0; $y < 4; $y++) {
@@ -346,12 +338,6 @@ trait IntraPredictionTrait
             for ($x = 0; $x < 4; $x++) {
                 if ($predicted[$y][$x] < 0) $predicted[$y][$x] = 0;
                 if ($predicted[$y][$x] > 255) $predicted[$y][$x] = 255;
-            }
-        }
-
-        if ($debugThis) {
-            for ($y = 0; $y < 4; $y++) {
-                echo "      pred[y=$y]: [" . implode(',', array_map('intval', $predicted[$y])) . "]\n";
             }
         }
 

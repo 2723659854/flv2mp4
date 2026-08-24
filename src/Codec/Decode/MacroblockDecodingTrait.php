@@ -50,16 +50,9 @@ trait MacroblockDecodingTrait
 
         $mbQpDelta = 0;
 
-        $debugThis = !empty($this->debugFrame) && $this->frameNum === $this->debugFrame && $mbX === $this->debugMbX && $mbY === $this->debugMbY;
-        $debugRow = !empty($this->debugFrame) && $this->frameNum === $this->debugFrame && $mbY === $this->debugMbY;
-        $debugAll = !empty($this->debugFrame) && $this->frameNum === $this->debugFrame;
-
         if ($sliceType === 2 || $sliceType === 4) {
             $mbQpDelta = $this->decodeIntraMacroblock($mbX, $mbY, $mbType, $sliceQp);
-            if ($debugAll && $mbY <= 12) echo "  [TRACE] Frame {$this->frameNum} MB($mbX,$mbY): I-slice mbType=$mbType\n";
         } elseif ($sliceType === 0 || $sliceType === 5) {
-            if ($debugAll && $mbY <= 12 && $mbType <= 10) echo "  [TRACE] Frame {$this->frameNum} MB($mbX,$mbY): P-slice mbType=$mbType\n";
-            if ($debugThis) echo "  [DEBUG] Frame {$this->frameNum} MB($mbX,$mbY): P-slice mbType=$mbType\n";
             $mbQpDelta = $this->decodePInterMacroblock($mbX, $mbY, $mbType, $sliceQp);
         } else {
             $this->fillMacroblockGray($mbX, $mbY);
@@ -72,8 +65,6 @@ trait MacroblockDecodingTrait
      */
     private function decodeIntraMacroblock(int $mbX, int $mbY, int $mbType, int $sliceQp): int
     {
-        $debugThis = !empty($this->debugFrame) && $this->frameNum === $this->debugFrame && $mbX === $this->debugMbX && $mbY === $this->debugMbY;
-        if ($debugThis) echo "  [DEBUG] Intra: mbType=$mbType (I4x4)\n";
 
         if ($mbType === 25) {
             $this->reader->alignToByte();
@@ -313,9 +304,6 @@ trait MacroblockDecodingTrait
                 $blk = $blkY * 4 + $blkX;
                 $predicted = $this->intra4x4Prediction($mbX, $mbY, $blkX, $blkY, $modes[$blk]);
 
-                $debugThis = $this->debugFrame !== null && $this->frameNum === $this->debugFrame
-                    && $mbX === $this->debugMbX && $mbY === $this->debugMbY;
-
                 for ($y = 0; $y < 4; $y++) {
                     for ($x = 0; $x < 4; $x++) {
                         $py = $mbY * 16 + $blkY * 4 + $y;
@@ -326,29 +314,6 @@ trait MacroblockDecodingTrait
                             $idx = $py * $this->width + $px;
                             $this->yPlane[$idx] = $val;
                         }
-                    }
-                }
-
-                if ($debugThis) {
-                    echo "      [blk($blkX,$blkY) mode=$modes[$blk]]\n";
-                    echo "        coeffs(raw): ";
-                    for ($i = 0; $i < 16; $i++) echo $yCoeffs[$blk][$i] . ",";
-                    echo "\n";
-                    echo "        residual(IDCT):\n";
-                    for ($y = 0; $y < 4; $y++) {
-                        echo "          [";
-                        for ($x = 0; $x < 4; $x++) printf("%4d", $yPixels[$blkY * 4 + $y][$blkX * 4 + $x]);
-                        echo "]\n";
-                    }
-                    echo "        recon:\n";
-                    for ($y = 0; $y < 4; $y++) {
-                        echo "          [";
-                        for ($x = 0; $x < 4; $x++) {
-                            $py = $mbY * 16 + $blkY * 4 + $y;
-                            $px = $mbX * 16 + $blkX * 4 + $x;
-                            printf("%4d", $this->yPlane[$py * $this->width + $px]);
-                        }
-                        echo "]\n";
                     }
                 }
             }
@@ -983,11 +948,6 @@ trait MacroblockDecodingTrait
         $mvX = $predMvX;
         $mvY = $predMvY;
 
-        $debugThis = !empty($this->debugFrame) && $this->frameNum === $this->debugFrame && $mbX === $this->debugMbX && $mbY === $this->debugMbY;
-        $debugRow = !empty($this->debugFrame) && $this->frameNum === $this->debugFrame && $mbY === $this->debugMbY;
-        if ($debugRow) echo "  [TRACE] Frame {$this->frameNum} MB($mbX,$mbY): P_Skip mv=($predMvX,$predMvY)\n";
-        if ($debugThis) echo "  [DEBUG] P_Skip: predMv=($predMvX,$predMvY) mv=($mvX,$mvY) ref=$refIdx\n";
-        
         $this->performMotionCompensation16x16($mbX, $mbY, $mvX, $mvY, $refIdx);
 
         $this->saveMvForPrediction($mbX, $mbY, $mvX, $mvY, $refIdx);
@@ -1060,19 +1020,14 @@ trait MacroblockDecodingTrait
         $mvX = $predMvX + $mvdL0X;
         $mvY = $predMvY + $mvdL0Y;
 
-        $debugThis = !empty($this->debugFrame) && $this->frameNum === $this->debugFrame && $mbX === $this->debugMbX && $mbY === $this->debugMbY;
-        if ($debugThis) echo "  [DEBUG] P_L0_16x16: mvd=($mvdL0X,$mvdL0Y) predMv=($predMvX,$predMvY) mv=($mvX,$mvY) refIdx=$refIdx\n";
-
         $this->performMotionCompensation16x16($mbX, $mbY, $mvX, $mvY, $refIdx);
         $cbpCode = $this->reader->readUe();
         $codedBlockPattern = self::GOLOMB_TO_INTER_CBP[$cbpCode] ?? 0;
-        if ($debugThis) echo "  [DEBUG] cbpCode=$cbpCode cbp=$codedBlockPattern\n";
         $mbQpDelta = 0;
         if ($codedBlockPattern !== 0) {
             $mbQpDelta = $this->reader->readSe();
             $qp = $sliceQp + $mbQpDelta;
             $qp = max(0, min(51, $qp));
-            if ($debugThis) echo "  [DEBUG] mbQpDelta=$mbQpDelta qp=$qp\n";
             $this->decodeResidualAndAdd($mbX, $mbY, $codedBlockPattern, $qp, 0);
         }
         if ($codedBlockPattern === 0) {
@@ -1094,8 +1049,6 @@ trait MacroblockDecodingTrait
      */
     private function decodePL0_16x8(int $mbX, int $mbY, int $sliceQp): int
     {
-        $debugThis = !empty($this->debugFrame) && $this->frameNum === $this->debugFrame && $mbX === $this->debugMbX && $mbY === $this->debugMbY;
-
         $refIdx0 = $this->readRefIdxL0();
         $refIdx1 = $this->readRefIdxL0();
         $mvd0X = $this->reader->readSe();
@@ -1111,9 +1064,6 @@ trait MacroblockDecodingTrait
         list($predMv1X, $predMv1Y) = $this->getP16x8MvPrediction($mbX, $mbY, 1, $refIdx1, $mv0);
         $mv1X = $predMv1X + $mvd1X;
         $mv1Y = $predMv1Y + $mvd1Y;
-
-        if ($debugThis) echo "  [DEBUG] P_L0_L0_16x8: part0: mvd=($mvd0X,$mvd0Y) predMv=($predMv0X,$predMv0Y) mv=($mv0X,$mv0Y) ref=$refIdx0\n";
-        if ($debugThis) echo "  [DEBUG] P_L0_L0_16x8: part1: mvd=($mvd1X,$mvd1Y) predMv=($predMv1X,$predMv1Y) mv=($mv1X,$mv1Y) ref=$refIdx1\n";
 
         $this->performMotionCompensation16x8($mbX, $mbY, 0, $mv0X, $mv0Y, $refIdx0);
         $this->performMotionCompensation16x8($mbX, $mbY, 1, $mv1X, $mv1Y, $refIdx1);
@@ -1156,7 +1106,6 @@ trait MacroblockDecodingTrait
      */
     private function decodePL0_8x16(int $mbX, int $mbY, int $sliceQp): int
     {
-        $debugThis = !empty($this->debugFrame) && $this->frameNum === $this->debugFrame && $mbX === $this->debugMbX && $mbY === $this->debugMbY;
 
         $refIdx0 = $this->readRefIdxL0();
         $refIdx1 = $this->readRefIdxL0();
@@ -1173,9 +1122,6 @@ trait MacroblockDecodingTrait
         list($predMv1X, $predMv1Y) = $this->getP8x16MvPrediction($mbX, $mbY, 1, $refIdx1, $mv0);
         $mv1X = $predMv1X + $mvd1X;
         $mv1Y = $predMv1Y + $mvd1Y;
-
-        if ($debugThis) echo "  [DEBUG] P_L0_L0_8x16: part0: mvd=($mvd0X,$mvd0Y) predMv=($predMv0X,$predMv0Y) mv=($mv0X,$mv0Y) ref=$refIdx0\n";
-        if ($debugThis) echo "  [DEBUG] P_L0_L0_8x16: part1: mvd=($mvd1X,$mvd1Y) predMv=($predMv1X,$predMv1Y) mv=($mv1X,$mv1Y) ref=$refIdx1\n";
 
         $this->performMotionCompensation8x16($mbX, $mbY, 0, $mv0X, $mv0Y, $refIdx0);
         $this->performMotionCompensation8x16($mbX, $mbY, 1, $mv1X, $mv1Y, $refIdx1);
@@ -1808,7 +1754,6 @@ trait MacroblockDecodingTrait
     private function getP16x8MvPrediction(int $mbX, int $mbY, int $partIdx, int $refIdx, ?array $mvPart0 = null): array
     {
         $mbWidth = $this->picWidthInMbs;
-        $debugPred = !empty($this->debugFrame) && $this->frameNum === $this->debugFrame && $mbX === $this->debugMbX && $mbY === $this->debugMbY;
 
         $mvLeft = null;
         $mvTop = null;
@@ -1838,28 +1783,17 @@ trait MacroblockDecodingTrait
             }
         }
 
-        if ($debugPred) {
-            echo "  [DEBUG] getP16x8MvPred(part$partIdx, ref$refIdx): ";
-            echo "A=" . ($mvLeft !== null ? "[" . $mvLeft[0] . "," . $mvLeft[1] . "," . $mvLeft[2] . "]" : "null");
-            echo " B=" . ($mvTop !== null ? "[" . $mvTop[0] . "," . $mvTop[1] . "," . $mvTop[2] . "]" : "null");
-            echo " C=" . ($mvC !== null ? "[" . $mvC[0] . "," . $mvC[1] . "," . $mvC[2] . "]" : "null");
-            echo "\n";
-        }
-
         if ($partIdx === 0) {
             if ($mvTop !== null && $mvTop[2] >= 0 && $mvTop[2] === $refIdx) {
-                if ($debugPred) echo "  [DEBUG] -> B fast path: ($mvTop[0],$mvTop[1])\n";
                 return [$mvTop[0], $mvTop[1]];
             }
         } else {
             if ($mvLeft !== null && $mvLeft[2] >= 0 && $mvLeft[2] === $refIdx) {
-                if ($debugPred) echo "  [DEBUG] -> A fast path: ($mvLeft[0],$mvLeft[1])\n";
                 return [$mvLeft[0], $mvLeft[1]];
             }
         }
 
         $result = $this->predictMvP16x16($mvLeft, $mvTop, $mvC, $refIdx);
-        if ($debugPred) echo "  [DEBUG] -> median result: (" . $result[0] . "," . $result[1] . ")\n";
         return $result;
     }
 
@@ -1912,11 +1846,6 @@ trait MacroblockDecodingTrait
             }
         }
 
-        $debugThis = !empty($this->debugFrame) && $this->frameNum === $this->debugFrame && $mbX === $this->debugMbX && $mbY === $this->debugMbY;
-        if ($debugThis) {
-            echo "  [DEBUG 8x16 part$partIdx] mvLeft=" . json_encode($mvLeft) . " mvTop=" . json_encode($mvTop) . " mvC=" . json_encode($mvC) . " refIdx=$refIdx\n";
-        }
-
         if ($partIdx === 0) {
             if ($mvLeft !== null && $mvLeft[2] === $refIdx) {
                 return [$mvLeft[0], $mvLeft[1]];
@@ -1928,9 +1857,6 @@ trait MacroblockDecodingTrait
         }
 
         $pred = $this->predictMvP16x16($mvLeft, $mvTop, $mvC, $refIdx);
-        if ($debugThis) {
-            echo "  [DEBUG 8x16 part$partIdx] pred=" . json_encode($pred) . "\n";
-        }
         return $pred;
     }
 
@@ -2009,13 +1935,6 @@ trait MacroblockDecodingTrait
 
         $lumaRefX = $mbX * 64 + $mvX;
         $lumaRefY = $mbY * 64 + $mvY;
-
-        $debugThis = !empty($this->debugFrame) && $this->frameNum === $this->debugFrame && $mbX === $this->debugMbX && $mbY === $this->debugMbY;
-        if ($debugThis) {
-            $intX = $lumaRefX >> 2; $intY = $lumaRefY >> 2;
-            $fracX = $lumaRefX & 3; $fracY = $lumaRefY & 3;
-            echo "  [DEBUG] MC16x16: refX=$lumaRefX refY=$lumaRefY intPos=($intX,$intY) frac=($fracX,$fracY)\n";
-        }
 
         $lumaPred = $this->mcLuma(
             $ref['y'], $ref['strideY'],
@@ -2223,9 +2142,6 @@ trait MacroblockDecodingTrait
         $crDc = array_fill(0, 4, 0);
         $cbAcCoeffs = array_fill(0, 4, array_fill(0, 16, 0));
         $crAcCoeffs = array_fill(0, 4, array_fill(0, 16, 0));
-
-        $isDebugSlice = ($this->debugTargetSlice > 0 && $this->debugSliceIndex === $this->debugTargetSlice);
-        $isDebugMb = $isDebugSlice && $mbY === 0 && ($mbX === 1 || $mbX === 2);
 
         if ($chromaCbp >= 1) {
             $cbDc = $this->decodeResidualBlock(4, -1);
