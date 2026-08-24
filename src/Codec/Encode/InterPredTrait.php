@@ -120,7 +120,7 @@ trait InterPredTrait
             throw new \RuntimeException("缺少 P 宏块 Worker 结果 ({$mbX},{$mbY})");
         }
         [$mvX, $mvY, $sad, $cbpLuma, $nzCache, $quantResidual, $workerReconY, $workerReconU, $workerReconV] = $prepared;
-        $reconStride = $this->mbAlignedWidth;
+        //$reconStride = $this->mbAlignedWidth;
 
         // === 计算P_Skip的MVP（与解码器predictMvPSkip一致） ===
         // P_Skip的MV = skipMVP，解码器用此MV做MC
@@ -128,7 +128,7 @@ trait InterPredTrait
 
         // 色度参考帧尺寸（使用mbAligned尺寸，与I帧重建存储格式一致）
         $chromaW = intdiv($this->mbAlignedWidth, 2);
-        $chromaH = intdiv($this->mbAlignedHeight, 2);
+        //$chromaH = intdiv($this->mbAlignedHeight, 2);
         $reconStride = $this->mbAlignedWidth;
 
         // P_Skip条件：cbpLuma=0 且 MV等于skipMVP（MVD=0）

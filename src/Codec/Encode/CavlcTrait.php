@@ -71,8 +71,7 @@ trait CavlcTrait
         }
 
         $avgNz = $count > 0 ? intdiv($predNz + intdiv($count, 2), $count) : 0;
-        $result = min($avgNz, 16);
-        return $result;
+        return  min($avgNz, 16);
     }
 
     public function writeBlockResidualCavlc(array $coeffs, int $endIdx, bool $isChromaDc, int $iNC): string
