@@ -220,8 +220,8 @@ trait MotionTrait
 
         // === 半像素/1/4像素精搜索 ===
         // 使用mcLumaBlock计算子像素位置的SAD
-        $bestMVx = $bestDX * 4;
-        $bestMVy = $bestDY * 4;
+        //$bestMVx = $bestDX * 4;
+        //$bestMVy = $bestDY * 4;
         // 整数 MV 的 MC 像素与整数 SAD 候选完全等价，复用已计算结果。
         $bestSAD = $candidateSads[$bestDX . ',' . $bestDY];
 
@@ -550,8 +550,8 @@ trait MotionTrait
         $refW = $this->mbAlignedWidth;
         $refH = $this->mbAlignedHeight;
 
-        $bestMV = [0, 0];
-        $bestSAD = PHP_INT_MAX;
+        //$bestMV = [0, 0];
+        //$bestSAD = PHP_INT_MAX;
 
         $origX = $mbX * 16;
         $origY = $mbY * 16;

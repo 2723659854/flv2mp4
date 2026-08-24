@@ -16,17 +16,9 @@ trait IntraPredTrait
     )
     {
         if ($this->mbType === self::MB_TYPE_I16x16) {
-            $result = $this->encodeMacroblockI16x16($mbX, $mbY, $yPlane, $uPlane, $vPlane, $leftAvailable, $leftNz, $topAvailable, $topNzLuma, $topNzCb, $topNzCr);
-//            if ($mbY == 5 && ($mbX == 12 || $mbX == 13)) {
-//                echo "  MB({$mbX},{$mbY}): I16x16, total bits=" . strlen($result) . "\n";
-//            }
-            return $result;
+            return $this->encodeMacroblockI16x16($mbX, $mbY, $yPlane, $uPlane, $vPlane, $leftAvailable, $leftNz, $topAvailable, $topNzLuma, $topNzCb, $topNzCr);
         } else {
-            $result = $this->encodeMacroblockI4x4($mbX, $mbY, $yPlane, $uPlane, $vPlane, $leftAvailable, $leftNz, $topAvailable, $topNzLuma, $topNzCb, $topNzCr, $leftIntra4x4Mode, $topIntra4x4Mode);
-//            if ($mbY == 5 && ($mbX == 12 || $mbX == 13)) {
-//                echo "  MB({$mbX},{$mbY}): I4x4, total bits=" . strlen($result) . "\n";
-//            }
-            return $result;
+            return  $this->encodeMacroblockI4x4($mbX, $mbY, $yPlane, $uPlane, $vPlane, $leftAvailable, $leftNz, $topAvailable, $topNzLuma, $topNzCb, $topNzCr, $leftIntra4x4Mode, $topIntra4x4Mode);
         }
     }
 
@@ -37,7 +29,6 @@ trait IntraPredTrait
     )
     {
         $bits = '';
-        $chromaWidth = (int)($this->width / 2);
         $lumaPixels = array_fill(0, 16, array_fill(0, 16, 128));
         $reconStride = $this->mbAlignedWidth;
         for ($y = 0; $y < 16; $y++) {
@@ -186,7 +177,6 @@ trait IntraPredTrait
         $dcCb2x2 = [0, 0, 0, 0];
         $dcCr2x2 = [0, 0, 0, 0];
 
-        $chromaHeight = (int)($this->height / 2);
         $chromaStride = (int)($this->mbAlignedWidth / 2);
         for ($y = 0; $y < 8; $y++) {
             $py = $mbY * 8 + $y;
@@ -202,10 +192,7 @@ trait IntraPredTrait
         $chromaTopU = array_fill(0, 8, 128);
         $chromaLeftV = array_fill(0, 8, 128);
         $chromaTopV = array_fill(0, 8, 128);
-        $chromaLeftSumU = 0;
-        $chromaTopSumU = 0;
-        $chromaLeftSumV = 0;
-        $chromaTopSumV = 0;
+
         $chromaCntL = 0;
         $chromaCntT = 0;
         $reconChromaStride = intdiv($this->mbAlignedWidth, 2);
@@ -216,8 +203,6 @@ trait IntraPredTrait
                 $idx = $py * $reconChromaStride + $refX;
                 $chromaLeftU[$y] = ord($this->reconUPlane[$idx]);
                 $chromaLeftV[$y] = ord($this->reconVPlane[$idx]);
-                $chromaLeftSumU += $chromaLeftU[$y];
-                $chromaLeftSumV += $chromaLeftV[$y];
                 $chromaCntL++;
             }
         }
@@ -228,8 +213,6 @@ trait IntraPredTrait
                 $idx = $refY * $reconChromaStride + $px;
                 $chromaTopU[$x] = ord($this->reconUPlane[$idx]);
                 $chromaTopV[$x] = ord($this->reconVPlane[$idx]);
-                $chromaTopSumU += $chromaTopU[$x];
-                $chromaTopSumV += $chromaTopV[$x];
                 $chromaCntT++;
             }
         }
@@ -406,45 +389,11 @@ trait IntraPredTrait
 
         $cbpIdx = ($cbpLuma == 0 ? 0 : 3) + $cbpChroma;
         $mbTypeValue = 1 + $i16Mode + ($cbpIdx << 2);
-        $debugThisMb = ($mbY == 5 && ($mbX == 12 || $mbX == 13));
-        $debugTargetMb = ($mbY == 5 && ($mbX == 12 || $mbX == 13));
-//        if ($debugTargetMb) {
-//            echo "=== DEBUG MB({$mbX},{$mbY}) I16x16 START ===\n";
-//            echo "  i16Mode={$i16Mode}, cbpChroma={$cbpChroma}, cbpLuma={$cbpLuma}, cbpIdx={$cbpIdx}, mbTypeValue={$mbTypeValue}\n";
-//            echo "  chromaMode={$chromaMode}\n";
-//            echo "  topAvailable=" . ($topAvailable ? 'true' : 'false') . ", leftAvailable=" . ($leftAvailable ? 'true' : 'false') . "\n";
-//            echo "  lumaPredMode={$lumaPredMode}, chromaPredMode={$chromaPredMode}\n";
-//            echo "  bit len before mb_type: " . strlen($bits) . "\n";
-//        }
         $bits .= $this->ue($mbTypeValue);
-//        if ($debugTargetMb) {
-//            echo "  bit len after mb_type: " . strlen($bits) . "\n";
-//        }
-
         $bits .= $this->ue($chromaMode);
-
         $bits .= $this->se(0);
-
-        // DEBUG
-//        if ($debugThisMb || $debugTargetMb) {
-//            $prefix = $debugTargetMb ? "  MB(0,0)" : "  DEBUG MB(0,0)";
-//            echo "{$prefix} header done, total bits: " . strlen($bits) . "\n";
-//        }
-
-//        if ($debugTargetMb) {
-//            echo "  leftNz = [" . implode(',', $leftNz) . "]\n";
-//            echo "  leftAvailable=" . ($leftAvailable ? 'true' : 'false') . "\n";
-//        }
         $dcNc = $this->computeNC(-1, $mbX, 0, 0, $leftAvailable, $leftNz, $topAvailable, $topNzLuma, $nzCache);
-        $beforeDc = strlen($bits);
-//        if ($debugThisMb) {
-//            echo "  Luma DC coeffs: " . implode(',', $dcZigzag) . "\n";
-//        }
         $bits .= $this->writeBlockResidualCavlc($dcZigzag, 15, false, $dcNc);
-//        if ($debugThisMb) {
-//            echo "  Luma DC: " . (strlen($bits) - $beforeDc) . " bits, dcNc={$dcNc}\n";
-//        }
-
         $lumaAcScanOrder = [0, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15];
         $nzCacheNew = array_fill(0, 24, 0);
         if ($cbpLuma > 0) {
@@ -453,11 +402,7 @@ trait IntraPredTrait
                 $bx = $rasterIdx % 4;
                 $acNc = $this->computeNC($rasterIdx, $mbX, $bx, $by, $leftAvailable, $leftNz, $topAvailable, $topNzLuma, $nzCacheNew);
                 $ac = $this->scan4x4Ac($quant4x4Luma[$rasterIdx]);
-                $beforeAc = strlen($bits);
                 $bits .= $this->writeBlockResidualCavlc($ac, 14, false, $acNc);
-//                if ($debugThisMb) {
-//                    echo "  Luma AC block {$rasterIdx}: " . (strlen($bits) - $beforeAc) . " bits, acNc={$acNc}\n";
-//                }
                 $nzCacheNew[$rasterIdx] = $nzCache[$rasterIdx];
             }
         }
@@ -472,17 +417,8 @@ trait IntraPredTrait
         }
 
         if ($cbpChroma > 0) {
-            $beforeCbDc = strlen($bits);
             $bits .= $this->writeBlockResidualCavlc($qCbDc, 3, true, -1);
-//            if ($debugThisMb) {
-//                echo "  Chroma Cb DC: " . (strlen($bits) - $beforeCbDc) . " bits\n";
-//            }
-            $beforeCrDc = strlen($bits);
             $bits .= $this->writeBlockResidualCavlc($qCrDc, 3, true, -1);
-//            if ($debugThisMb) {
-//                echo "  Chroma Cr DC: " . (strlen($bits) - $beforeCrDc) . " bits\n";
-//            }
-
             if ($cbpChroma === 2) {
                 $cbScanOrder = [16, 17, 18, 19];
                 foreach ($cbScanOrder as $blockIdx) {
@@ -491,11 +427,7 @@ trait IntraPredTrait
                     $bx = $blk % 2;
                     $acNc = $this->computeNC($blockIdx, $mbX, $bx, $by, $leftAvailable, $leftNz, $topAvailable, $topNzCb, $nzCacheNew);
                     $acCb = $this->scan4x4Ac($quantCb4x4[$blk]);
-                    $beforeAc = strlen($bits);
                     $bits .= $this->writeBlockResidualCavlc($acCb, 14, false, $acNc);
-//                    if ($debugThisMb) {
-//                        echo "  Chroma Cb AC block {$blk} (raster {$blockIdx}): " . (strlen($bits) - $beforeAc) . " bits, acNc={$acNc}\n";
-//                    }
                     $nzCacheNew[$blockIdx] = $nzCache[$blockIdx];
                 }
                 $crScanOrder = [20, 21, 22, 23];
@@ -505,11 +437,7 @@ trait IntraPredTrait
                     $bx = $blk % 2;
                     $acNc = $this->computeNC($blockIdx, $mbX, $bx, $by, $leftAvailable, $leftNz, $topAvailable, $topNzCr, $nzCacheNew);
                     $acCr = $this->scan4x4Ac($quantCr4x4[$blk]);
-                    $beforeAc = strlen($bits);
                     $bits .= $this->writeBlockResidualCavlc($acCr, 14, false, $acNc);
-//                    if ($debugThisMb) {
-//                        echo "  Chroma Cr AC block {$blk} (raster {$blockIdx}): " . (strlen($bits) - $beforeAc) . " bits, acNc={$acNc}\n";
-//                    }
                     $nzCacheNew[$blockIdx] = $nzCache[$blockIdx];
                 }
             }
@@ -590,7 +518,6 @@ trait IntraPredTrait
 
         // === 色度本地解码重建（用于正确更新色度参考帧）===
         $chromaW = intdiv($this->mbAlignedWidth, 2);
-        $chromaH = intdiv($this->mbAlignedHeight, 2);
         $cbQmul = $this->dequant4Table[1][$chromaQp][0];
         $crQmul = $this->dequant4Table[2][$chromaQp][0];
         $cbDcResult = $this->chromaDcDequantIdct($qCbDc, $cbQmul);
@@ -657,12 +584,6 @@ trait IntraPredTrait
                 }
             }
         }
-
-        // DEBUG
-//        if ($mbY <= 3 && $mbX <= 5) {
-//            echo "DEBUG MB({$mbX},{$mbY}): " . strlen($bits) . " bits, cbpLuma={$cbpLuma}, cbpChroma={$cbpChroma}, chromaMode={$chromaMode}\n";
-//        }
-
         return $bits;
     }
 
@@ -674,9 +595,6 @@ trait IntraPredTrait
     )
     {
         $bits = '';
-        $chromaWidth = (int)($this->width / 2);
-        $chromaHeight = (int)($this->height / 2);
-
         $lumaPixels = array_fill(0, 16, array_fill(0, 16, 128));
         $reconStride = $this->mbAlignedWidth;
         for ($y = 0; $y < 16; $y++) {
@@ -730,7 +648,7 @@ trait IntraPredTrait
             }
         }
 
-        $lumaAcScanOrder = [0, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15];
+        //$lumaAcScanOrder = [0, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15];
         $intra4x4PredModes = array_fill(0, 16, 2);
         for ($by = 0; $by < 4; $by++) {
             for ($bx = 0; $bx < 4; $bx++) {
@@ -1232,10 +1150,6 @@ trait IntraPredTrait
         $chromaTopU = array_fill(0, 8, 128);
         $chromaLeftV = array_fill(0, 8, 128);
         $chromaTopV = array_fill(0, 8, 128);
-        $chromaLeftSumU = 0;
-        $chromaTopSumU = 0;
-        $chromaLeftSumV = 0;
-        $chromaTopSumV = 0;
         $chromaCntL = 0;
         $chromaCntT = 0;
         $reconChromaStride = intdiv($this->mbAlignedWidth, 2);
@@ -1246,8 +1160,6 @@ trait IntraPredTrait
                 $idx = $py * $reconChromaStride + $refX;
                 $chromaLeftU[$y] = ord($this->reconUPlane[$idx]);
                 $chromaLeftV[$y] = ord($this->reconVPlane[$idx]);
-                $chromaLeftSumU += $chromaLeftU[$y];
-                $chromaLeftSumV += $chromaLeftV[$y];
                 $chromaCntL++;
             }
         }
@@ -1258,8 +1170,6 @@ trait IntraPredTrait
                 $idx = $refY * $reconChromaStride + $px;
                 $chromaTopU[$x] = ord($this->reconUPlane[$idx]);
                 $chromaTopV[$x] = ord($this->reconVPlane[$idx]);
-                $chromaTopSumU += $chromaTopU[$x];
-                $chromaTopSumV += $chromaTopV[$x];
                 $chromaCntT++;
             }
         }

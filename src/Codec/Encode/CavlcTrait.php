@@ -72,9 +72,6 @@ trait CavlcTrait
 
         $avgNz = $count > 0 ? intdiv($predNz + intdiv($count, 2), $count) : 0;
         $result = min($avgNz, 16);
-        if (isset($GLOBALS['debugNc']) && $GLOBALS['debugNc'] && $blockIdx >= 16) {
-            echo "    ENCODER computeNC(blockIdx={$blockIdx}, mbX={$mbX}, bx={$bx}, by={$by}): predNz={$predNz}, count={$count}, result={$result}\n";
-        }
         return $result;
     }
 

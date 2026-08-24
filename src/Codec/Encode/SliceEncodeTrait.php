@@ -132,8 +132,8 @@ trait SliceEncodeTrait
         $topNzLuma = array_fill(0, $mbWidth * 4, 0);
         $topNzCb = array_fill(0, $mbWidth * 2, 0);
         $topNzCr = array_fill(0, $mbWidth * 2, 0);
-        $leftNz = [0, 0, 0, 0, 0, 0, 0, 0];
-        $leftIntra4x4Mode = [-1, -1, -1, -1];
+        //$leftNz = [0, 0, 0, 0, 0, 0, 0, 0];
+        //$leftIntra4x4Mode = [-1, -1, -1, -1];
         $topIntra4x4Mode = array_fill(0, $mbWidth * 4, -1);
 
         // 运动估计独立于宏块邻居状态，先批量提交，编码阶段仍严格按光栅顺序消费。
@@ -150,8 +150,8 @@ trait SliceEncodeTrait
                     }
                 }
                 $this->motionWorkerResults = $client->batch($this->width, $this->height, $this->mbAlignedWidth, $this->mbAlignedHeight, $this->qp, $this->refYPlane, $this->refUPlane, $this->refVPlane, $jobs);
-            } catch (Throwable $e) {
-                throw new RuntimeException('运动估计 Worker 失败: ' . $e->getMessage(), 0, $e);
+            } catch (\Throwable $e) {
+                throw new \RuntimeException('运动估计 Worker 失败: ' . $e->getMessage(), 0, $e);
             }
         }
 
@@ -213,9 +213,6 @@ trait SliceEncodeTrait
                         $topNzLuma, $topNzCb, $topNzCr,
                         $leftIntra4x4Mode, $topIntra4x4Mode
                     );
-//                    if ($mbY == 5 && $mbX >= 10 && $mbX <= 15) {
-//                        echo "ENCODE SLICE MB({$mbX},{$mbY}): before=" . strlen($bits) . ", mbBits=" . strlen($mbBits) . ", after=" . (strlen($bits) + strlen($mbBits)) . "\n";
-//                    }
                     $bits .= $mbBits;
 
                     // I帧宏块没有运动向量，设置为[0,0,-1]表示存在但不使用L0（与解码器一致）
