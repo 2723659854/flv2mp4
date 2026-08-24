@@ -105,7 +105,7 @@ class FlvRecoder
 
         $this->decoder = new H264Decoder();
         $this->encoder = new H264Encoder();
-        $this->encoder->motionWorkers = max(1, (int)($config['motionWorkers'] ?? 4));
+        $this->encoder->motionWorkers = max(1, (int)($config['motionWorkers'] ?? 8));
         $this->scaler = new VideoScaler();
     }
 
@@ -210,7 +210,7 @@ class FlvRecoder
     {
         $this->decoder = new H264Decoder();
         $this->encoder = new H264Encoder();
-        $this->encoder->motionWorkers = max(1, (int)($this->config['motionWorkers'] ?? 4));
+        $this->encoder->motionWorkers = max(1, (int)($this->config['motionWorkers'] ?? 8));
         $this->srcWidth = 0;
         $this->srcHeight = 0;
         $this->srcInitialized = false;
