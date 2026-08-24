@@ -470,6 +470,7 @@ class H264Encoder
     // mvTopRow[mbX*4+0..3]: 上邻居宏块底行4个4x4子块的MV，每个元素=[mvX, mvY, refIdx]或null
     public $mvLeftCol = [];
     public $mvTopRow = [];
+    public $mvTopLeft = null;
     public $picWidthInMbs = 0;
     public $lastMbWasSkip = false; // 上一个宏块是否为P_Skip
     public $motionWorkerClient = null;

@@ -158,6 +158,7 @@ trait SliceEncodeTrait
         // 重置MV缓存（mvTopRow保留上行的MV，mvLeftCol每行重置）
         $this->mvTopRow = [];
         $this->mvLeftCol = [null, null, null, null];
+        $this->mvTopLeft = null;
 
         // 初始化本地解码重建帧（使用宏块对齐尺寸，与解码器一致）
         // 解码器初始化为128，填充区域会被实际解码值覆盖
@@ -180,7 +181,9 @@ trait SliceEncodeTrait
             // 每行重置mvLeftCol（左邻居不可用于行首宏块）
             // 不清空mvTopRow：保留上一行的MV作为top预测参考
             $this->mvLeftCol = [null, null, null, null];
+            $this->mvTopLeft = null;
             for ($mbX = 0; $mbX < $mbWidth; $mbX++) {
+                $nextMvTopLeft = $this->mvTopRow[$mbX * 4 + 3] ?? null;
                 if ($isPSlice) {
                     // P帧编码
                     $mbBits = $this->encodePMacroblock(
@@ -217,6 +220,7 @@ trait SliceEncodeTrait
                     $this->mvTopRow[$mbX * 4 + 2] = $intraMv;
                     $this->mvTopRow[$mbX * 4 + 3] = $intraMv;
                 }
+                $this->mvTopLeft = $nextMvTopLeft;
                 $leftAvailable = true;
             }
         }

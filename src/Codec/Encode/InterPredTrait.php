@@ -360,7 +360,7 @@ trait InterPredTrait
                 $mvC = $this->mvTopRow[($mbX + 1) * 4] ?? null;
             }
             if ($mvC === null && $mbX > 0) {
-                $mvC = $this->mvTopRow[($mbX - 1) * 4 + 3] ?? null;
+                $mvC = $this->mvTopLeft;
             }
         }
 
@@ -393,7 +393,7 @@ trait InterPredTrait
                 $mvC = $this->mvTopRow[($mbX + 1) * 4] ?? null;
             }
             if ($mvC === null && $mbX > 0) {
-                $mvC = $this->mvTopRow[($mbX - 1) * 4 + 3] ?? null;
+                $mvC = $this->mvTopLeft;
             }
         }
 
