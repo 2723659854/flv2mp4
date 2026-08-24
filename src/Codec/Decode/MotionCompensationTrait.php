@@ -291,6 +291,80 @@ trait MotionCompensationTrait
         return $pred;
     }
 
+    private function mcChromaPair(
+        array &$uPlane,
+        array &$vPlane,
+        int $stride,
+        int $width,
+        int $height,
+        int $x,
+        int $y,
+        int $blockW,
+        int $blockH
+    ): array {
+        $uPred = array_fill(0, $blockH, array_fill(0, $blockW, 0));
+        $vPred = array_fill(0, $blockH, array_fill(0, $blockW, 0));
+
+        $fracX = $x & 7;
+        $fracY = $y & 7;
+        $intX = $x >> 3;
+        $intY = $y >> 3;
+        $maxX = $width - 1;
+        $maxY = $height - 1;
+
+        $x0 = [];
+        $x1 = [];
+        for ($i = 0; $i < $blockW; $i++) {
+            $sx = $intX + $i;
+            $x0[$i] = $sx < 0 ? 0 : ($sx > $maxX ? $maxX : $sx);
+            $sx++;
+            $x1[$i] = $sx < 0 ? 0 : ($sx > $maxX ? $maxX : $sx);
+        }
+
+        $hasFraction = $fracX !== 0 || $fracY !== 0;
+        if ($hasFraction) {
+            $wx0 = 8 - $fracX;
+            $wy0 = 8 - $fracY;
+            $w00 = $wx0 * $wy0;
+            $w10 = $fracX * $wy0;
+            $w01 = $wx0 * $fracY;
+            $w11 = $fracX * $fracY;
+        }
+
+        for ($j = 0; $j < $blockH; $j++) {
+            $sy0 = $intY + $j;
+            $sy0 = $sy0 < 0 ? 0 : ($sy0 > $maxY ? $maxY : $sy0);
+            $row0 = $sy0 * $stride;
+            if ($hasFraction) {
+                $sy1 = $intY + $j + 1;
+                $sy1 = $sy1 < 0 ? 0 : ($sy1 > $maxY ? $maxY : $sy1);
+                $row1 = $sy1 * $stride;
+            }
+            for ($i = 0; $i < $blockW; $i++) {
+                $x0i = $x0[$i];
+                $x1i = $x1[$i];
+                if (!$hasFraction) {
+                    $uPred[$j][$i] = $uPlane[$row0 + $x0i];
+                    $vPred[$j][$i] = $vPlane[$row0 + $x0i];
+                    continue;
+                }
+
+                $uVal = ($w00 * $uPlane[$row0 + $x0i]
+                    + $w10 * $uPlane[$row0 + $x1i]
+                    + $w01 * $uPlane[$row1 + $x0i]
+                    + $w11 * $uPlane[$row1 + $x1i] + 32) >> 6;
+                $vVal = ($w00 * $vPlane[$row0 + $x0i]
+                    + $w10 * $vPlane[$row0 + $x1i]
+                    + $w01 * $vPlane[$row1 + $x0i]
+                    + $w11 * $vPlane[$row1 + $x1i] + 32) >> 6;
+                $uPred[$j][$i] = $uVal < 0 ? 0 : ($uVal > 255 ? 255 : $uVal);
+                $vPred[$j][$i] = $vVal < 0 ? 0 : ($vVal > 255 ? 255 : $vVal);
+            }
+        }
+
+        return [$uPred, $vPred];
+    }
+
     private function getRefPixel(array &$refPlane, int $stride, int $w, int $h, int $x, int $y): int
     {
         $x = $this->clamp($x, 0, $w - 1);

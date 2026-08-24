@@ -1582,13 +1582,8 @@ trait MacroblockDecodingTrait
         $chromaRefX = $mbX * 64 + $blkX * 32 + $mvX;
         $chromaRefY = $mbY * 64 + $blkY * 32 + $mvY;
 
-        $cbPred = $this->mcChroma(
-            $ref['u'], $ref['strideUv'],
-            $ref['widthUv'], $ref['heightUv'],
-            $chromaRefX, $chromaRefY, 4, 4
-        );
-        $crPred = $this->mcChroma(
-            $ref['v'], $ref['strideUv'],
+        [$cbPred, $crPred] = $this->mcChromaPair(
+            $ref['u'], $ref['v'], $ref['strideUv'],
             $ref['widthUv'], $ref['heightUv'],
             $chromaRefX, $chromaRefY, 4, 4
         );
@@ -1630,13 +1625,8 @@ trait MacroblockDecodingTrait
         $chromaRefX = $mbX * 64 + $blkX * 32 + $mvX;
         $chromaRefY = $mbY * 64 + $blkY * 32 + $yOffset * 4 + $mvY;
 
-        $cbPred = $this->mcChroma(
-            $ref['u'], $ref['strideUv'],
-            $ref['widthUv'], $ref['heightUv'],
-            $chromaRefX, $chromaRefY, 4, 2
-        );
-        $crPred = $this->mcChroma(
-            $ref['v'], $ref['strideUv'],
+        [$cbPred, $crPred] = $this->mcChromaPair(
+            $ref['u'], $ref['v'], $ref['strideUv'],
             $ref['widthUv'], $ref['heightUv'],
             $chromaRefX, $chromaRefY, 4, 2
         );
@@ -1678,13 +1668,8 @@ trait MacroblockDecodingTrait
         $chromaRefX = $mbX * 64 + $blkX * 32 + $xOffset * 4 + $mvX;
         $chromaRefY = $mbY * 64 + $blkY * 32 + $mvY;
 
-        $cbPred = $this->mcChroma(
-            $ref['u'], $ref['strideUv'],
-            $ref['widthUv'], $ref['heightUv'],
-            $chromaRefX, $chromaRefY, 2, 4
-        );
-        $crPred = $this->mcChroma(
-            $ref['v'], $ref['strideUv'],
+        [$cbPred, $crPred] = $this->mcChromaPair(
+            $ref['u'], $ref['v'], $ref['strideUv'],
             $ref['widthUv'], $ref['heightUv'],
             $chromaRefX, $chromaRefY, 2, 4
         );
@@ -1726,13 +1711,8 @@ trait MacroblockDecodingTrait
         $chromaRefX = $mbX * 64 + $blkX * 32 + $subX * 16 + $mvX;
         $chromaRefY = $mbY * 64 + $blkY * 32 + $subY * 16 + $mvY;
 
-        $cbPred = $this->mcChroma(
-            $ref['u'], $ref['strideUv'],
-            $ref['widthUv'], $ref['heightUv'],
-            $chromaRefX, $chromaRefY, 2, 2
-        );
-        $crPred = $this->mcChroma(
-            $ref['v'], $ref['strideUv'],
+        [$cbPred, $crPred] = $this->mcChromaPair(
+            $ref['u'], $ref['v'], $ref['strideUv'],
             $ref['widthUv'], $ref['heightUv'],
             $chromaRefX, $chromaRefY, 2, 2
         );
@@ -2059,13 +2039,8 @@ trait MacroblockDecodingTrait
         $chromaRefX = $mbX * 64 + $mvX;
         $chromaRefY = $mbY * 64 + $mvY;
 
-        $cbPred = $this->mcChroma(
-            $ref['u'], $ref['strideUv'],
-            $ref['widthUv'], $ref['heightUv'],
-            $chromaRefX, $chromaRefY, 8, 8
-        );
-        $crPred = $this->mcChroma(
-            $ref['v'], $ref['strideUv'],
+        [$cbPred, $crPred] = $this->mcChromaPair(
+            $ref['u'], $ref['v'], $ref['strideUv'],
             $ref['widthUv'], $ref['heightUv'],
             $chromaRefX, $chromaRefY, 8, 8
         );
@@ -2119,13 +2094,8 @@ trait MacroblockDecodingTrait
         $chromaRefX = $mbX * 64 + $mvX;
         $chromaRefY = $mbY * 64 + $mvY + $yOffset * 4;
 
-        $cbPred = $this->mcChroma(
-            $ref['u'], $ref['strideUv'],
-            $ref['widthUv'], $ref['heightUv'],
-            $chromaRefX, $chromaRefY, 8, 4
-        );
-        $crPred = $this->mcChroma(
-            $ref['v'], $ref['strideUv'],
+        [$cbPred, $crPred] = $this->mcChromaPair(
+            $ref['u'], $ref['v'], $ref['strideUv'],
             $ref['widthUv'], $ref['heightUv'],
             $chromaRefX, $chromaRefY, 8, 4
         );
@@ -2171,13 +2141,8 @@ trait MacroblockDecodingTrait
         $chromaRefX = $mbX * 64 + $mvX + $xOffset * 4;
         $chromaRefY = $mbY * 64 + $mvY;
 
-        $cbPred = $this->mcChroma(
-            $ref['u'], $ref['strideUv'],
-            $ref['widthUv'], $ref['heightUv'],
-            $chromaRefX, $chromaRefY, 4, 8
-        );
-        $crPred = $this->mcChroma(
-            $ref['v'], $ref['strideUv'],
+        [$cbPred, $crPred] = $this->mcChromaPair(
+            $ref['u'], $ref['v'], $ref['strideUv'],
             $ref['widthUv'], $ref['heightUv'],
             $chromaRefX, $chromaRefY, 4, 8
         );
