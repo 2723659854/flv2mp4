@@ -276,7 +276,9 @@ trait SliceDecodingTrait
                 $this->nzLeftColChroma = array_fill(0, 4, 0);
                 $this->intra4x4LeftModes = array_fill(0, 4, -1);
                 $this->mvLeftCol = array_fill(0, 4, null);
+                $this->mvTopLeft = array_fill(0, 4, null);
             }
+            $nextMvTopLeft = $this->mvTopRow[$mbX * 4 + 3] ?? null;
 
             if ($mbIdx % 2 === 0 || $mbIdx === $endMbIdx - 1) {
                 flush();
@@ -290,12 +292,14 @@ trait SliceDecodingTrait
                     $this->decodePSkip($mbX, $mbY);
                     $this->mbTypeForDeblock[$mbIdx] = 0;
                     $this->mbQpForDeblock[$mbIdx] = $qp;
+                    $this->mvTopLeft = [$nextMvTopLeft, $nextMvTopLeft, $nextMvTopLeft, $nextMvTopLeft];
                     continue;
                 }
             }
             $mbQpDelta = $this->decodeMacroblock($mbX, $mbY, $qp, $sliceType);
             $qp = max(0, min(51, $qp + $mbQpDelta));
             $this->mbQpForDeblock[$mbIdx] = $qp;
+            $this->mvTopLeft = [$nextMvTopLeft, $nextMvTopLeft, $nextMvTopLeft, $nextMvTopLeft];
         }
 
         $this->applyDeblockingFilter();

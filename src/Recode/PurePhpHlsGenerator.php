@@ -132,6 +132,16 @@ class PurePhpHlsGenerator
         $this->maxFrames = $maxFrames;
     }
 
+    /**
+     * 设置切片间隔
+     * @param int $segmentDuration
+     * @return void
+     */
+    public function setSegmentDuration(int $segmentDuration = 3)
+    {
+        $this->segmentDuration = $segmentDuration;
+    }
+
     private function loadWatermarkFile(string $watermarkFile): array
     {
         if (!file_exists($watermarkFile)) {

@@ -838,7 +838,6 @@ class FlvRecoder
         return $config;
     }
 
-
     private function writeVideoTag(string $avccData, bool $isKeyFrame, int $timestamp, int $cts): void
     {
         $hasWritableVideoNal = false;

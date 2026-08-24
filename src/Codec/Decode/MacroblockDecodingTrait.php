@@ -1695,7 +1695,7 @@ trait MacroblockDecodingTrait
                 $mvC = $this->mvTopRow[($mbX + 1) * 4] ?? null;
             }
             if ($mvC === null && $mbX > 0) {
-                $mvC = $this->mvTopRow[($mbX - 1) * 4 + 3] ?? null;
+                $mvC = $this->mvTopLeft[0] ?? null;
             }
         }
 
@@ -1731,7 +1731,7 @@ trait MacroblockDecodingTrait
                 $mvC = $this->mvTopRow[($mbX + 1) * 4] ?? null;
             }
             if ($mvC === null && $mbX > 0) {
-                $mvC = $this->mvTopRow[($mbX - 1) * 4 + 3] ?? null;
+                $mvC = $this->mvTopLeft[0] ?? null;
             }
         }
 
@@ -1766,7 +1766,7 @@ trait MacroblockDecodingTrait
                 $mvC = $this->mvTopRow[($mbX + 1) * 4] ?? null;
             }
             if ($mvC === null && $mbX > 0 && $mbY > 0) {
-                $mvC = $this->mvTopRow[($mbX - 1) * 4 + 3] ?? null;
+                $mvC = $this->mvTopLeft[0] ?? null;
             }
         } else {
             $mvTop = $mvPart0;
@@ -1818,9 +1818,9 @@ trait MacroblockDecodingTrait
             if ($mbY > 0) {
                 $mvC = $this->mvTopRow[$mbX * 4 + 2] ?? null;
             }
-            // D fallback: blk(0-1,-1) = blk(-1,-1) → (mbX-1)*4+3
+            // D fallback: 当前宏块左上方 4x4 块
             if ($mvC === null && $mbX > 0 && $mbY > 0) {
-                $mvC = $this->mvTopRow[($mbX - 1) * 4 + 3] ?? null;
+                $mvC = $this->mvTopLeft[0] ?? null;
             }
         } else {
             $mvLeft = $mvPart0;
@@ -1828,11 +1828,10 @@ trait MacroblockDecodingTrait
                 // B = top of blk(2,0) → blk(2,3) = mbX*4+2
                 $mvTop = $this->mvTopRow[$mbX * 4 + 2] ?? null;
             }
-            // C = top-right of part1: blk(2+2,-1) = blk(4,-1) → (mbX+1)*4
+            // C = 当前右分区右上角；画面右边界不可用时回退到左上角 D。
             if ($mbX + 1 < $mbWidth && $mbY > 0) {
                 $mvC = $this->mvTopRow[($mbX + 1) * 4] ?? null;
             }
-            // D fallback: blk(2-1,-1) = blk(1,-1) → mbX*4+1
             if ($mvC === null && $mbY > 0) {
                 $mvC = $this->mvTopRow[$mbX * 4 + 1] ?? null;
             }
