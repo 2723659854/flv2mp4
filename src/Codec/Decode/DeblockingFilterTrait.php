@@ -19,6 +19,15 @@ trait DeblockingFilterTrait
     /** @var int[] 运动向量缺失时复用的零值，避免在热循环中重复创建数组。 */
     private array $deblockZeroMv = [0, 0];
 
+    private int $deblockYStride = 0;
+    private int $deblockUvStride = 0;
+    private int $deblockYPlaneSize = 0;
+    private int $deblockUPlaneSize = 0;
+    private int $deblockVPlaneSize = 0;
+    private array $deblockThresholdCache = [];
+    private array $deblockTc0Cache = [];
+    private array $deblockChromaQpCache = [];
+
     private function clip3(int $lo, int $hi, int $x): int
     {
         if ($x < $lo) return $lo;
@@ -33,16 +42,45 @@ trait DeblockingFilterTrait
 
     private function getThresholds(int $qp, int $alphaOffset, int $betaOffset, int &$alpha, int &$beta): void
     {
+        if (isset($this->deblockThresholdCache[$qp])) {
+            [$alpha, $beta] = $this->deblockThresholdCache[$qp];
+            return;
+        }
+
         $indexA = $this->clip3(0, 51, $qp + $alphaOffset);
         $indexB = $this->clip3(0, 51, $qp + $betaOffset);
         $alpha = self::ALPHA_TABLE[$indexA];
         $beta = self::BETA_TABLE[$indexB];
+        $this->deblockThresholdCache[$qp] = [$alpha, $beta];
     }
 
     private function getTc0(int $qp, int $alphaOffset, int $bs): int
     {
+        $key = ($qp << 2) | $bs;
+        if (isset($this->deblockTc0Cache[$key])) {
+            return $this->deblockTc0Cache[$key];
+        }
+
         $indexA = $this->clip3(0, 51, $qp + $alphaOffset);
-        return self::TC0_TABLE[$indexA][$bs - 1];
+        $tc0 = self::TC0_TABLE[$indexA][$bs - 1];
+        $this->deblockTc0Cache[$key] = $tc0;
+        return $tc0;
+    }
+
+    private function getChromaQp(int $qp): int
+    {
+        if (isset($this->deblockChromaQpCache[$qp])) {
+            return $this->deblockChromaQpCache[$qp];
+        }
+
+        $chromaQpIndex = $this->clip3(
+            0,
+            51,
+            $qp + $this->chromaQpIndexOffset
+        );
+        $chromaQp = self::CHROMA_QP_TABLE[$chromaQpIndex];
+        $this->deblockChromaQpCache[$qp] = $chromaQp;
+        return $chromaQp;
     }
 
     private function avgQp(int $qpP, int $qpQ): int
@@ -160,9 +198,9 @@ trait DeblockingFilterTrait
             return;
         }
 
-        $stride = $this->width;
+        $stride = $this->deblockYStride;
         $plane = &$this->yPlane;
-        $planeSize = count($plane);
+        $planeSize = $this->deblockYPlaneSize;
         $mbBaseOffset = ($mbY * 16) * $stride + ($mbX * 16);
 
         $edgePixelOffset = $isVertical ? ($edge * 4) : ($edge * 4 * $stride);
@@ -228,16 +266,18 @@ trait DeblockingFilterTrait
             return;
         }
 
-        $stride = (int)($this->width / 2);
+        $stride = $this->deblockUvStride;
         $mbBaseOffset = ($mbY * 8) * $stride + ($mbX * 8);
 
         $edgePixelOffset = $isVertical ? ($edge * 4) : ($edge * 4 * $stride);
         $base = $mbBaseOffset + $edgePixelOffset;
         $step = $isVertical ? 1 : $stride;
 
-        foreach (['uPlane', 'vPlane'] as $planeName) {
+        foreach (['uPlane', 'vPlane'] as $planeIndex => $planeName) {
             $plane = &$this->$planeName;
-            $planeSize = count($plane);
+            $planeSize = $planeIndex === 0
+                ? $this->deblockUPlaneSize
+                : $this->deblockVPlaneSize;
 
             for ($i = 0; $i < 4; $i++) {
                 $curBs = $bs[$i];
@@ -455,6 +495,15 @@ trait DeblockingFilterTrait
             return;
         }
 
+        $this->deblockYStride = $this->width;
+        $this->deblockUvStride = (int)($this->width / 2);
+        $this->deblockYPlaneSize = count($this->yPlane);
+        $this->deblockUPlaneSize = count($this->uPlane);
+        $this->deblockVPlaneSize = count($this->vPlane);
+        $this->deblockThresholdCache = [];
+        $this->deblockTc0Cache = [];
+        $this->deblockChromaQpCache = [];
+
         $mbWidth = $this->picWidthInMbs;
         $mbHeight = $this->picHeightInMbs;
         $emptyStrengths = [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
@@ -483,8 +532,7 @@ trait DeblockingFilterTrait
                     $qp = $isMbEdge && $mbX > 0 ? $this->avgQp($curQp, $this->mbQpForDeblock[($mbY * $mbWidth + $mbX - 1)] ?? $curQp) : $curQp;
                     $this->filterMbEdgeLuma(true, $mbX, $mbY, $edge, $bsVertical[$edge], $qp);
 
-                    $chromaQpIndex = max(0, min(51, $qp + $this->chromaQpIndexOffset));
-                    $chromaQp = self::CHROMA_QP_TABLE[$chromaQpIndex];
+                    $chromaQp = $this->getChromaQp($qp);
                     if ($edge == 0 || $edge == 2) {
                         $chromaEdge = (int)($edge / 2);
                         $this->filterMbEdgeChroma(true, $mbX, $mbY, $chromaEdge, $bsVertical[$edge], $chromaQp);
@@ -501,8 +549,7 @@ trait DeblockingFilterTrait
                     $qp = $isMbEdge && $mbY > 0 ? $this->avgQp($curQp, $this->mbQpForDeblock[(($mbY - 1) * $mbWidth + $mbX)] ?? $curQp) : $curQp;
                     $this->filterMbEdgeLuma(false, $mbX, $mbY, $edge, $bsHorizontal[$edge], $qp);
 
-                    $chromaQpIndex = max(0, min(51, $qp + $this->chromaQpIndexOffset));
-                    $chromaQp = self::CHROMA_QP_TABLE[$chromaQpIndex];
+                    $chromaQp = $this->getChromaQp($qp);
                     if ($edge == 0 || $edge == 2) {
                         $chromaEdge = (int)($edge / 2);
                         $this->filterMbEdgeChroma(false, $mbX, $mbY, $chromaEdge, $bsHorizontal[$edge], $chromaQp);
