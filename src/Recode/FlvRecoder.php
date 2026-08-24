@@ -303,18 +303,18 @@ class FlvRecoder
 
         $frameCount = 0;
         $videoCount = 0;
-        $hasAudio = false;
-        $hasVideo = false;
+        //$hasAudio = false;
+        //$hasVideo = false;
 
         foreach ($tags as $tag) {
             if (!property_exists($tag, 'tagType')) continue;
 
             if ($tag->tagType === 9) {
-                $hasVideo = true;
+                //$hasVideo = true;
                 $this->handleVideoFrame($tag);
                 $videoCount++;
             } elseif ($tag->tagType === 8) {
-                $hasAudio = true;
+                //$hasAudio = true;
                 $this->handleAudioFrame($tag);
             }
 
@@ -838,9 +838,6 @@ class FlvRecoder
         return $config;
     }
 
-    private function updateSequenceHeader(): void
-    {
-    }
 
     private function writeVideoTag(string $avccData, bool $isKeyFrame, int $timestamp, int $cts): void
     {

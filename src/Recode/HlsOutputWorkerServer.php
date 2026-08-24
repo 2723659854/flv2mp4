@@ -24,10 +24,6 @@ final class HlsOutputWorkerServer
         $output = '';
         $expected = 0;
         $finished = false;
-        $lastProgressAt = microtime(true);
-        $firstProfile = reset($this->profiles) ?: [];
-        $gopWorkers = max(1, (int)($firstProfile['gopWorkers'] ?? 1));
-//        $pool = $gopWorkers > 1 ? new GopPool($gopWorkers, (int)($firstProfile['motionWorkersPerGop'] ?? 1), (float)($firstProfile['gopSeconds'] ?? 2.0)) : null;
         $pool = null;
         $replay = static fn(array $queued) => $generator->processPipelineEvent($queued['metadata'], $queued['payload']);
         try {
