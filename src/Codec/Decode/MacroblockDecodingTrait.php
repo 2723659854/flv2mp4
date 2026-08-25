@@ -301,7 +301,7 @@ trait MacroblockDecodingTrait
                             $val = $predicted[$y][$x] + $yPixels[$blkY * 4 + $y][$blkX * 4 + $x];
                             $val = max(0, min(255, $val));
                             $idx = $py * $this->width + $px;
-                            $this->yPlane[$idx] = $val;
+                            $this->yPlane[$idx] = chr($val);
                         }
                     }
                 }
@@ -370,8 +370,8 @@ trait MacroblockDecodingTrait
                     $valU = max(0, min(255, $valU));
                     $valV = max(0, min(255, $valV));
                     $idx = $py * $chromaWidth + $px;
-                    $this->uPlane[$idx] = $valU;
-                    $this->vPlane[$idx] = $valV;
+                    $this->uPlane[$idx] = chr($valU);
+                    $this->vPlane[$idx] = chr($valV);
                 }
             }
         }
@@ -628,7 +628,7 @@ trait MacroblockDecodingTrait
                                 $val = $lumaPred[$blkY * 4 + $y][$blkX * 4 + $x] + $acIdct[$y * 4 + $x];
                                 $val = max(0, min(255, $val));
                                 $idx = $py * $this->width + $px;
-                                $this->yPlane[$idx] = $val;
+                                $this->yPlane[$idx] = chr($val);
                             }
                         }
                     }
@@ -643,7 +643,7 @@ trait MacroblockDecodingTrait
                                 $val = $lumaPred[$blkY * 4 + $y][$blkX * 4 + $x] + $dcAdd;
                                 $val = max(0, min(255, $val));
                                 $idx = $py * $this->width + $px;
-                                $this->yPlane[$idx] = $val;
+                                $this->yPlane[$idx] = chr($val);
                             }
                         }
                     }
@@ -685,8 +685,8 @@ trait MacroblockDecodingTrait
                                 $vu = $cbPred[$blkY * 4 + $y][$blkX * 4 + $x] + $acIdctCb[$y * 4 + $x];
                                 $vv = $crPred[$blkY * 4 + $y][$blkX * 4 + $x] + $acIdctCr[$y * 4 + $x];
                                 $idx = $py * $cw + $px;
-                                $this->uPlane[$idx] = max(0, min(255, $vu));
-                                $this->vPlane[$idx] = max(0, min(255, $vv));
+                                $this->uPlane[$idx] = chr(max(0, min(255, $vu)));
+                                $this->vPlane[$idx] = chr(max(0, min(255, $vv)));
                             }
                         }
                     }
@@ -702,8 +702,8 @@ trait MacroblockDecodingTrait
                                 $vu = $cbPred[$blkY * 4 + $y][$blkX * 4 + $x] + $cbDcAdd;
                                 $vv = $crPred[$blkY * 4 + $y][$blkX * 4 + $x] + $crDcAdd;
                                 $idx = $py * $cw + $px;
-                                $this->uPlane[$idx] = max(0, min(255, $vu));
-                                $this->vPlane[$idx] = max(0, min(255, $vv));
+                                $this->uPlane[$idx] = chr(max(0, min(255, $vu)));
+                                $this->vPlane[$idx] = chr(max(0, min(255, $vv)));
                             }
                         }
                     }
@@ -715,8 +715,8 @@ trait MacroblockDecodingTrait
                             $px = $mbX * 8 + $blkX * 4 + $x;
                             if ($py < $ch && $px < $cw) {
                                 $idx = $py * $cw + $px;
-                                $this->uPlane[$idx] = $cbPred[$blkY * 4 + $y][$blkX * 4 + $x];
-                                $this->vPlane[$idx] = $crPred[$blkY * 4 + $y][$blkX * 4 + $x];
+                                $this->uPlane[$idx] = chr($cbPred[$blkY * 4 + $y][$blkX * 4 + $x]);
+                                $this->vPlane[$idx] = chr($crPred[$blkY * 4 + $y][$blkX * 4 + $x]);
                             }
                         }
                     }
@@ -800,7 +800,7 @@ trait MacroblockDecodingTrait
             for ($x = 0; $x < 16; $x++) {
                 $px = $px0 + $x;
                 if ($px >= $this->width) break;
-                $this->yPlane[$baseIdx + $px] = 128;
+                $this->yPlane[$baseIdx + $px] = "\x80";
             }
         }
         // 色度8x8
@@ -815,8 +815,8 @@ trait MacroblockDecodingTrait
             for ($x = 0; $x < 8; $x++) {
                 $cx = $cx0 + $x;
                 if ($cx >= $cw) break;
-                $this->uPlane[$baseIdx + $cx] = 128;
-                $this->vPlane[$baseIdx + $cx] = 128;
+                $this->uPlane[$baseIdx + $cx] = "\x80";
+                $this->vPlane[$baseIdx + $cx] = "\x80";
             }
         }
         // 非I帧宏块传递DC_PRED(2)给相邻宏块
@@ -837,7 +837,7 @@ trait MacroblockDecodingTrait
         $py = $mbY * 16 + $y;
         if ($px >= $this->width || $py >= $this->height) return;
         $idx = $py * $this->width + $px;
-        $this->yPlane[$idx] = max(0, min(255, $val));
+        $this->yPlane[$idx] = chr(max(0, min(255, $val)));
     }
 
     /**
@@ -854,9 +854,9 @@ trait MacroblockDecodingTrait
         $idx = $py * $cw + $px;
         $val = max(0, min(255, $val));
         if ($uv === 0) {
-            $this->uPlane[$idx] = $val;
+            $this->uPlane[$idx] = chr($val);
         } else {
-            $this->vPlane[$idx] = $val;
+            $this->vPlane[$idx] = chr($val);
         }
     }
 
@@ -1467,6 +1467,7 @@ trait MacroblockDecodingTrait
             $ref = $this->refPicList0[$refIdx];
             return [
                 'y' => $ref['y'], 'u' => $ref['u'], 'v' => $ref['v'],
+                'yBytes' => $ref['yBytes'], 'uBytes' => $ref['uBytes'], 'vBytes' => $ref['vBytes'],
                 'strideY' => $ref['strideY'], 'strideUv' => $ref['strideUv'],
                 'widthY' => $ref['widthY'], 'heightY' => $ref['heightY'],
                 'widthUv' => $ref['widthUv'], 'heightUv' => $ref['heightUv'],
@@ -1480,195 +1481,46 @@ trait MacroblockDecodingTrait
         ];
     }
 
-    /**
-     * 执行8x8运动补偿
-     */
+    private function performMotionCompensationBlock(int $dstX, int $dstY, int $blockW, int $blockH, int $mvX, int $mvY, int $refIdx): void
+    {
+        if ($this->refFrameY === null) return;
+        $ref = $this->getRefPlanes($refIdx);
+        $lumaRefX = $dstX * 4 + $mvX;
+        $lumaRefY = $dstY * 4 + $mvY;
+        $this->mcLumaTo(
+            $ref['y'], $ref['strideY'], $ref['widthY'], $ref['heightY'],
+            $lumaRefX, $lumaRefY, $blockW, $blockH,
+            $this->yPlane, $this->width, $dstX, $dstY, $ref['yBytes']
+        );
+        $chromaStride = intdiv($this->width, 2);
+        $this->mcChromaPairTo(
+            $ref['u'], $ref['v'], $ref['strideUv'], $ref['widthUv'], $ref['heightUv'],
+            $lumaRefX, $lumaRefY, intdiv($blockW, 2), intdiv($blockH, 2),
+            $this->uPlane, $this->vPlane, $chromaStride, intdiv($dstX, 2), intdiv($dstY, 2),
+            $ref['uBytes'], $ref['vBytes']
+        );
+    }
+
     private function performMotionCompensation8x8(int $mbX, int $mbY, int $blkX, int $blkY, int $mvX, int $mvY, int $refIdx): void
     {
-        if ($this->refFrameY === null) {
-            return;
-        }
-        $ref = $this->getRefPlanes($refIdx);
-
-        $lumaRefX = $mbX * 64 + $blkX * 32 + $mvX;
-        $lumaRefY = $mbY * 64 + $blkY * 32 + $mvY;
-
-        $dstX = $mbX * 16 + $blkX * 8;
-        $dstY = $mbY * 16 + $blkY * 8;
-        $copyW = min(8, $this->width - $dstX);
-        $copyH = min(8, $this->height - $dstY);
-        $dstStride = $this->width;
-        if (($lumaRefX & 3) === 0 && ($lumaRefY & 3) === 0) {
-            $srcX = $lumaRefX >> 2;
-            $srcY = $lumaRefY >> 2;
-            if ($srcX >= 0 && $srcY >= 0 && $srcX + $copyW <= $ref['widthY'] && $srcY + $copyH <= $ref['heightY']) {
-                for ($y = 0; $y < $copyH; $y++) {
-                    $srcBase = ($srcY + $y) * $ref['strideY'] + $srcX;
-                    $dstBase = ($dstY + $y) * $dstStride + $dstX;
-                    for ($x = 0; $x < $copyW; $x++) {
-                        $this->yPlane[$dstBase + $x] = $ref['y'][$srcBase + $x];
-                    }
-                }
-            } else {
-                $lumaPred = $this->mcLuma($ref['y'], $ref['strideY'], $ref['widthY'], $ref['heightY'], $lumaRefX, $lumaRefY, 8, 8);
-                for ($y = 0; $y < $copyH; $y++) {
-                    $dstBase = ($dstY + $y) * $dstStride + $dstX;
-                    for ($x = 0; $x < $copyW; $x++) $this->yPlane[$dstBase + $x] = $lumaPred[$y][$x];
-                }
-            }
-        } else {
-            $lumaPred = $this->mcLuma($ref['y'], $ref['strideY'], $ref['widthY'], $ref['heightY'], $lumaRefX, $lumaRefY, 8, 8);
-            for ($y = 0; $y < $copyH; $y++) {
-                $dstBase = ($dstY + $y) * $dstStride + $dstX;
-                for ($x = 0; $x < $copyW; $x++) $this->yPlane[$dstBase + $x] = $lumaPred[$y][$x];
-            }
-        }
-
-        // 色度：8x8亮度对应4x4色度
-        $chromaRefX = $mbX * 64 + $blkX * 32 + $mvX;
-        $chromaRefY = $mbY * 64 + $blkY * 32 + $mvY;
-
-        [$cbPred, $crPred] = $this->mcChromaPair(
-            $ref['u'], $ref['v'], $ref['strideUv'],
-            $ref['widthUv'], $ref['heightUv'],
-            $chromaRefX, $chromaRefY, 4, 4
-        );
-
-        for ($y = 0; $y < 4; $y++) {
-            for ($x = 0; $x < 4; $x++) {
-                $this->writeChromaPixel($mbX, $mbY, $blkX * 4 + $x, $blkY * 4 + $y, $cbPred[$y][$x], 0);
-                $this->writeChromaPixel($mbX, $mbY, $blkX * 4 + $x, $blkY * 4 + $y, $crPred[$y][$x], 1);
-            }
-        }
+        $this->performMotionCompensationBlock($mbX * 16 + $blkX * 8, $mbY * 16 + $blkY * 8, 8, 8, $mvX, $mvY, $refIdx);
     }
 
-    /**
-     * 执行8x4运动补偿
-     * @param int $subPartIdx 0=上半, 1=下半
-     */
     private function performMotionCompensation8x4(int $mbX, int $mbY, int $blkX, int $blkY, int $subPartIdx, int $mvX, int $mvY, int $refIdx): void
     {
-        if ($this->refFrameY === null) return;
-        $ref = $this->getRefPlanes($refIdx);
-
-        $yOffset = $subPartIdx * 4;
-        $lumaRefX = $mbX * 64 + $blkX * 32 + $mvX;
-        $lumaRefY = $mbY * 64 + $blkY * 32 + $yOffset * 4 + $mvY;
-
-        $lumaPred = $this->mcLuma(
-            $ref['y'], $ref['strideY'],
-            $ref['widthY'], $ref['heightY'],
-            $lumaRefX, $lumaRefY, 8, 4
-        );
-
-        for ($y = 0; $y < 4; $y++) {
-            for ($x = 0; $x < 8; $x++) {
-                $this->writeLumaPixel($mbX, $mbY, $blkX * 8 + $x, $blkY * 8 + $yOffset + $y, $lumaPred[$y][$x]);
-            }
-        }
-
-        // 色度
-        $chromaRefX = $mbX * 64 + $blkX * 32 + $mvX;
-        $chromaRefY = $mbY * 64 + $blkY * 32 + $yOffset * 4 + $mvY;
-
-        [$cbPred, $crPred] = $this->mcChromaPair(
-            $ref['u'], $ref['v'], $ref['strideUv'],
-            $ref['widthUv'], $ref['heightUv'],
-            $chromaRefX, $chromaRefY, 4, 2
-        );
-
-        for ($y = 0; $y < 2; $y++) {
-            for ($x = 0; $x < 4; $x++) {
-                $this->writeChromaPixel($mbX, $mbY, $blkX * 4 + $x, $blkY * 4 + (int)($yOffset / 2) + $y, $cbPred[$y][$x], 0);
-                $this->writeChromaPixel($mbX, $mbY, $blkX * 4 + $x, $blkY * 4 + (int)($yOffset / 2) + $y, $crPred[$y][$x], 1);
-            }
-        }
+        $this->performMotionCompensationBlock($mbX * 16 + $blkX * 8, $mbY * 16 + $blkY * 8 + $subPartIdx * 4, 8, 4, $mvX, $mvY, $refIdx);
     }
 
-    /**
-     * 执行4x8运动补偿
-     * @param int $subPartIdx 0=左半, 1=右半
-     */
     private function performMotionCompensation4x8(int $mbX, int $mbY, int $blkX, int $blkY, int $subPartIdx, int $mvX, int $mvY, int $refIdx): void
     {
-        if ($this->refFrameY === null) return;
-        $ref = $this->getRefPlanes($refIdx);
-
-        $xOffset = $subPartIdx * 4;
-        $lumaRefX = $mbX * 64 + $blkX * 32 + $xOffset * 4 + $mvX;
-        $lumaRefY = $mbY * 64 + $blkY * 32 + $mvY;
-
-        $lumaPred = $this->mcLuma(
-            $ref['y'], $ref['strideY'],
-            $ref['widthY'], $ref['heightY'],
-            $lumaRefX, $lumaRefY, 4, 8
-        );
-
-        for ($y = 0; $y < 8; $y++) {
-            for ($x = 0; $x < 4; $x++) {
-                $this->writeLumaPixel($mbX, $mbY, $blkX * 8 + $xOffset + $x, $blkY * 8 + $y, $lumaPred[$y][$x]);
-            }
-        }
-
-        // 色度
-        $chromaRefX = $mbX * 64 + $blkX * 32 + $xOffset * 4 + $mvX;
-        $chromaRefY = $mbY * 64 + $blkY * 32 + $mvY;
-
-        [$cbPred, $crPred] = $this->mcChromaPair(
-            $ref['u'], $ref['v'], $ref['strideUv'],
-            $ref['widthUv'], $ref['heightUv'],
-            $chromaRefX, $chromaRefY, 2, 4
-        );
-
-        for ($y = 0; $y < 4; $y++) {
-            for ($x = 0; $x < 2; $x++) {
-                $this->writeChromaPixel($mbX, $mbY, $blkX * 4 + (int)($xOffset / 2) + $x, $blkY * 4 + $y, $cbPred[$y][$x], 0);
-                $this->writeChromaPixel($mbX, $mbY, $blkX * 4 + (int)($xOffset / 2) + $x, $blkY * 4 + $y, $crPred[$y][$x], 1);
-            }
-        }
+        $this->performMotionCompensationBlock($mbX * 16 + $blkX * 8 + $subPartIdx * 4, $mbY * 16 + $blkY * 8, 4, 8, $mvX, $mvY, $refIdx);
     }
 
-    /**
-     * 执行4x4运动补偿
-     * @param int $subPartIdx 0=top-left, 1=top-right, 2=bottom-left, 3=bottom-right
-     */
     private function performMotionCompensation4x4(int $mbX, int $mbY, int $blkX, int $blkY, int $subPartIdx, int $mvX, int $mvY, int $refIdx): void
     {
-        if ($this->refFrameY === null) return;
-        $ref = $this->getRefPlanes($refIdx);
-
         $subX = $subPartIdx % 2;
         $subY = intdiv($subPartIdx, 2);
-        $lumaRefX = $mbX * 64 + $blkX * 32 + $subX * 16 + $mvX;
-        $lumaRefY = $mbY * 64 + $blkY * 32 + $subY * 16 + $mvY;
-
-        $lumaPred = $this->mcLuma(
-            $ref['y'], $ref['strideY'],
-            $ref['widthY'], $ref['heightY'],
-            $lumaRefX, $lumaRefY, 4, 4
-        );
-
-        for ($y = 0; $y < 4; $y++) {
-            for ($x = 0; $x < 4; $x++) {
-                $this->writeLumaPixel($mbX, $mbY, $blkX * 8 + $subX * 4 + $x, $blkY * 8 + $subY * 4 + $y, $lumaPred[$y][$x]);
-            }
-        }
-
-        $chromaRefX = $mbX * 64 + $blkX * 32 + $subX * 16 + $mvX;
-        $chromaRefY = $mbY * 64 + $blkY * 32 + $subY * 16 + $mvY;
-
-        [$cbPred, $crPred] = $this->mcChromaPair(
-            $ref['u'], $ref['v'], $ref['strideUv'],
-            $ref['widthUv'], $ref['heightUv'],
-            $chromaRefX, $chromaRefY, 2, 2
-        );
-
-        for ($y = 0; $y < 2; $y++) {
-            for ($x = 0; $x < 2; $x++) {
-                $this->writeChromaPixel($mbX, $mbY, $blkX * 4 + $subX * 2 + $x, $blkY * 4 + $subY * 2 + $y, $cbPred[$y][$x], 0);
-                $this->writeChromaPixel($mbX, $mbY, $blkX * 4 + $subX * 2 + $x, $blkY * 4 + $subY * 2 + $y, $crPred[$y][$x], 1);
-            }
-        }
+        $this->performMotionCompensationBlock($mbX * 16 + $blkX * 8 + $subX * 4, $mbY * 16 + $blkY * 8 + $subY * 4, 4, 4, $mvX, $mvY, $refIdx);
     }
 
     // ====================== 运动向量预测辅助函数 ======================
@@ -1921,223 +1773,31 @@ trait MacroblockDecodingTrait
 
     // ====================== 运动补偿辅助函数 ======================
 
-    /**
-     * 执行16x16运动补偿
-     */
     private function performMotionCompensation16x16(int $mbX, int $mbY, int $mvX, int $mvY, int $refIdx): void
     {
         if ($this->refFrameY === null) {
             $this->fillMacroblockGray($mbX, $mbY);
             return;
         }
-        $ref = $this->getRefPlanes($refIdx);
-
-        $lumaRefX = $mbX * 64 + $mvX;
-        $lumaRefY = $mbY * 64 + $mvY;
-
-        $dstX = $mbX * 16;
-        $dstY = $mbY * 16;
-        $copyW = min(16, $this->width - $dstX);
-        $copyH = min(16, $this->height - $dstY);
-        $dstStride = $this->width;
-        if (($lumaRefX & 3) === 0 && ($lumaRefY & 3) === 0) {
-            $srcX = $lumaRefX >> 2;
-            $srcY = $lumaRefY >> 2;
-            if ($srcX >= 0 && $srcY >= 0 && $srcX + $copyW <= $ref['widthY'] && $srcY + $copyH <= $ref['heightY']) {
-                for ($y = 0; $y < $copyH; $y++) {
-                    $srcBase = ($srcY + $y) * $ref['strideY'] + $srcX;
-                    $dstBase = ($dstY + $y) * $dstStride + $dstX;
-                    for ($x = 0; $x < $copyW; $x++) {
-                        $this->yPlane[$dstBase + $x] = $ref['y'][$srcBase + $x];
-                    }
-                }
-            } else {
-                $lumaPred = $this->mcLuma($ref['y'], $ref['strideY'], $ref['widthY'], $ref['heightY'], $lumaRefX, $lumaRefY, 16, 16);
-                for ($y = 0; $y < $copyH; $y++) {
-                    $dstBase = ($dstY + $y) * $dstStride + $dstX;
-                    for ($x = 0; $x < $copyW; $x++) $this->yPlane[$dstBase + $x] = $lumaPred[$y][$x];
-                }
-            }
-        } else {
-            $lumaPred = $this->mcLuma($ref['y'], $ref['strideY'], $ref['widthY'], $ref['heightY'], $lumaRefX, $lumaRefY, 16, 16);
-            for ($y = 0; $y < $copyH; $y++) {
-                $dstBase = ($dstY + $y) * $dstStride + $dstX;
-                for ($x = 0; $x < $copyW; $x++) $this->yPlane[$dstBase + $x] = $lumaPred[$y][$x];
-            }
-        }
-
-        $chromaRefX = $mbX * 64 + $mvX;
-        $chromaRefY = $mbY * 64 + $mvY;
-
-        $chromaStride = intdiv($this->width, 2);
-        $chromaHeight = intdiv($this->height, 2);
-        $dstChromaX = $mbX * 8;
-        $dstChromaY = $mbY * 8;
-        $copyChromaW = min(8, $chromaStride - $dstChromaX);
-        $copyChromaH = min(8, $chromaHeight - $dstChromaY);
-        if (($chromaRefX & 7) === 0 && ($chromaRefY & 7) === 0) {
-            $srcChromaX = $chromaRefX >> 3;
-            $srcChromaY = $chromaRefY >> 3;
-            if ($srcChromaX >= 0 && $srcChromaY >= 0 && $srcChromaX + 8 <= $ref['widthUv'] && $srcChromaY + 8 <= $ref['heightUv']) {
-                for ($y = 0; $y < $copyChromaH; $y++) {
-                    $srcBase = ($srcChromaY + $y) * $ref['strideUv'] + $srcChromaX;
-                    $dstBase = ($dstChromaY + $y) * $chromaStride + $dstChromaX;
-                    for ($x = 0; $x < $copyChromaW; $x++) {
-                        $this->uPlane[$dstBase + $x] = $ref['u'][$srcBase + $x];
-                        $this->vPlane[$dstBase + $x] = $ref['v'][$srcBase + $x];
-                    }
-                }
-                return;
-            }
-        }
-
-        [$cbPred, $crPred] = $this->mcChromaPair(
-            $ref['u'], $ref['v'], $ref['strideUv'],
-            $ref['widthUv'], $ref['heightUv'],
-            $chromaRefX, $chromaRefY, 8, 8
-        );
-
-        for ($y = 0; $y < $copyChromaH; $y++) {
-            $dstBase = ($dstChromaY + $y) * $chromaStride + $dstChromaX;
-            $srcCbRow = $cbPred[$y];
-            $srcCrRow = $crPred[$y];
-            for ($x = 0; $x < $copyChromaW; $x++) {
-                $this->uPlane[$dstBase + $x] = $srcCbRow[$x];
-                $this->vPlane[$dstBase + $x] = $srcCrRow[$x];
-            }
-        }
+        $this->performMotionCompensationBlock($mbX * 16, $mbY * 16, 16, 16, $mvX, $mvY, $refIdx);
     }
 
-    /**
-     * 执行16x8运动补偿
-     * @param int $partIdx 0=上半部分, 1=下半部分
-     */
     private function performMotionCompensation16x8(int $mbX, int $mbY, int $partIdx, int $mvX, int $mvY, int $refIdx): void
     {
         if ($this->refFrameY === null) {
             $this->fillMacroblockGray($mbX, $mbY);
             return;
         }
-        $ref = $this->getRefPlanes($refIdx);
-
-        $yOffset = $partIdx * 8;
-
-        $lumaRefX = $mbX * 64 + $mvX;
-        $lumaRefY = $mbY * 64 + $mvY + $yOffset * 4;
-
-        $dstX = $mbX * 16;
-        $dstY = $mbY * 16 + $yOffset;
-        $copyW = min(16, $this->width - $dstX);
-        $copyH = min(8, $this->height - $dstY);
-        $dstStride = $this->width;
-        if (($lumaRefX & 3) === 0 && ($lumaRefY & 3) === 0) {
-            $srcX = $lumaRefX >> 2;
-            $srcY = $lumaRefY >> 2;
-            if ($srcX >= 0 && $srcY >= 0 && $srcX + $copyW <= $ref['widthY'] && $srcY + $copyH <= $ref['heightY']) {
-                for ($y = 0; $y < $copyH; $y++) {
-                    $srcBase = ($srcY + $y) * $ref['strideY'] + $srcX;
-                    $dstBase = ($dstY + $y) * $dstStride + $dstX;
-                    for ($x = 0; $x < $copyW; $x++) {
-                        $this->yPlane[$dstBase + $x] = $ref['y'][$srcBase + $x];
-                    }
-                }
-            } else {
-                $lumaPred = $this->mcLuma($ref['y'], $ref['strideY'], $ref['widthY'], $ref['heightY'], $lumaRefX, $lumaRefY, 16, 8);
-                for ($y = 0; $y < $copyH; $y++) {
-                    $dstBase = ($dstY + $y) * $dstStride + $dstX;
-                    for ($x = 0; $x < $copyW; $x++) $this->yPlane[$dstBase + $x] = $lumaPred[$y][$x];
-                }
-            }
-        } else {
-            $lumaPred = $this->mcLuma($ref['y'], $ref['strideY'], $ref['widthY'], $ref['heightY'], $lumaRefX, $lumaRefY, 16, 8);
-            for ($y = 0; $y < $copyH; $y++) {
-                $dstBase = ($dstY + $y) * $dstStride + $dstX;
-                for ($x = 0; $x < $copyW; $x++) $this->yPlane[$dstBase + $x] = $lumaPred[$y][$x];
-            }
-        }
-
-        $chromaRefX = $mbX * 64 + $mvX;
-        $chromaRefY = $mbY * 64 + $mvY + $yOffset * 4;
-
-        [$cbPred, $crPred] = $this->mcChromaPair(
-            $ref['u'], $ref['v'], $ref['strideUv'],
-            $ref['widthUv'], $ref['heightUv'],
-            $chromaRefX, $chromaRefY, 8, 4
-        );
-
-        $chromaYOffset = $partIdx * 4;
-        for ($y = 0; $y < 4; $y++) {
-            for ($x = 0; $x < 8; $x++) {
-                $this->writeChromaPixel($mbX, $mbY, $x, $chromaYOffset + $y, $cbPred[$y][$x], 0);
-                $this->writeChromaPixel($mbX, $mbY, $x, $chromaYOffset + $y, $crPred[$y][$x], 1);
-            }
-        }
+        $this->performMotionCompensationBlock($mbX * 16, $mbY * 16 + $partIdx * 8, 16, 8, $mvX, $mvY, $refIdx);
     }
 
-    /**
-     * 执行8x16运动补偿
-     * @param int $partIdx 0=左半部分, 1=右半部分
-     */
     private function performMotionCompensation8x16(int $mbX, int $mbY, int $partIdx, int $mvX, int $mvY, int $refIdx): void
     {
         if ($this->refFrameY === null) {
             $this->fillMacroblockGray($mbX, $mbY);
             return;
         }
-        $ref = $this->getRefPlanes($refIdx);
-
-        $xOffset = $partIdx * 8;
-
-        $lumaRefX = $mbX * 64 + $mvX + $xOffset * 4;
-        $lumaRefY = $mbY * 64 + $mvY;
-
-        $dstX = $mbX * 16 + $xOffset;
-        $dstY = $mbY * 16;
-        $copyW = min(8, $this->width - $dstX);
-        $copyH = min(16, $this->height - $dstY);
-        $dstStride = $this->width;
-        if (($lumaRefX & 3) === 0 && ($lumaRefY & 3) === 0) {
-            $srcX = $lumaRefX >> 2;
-            $srcY = $lumaRefY >> 2;
-            if ($srcX >= 0 && $srcY >= 0 && $srcX + $copyW <= $ref['widthY'] && $srcY + $copyH <= $ref['heightY']) {
-                for ($y = 0; $y < $copyH; $y++) {
-                    $srcBase = ($srcY + $y) * $ref['strideY'] + $srcX;
-                    $dstBase = ($dstY + $y) * $dstStride + $dstX;
-                    for ($x = 0; $x < $copyW; $x++) {
-                        $this->yPlane[$dstBase + $x] = $ref['y'][$srcBase + $x];
-                    }
-                }
-            } else {
-                $lumaPred = $this->mcLuma($ref['y'], $ref['strideY'], $ref['widthY'], $ref['heightY'], $lumaRefX, $lumaRefY, 8, 16);
-                for ($y = 0; $y < $copyH; $y++) {
-                    $dstBase = ($dstY + $y) * $dstStride + $dstX;
-                    for ($x = 0; $x < $copyW; $x++) $this->yPlane[$dstBase + $x] = $lumaPred[$y][$x];
-                }
-            }
-        } else {
-            $lumaPred = $this->mcLuma($ref['y'], $ref['strideY'], $ref['widthY'], $ref['heightY'], $lumaRefX, $lumaRefY, 8, 16);
-            for ($y = 0; $y < $copyH; $y++) {
-                $dstBase = ($dstY + $y) * $dstStride + $dstX;
-                for ($x = 0; $x < $copyW; $x++) $this->yPlane[$dstBase + $x] = $lumaPred[$y][$x];
-            }
-        }
-
-        $chromaRefX = $mbX * 64 + $mvX + $xOffset * 4;
-        $chromaRefY = $mbY * 64 + $mvY;
-
-        [$cbPred, $crPred] = $this->mcChromaPair(
-            $ref['u'], $ref['v'], $ref['strideUv'],
-            $ref['widthUv'], $ref['heightUv'],
-            $chromaRefX, $chromaRefY, 4, 8
-        );
-
-        $chromaXOffset = $partIdx * 4;
-        for ($y = 0; $y < 8; $y++) {
-            for ($x = 0; $x < 4; $x++) {
-                $this->writeChromaPixel($mbX, $mbY, $chromaXOffset + $x, $y, $cbPred[$y][$x], 0);
-                $this->writeChromaPixel($mbX, $mbY, $chromaXOffset + $x, $y, $crPred[$y][$x], 1);
-            }
-        }
+        $this->performMotionCompensationBlock($mbX * 16 + $partIdx * 8, $mbY * 16, 8, 16, $mvX, $mvY, $refIdx);
     }
 
     /**
@@ -2258,8 +1918,8 @@ trait MacroblockDecodingTrait
                             $px = $mbX * 16 + $blkX * 4 + $x;
                             if ($py < $this->height && $px < $this->width) {
                                 $idx = $py * $this->width + $px;
-                                $val = $this->yPlane[$idx] + $idct[$y * 4 + $x];
-                                $this->yPlane[$idx] = max(0, min(255, $val));
+                                $val = ord($this->yPlane[$idx]) + $idct[$y * 4 + $x];
+                                $this->yPlane[$idx] = chr(max(0, min(255, $val)));
                             }
                         }
                     }
@@ -2287,8 +1947,8 @@ trait MacroblockDecodingTrait
                             $px = $mbX * 8 + $blkX * 4 + $x;
                             if ($py < $ch && $px < $cw) {
                                 $idx = $py * $cw + $px;
-                                $val = $this->uPlane[$idx] + $acIdctCb[$y * 4 + $x];
-                                $this->uPlane[$idx] = max(0, min(255, $val));
+                                $val = ord($this->uPlane[$idx]) + $acIdctCb[$y * 4 + $x];
+                                $this->uPlane[$idx] = chr(max(0, min(255, $val)));
                             }
                         }
                     }
@@ -2300,8 +1960,8 @@ trait MacroblockDecodingTrait
                             $px = $mbX * 8 + $blkX * 4 + $x;
                             if ($py < $ch && $px < $cw) {
                                 $idx = $py * $cw + $px;
-                                $val = $this->uPlane[$idx] + $dcAddCb;
-                                $this->uPlane[$idx] = max(0, min(255, $val));
+                                $val = ord($this->uPlane[$idx]) + $dcAddCb;
+                                $this->uPlane[$idx] = chr(max(0, min(255, $val)));
                             }
                         }
                     }
@@ -2318,8 +1978,8 @@ trait MacroblockDecodingTrait
                             $px = $mbX * 8 + $blkX * 4 + $x;
                             if ($py < $ch && $px < $cw) {
                                 $idx = $py * $cw + $px;
-                                $val = $this->vPlane[$idx] + $acIdctCr[$y * 4 + $x];
-                                $this->vPlane[$idx] = max(0, min(255, $val));
+                                $val = ord($this->vPlane[$idx]) + $acIdctCr[$y * 4 + $x];
+                                $this->vPlane[$idx] = chr(max(0, min(255, $val)));
                             }
                         }
                     }
@@ -2331,8 +1991,8 @@ trait MacroblockDecodingTrait
                             $px = $mbX * 8 + $blkX * 4 + $x;
                             if ($py < $ch && $px < $cw) {
                                 $idx = $py * $cw + $px;
-                                $val = $this->vPlane[$idx] + $dcAddCr;
-                                $this->vPlane[$idx] = max(0, min(255, $val));
+                                $val = ord($this->vPlane[$idx]) + $dcAddCr;
+                                $this->vPlane[$idx] = chr(max(0, min(255, $val)));
                             }
                         }
                     }

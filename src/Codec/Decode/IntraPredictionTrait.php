@@ -37,8 +37,8 @@ trait IntraPredictionTrait
                 $py = $mbPy + $y;
                 if ($py < $this->height && $refX >= 0) {
                     $idx = $py * $this->width + $refX;
-                    if ($idx >= 0 && $idx < count($this->yPlane)) {
-                        $left[$y] = $this->yPlane[$idx];
+                    if ($idx >= 0 && $idx < strlen($this->yPlane)) {
+                        $left[$y] = ord($this->yPlane[$idx]);
                     }
                 }
             }
@@ -50,8 +50,8 @@ trait IntraPredictionTrait
                 $px = $mbPx + $x;
                 if ($px < $this->width && $refY >= 0) {
                     $idx = $refY * $this->width + $px;
-                    if ($idx >= 0 && $idx < count($this->yPlane)) {
-                        $top[$x] = $this->yPlane[$idx];
+                    if ($idx >= 0 && $idx < strlen($this->yPlane)) {
+                        $top[$x] = ord($this->yPlane[$idx]);
                     }
                 }
             }
@@ -75,8 +75,8 @@ trait IntraPredictionTrait
                     $px = $mbPx + $x;
                     if ($px < $this->width && $refY >= 0) {
                         $idx = $refY * $this->width + $px;
-                        if ($idx >= 0 && $idx < count($this->yPlane)) {
-                            $top[$x] = $this->yPlane[$idx];
+                        if ($idx >= 0 && $idx < strlen($this->yPlane)) {
+                            $top[$x] = ord($this->yPlane[$idx]);
                         }
                     }
                 }
@@ -90,8 +90,8 @@ trait IntraPredictionTrait
 
         if ($topAvail && $leftAvail) {
             $cornerIdx = ($mbPy - 1) * $this->width + ($mbPx - 1);
-            if ($mbPy - 1 >= 0 && $mbPx - 1 >= 0 && $cornerIdx >= 0 && $cornerIdx < count($this->yPlane)) {
-                $topLeft = $this->yPlane[$cornerIdx];
+            if ($mbPy - 1 >= 0 && $mbPx - 1 >= 0 && $cornerIdx >= 0 && $cornerIdx < strlen($this->yPlane)) {
+                $topLeft = ord($this->yPlane[$cornerIdx]);
             }
         } elseif ($topAvail) {
             $topLeft = $top[0];
@@ -359,21 +359,21 @@ trait IntraPredictionTrait
             $ry = $py0 - 1;
             for ($x = 0; $x < 16; $x++) {
                 $idx = $ry * $this->width + ($px0 + $x);
-                if ($idx >= 0 && $idx < count($this->yPlane)) $topLine[$x + 1] = $this->yPlane[$idx];
+                if ($idx >= 0 && $idx < strlen($this->yPlane)) $topLine[$x + 1] = ord($this->yPlane[$idx]);
             }
         }
         if ($leftAvail) {
             $rx = $px0 - 1;
             for ($y = 0; $y < 16; $y++) {
                 $idx = ($py0 + $y) * $this->width + $rx;
-                if ($idx >= 0 && $idx < count($this->yPlane)) $leftLine[$y + 1] = $this->yPlane[$idx];
+                if ($idx >= 0 && $idx < strlen($this->yPlane)) $leftLine[$y + 1] = ord($this->yPlane[$idx]);
             }
         }
         // 角落参考像素
         if ($topAvail && $leftAvail) {
             $cornerIdx = ($py0 - 1) * $this->width + ($px0 - 1);
-            if ($cornerIdx >= 0 && $cornerIdx < count($this->yPlane)) {
-                $topLine[0] = $leftLine[0] = $this->yPlane[$cornerIdx];
+            if ($cornerIdx >= 0 && $cornerIdx < strlen($this->yPlane)) {
+                $topLine[0] = $leftLine[0] = ord($this->yPlane[$cornerIdx]);
             } else {
                 $topLine[0] = $leftLine[0] = 128;
             }
@@ -493,20 +493,20 @@ trait IntraPredictionTrait
             $ry = $py0 - 1;
             for ($x = 0; $x < 8; $x++) {
                 $idx = $ry * $cw + ($px0 + $x);
-                if ($idx >= 0 && $idx < count($planeBuf)) $top[$x] = $planeBuf[$idx];
+                if ($idx >= 0 && $idx < strlen($planeBuf)) $top[$x] = ord($planeBuf[$idx]);
             }
         }
         if ($hasLeft) {
             $rx = $px0 - 1;
             for ($y = 0; $y < 8; $y++) {
                 $idx = ($py0 + $y) * $cw + $rx;
-                if ($idx >= 0 && $idx < count($planeBuf)) $left[$y] = $planeBuf[$idx];
+                if ($idx >= 0 && $idx < strlen($planeBuf)) $left[$y] = ord($planeBuf[$idx]);
             }
         }
         if ($hasTop && $hasLeft) {
             $cornerIdx = ($py0 - 1) * $cw + ($px0 - 1);
-            if ($cornerIdx >= 0 && $cornerIdx < count($planeBuf)) {
-                $topLeft = $planeBuf[$cornerIdx];
+            if ($cornerIdx >= 0 && $cornerIdx < strlen($planeBuf)) {
+                $topLeft = ord($planeBuf[$cornerIdx]);
             }
         }
 

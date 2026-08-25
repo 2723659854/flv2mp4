@@ -64,7 +64,10 @@ final class FlvDecoderWorkerServer
                 }
                 foreach (HlsPipelineProtocol::take($response, 4) as $event) {
                     if ($event['type'] === HlsPipelineProtocol::ERROR) throw new RuntimeException($event['metadata']['message'] ?? '输出进程失败');
-                    if ($event['type'] === HlsPipelineProtocol::FINISHED) { $this->writeAll($upstream, HlsPipelineProtocol::frame(HlsPipelineProtocol::FINISHED, $event['sequence'])); return; }
+                    if ($event['type'] === HlsPipelineProtocol::FINISHED) {
+                        $this->writeAll($upstream, HlsPipelineProtocol::frame(HlsPipelineProtocol::FINISHED, $event['sequence']));
+                        return;
+                    }
                 }
             }
         } catch (Throwable $e) {
