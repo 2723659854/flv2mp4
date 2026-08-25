@@ -41,7 +41,7 @@ trait ResidualDecodingTrait
             // 防止死循环：最多读取32位前缀 (level_prefix = 连续0的个数)
             while ($pre < 32 && $this->reader->readU(1) === 0) $pre++;
             // 计算 level_code
-            $levelCode = 0;
+            //$levelCode = 0;
             if ($isFirst && $suffixLen === 0) {
                 // 第一个系数且 suffix_length==0 的特殊VLC结构
                 if ($pre < 14) {
@@ -101,7 +101,7 @@ trait ResidualDecodingTrait
             $nzIdx = $lastNz;
             for ($i = 0; $i < $totalCoeff; $i++) {
                 $isLast = ($i == $totalCoeff - 1);
-                $rb = 0;
+                //$rb = 0;
                 if (!$isLast && $zl > 0) {
                     $rb = $this->readRunBefore($zl);
                 } elseif (!$isLast) {
@@ -276,7 +276,7 @@ trait ResidualDecodingTrait
 
             $isFirst = ($rem === $totalCoeff - $trailingOnes);
 
-            $levelCode = 0;
+            //$levelCode = 0;
             if ($isFirst && $suffixLen === 0) {
                 if ($pre < 14) {
                     $levelCode = $pre;
@@ -341,9 +341,8 @@ trait ResidualDecodingTrait
     {
         $coeffs = array_fill(0, 4, 0);
 
-        // 色度DC coeff_token VLC表 (与FFmpeg h264_cavlc.c chroma_dc_coeff_token一致)
+        // 色度DC coeff_token VLC表
         // 索引方式: [totalCoeff][trailingOnes] -> [bits_value, length]
-        // 来源: FFmpeg chroma_dc_coeff_token_len / chroma_dc_coeff_token_bits
         static $chromaDcTokenMap = [
             '01'       => [0, 0],  // TotalCoeff=0, TrailingOnes=0 (len=2)
             '000111'   => [1, 0],  // TotalCoeff=1, TrailingOnes=0 (len=6)
@@ -396,7 +395,7 @@ trait ResidualDecodingTrait
             $pre = 0;
             while ($pre < 32 && $this->reader->readU(1) === 0) $pre++;
 
-            $levelCode = 0;
+            //$levelCode = 0;
             if ($isFirst && $suffixLen === 0) {
                 // 第一个level且suffix_length==0的特殊VLC
                 if ($pre < 14) {
@@ -435,7 +434,7 @@ trait ResidualDecodingTrait
             $level = $level - $mask;
             $coeffs[$i] = $level;
 
-            // 更新suffix_length (与readCoeffsCAVLC一致, 参考FFmpeg SUFFIX_LIMIT表)
+            // 更新suffix_length (与readCoeffsCAVLC一致)
             $absLvl = abs($level);
             if ($isFirst) {
                 $suffixLen = ($absLvl > 3) ? 2 : 1;
@@ -458,7 +457,7 @@ trait ResidualDecodingTrait
 
             for ($i = 0; $i < $totalCoeff; $i++) {
                 $isLast = ($i == $totalCoeff - 1);
-                $rb = 0;
+                //$rb = 0;
                 if (!$isLast && $zl > 0) {
                     $rb = $this->readRunBefore($zl);
                 } elseif (!$isLast) {
@@ -827,7 +826,7 @@ trait ResidualDecodingTrait
     public function decodeResidualBlock(int $maxCoef, int $nC = -1): array
     {
         // Direct translation of Rust decode_residual (cavlc.rs:344-542)
-        $dbg = $this->debugResidual;
+        //$dbg = $this->debugResidual;
         $coeffs = array_fill(0, $maxCoef, 0);
 
         // 1. Read coeff_token
@@ -869,7 +868,7 @@ trait ResidualDecodingTrait
                 }
 
                 // Compute level_code from prefix and suffix
-                $levelCode = 0;
+                //$levelCode = 0;
 
                 if ($isFirst && $suffixLength === 0) {
                     // First coefficient with suffix_length == 0: special VLC

@@ -11,8 +11,6 @@ trait MotionCompensationTrait
 {
     /**
      * 亮度运动补偿 - 1/4 像素精度
-     * 严格对齐FFmpeg h264qpel_template.c实现
-     *
      * @param array $refPlane 参考帧平面 (已clamp到边界)
      * @param int $refStride 参考帧步长
      * @param int $refWidth 参考帧宽度

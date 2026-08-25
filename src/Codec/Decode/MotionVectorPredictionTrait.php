@@ -13,7 +13,6 @@ trait MotionVectorPredictionTrait
 
     /**
      * P帧16x16宏块运动向量预测 (H.264 8.4.1.3节)
-     * 严格参考FFmpeg pred_motion实现
      * @param array|null $mvLeft 左邻居 [mvX, mvY, refIdx]，null表示PART_NOT_AVAILABLE（帧边界外），[0,0,-1]表示Intra（LIST_NOT_USED）
      * @param array|null $mvTop 上邻居 [mvX, mvY, refIdx]，null表示PART_NOT_AVAILABLE
      * @param array|null $mvTopRight 右上邻居 [mvX, mvY, refIdx]，null表示PART_NOT_AVAILABLE
@@ -75,7 +74,6 @@ trait MotionVectorPredictionTrait
 
     /**
      * P_Skip 宏块运动向量预测 (H.264 8.4.1.1节)
-     * 特殊快速路径（与FFmpeg pred_pskip_motion一致）：
      * - 如果A（左邻居）完全不存在（帧边界外，null）→ 返回(0,0)
      * - 如果B（上邻居）完全不存在（帧边界外，null）→ 返回(0,0)
      * - 如果A是Inter宏块且ref=0、MV=(0,0) → 返回(0,0)

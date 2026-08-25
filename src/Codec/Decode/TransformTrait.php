@@ -47,7 +47,7 @@ trait TransformTrait
 
     /**
      * 4x4 IDCT整数逆变换
-     * 严格对齐FFmpeg ff_h264_idct_add: 先列变换，后行变换，中间>>1不可交换顺序
+     * 先列变换，后行变换，中间>>1不可交换顺序
      */
     public function idct4x4(array $in): array
     {
@@ -70,7 +70,7 @@ trait TransformTrait
         $block = $in;
         $block[0] += 32;
 
-        // 第一遍：列变换 (与FFmpeg一致: i是列索引)
+        // 第一遍：列变换 (i是列索引)
         for ($i = 0; $i < 4; $i++) {
             $z0 = $block[$i + 0] + $block[$i + 8];
             $z1 = $block[$i + 0] - $block[$i + 8];
@@ -83,7 +83,7 @@ trait TransformTrait
             $block[$i + 12] = $z0 - $z3;
         }
 
-        // 第二遍：行变换并>>6 (与FFmpeg一致)
+        // 第二遍：行变换并>>6
         $out = array_fill(0, 16, 0);
         for ($i = 0; $i < 4; $i++) {
             $row = 4 * $i;

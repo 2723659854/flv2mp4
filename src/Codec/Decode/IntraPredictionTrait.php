@@ -25,7 +25,7 @@ trait IntraPredictionTrait
 
         $topAvail = ($blkY === 0 && $mbY > 0) || $blkY > 0;
         $leftAvail = ($blkX === 0 && $mbX > 0) || $blkX > 0;
-        $topRightAvail = false;
+        //$topRightAvail = false;
 
         $top = array_fill(0, 8, 128);
         $left = array_fill(0, 4, 128);
@@ -80,7 +80,7 @@ trait IntraPredictionTrait
                         }
                     }
                 }
-                $topRightAvail = true;
+                //$topRightAvail = true;
             } else {
                 for ($x = 4; $x < 8; $x++) {
                     $top[$x] = $top[3];

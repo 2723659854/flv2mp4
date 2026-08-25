@@ -258,7 +258,7 @@ trait SliceDecodingTrait
 
         $mbSkipRun = -1;
 
-        $isPSlice = ($sliceType === 0 || $sliceType === 5);
+        //$isPSlice = ($sliceType === 0 || $sliceType === 5);
         for ($mbIdx = $startMbIdx; $mbIdx < $endMbIdx; $mbIdx++) {
             $mbX = $mbIdx % $mbWidth;
             $mbY = (int)($mbIdx / $mbWidth);
