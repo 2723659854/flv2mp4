@@ -3,6 +3,10 @@ namespace Xiaosongshu\Flv2mp4\Codec\Encode;
 
 use RuntimeException;
 
+/**
+ * @purpose 运动模块分布式计算-客户端
+ * @author yanglong
+ */
 final class MotionWorkerClient
 {
     private array $sockets = [];

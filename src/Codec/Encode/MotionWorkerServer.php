@@ -4,6 +4,10 @@ namespace Xiaosongshu\Flv2mp4\Codec\Encode;
 use RuntimeException;
 use Throwable;
 
+/**
+ * @purpose 运动模块分布式计算-服务端
+ * @author yanglong
+ */
 final class MotionWorkerServer
 {
     public function run(string $address, ?float $idle = null): void

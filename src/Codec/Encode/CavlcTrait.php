@@ -4,6 +4,7 @@ namespace Xiaosongshu\Flv2mp4\Codec\Encode;
 
 /**
  * @purpose CAVLC编码特征/模块 熵编码模块
+ * @author yanglong
  */
 trait CavlcTrait
 {

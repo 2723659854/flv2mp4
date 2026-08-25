@@ -4,6 +4,10 @@ namespace Xiaosongshu\Flv2mp4\Codec\Encode;
 use InvalidArgumentException;
 use UnexpectedValueException;
 
+/**
+ * @purpose 运动模块分布式计算-协议
+ * @author yanglong
+ */
 final class MotionWorkerProtocol
 {
     public const MAX_BODY_LENGTH = 16777216;
