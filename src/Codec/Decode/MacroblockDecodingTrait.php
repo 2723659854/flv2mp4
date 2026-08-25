@@ -1148,6 +1148,7 @@ trait MacroblockDecodingTrait
     private function decodeP_8x8(int $mbX, int $mbY, int $sliceQp): int
     {
         $mbMvs = array_fill(0, 4, array_fill(0, 4, null));
+        $mcTasks = [];
 
         $subMbScan = [[0, 0], [1, 0], [0, 1], [1, 1]];
 
@@ -1206,7 +1207,7 @@ trait MacroblockDecodingTrait
                 $mbMvs[$partY + 1][$partX] = $mv;
                 $mbMvs[$partY + 1][$partX + 1] = $mv;
 
-                $this->performMotionCompensation8x8($mbX, $mbY, $blkX8, $blkY8, $mvX, $mvY, $refIdx);
+                $mcTasks[] = [$partX * 4, $partY * 4, 8, 8, $mvX, $mvY, $refIdx];
 
             } elseif ($subMbType === 1) {
                 for ($sub = 0; $sub < 2; $sub++) {
@@ -1226,7 +1227,7 @@ trait MacroblockDecodingTrait
                     $mbMvs[$subY][$partX] = $mv;
                     $mbMvs[$subY][$partX + 1] = $mv;
 
-                    $this->performMotionCompensation8x4($mbX, $mbY, $blkX8, $blkY8, $sub, $mvX, $mvY, $refIdx);
+                    $mcTasks[] = [$partX * 4, $subY * 4, 8, 4, $mvX, $mvY, $refIdx];
                 }
 
             } elseif ($subMbType === 2) {
@@ -1247,7 +1248,7 @@ trait MacroblockDecodingTrait
                     $mbMvs[$partY][$subX] = $mv;
                     $mbMvs[$partY + 1][$subX] = $mv;
 
-                    $this->performMotionCompensation4x8($mbX, $mbY, $blkX8, $blkY8, $sub, $mvX, $mvY, $refIdx);
+                    $mcTasks[] = [$subX * 4, $partY * 4, 4, 8, $mvX, $mvY, $refIdx];
                 }
 
             } elseif ($subMbType === 3) {
@@ -1267,13 +1268,15 @@ trait MacroblockDecodingTrait
 
                     $mbMvs[$subY][$subX] = [$mvX, $mvY, $refIdx];
 
-                    $this->performMotionCompensation4x4($mbX, $mbY, $blkX8, $blkY8, $sub, $mvX, $mvY, $refIdx);
+                    $mcTasks[] = [$subX * 4, $subY * 4, 4, 4, $mvX, $mvY, $refIdx];
                 }
 
             } else {
                 break;
             }
         }
+
+        $this->executeMergedMcTasks($mbX, $mbY, $mcTasks);
 
         $mbQpDelta = 0;
         $cbpCode = $this->reader->readUe();
@@ -1306,6 +1309,7 @@ trait MacroblockDecodingTrait
         $refIdx = 0;
 
         $mbMvs = array_fill(0, 4, array_fill(0, 4, null));
+        $mcTasks = [];
 
         $subMbScan = [[0, 0], [1, 0], [0, 1], [1, 1]];
 
@@ -1358,7 +1362,7 @@ trait MacroblockDecodingTrait
                 $mbMvs[$partY + 1][$partX] = $mv;
                 $mbMvs[$partY + 1][$partX + 1] = $mv;
 
-                $this->performMotionCompensation8x8($mbX, $mbY, $blkX8, $blkY8, $mvX, $mvY, $refIdx);
+                $mcTasks[] = [$partX * 4, $partY * 4, 8, 8, $mvX, $mvY, $refIdx];
 
             } elseif ($subMbType === 1) {
                 for ($sub = 0; $sub < 2; $sub++) {
@@ -1378,7 +1382,7 @@ trait MacroblockDecodingTrait
                     $mbMvs[$subY][$partX] = $mv;
                     $mbMvs[$subY][$partX + 1] = $mv;
 
-                    $this->performMotionCompensation8x4($mbX, $mbY, $blkX8, $blkY8, $sub, $mvX, $mvY, $refIdx);
+                    $mcTasks[] = [$partX * 4, $subY * 4, 8, 4, $mvX, $mvY, $refIdx];
                 }
 
             } elseif ($subMbType === 2) {
@@ -1399,7 +1403,7 @@ trait MacroblockDecodingTrait
                     $mbMvs[$partY][$subX] = $mv;
                     $mbMvs[$partY + 1][$subX] = $mv;
 
-                    $this->performMotionCompensation4x8($mbX, $mbY, $blkX8, $blkY8, $sub, $mvX, $mvY, $refIdx);
+                    $mcTasks[] = [$subX * 4, $partY * 4, 4, 8, $mvX, $mvY, $refIdx];
                 }
 
             } elseif ($subMbType === 3) {
@@ -1419,13 +1423,15 @@ trait MacroblockDecodingTrait
 
                     $mbMvs[$subY][$subX] = [$mvX, $mvY, $refIdx];
 
-                    $this->performMotionCompensation4x4($mbX, $mbY, $blkX8, $blkY8, $sub, $mvX, $mvY, $refIdx);
+                    $mcTasks[] = [$subX * 4, $subY * 4, 4, 4, $mvX, $mvY, $refIdx];
                 }
 
             } else {
                 break;
             }
         }
+
+        $this->executeMergedMcTasks($mbX, $mbY, $mcTasks);
 
         $cbpCode = $this->reader->readUe();
         $codedBlockPattern = self::GOLOMB_TO_INTER_CBP[$cbpCode] ?? 0;
@@ -1479,6 +1485,53 @@ trait MacroblockDecodingTrait
             'widthY' => $this->refWidthY, 'heightY' => $this->refHeightY,
             'widthUv' => $this->refWidthUv, 'heightUv' => $this->refHeightUv,
         ];
+    }
+
+    private function executeMergedMcTasks(int $mbX, int $mbY, array $tasks): void
+    {
+        $grid = array_fill(0, 4, array_fill(0, 4, null));
+        foreach ($tasks as $task) {
+            [$x, $y, $w, $h, $mvX, $mvY, $refIdx] = $task;
+            for ($blockY = intdiv($y, 4); $blockY < intdiv($y + $h, 4); $blockY++) {
+                for ($blockX = intdiv($x, 4); $blockX < intdiv($x + $w, 4); $blockX++) {
+                    $grid[$blockY][$blockX] = [$mvX, $mvY, $refIdx];
+                }
+            }
+        }
+
+        $used = array_fill(0, 4, array_fill(0, 4, false));
+        for ($y = 0; $y < 4; $y++) {
+            for ($x = 0; $x < 4; $x++) {
+                if ($used[$y][$x] || $grid[$y][$x] === null) continue;
+
+                $mv = $grid[$y][$x];
+                $width = 1;
+                while ($x + $width < 4 && !$used[$y][$x + $width] && $grid[$y][$x + $width] === $mv) {
+                    $width++;
+                }
+
+                $height = 1;
+                while ($y + $height < 4) {
+                    for ($i = 0; $i < $width; $i++) {
+                        if ($used[$y + $height][$x + $i] || $grid[$y + $height][$x + $i] !== $mv) {
+                            break 2;
+                        }
+                    }
+                    $height++;
+                }
+
+                for ($j = 0; $j < $height; $j++) {
+                    for ($i = 0; $i < $width; $i++) {
+                        $used[$y + $j][$x + $i] = true;
+                    }
+                }
+
+                $this->performMotionCompensationBlock(
+                    $mbX * 16 + $x * 4, $mbY * 16 + $y * 4,
+                    $width * 4, $height * 4, $mv[0], $mv[1], $mv[2]
+                );
+            }
+        }
     }
 
     private function performMotionCompensationBlock(int $dstX, int $dstY, int $blockW, int $blockH, int $mvX, int $mvY, int $refIdx): void
