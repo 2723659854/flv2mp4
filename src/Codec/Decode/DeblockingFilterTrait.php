@@ -21,9 +21,6 @@ trait DeblockingFilterTrait
 
     private int $deblockYStride = 0;
     private int $deblockUvStride = 0;
-    private int $deblockYPlaneSize = 0;
-    private int $deblockUPlaneSize = 0;
-    private int $deblockVPlaneSize = 0;
     private array $deblockThresholdCache = [];
     private array $deblockTc0Cache = [];
     private array $deblockChromaQpCache = [];
@@ -88,38 +85,6 @@ trait DeblockingFilterTrait
         return (int)(($qpP + $qpQ + 1) >> 1);
     }
 
-    private function filterNormalLuma(int $p0, int $p1, int $p2, int $q0, int $q1, int $q2, int $alpha, int $beta, int $tc0,
-                                      &$newP0, &$newP1, &$newQ0, &$newQ1): bool
-    {
-        if (abs($p0 - $q0) >= $alpha || abs($p1 - $p0) >= $beta || abs($q1 - $q0) >= $beta) {
-            return false;
-        }
-
-        $tc = $tc0;
-        $newP1 = $p1;
-        $newQ1 = $q1;
-
-        if (abs($p2 - $p0) < $beta) {
-            if ($tc0 !== 0) {
-                $newP1 = $p1 + $this->clip3(-$tc0, $tc0, ((($p2 + (($p0 + $q0 + 1) >> 1)) >> 1) - $p1));
-            }
-            $tc++;
-        }
-
-        if (abs($q2 - $q0) < $beta) {
-            if ($tc0 !== 0) {
-                $newQ1 = $q1 + $this->clip3(-$tc0, $tc0, ((($q2 + (($p0 + $q0 + 1) >> 1)) >> 1) - $q1));
-            }
-            $tc++;
-        }
-
-        $delta = $this->clip3(-$tc, $tc, ((($q0 - $p0) * 4 + ($p1 - $q1) + 4) >> 3));
-        $newP0 = $this->clipPixel($p0 + $delta);
-        $newQ0 = $this->clipPixel($q0 - $delta);
-
-        return true;
-    }
-
     private function filterStrongLuma(int $p0, int $p1, int $p2, int $p3, int $q0, int $q1, int $q2, int $q3, int $alpha, int $beta,
                                       &$newP0, &$newP1, &$newP2, &$newQ0, &$newQ1, &$newQ2): bool
     {
@@ -163,20 +128,6 @@ trait DeblockingFilterTrait
         return true;
     }
 
-    private function filterNormalChroma(int $p0, int $p1, int $q0, int $q1, int $alpha, int $beta, int $tc,
-                                        &$newP0, &$newQ0): bool
-    {
-        if (abs($p0 - $q0) >= $alpha || abs($p1 - $p0) >= $beta || abs($q1 - $q0) >= $beta) {
-            return false;
-        }
-
-        $delta = $this->clip3(-$tc, $tc, ((($q0 - $p0) * 4 + ($p1 - $q1) + 4) >> 3));
-        $newP0 = $this->clipPixel($p0 + $delta);
-        $newQ0 = $this->clipPixel($q0 - $delta);
-
-        return true;
-    }
-
     private function filterStrongChroma(int $p0, int $p1, int $q0, int $q1, int $alpha, int $beta,
                                         &$newP0, &$newQ0): bool
     {
@@ -190,7 +141,7 @@ trait DeblockingFilterTrait
         return true;
     }
 
-    private function filterMbEdgeLuma(bool $isVertical, int $mbX, int $mbY, int $edge, array $bs, int $qp)
+    private function filterVerticalLuma(int $mbX, int $mbY, int $edge, array $bs, int $qp): void
     {
         $alpha = $beta = 0;
         $this->getThresholds($qp, $this->sliceAlphaC0Offset, $this->sliceBetaOffset, $alpha, $beta);
@@ -200,65 +151,145 @@ trait DeblockingFilterTrait
 
         $stride = $this->deblockYStride;
         $plane = &$this->yPlane;
-        $planeSize = $this->deblockYPlaneSize;
-        $mbBaseOffset = ($mbY * 16) * $stride + ($mbX * 16);
-
-        $edgePixelOffset = $isVertical ? ($edge * 4) : ($edge * 4 * $stride);
-        $base = $mbBaseOffset + $edgePixelOffset;
-        $step = $isVertical ? 1 : $stride;
+        $base = ($mbY * 16) * $stride + ($mbX * 16) + $edge * 4;
 
         for ($i = 0; $i < 4; $i++) {
             $curBs = $bs[$i];
             if ($curBs == 0) {
                 continue;
             }
-            // 同一 4 像素分段共用边界强度，tc0 只查询一次。
             $tc0 = $curBs < 4 ? $this->getTc0($qp, $this->sliceAlphaC0Offset, $curBs) : 0;
+            $off = $base + $i * 4 * $stride;
 
-            for ($d = 0; $d < 4; $d++) {
-                $off = $isVertical ? ($base + ($i * 4 + $d) * $stride) : ($base + $i * 4 + $d);
-
-                if ($off - 4 * $step < 0 || $off + 3 * $step >= $planeSize) {
-                    continue;
-                }
-
-                $p0 = ord($plane[$off - $step]);
-                $p1 = ord($plane[$off - 2 * $step]);
-                $p2 = ord($plane[$off - 3 * $step]);
+            for ($d = 0; $d < 4; $d++, $off += $stride) {
+                $p0 = ord($plane[$off - 1]);
+                $p1 = ord($plane[$off - 2]);
+                $p2 = ord($plane[$off - 3]);
                 $q0 = ord($plane[$off]);
-                $q1 = ord($plane[$off + $step]);
-                $q2 = ord($plane[$off + 2 * $step]);
+                $q1 = ord($plane[$off + 1]);
+                $q2 = ord($plane[$off + 2]);
 
                 if ($curBs < 4) {
-                    if ($this->filterNormalLuma(
-                        $p0, $p1, $p2, $q0, $q1, $q2, $alpha, $beta, $tc0,
-                        $newP0, $newP1, $newQ0, $newQ1
-                    )) {
-                        $plane[$off - $step] = chr($newP0);
-                        $plane[$off - 2 * $step] = chr($newP1);
-                        $plane[$off] = chr($newQ0);
-                        $plane[$off + $step] = chr($newQ1);
+                    if (abs($p0 - $q0) < $alpha && abs($p1 - $p0) < $beta && abs($q1 - $q0) < $beta) {
+                        $tc = $tc0;
+                        $newP1 = $p1;
+                        $newQ1 = $q1;
+                        $p0q0 = ($p0 + $q0 + 1) >> 1;
+
+                        if (abs($p2 - $p0) < $beta) {
+                            if ($tc0 !== 0) {
+                                $newP1 = $p1 + $this->clip3(-$tc0, $tc0, ((($p2 + $p0q0) >> 1) - $p1));
+                            }
+                            $tc++;
+                        }
+
+                        if (abs($q2 - $q0) < $beta) {
+                            if ($tc0 !== 0) {
+                                $newQ1 = $q1 + $this->clip3(-$tc0, $tc0, ((($q2 + $p0q0) >> 1) - $q1));
+                            }
+                            $tc++;
+                        }
+
+                        $delta = $this->clip3(-$tc, $tc, ((($q0 - $p0) * 4 + ($p1 - $q1) + 4) >> 3));
+                        $plane[$off - 1] = chr($this->clipPixel($p0 + $delta));
+                        $plane[$off - 2] = chr($newP1);
+                        $plane[$off] = chr($this->clipPixel($q0 - $delta));
+                        $plane[$off + 1] = chr($newQ1);
                     }
                 } else {
-                    $p3 = ord($plane[$off - 4 * $step]);
-                    $q3 = ord($plane[$off + 3 * $step]);
+                    $p3 = ord($plane[$off - 4]);
+                    $q3 = ord($plane[$off + 3]);
                     if ($this->filterStrongLuma(
                         $p0, $p1, $p2, $p3, $q0, $q1, $q2, $q3, $alpha, $beta,
                         $newP0, $newP1, $newP2, $newQ0, $newQ1, $newQ2
                     )) {
-                        $plane[$off - $step] = chr($newP0);
-                        $plane[$off - 2 * $step] = chr($newP1);
-                        $plane[$off - 3 * $step] = chr($newP2);
+                        $plane[$off - 1] = chr($newP0);
+                        $plane[$off - 2] = chr($newP1);
+                        $plane[$off - 3] = chr($newP2);
                         $plane[$off] = chr($newQ0);
-                        $plane[$off + $step] = chr($newQ1);
-                        $plane[$off + 2 * $step] = chr($newQ2);
+                        $plane[$off + 1] = chr($newQ1);
+                        $plane[$off + 2] = chr($newQ2);
                     }
                 }
             }
         }
     }
 
-    private function filterMbEdgeChroma(bool $isVertical, int $mbX, int $mbY, int $edge, array $bs, int $qp)
+    private function filterHorizontalLuma(int $mbX, int $mbY, int $edge, array $bs, int $qp): void
+    {
+        $alpha = $beta = 0;
+        $this->getThresholds($qp, $this->sliceAlphaC0Offset, $this->sliceBetaOffset, $alpha, $beta);
+        if ($alpha == 0 || $beta == 0) {
+            return;
+        }
+
+        $stride = $this->deblockYStride;
+        $plane = &$this->yPlane;
+        $base = ($mbY * 16 + $edge * 4) * $stride + ($mbX * 16);
+
+        for ($i = 0; $i < 4; $i++) {
+            $curBs = $bs[$i];
+            if ($curBs == 0) {
+                continue;
+            }
+            $tc0 = $curBs < 4 ? $this->getTc0($qp, $this->sliceAlphaC0Offset, $curBs) : 0;
+            $off = $base + $i * 4;
+
+            for ($d = 0; $d < 4; $d++, $off++) {
+                $p0 = ord($plane[$off - $stride]);
+                $p1 = ord($plane[$off - 2 * $stride]);
+                $p2 = ord($plane[$off - 3 * $stride]);
+                $q0 = ord($plane[$off]);
+                $q1 = ord($plane[$off + $stride]);
+                $q2 = ord($plane[$off + 2 * $stride]);
+
+                if ($curBs < 4) {
+                    if (abs($p0 - $q0) < $alpha && abs($p1 - $p0) < $beta && abs($q1 - $q0) < $beta) {
+                        $tc = $tc0;
+                        $newP1 = $p1;
+                        $newQ1 = $q1;
+                        $p0q0 = ($p0 + $q0 + 1) >> 1;
+
+                        if (abs($p2 - $p0) < $beta) {
+                            if ($tc0 !== 0) {
+                                $newP1 = $p1 + $this->clip3(-$tc0, $tc0, ((($p2 + $p0q0) >> 1) - $p1));
+                            }
+                            $tc++;
+                        }
+
+                        if (abs($q2 - $q0) < $beta) {
+                            if ($tc0 !== 0) {
+                                $newQ1 = $q1 + $this->clip3(-$tc0, $tc0, ((($q2 + $p0q0) >> 1) - $q1));
+                            }
+                            $tc++;
+                        }
+
+                        $delta = $this->clip3(-$tc, $tc, ((($q0 - $p0) * 4 + ($p1 - $q1) + 4) >> 3));
+                        $plane[$off - $stride] = chr($this->clipPixel($p0 + $delta));
+                        $plane[$off - 2 * $stride] = chr($newP1);
+                        $plane[$off] = chr($this->clipPixel($q0 - $delta));
+                        $plane[$off + $stride] = chr($newQ1);
+                    }
+                } else {
+                    $p3 = ord($plane[$off - 4 * $stride]);
+                    $q3 = ord($plane[$off + 3 * $stride]);
+                    if ($this->filterStrongLuma(
+                        $p0, $p1, $p2, $p3, $q0, $q1, $q2, $q3, $alpha, $beta,
+                        $newP0, $newP1, $newP2, $newQ0, $newQ1, $newQ2
+                    )) {
+                        $plane[$off - $stride] = chr($newP0);
+                        $plane[$off - 2 * $stride] = chr($newP1);
+                        $plane[$off - 3 * $stride] = chr($newP2);
+                        $plane[$off] = chr($newQ0);
+                        $plane[$off + $stride] = chr($newQ1);
+                        $plane[$off + 2 * $stride] = chr($newQ2);
+                    }
+                }
+            }
+        }
+    }
+
+    private function filterVerticalChroma(int $mbX, int $mbY, int $edge, array $bs, int $qp): void
     {
         $alpha = $beta = 0;
         $this->getThresholds($qp, $this->sliceAlphaC0Offset, $this->sliceBetaOffset, $alpha, $beta);
@@ -267,55 +298,84 @@ trait DeblockingFilterTrait
         }
 
         $stride = $this->deblockUvStride;
-        $mbBaseOffset = ($mbY * 8) * $stride + ($mbX * 8);
+        $base = ($mbY * 8) * $stride + ($mbX * 8) + $edge * 4;
 
-        $edgePixelOffset = $isVertical ? ($edge * 4) : ($edge * 4 * $stride);
-        $base = $mbBaseOffset + $edgePixelOffset;
-        $step = $isVertical ? 1 : $stride;
-
-        foreach (['uPlane', 'vPlane'] as $planeIndex => $planeName) {
+        foreach (['uPlane', 'vPlane'] as $planeName) {
             $plane = &$this->$planeName;
-            $planeSize = $planeIndex === 0
-                ? $this->deblockUPlaneSize
-                : $this->deblockVPlaneSize;
-
             for ($i = 0; $i < 4; $i++) {
                 $curBs = $bs[$i];
                 if ($curBs == 0) {
                     continue;
                 }
-                // 同一 2 像素分段共用边界强度，tc 只查询一次。
                 $tc = $curBs < 4 ? $this->getTc0($qp, $this->sliceAlphaC0Offset, $curBs) + 1 : 0;
+                $off = $base + $i * 2 * $stride;
 
-                for ($d = 0; $d < 2; $d++) {
-                    $off = $isVertical ? ($base + ($i * 2 + $d) * $stride) : ($base + $i * 2 + $d);
-
-                    if ($off - 2 * $step < 0 || $off + $step >= $planeSize) {
-                        continue;
-                    }
-
-                    $p0 = ord($plane[$off - $step]);
-                    $p1 = ord($plane[$off - 2 * $step]);
+                for ($d = 0; $d < 2; $d++, $off += $stride) {
+                    $p0 = ord($plane[$off - 1]);
+                    $p1 = ord($plane[$off - 2]);
                     $q0 = ord($plane[$off]);
-                    $q1 = ord($plane[$off + $step]);
+                    $q1 = ord($plane[$off + 1]);
 
                     if ($curBs < 4) {
-                        if ($this->filterNormalChroma(
-                            $p0, $p1, $q0, $q1, $alpha, $beta, $tc, $newP0, $newQ0
-                        )) {
-                            $plane[$off - $step] = chr($newP0);
-                            $plane[$off] = chr($newQ0);
+                        if (abs($p0 - $q0) < $alpha && abs($p1 - $p0) < $beta && abs($q1 - $q0) < $beta) {
+                            $delta = $this->clip3(-$tc, $tc, ((($q0 - $p0) * 4 + ($p1 - $q1) + 4) >> 3));
+                            $plane[$off - 1] = chr($this->clipPixel($p0 + $delta));
+                            $plane[$off] = chr($this->clipPixel($q0 - $delta));
                         }
-                    } else {
-                        if ($this->filterStrongChroma(
-                            $p0, $p1, $q0, $q1, $alpha, $beta, $newP0, $newQ0
-                        )) {
-                            $plane[$off - $step] = chr($newP0);
-                            $plane[$off] = chr($newQ0);
-                        }
+                    } elseif ($this->filterStrongChroma(
+                        $p0, $p1, $q0, $q1, $alpha, $beta, $newP0, $newQ0
+                    )) {
+                        $plane[$off - 1] = chr($newP0);
+                        $plane[$off] = chr($newQ0);
                     }
                 }
             }
+            unset($plane);
+        }
+    }
+
+    private function filterHorizontalChroma(int $mbX, int $mbY, int $edge, array $bs, int $qp): void
+    {
+        $alpha = $beta = 0;
+        $this->getThresholds($qp, $this->sliceAlphaC0Offset, $this->sliceBetaOffset, $alpha, $beta);
+        if ($alpha == 0 || $beta == 0) {
+            return;
+        }
+
+        $stride = $this->deblockUvStride;
+        $base = ($mbY * 8 + $edge * 4) * $stride + ($mbX * 8);
+
+        foreach (['uPlane', 'vPlane'] as $planeName) {
+            $plane = &$this->$planeName;
+            for ($i = 0; $i < 4; $i++) {
+                $curBs = $bs[$i];
+                if ($curBs == 0) {
+                    continue;
+                }
+                $tc = $curBs < 4 ? $this->getTc0($qp, $this->sliceAlphaC0Offset, $curBs) + 1 : 0;
+                $off = $base + $i * 2;
+
+                for ($d = 0; $d < 2; $d++, $off++) {
+                    $p0 = ord($plane[$off - $stride]);
+                    $p1 = ord($plane[$off - 2 * $stride]);
+                    $q0 = ord($plane[$off]);
+                    $q1 = ord($plane[$off + $stride]);
+
+                    if ($curBs < 4) {
+                        if (abs($p0 - $q0) < $alpha && abs($p1 - $p0) < $beta && abs($q1 - $q0) < $beta) {
+                            $delta = $this->clip3(-$tc, $tc, ((($q0 - $p0) * 4 + ($p1 - $q1) + 4) >> 3));
+                            $plane[$off - $stride] = chr($this->clipPixel($p0 + $delta));
+                            $plane[$off] = chr($this->clipPixel($q0 - $delta));
+                        }
+                    } elseif ($this->filterStrongChroma(
+                        $p0, $p1, $q0, $q1, $alpha, $beta, $newP0, $newQ0
+                    )) {
+                        $plane[$off - $stride] = chr($newP0);
+                        $plane[$off] = chr($newQ0);
+                    }
+                }
+            }
+            unset($plane);
         }
     }
 
@@ -427,9 +487,6 @@ trait DeblockingFilterTrait
 
         $this->deblockYStride = $this->width;
         $this->deblockUvStride = (int)($this->width / 2);
-        $this->deblockYPlaneSize = strlen($this->yPlane);
-        $this->deblockUPlaneSize = strlen($this->uPlane);
-        $this->deblockVPlaneSize = strlen($this->vPlane);
         $this->deblockThresholdCache = [];
         $this->deblockTc0Cache = [];
         $this->deblockChromaQpCache = [];
@@ -465,12 +522,12 @@ trait DeblockingFilterTrait
                     }
 
                     $qp = $isMbEdge && $mbX > 0 ? $this->avgQp($curQp, $this->mbQpForDeblock[($mbY * $mbWidth + $mbX - 1)] ?? $curQp) : $curQp;
-                    $this->filterMbEdgeLuma(true, $mbX, $mbY, $edge, $strengths, $qp);
+                    $this->filterVerticalLuma($mbX, $mbY, $edge, $strengths, $qp);
 
                     $chromaQp = $this->getChromaQp($qp);
                     if ($edge == 0 || $edge == 2) {
                         $chromaEdge = (int)($edge / 2);
-                        $this->filterMbEdgeChroma(true, $mbX, $mbY, $chromaEdge, $bsVertical[$edge], $chromaQp);
+                        $this->filterVerticalChroma($mbX, $mbY, $chromaEdge, $strengths, $chromaQp);
                     }
                 }
 
@@ -487,12 +544,12 @@ trait DeblockingFilterTrait
                     }
 
                     $qp = $isMbEdge && $mbY > 0 ? $this->avgQp($curQp, $this->mbQpForDeblock[(($mbY - 1) * $mbWidth + $mbX)] ?? $curQp) : $curQp;
-                    $this->filterMbEdgeLuma(false, $mbX, $mbY, $edge, $strengths, $qp);
+                    $this->filterHorizontalLuma($mbX, $mbY, $edge, $strengths, $qp);
 
                     $chromaQp = $this->getChromaQp($qp);
                     if ($edge == 0 || $edge == 2) {
                         $chromaEdge = (int)($edge / 2);
-                        $this->filterMbEdgeChroma(false, $mbX, $mbY, $chromaEdge, $bsHorizontal[$edge], $chromaQp);
+                        $this->filterHorizontalChroma($mbX, $mbY, $chromaEdge, $strengths, $chromaQp);
                     }
                 }
             }
