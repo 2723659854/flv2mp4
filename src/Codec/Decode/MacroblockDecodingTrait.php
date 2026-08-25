@@ -1493,15 +1493,34 @@ trait MacroblockDecodingTrait
         $lumaRefX = $mbX * 64 + $blkX * 32 + $mvX;
         $lumaRefY = $mbY * 64 + $blkY * 32 + $mvY;
 
-        $lumaPred = $this->mcLuma(
-            $ref['y'], $ref['strideY'],
-            $ref['widthY'], $ref['heightY'],
-            $lumaRefX, $lumaRefY, 8, 8
-        );
-
-        for ($y = 0; $y < 8; $y++) {
-            for ($x = 0; $x < 8; $x++) {
-                $this->writeLumaPixel($mbX, $mbY, $blkX * 8 + $x, $blkY * 8 + $y, $lumaPred[$y][$x]);
+        $dstX = $mbX * 16 + $blkX * 8;
+        $dstY = $mbY * 16 + $blkY * 8;
+        $copyW = min(8, $this->width - $dstX);
+        $copyH = min(8, $this->height - $dstY);
+        $dstStride = $this->width;
+        if (($lumaRefX & 3) === 0 && ($lumaRefY & 3) === 0) {
+            $srcX = $lumaRefX >> 2;
+            $srcY = $lumaRefY >> 2;
+            if ($srcX >= 0 && $srcY >= 0 && $srcX + $copyW <= $ref['widthY'] && $srcY + $copyH <= $ref['heightY']) {
+                for ($y = 0; $y < $copyH; $y++) {
+                    $srcBase = ($srcY + $y) * $ref['strideY'] + $srcX;
+                    $dstBase = ($dstY + $y) * $dstStride + $dstX;
+                    for ($x = 0; $x < $copyW; $x++) {
+                        $this->yPlane[$dstBase + $x] = $ref['y'][$srcBase + $x];
+                    }
+                }
+            } else {
+                $lumaPred = $this->mcLuma($ref['y'], $ref['strideY'], $ref['widthY'], $ref['heightY'], $lumaRefX, $lumaRefY, 8, 8);
+                for ($y = 0; $y < $copyH; $y++) {
+                    $dstBase = ($dstY + $y) * $dstStride + $dstX;
+                    for ($x = 0; $x < $copyW; $x++) $this->yPlane[$dstBase + $x] = $lumaPred[$y][$x];
+                }
+            }
+        } else {
+            $lumaPred = $this->mcLuma($ref['y'], $ref['strideY'], $ref['widthY'], $ref['heightY'], $lumaRefX, $lumaRefY, 8, 8);
+            for ($y = 0; $y < $copyH; $y++) {
+                $dstBase = ($dstY + $y) * $dstStride + $dstX;
+                for ($x = 0; $x < $copyW; $x++) $this->yPlane[$dstBase + $x] = $lumaPred[$y][$x];
             }
         }
 
@@ -1916,33 +1935,39 @@ trait MacroblockDecodingTrait
         $lumaRefX = $mbX * 64 + $mvX;
         $lumaRefY = $mbY * 64 + $mvY;
 
-        $lumaPred = $this->mcLuma(
-            $ref['y'], $ref['strideY'],
-            $ref['widthY'], $ref['heightY'],
-            $lumaRefX, $lumaRefY, 16, 16
-        );
-
         $dstX = $mbX * 16;
         $dstY = $mbY * 16;
         $copyW = min(16, $this->width - $dstX);
         $copyH = min(16, $this->height - $dstY);
         $dstStride = $this->width;
-        for ($y = 0; $y < $copyH; $y++) {
-            $dstBase = ($dstY + $y) * $dstStride + $dstX;
-            $srcRow = $lumaPred[$y];
-            for ($x = 0; $x < $copyW; $x++) {
-                $this->yPlane[$dstBase + $x] = $srcRow[$x];
+        if (($lumaRefX & 3) === 0 && ($lumaRefY & 3) === 0) {
+            $srcX = $lumaRefX >> 2;
+            $srcY = $lumaRefY >> 2;
+            if ($srcX >= 0 && $srcY >= 0 && $srcX + $copyW <= $ref['widthY'] && $srcY + $copyH <= $ref['heightY']) {
+                for ($y = 0; $y < $copyH; $y++) {
+                    $srcBase = ($srcY + $y) * $ref['strideY'] + $srcX;
+                    $dstBase = ($dstY + $y) * $dstStride + $dstX;
+                    for ($x = 0; $x < $copyW; $x++) {
+                        $this->yPlane[$dstBase + $x] = $ref['y'][$srcBase + $x];
+                    }
+                }
+            } else {
+                $lumaPred = $this->mcLuma($ref['y'], $ref['strideY'], $ref['widthY'], $ref['heightY'], $lumaRefX, $lumaRefY, 16, 16);
+                for ($y = 0; $y < $copyH; $y++) {
+                    $dstBase = ($dstY + $y) * $dstStride + $dstX;
+                    for ($x = 0; $x < $copyW; $x++) $this->yPlane[$dstBase + $x] = $lumaPred[$y][$x];
+                }
+            }
+        } else {
+            $lumaPred = $this->mcLuma($ref['y'], $ref['strideY'], $ref['widthY'], $ref['heightY'], $lumaRefX, $lumaRefY, 16, 16);
+            for ($y = 0; $y < $copyH; $y++) {
+                $dstBase = ($dstY + $y) * $dstStride + $dstX;
+                for ($x = 0; $x < $copyW; $x++) $this->yPlane[$dstBase + $x] = $lumaPred[$y][$x];
             }
         }
 
         $chromaRefX = $mbX * 64 + $mvX;
         $chromaRefY = $mbY * 64 + $mvY;
-
-        [$cbPred, $crPred] = $this->mcChromaPair(
-            $ref['u'], $ref['v'], $ref['strideUv'],
-            $ref['widthUv'], $ref['heightUv'],
-            $chromaRefX, $chromaRefY, 8, 8
-        );
 
         $chromaStride = intdiv($this->width, 2);
         $chromaHeight = intdiv($this->height, 2);
@@ -1950,6 +1975,28 @@ trait MacroblockDecodingTrait
         $dstChromaY = $mbY * 8;
         $copyChromaW = min(8, $chromaStride - $dstChromaX);
         $copyChromaH = min(8, $chromaHeight - $dstChromaY);
+        if (($chromaRefX & 7) === 0 && ($chromaRefY & 7) === 0) {
+            $srcChromaX = $chromaRefX >> 3;
+            $srcChromaY = $chromaRefY >> 3;
+            if ($srcChromaX >= 0 && $srcChromaY >= 0 && $srcChromaX + 8 <= $ref['widthUv'] && $srcChromaY + 8 <= $ref['heightUv']) {
+                for ($y = 0; $y < $copyChromaH; $y++) {
+                    $srcBase = ($srcChromaY + $y) * $ref['strideUv'] + $srcChromaX;
+                    $dstBase = ($dstChromaY + $y) * $chromaStride + $dstChromaX;
+                    for ($x = 0; $x < $copyChromaW; $x++) {
+                        $this->uPlane[$dstBase + $x] = $ref['u'][$srcBase + $x];
+                        $this->vPlane[$dstBase + $x] = $ref['v'][$srcBase + $x];
+                    }
+                }
+                return;
+            }
+        }
+
+        [$cbPred, $crPred] = $this->mcChromaPair(
+            $ref['u'], $ref['v'], $ref['strideUv'],
+            $ref['widthUv'], $ref['heightUv'],
+            $chromaRefX, $chromaRefY, 8, 8
+        );
+
         for ($y = 0; $y < $copyChromaH; $y++) {
             $dstBase = ($dstChromaY + $y) * $chromaStride + $dstChromaX;
             $srcCbRow = $cbPred[$y];
@@ -1978,15 +2025,34 @@ trait MacroblockDecodingTrait
         $lumaRefX = $mbX * 64 + $mvX;
         $lumaRefY = $mbY * 64 + $mvY + $yOffset * 4;
 
-        $lumaPred = $this->mcLuma(
-            $ref['y'], $ref['strideY'],
-            $ref['widthY'], $ref['heightY'],
-            $lumaRefX, $lumaRefY, 16, 8
-        );
-
-        for ($y = 0; $y < 8; $y++) {
-            for ($x = 0; $x < 16; $x++) {
-                $this->writeLumaPixel($mbX, $mbY, $x, $yOffset + $y, $lumaPred[$y][$x]);
+        $dstX = $mbX * 16;
+        $dstY = $mbY * 16 + $yOffset;
+        $copyW = min(16, $this->width - $dstX);
+        $copyH = min(8, $this->height - $dstY);
+        $dstStride = $this->width;
+        if (($lumaRefX & 3) === 0 && ($lumaRefY & 3) === 0) {
+            $srcX = $lumaRefX >> 2;
+            $srcY = $lumaRefY >> 2;
+            if ($srcX >= 0 && $srcY >= 0 && $srcX + $copyW <= $ref['widthY'] && $srcY + $copyH <= $ref['heightY']) {
+                for ($y = 0; $y < $copyH; $y++) {
+                    $srcBase = ($srcY + $y) * $ref['strideY'] + $srcX;
+                    $dstBase = ($dstY + $y) * $dstStride + $dstX;
+                    for ($x = 0; $x < $copyW; $x++) {
+                        $this->yPlane[$dstBase + $x] = $ref['y'][$srcBase + $x];
+                    }
+                }
+            } else {
+                $lumaPred = $this->mcLuma($ref['y'], $ref['strideY'], $ref['widthY'], $ref['heightY'], $lumaRefX, $lumaRefY, 16, 8);
+                for ($y = 0; $y < $copyH; $y++) {
+                    $dstBase = ($dstY + $y) * $dstStride + $dstX;
+                    for ($x = 0; $x < $copyW; $x++) $this->yPlane[$dstBase + $x] = $lumaPred[$y][$x];
+                }
+            }
+        } else {
+            $lumaPred = $this->mcLuma($ref['y'], $ref['strideY'], $ref['widthY'], $ref['heightY'], $lumaRefX, $lumaRefY, 16, 8);
+            for ($y = 0; $y < $copyH; $y++) {
+                $dstBase = ($dstY + $y) * $dstStride + $dstX;
+                for ($x = 0; $x < $copyW; $x++) $this->yPlane[$dstBase + $x] = $lumaPred[$y][$x];
             }
         }
 
@@ -2025,15 +2091,34 @@ trait MacroblockDecodingTrait
         $lumaRefX = $mbX * 64 + $mvX + $xOffset * 4;
         $lumaRefY = $mbY * 64 + $mvY;
 
-        $lumaPred = $this->mcLuma(
-            $ref['y'], $ref['strideY'],
-            $ref['widthY'], $ref['heightY'],
-            $lumaRefX, $lumaRefY, 8, 16
-        );
-
-        for ($y = 0; $y < 16; $y++) {
-            for ($x = 0; $x < 8; $x++) {
-                $this->writeLumaPixel($mbX, $mbY, $xOffset + $x, $y, $lumaPred[$y][$x]);
+        $dstX = $mbX * 16 + $xOffset;
+        $dstY = $mbY * 16;
+        $copyW = min(8, $this->width - $dstX);
+        $copyH = min(16, $this->height - $dstY);
+        $dstStride = $this->width;
+        if (($lumaRefX & 3) === 0 && ($lumaRefY & 3) === 0) {
+            $srcX = $lumaRefX >> 2;
+            $srcY = $lumaRefY >> 2;
+            if ($srcX >= 0 && $srcY >= 0 && $srcX + $copyW <= $ref['widthY'] && $srcY + $copyH <= $ref['heightY']) {
+                for ($y = 0; $y < $copyH; $y++) {
+                    $srcBase = ($srcY + $y) * $ref['strideY'] + $srcX;
+                    $dstBase = ($dstY + $y) * $dstStride + $dstX;
+                    for ($x = 0; $x < $copyW; $x++) {
+                        $this->yPlane[$dstBase + $x] = $ref['y'][$srcBase + $x];
+                    }
+                }
+            } else {
+                $lumaPred = $this->mcLuma($ref['y'], $ref['strideY'], $ref['widthY'], $ref['heightY'], $lumaRefX, $lumaRefY, 8, 16);
+                for ($y = 0; $y < $copyH; $y++) {
+                    $dstBase = ($dstY + $y) * $dstStride + $dstX;
+                    for ($x = 0; $x < $copyW; $x++) $this->yPlane[$dstBase + $x] = $lumaPred[$y][$x];
+                }
+            }
+        } else {
+            $lumaPred = $this->mcLuma($ref['y'], $ref['strideY'], $ref['widthY'], $ref['heightY'], $lumaRefX, $lumaRefY, 8, 16);
+            for ($y = 0; $y < $copyH; $y++) {
+                $dstBase = ($dstY + $y) * $dstStride + $dstX;
+                for ($x = 0; $x < $copyW; $x++) $this->yPlane[$dstBase + $x] = $lumaPred[$y][$x];
             }
         }
 

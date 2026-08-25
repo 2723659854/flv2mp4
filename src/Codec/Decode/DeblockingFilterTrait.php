@@ -529,8 +529,13 @@ trait DeblockingFilterTrait
                         continue;
                     }
 
+                    $strengths = $bsVertical[$edge];
+                    if (($strengths[0] | $strengths[1] | $strengths[2] | $strengths[3]) === 0) {
+                        continue;
+                    }
+
                     $qp = $isMbEdge && $mbX > 0 ? $this->avgQp($curQp, $this->mbQpForDeblock[($mbY * $mbWidth + $mbX - 1)] ?? $curQp) : $curQp;
-                    $this->filterMbEdgeLuma(true, $mbX, $mbY, $edge, $bsVertical[$edge], $qp);
+                    $this->filterMbEdgeLuma(true, $mbX, $mbY, $edge, $strengths, $qp);
 
                     $chromaQp = $this->getChromaQp($qp);
                     if ($edge == 0 || $edge == 2) {
@@ -546,8 +551,13 @@ trait DeblockingFilterTrait
                         continue;
                     }
 
+                    $strengths = $bsHorizontal[$edge];
+                    if (($strengths[0] | $strengths[1] | $strengths[2] | $strengths[3]) === 0) {
+                        continue;
+                    }
+
                     $qp = $isMbEdge && $mbY > 0 ? $this->avgQp($curQp, $this->mbQpForDeblock[(($mbY - 1) * $mbWidth + $mbX)] ?? $curQp) : $curQp;
-                    $this->filterMbEdgeLuma(false, $mbX, $mbY, $edge, $bsHorizontal[$edge], $qp);
+                    $this->filterMbEdgeLuma(false, $mbX, $mbY, $edge, $strengths, $qp);
 
                     $chromaQp = $this->getChromaQp($qp);
                     if ($edge == 0 || $edge == 2) {

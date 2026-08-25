@@ -272,10 +272,6 @@ trait SliceDecodingTrait
             }
             $nextMvTopLeft = $this->mvTopRow[$mbX * 4 + 3] ?? null;
 
-            if ($mbIdx % 2 === 0 || $mbIdx === $endMbIdx - 1) {
-                flush();
-            }
-
             if (($sliceType === 0 || $sliceType === 5) && !$this->entropyCodingModeFlag) {
                 if ($mbSkipRun === -1) {
                     $mbSkipRun = $this->reader->readUe();
