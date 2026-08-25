@@ -5,6 +5,10 @@ namespace Xiaosongshu\Flv2mp4\Recode;
 use RuntimeException;
 use Throwable;
 
+/**
+ * @purpose mp4重编码分布式架构-输出
+ * @author yanglong
+ */
 final class Mp4OutputWorkerServer
 {
     public function __construct(private array $config, private string $outputFile)

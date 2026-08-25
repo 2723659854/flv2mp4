@@ -6,6 +6,10 @@ use RuntimeException;
 use Throwable;
 use Xiaosongshu\Flv2mp4\Codec\Scaler\VideoScaler;
 
+/**
+ * @purpose flv转hls分布式架构-缩放
+ * @author yanglong
+ */
 final class HlsScaleWorkerServer
 {
     private VideoScaler $scaler;

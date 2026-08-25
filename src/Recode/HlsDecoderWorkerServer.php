@@ -8,6 +8,10 @@ use Xiaosongshu\Flv2mp4\Codec\H264Decoder;
 use Xiaosongshu\Flv2mp4\Codec\NalUtil;
 use Xiaosongshu\Flv2mp4\Codec\Scaler\VideoScaler;
 
+/**
+ * @purpose flv转hls分布式架构-解码服务端
+ * @author yanglong
+ */
 final class HlsDecoderWorkerServer
 {
     private H264Decoder $decoder;

@@ -5,6 +5,10 @@ namespace Xiaosongshu\Flv2mp4\Recode;
 use RuntimeException;
 use Throwable;
 
+/**
+ * @purpose flv转hls分布式架构-输出服务
+ * @author yanglong
+ */
 final class HlsOutputWorkerServer
 {
     public function __construct(private array $profiles, private string $outputDir)

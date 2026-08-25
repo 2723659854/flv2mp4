@@ -7,6 +7,10 @@ use ReflectionClass;
 use RuntimeException;
 use Throwable;
 
+/**
+ * @purpose flv转hls分布式架构-管道客户端
+ * @author yanglong
+ */
 final class HlsPipelineClient
 {
     private array $processes = [];

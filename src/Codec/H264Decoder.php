@@ -244,7 +244,6 @@ class H264Decoder
 
     public function initQuantMatrix(): void
     {
-        // H.264标准: FFmpeg h264_ps.c line 331: memset(sps->scaling_matrix4, 16, ...)
         // 当scaling_matrix_present_flag=0时，所有矩阵初始化为16（flat matrix）
         // default_scaling4[0/1]仅在decode_scaling_list内部作为fallback使用，
         // 不覆盖整个矩阵为非flat值
@@ -327,7 +326,7 @@ class H264Decoder
         $uvSize = (int)($ySize / 4);
 
         // 第二轮：解码图像Slice — 每个Slice是一帧，各自初始化并输出
-        $sliceCount = 0;
+        //$sliceCount = 0;
         $outputData = '';
         $this->frameNum = -1;
         foreach ($nalUnits as $nal) {
@@ -335,7 +334,7 @@ class H264Decoder
             if ($nalType === 1 || $nalType === 5) {
                 $nalHeader = ord($nal['raw'][0]);
                 $nalRefIdc = ($nalHeader >> 5) & 0x03;
-                $sliceCount++;
+                //$sliceCount++;
                 $this->frameNum++;
                 // 每帧重新初始化像素平面
                 $this->yPlane = array_fill(0, $ySize, 128);

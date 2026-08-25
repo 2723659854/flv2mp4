@@ -5,6 +5,10 @@ namespace Xiaosongshu\Flv2mp4\Recode;
 use InvalidArgumentException;
 use UnexpectedValueException;
 
+/**
+ * @purpose flv转hls分布式架构-协议
+ * @author yanglong
+ */
 final class HlsPipelineProtocol
 {
     public const EVENT = 1;

@@ -7,6 +7,10 @@ use ReflectionClass;
 use RuntimeException;
 use Throwable;
 
+/**
+ * @purpose mp4重编码分布式架构-管道
+ * @author yanglong
+ */
 final class Mp4PipelineClient
 {
     private array $processes = [];
