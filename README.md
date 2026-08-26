@@ -533,11 +533,11 @@ if ($result && file_exists($outputFile1)) {
 
 ### Results
 
-| Output format | Best time | Typical range |
-| :--- | :--- | :--- |
-| **FLV re‑encoding** | **28 s** | 28~29 s |
-| **MP4 re‑encoding** | **29 s** | 29~30 s |
-| **HLS (fMP4 + m3u8)** | **37 s** | 37~38 s |
+| Output format           | Best time | Typical range |
+|:------------------------| :--- | :--- |
+| **FLV re‑encoding**     | **28 s** | 28~29 s |
+| **MP4 re‑encoding**     | **29 s** | 29~30 s |
+| **HLS (mpegts + m3u8)** | **37 s** | 37~38 s |
 
 *Best value (28 s) was observed 3 times out of 6 runs; 29 s occurred 3 times.*
 
