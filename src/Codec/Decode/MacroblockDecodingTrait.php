@@ -1489,6 +1489,7 @@ trait MacroblockDecodingTrait
 
     private function executeMergedMcTasks(int $mbX, int $mbY, array $tasks): void
     {
+        $refCache = [];
         $grid = array_fill(0, 4, array_fill(0, 4, null));
         foreach ($tasks as $task) {
             [$x, $y, $w, $h, $mvX, $mvY, $refIdx] = $task;
@@ -1526,18 +1527,23 @@ trait MacroblockDecodingTrait
                     }
                 }
 
+                if (!isset($refCache[$mv[2]])) {
+                    $refCache[$mv[2]] = $this->getRefPlanes($mv[2]);
+                }
                 $this->performMotionCompensationBlock(
                     $mbX * 16 + $x * 4, $mbY * 16 + $y * 4,
-                    $width * 4, $height * 4, $mv[0], $mv[1], $mv[2]
+                    $width * 4, $height * 4, $mv[0], $mv[1], $refCache[$mv[2]]
                 );
             }
         }
     }
 
-    private function performMotionCompensationBlock(int $dstX, int $dstY, int $blockW, int $blockH, int $mvX, int $mvY, int $refIdx): void
+    private function performMotionCompensationBlock(int $dstX, int $dstY, int $blockW, int $blockH, int $mvX, int $mvY, int|array $ref): void
     {
         if ($this->refFrameY === null) return;
-        $ref = $this->getRefPlanes($refIdx);
+        if (is_int($ref)) {
+            $ref = $this->getRefPlanes($ref);
+        }
         $lumaRefX = $dstX * 4 + $mvX;
         $lumaRefY = $dstY * 4 + $mvY;
         $this->mcLumaTo(

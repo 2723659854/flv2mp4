@@ -175,9 +175,64 @@ trait MotionCompensationTrait
             $second = $this->lumaHvLowpass($refBytes, $refStride, $refWidth, $refHeight, $intX, $intY, $blockW, $blockH);
             $secondOffset = 0;
         } else {
-            $first = $this->lumaHorizontalLowpass($refBytes, $refStride, $refWidth, $refHeight, $intX, $intY + ($fracY === 3 ? 1 : 0), $blockW, $blockH);
-            $second = $this->lumaVerticalLowpass($refBytes, $refStride, $refWidth, $refHeight, $intX + ($fracX === 3 ? 1 : 0), $intY - 2, $blockW, $blockH + 4);
-            $secondOffset = 2 * $blockW;
+            $horizontalY = $intY + ($fracY === 3 ? 1 : 0);
+            $verticalX = $intX + ($fracX === 3 ? 1 : 0);
+            $interiorHorizontalX = $intX >= 2 && $intX + $blockW + 2 <= $maxX;
+            $interiorVerticalX = $verticalX >= 0 && $verticalX + $blockW <= $refWidth;
+            for ($j = 0; $j < $blockH; $j++) {
+                $horizontalSrcY = $horizontalY + $j;
+                $horizontalSrcY = $horizontalSrcY < 0 ? 0 : ($horizontalSrcY > $maxY ? $maxY : $horizontalSrcY);
+                $horizontalRow = $horizontalSrcY * $refStride;
+
+                $verticalSrcY = $intY + $j;
+                $y0 = $verticalSrcY - 2 < 0 ? 0 : ($verticalSrcY - 2 > $maxY ? $maxY : $verticalSrcY - 2);
+                $y1 = $verticalSrcY - 1 < 0 ? 0 : ($verticalSrcY - 1 > $maxY ? $maxY : $verticalSrcY - 1);
+                $y2 = $verticalSrcY < 0 ? 0 : ($verticalSrcY > $maxY ? $maxY : $verticalSrcY);
+                $y3 = $verticalSrcY + 1 < 0 ? 0 : ($verticalSrcY + 1 > $maxY ? $maxY : $verticalSrcY + 1);
+                $y4 = $verticalSrcY + 2 < 0 ? 0 : ($verticalSrcY + 2 > $maxY ? $maxY : $verticalSrcY + 2);
+                $y5 = $verticalSrcY + 3 < 0 ? 0 : ($verticalSrcY + 3 > $maxY ? $maxY : $verticalSrcY + 3);
+                $row0 = $y0 * $refStride;
+                $row1 = $y1 * $refStride;
+                $row2 = $y2 * $refStride;
+                $row3 = $y3 * $refStride;
+                $row4 = $y4 * $refStride;
+                $row5 = $y5 * $refStride;
+                $dstBase = ($dstY + $j) * $dstStride + $dstX;
+
+                for ($i = 0; $i < $blockW; $i++) {
+                    $horizontalSrcX = $intX + $i;
+                    if ($interiorHorizontalX) {
+                        $horizontal = $refBytes[$horizontalRow + $horizontalSrcX - 2] - 5 * $refBytes[$horizontalRow + $horizontalSrcX - 1]
+                            + 20 * $refBytes[$horizontalRow + $horizontalSrcX] + 20 * $refBytes[$horizontalRow + $horizontalSrcX + 1]
+                            - 5 * $refBytes[$horizontalRow + $horizontalSrcX + 2] + $refBytes[$horizontalRow + $horizontalSrcX + 3];
+                    } else {
+                        $x0 = $horizontalSrcX - 2 < 0 ? 0 : ($horizontalSrcX - 2 > $maxX ? $maxX : $horizontalSrcX - 2);
+                        $x1 = $horizontalSrcX - 1 < 0 ? 0 : ($horizontalSrcX - 1 > $maxX ? $maxX : $horizontalSrcX - 1);
+                        $x2 = $horizontalSrcX < 0 ? 0 : ($horizontalSrcX > $maxX ? $maxX : $horizontalSrcX);
+                        $x3 = $horizontalSrcX + 1 < 0 ? 0 : ($horizontalSrcX + 1 > $maxX ? $maxX : $horizontalSrcX + 1);
+                        $x4 = $horizontalSrcX + 2 < 0 ? 0 : ($horizontalSrcX + 2 > $maxX ? $maxX : $horizontalSrcX + 2);
+                        $x5 = $horizontalSrcX + 3 < 0 ? 0 : ($horizontalSrcX + 3 > $maxX ? $maxX : $horizontalSrcX + 3);
+                        $horizontal = $refBytes[$horizontalRow + $x0] - 5 * $refBytes[$horizontalRow + $x1]
+                            + 20 * $refBytes[$horizontalRow + $x2] + 20 * $refBytes[$horizontalRow + $x3]
+                            - 5 * $refBytes[$horizontalRow + $x4] + $refBytes[$horizontalRow + $x5];
+                    }
+                    $horizontal = ($horizontal + 16) >> 5;
+                    $horizontal = $horizontal < 0 ? 0 : ($horizontal > 255 ? 255 : $horizontal);
+
+                    $verticalSrcX = $verticalX + $i;
+                    if (!$interiorVerticalX) {
+                        $verticalSrcX = $verticalSrcX < 0 ? 0 : ($verticalSrcX > $maxX ? $maxX : $verticalSrcX);
+                    }
+                    $vertical = $refBytes[$row0 + $verticalSrcX] - 5 * $refBytes[$row1 + $verticalSrcX]
+                        + 20 * $refBytes[$row2 + $verticalSrcX] + 20 * $refBytes[$row3 + $verticalSrcX]
+                        - 5 * $refBytes[$row4 + $verticalSrcX] + $refBytes[$row5 + $verticalSrcX];
+                    $vertical = ($vertical + 16) >> 5;
+                    $vertical = $vertical < 0 ? 0 : ($vertical > 255 ? 255 : $vertical);
+
+                    $dstPlane[$dstBase + $i] = chr(($horizontal + $vertical + 1) >> 1);
+                }
+            }
+            return;
         }
 
         for ($j = 0; $j < $blockH; $j++) {
