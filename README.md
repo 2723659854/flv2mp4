@@ -520,140 +520,28 @@ if ($result && file_exists($outputFile1)) {
 
 ### Test Environment
 
-| Item | Details |
-| :--- | :--- |
-| **CPU** | 16 physical cores |
-| **RAM** | 15.8 GB (available) |
-| **Worker processes** | 8 ME sub‑processes (empirically optimal; more or fewer increases time) |
-| **PHP version** | 8.4.3 (CLI, JIT enabled) |
-| **OPcache** | `opcache.enable_cli=on`, `opcache.jit=on`, `opcache.jit_buffer_size=100M` |
-| **Test clip** | `test.flv`, 3.02 s, 720×742, 30 fps |
-| **Output specs** | `output.flv`, 360×360, 10 fps |
-| **Codec settings** | H.264 Constrained Baseline, AAC 128 kbps |
-
-### Results
-
-| Output format           | Best time | Typical range |
-|:------------------------| :--- | :--- |
-| **FLV re‑encoding**     | **28 s** | 28~29 s |
-| **MP4 re‑encoding**     | **29 s** | 29~30 s |
-| **HLS (mpegts + m3u8)** | **37 s** | 37~38 s |
-
-*Best value (28 s) was observed 3 times out of 6 runs; 29 s occurred 3 times.*
-
-### Performance Breakdown
-
-**1. Processing scale**
-
-**Decoding side (source)**
-- Resolution: 720×742 → macroblock‑aligned to 720×752 (47×47 16×16 MBs)
-- MBs per frame: 47×47 = **2,209 MBs**
-- Total frames: 90
-- **Total decoded MBs:** 2,209 × 90 = **198,810 MBs**
-
-**Encoding side (output)**
-- Resolution: 360×360 → aligned to 368×368 (23×23 MBs)
-- MBs per frame: 23×23 = **529 MBs**
-- Total frames: 30
-- **Total encoded MBs:** 529 × 30 = **15,870 MBs**
-
-**Total MBs processed:** 198,810 + 15,870 ≈ **215,000 macroblocks**
-
-**2. Motion estimation (hotspot)**
-
-Even with fast search, each macroblock checks about 150 candidate motion vectors. Each SAD computation processes 16×16 = **256 pixel differences**.
-
-- Encoding ME operations: 15,870 × 150 × 256 ≈ **610 million integer ops**
-- Combined with decoding motion compensation, DCT, quantization, entropy coding, total operations exceed **1 billion**
-- **≈ 350 million primitive pixel ops per second**
-
-### Architecture Overview
-
-The system employs a **pipeline + distributed computing** architecture:
-
-```
-FLV file
-   │
-   ▼
-┌──────────────────┐
-│  Main process    │
-│  (FLV Tag demux) │
-└────────┬─────────┘
-         │
-         ▼
-┌──────────────────┐      ┌──────────────────┐
-│ Decode+Scale     │ ──▶  │ Encode master    │
-│ (H.264 → YUV)    │      │ (YUV → H.264)    │
-└──────────────────┘      └────────┬─────────┘
-                                    │
-            ┌───────────┬───────────┼───────────┬───────────┐
-            ▼           ▼           ▼           ▼           ▼
-       ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌───────────┐
-       │ ME Worker │  │ ME Worker │  │ ME Worker │  │ ME Worker │  │ ME Worker │
-       │  (8 total)│  │           │  │           │  │           │  │           │
-       └───────────┘  └───────────┘  └───────────┘  └───────────┘  └───────────┘
-```
-
-*8 ME worker processes are optimal for 16‑core systems. Increasing further adds context‑switching overhead; decreasing under‑utilises CPU.*
-
-### Usage Recommendations
-
-| Scenario | Recommended | Explanation |
+| Item | Windows Environment | Linux Environment (Docker) |
 | :--- | :--- | :--- |
-| **Live real‑time transcoding** | ❌ Not suitable | 3 s video takes 28 s (~9× real‑time), violates low‑latency requirements |
-| **Off‑line VOD transcoding** | ✅ Recommended | Can be used as background job (Redis queue + Worker) for user‑uploaded files |
-| **Restricted environments (no FFmpeg)** | ✅ Recommended | Pure PHP, zero external deps, deployable in containers/embedded systems |
-| **High‑concurrency bursts** | ⚠️ Control carefully | Limit concurrency to avoid CPU starvation for critical services |
+| **Operating System** | Windows | Linux (Docker) |
+| **CPU** | 16 cores (physical) | 14 cores (physical) |
+| **Memory** | 15.8 GB (available) | 4 GB (available) |
+| **Worker processes** | 8 ME sub‑processes | 8 ME sub‑processes |
+| **PHP version** | 8.4.3 (CLI, JIT enabled) | 8.1.24 (CLI, OPcache disabled) |
+| **OPcache** | `opcache.enable_cli=on`, `opcache.jit=on`, `opcache.jit_buffer_size=100M` | Not enabled |
+| **Test clip** | `test.flv`, 3.02 s, 720×742, 30 fps | Same as left |
+| **Output specs** | `output.flv`, 360×360, 10 fps | Same as left |
+| **Encoding settings** | H.264 Constrained Baseline, AAC 128 kbps | Same as left |
 
-### Production Deployment Tips
 
-**1. Enable JIT (essential)**
+### Cross‑Platform Performance Comparison
 
-Testing shows PHP 8.4.3 with JIT is ~1 s faster than PHP 8.2.9.
+| Output Format | Windows Time | **Linux (Docker) Time** | Performance Gain |
+| :--- | :--- | :--- | :--- |
+| **FLV Re‑encoding** | 28 s | **23 s** | **↓ 17.9%** |
+| **MP4 Re‑encoding** | 29 s | **24 s** | **↓ 17.2%** |
+| **HLS (mpegts + m3u8)** | 37 s | **31 s** | **↓ 16.2%** |
 
-```ini
-; php.ini
-opcache.enable_cli=1
-opcache.jit=on
-opcache.jit_buffer_size=100M
-```
-
-**2. Recommended PHP version**
-
-- **PHP 8.4.x** (best performance)
-- PHP 8.2.x works but is slightly slower (~29 s)
-
-**3. Worker tuning**
-
-```bash
-# For 16‑core systems, 8 workers is optimal
-php recode.php --workers=8
-```
-
-**4. CPU isolation (optional)**
-
-```bash
-# Bind to CPU cores 0-7 (matching the 8 workers)
-taskset -c 0-7 php recode.php
-```
-
-**5. Task queue**
-
-Push transcoding tasks to Redis or Beanstalkd queues and consume via Worker processes to avoid blocking the main request path.
-
-### Conclusion
-
-The pure‑PHP H.264 re‑encoding system achieves stable results on a 16‑core test machine:
-
-- **FLV re‑encoding:** 28 s
-- **MP4 re‑encoding:** 29 s
-- **HLS full pipeline:** 37 s
-
-Total operations exceed **1 billion integer operations**, translating to **≈ 350 million pixel‑level operations per second**. This system is suitable for offline asynchronous transcoding, but not for live real‑time transcoding.
-
-### Data Source
-
-All metrics are from actual runs of the `xiaosongshu/flv2mp4` project.
+*Linux environment (without OPcache) is still about 5–6 seconds faster than Windows (with JIT enabled).*
 
 ---
 
