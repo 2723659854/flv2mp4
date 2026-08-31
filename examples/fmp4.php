@@ -26,3 +26,13 @@ try {
     echo "错误: " . $e->getMessage() . "\n";
     exit(1);
 }
+
+
+$file = __DIR__ . "/demo.mp4";
+$outputDir1 = __DIR__ . "/mp4_fmp4";
+$res = \Xiaosongshu\Flv2mp4\Client::runMp42Fmp4($file, $outputDir1);
+var_dump("mp4生成fmp4的hls切片",$res);
+
+
+$res = \Xiaosongshu\Flv2mp4\Client::runFmp42Mp4(__DIR__."/mp4_fmp4/index.m3u8", __DIR__ . "/005.MP4");
+echo "fMP4转MP4完成: {$res}\n";

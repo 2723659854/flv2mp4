@@ -103,7 +103,7 @@ echo "=== 示例8: hls并合并为mp4文件 ===\n";
 $mp4HlsDir = __DIR__ . "/mp4_hls";
 $start1 = time();
 try{
-    $res = \Xiaosongshu\Flv2mp4\Client::runHls2Mp4($mp4HlsDir.'/dcc4514484c10342f3ce0ae9da0a529b/index.m3u8', __DIR__.'/hls_2_mp4.mp4');
+    $res = \Xiaosongshu\Flv2mp4\Client::runHls2Mp4($mp4HlsDir.'/demo/index.m3u8', __DIR__.'/hls_2_mp4.mp4');
     echo "\n转换完成: " . $res . "\n\n";
 }catch (\Exception $e){
     echo "错误: " . $e->getMessage() . "\n\n";

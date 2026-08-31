@@ -63,7 +63,8 @@ class Mp42Hls
         $this->videoWidth = (int)$this->getProperty($reflection, 'videoWidth');
         $this->videoHeight = (int)$this->getProperty($reflection, 'videoHeight');
 
-        $streamId = md5(basename($this->getInputFile()));
+        //$streamId = md5(basename($this->getInputFile()));
+        $streamId = pathinfo( (basename($this->getInputFile())),PATHINFO_FILENAME);
         $streamDir = rtrim($this->getOutputDir(), '/\\') . DIRECTORY_SEPARATOR . $streamId . DIRECTORY_SEPARATOR;
         $this->clearOutput($streamDir);
         $hls = new Flv2Hls($streamId, [

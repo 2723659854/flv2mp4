@@ -9,7 +9,9 @@ use Xiaosongshu\Flv2mp4\Manage\Hls2Mp4;
 use Xiaosongshu\Flv2mp4\Manage\Mp4ToFlv;
 use Xiaosongshu\Flv2mp4\Manage\FlvToMp4;
 use Xiaosongshu\Flv2mp4\Manage\Fmp42Flv;
+use Xiaosongshu\Flv2mp4\Manage\Fmp42Mp4;
 use Xiaosongshu\Flv2mp4\Manage\Mp42Hls;
+use Xiaosongshu\Flv2mp4\Manage\Mp42Fmp4;
 
 /**
  * @purpose flv文件转码mp4客户端
@@ -805,6 +807,18 @@ class Client
     }
 
     /**
+     * MP4 转fmp4的hls
+     * @param string $mp4File mp4文件
+     * @param string $outputDir 输出目录
+     * @param int $targetSegmentDuration 每一个切片时间
+     * @return array
+     */
+    public static function runMp42Fmp4(string $mp4File, string $outputDir, int $targetSegmentDuration = 4000): array
+    {
+        return (new Mp42Fmp4($mp4File, $outputDir))->run($targetSegmentDuration);
+    }
+
+    /**
      * 将flv转码为mp4文件
      * @param string $flvFile 原始flv静态文件
      * @param string $mp4File 输出的mp4静态文件
@@ -830,6 +844,17 @@ class Client
      */
     public static function runFmp42Flv(string $m3u8File, string $outputFile){
         return Fmp42Flv::runFmp42Flv($m3u8File, $outputFile);
+    }
+
+    /**
+     * 将 fMP4 合并为标准 MP4
+     * @param string $inputFile m3u8索引文件
+     * @param string $outputFile 输出mp4文件
+     * @return string
+     */
+    public static function runFmp42Mp4(string $inputFile, string $outputFile): string
+    {
+        return (new Fmp42Mp4($inputFile, $outputFile))->run();
     }
 
     /**
