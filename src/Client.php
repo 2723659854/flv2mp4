@@ -8,6 +8,7 @@ use Xiaosongshu\Flv2mp4\Manage\Hls2Flv;
 use Xiaosongshu\Flv2mp4\Manage\Mp4ToFlv;
 use Xiaosongshu\Flv2mp4\Manage\FlvToMp4;
 use Xiaosongshu\Flv2mp4\Manage\Fmp42Flv;
+use Xiaosongshu\Flv2mp4\Manage\Mp42Hls;
 
 /**
  * @purpose flv文件转码mp4客户端
@@ -777,6 +778,17 @@ class Client
         }catch (\Exception $e){
             throw new \RuntimeException("error:" . $e->getMessage());
         }
+    }
+
+    /**
+     * MP4直接流式转换为HLS，不生成中间FLV文件
+     * @param string $mp4File 原始mp4文件
+     * @param string $outputDir HLS输出目录
+     * @return array 返回索引和输出目录
+     */
+    public static function runMp42Hls(string $mp4File, string $outputDir): array
+    {
+        return (new Mp42Hls($mp4File, $outputDir))->run();
     }
 
     /**

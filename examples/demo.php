@@ -84,4 +84,18 @@ try {
     echo "错误: " . $e->getMessage() . "\n\n";
 }
 
+echo "\n === 示例7: 转换mp4为hls === \n";
+$mp4File = __DIR__ . "/demo.mp4";
+$mp4HlsDir = __DIR__ . "/mp4_hls";
+try {
+    if (file_exists($mp4File)) {
+        $res3 = \Xiaosongshu\Flv2mp4\Client::runMp42Hls($mp4File, $mp4HlsDir);
+        echo "\n mp4转hls完成 index = {$res3['index']} dir = {$res3['outputDir']}\n\n";
+    } else {
+        echo "跳过: 测试文件不存在 {$mp4File}\n\n";
+    }
+} catch (\Exception $e) {
+    echo "错误: " . $e->getMessage() . "\n\n";
+}
+
 
