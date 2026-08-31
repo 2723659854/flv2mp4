@@ -857,6 +857,12 @@ class Client
         return (new Fmp42Mp4($inputFile, $outputFile))->run();
     }
 
+    /** 将 AAC-LC ADTS 文件流式解码为交错 S16LE PCM。 */
+    public static function runAac2Pcm(string $aacFile, string $pcmFile): array
+    {
+        return (new \Xiaosongshu\Flv2mp4\Manage\AacToPcm($aacFile, $pcmFile))->run();
+    }
+
     /**
      * 从媒体片段中计算实际时长（毫秒）
      * @param array $segments 媒体片段数组
