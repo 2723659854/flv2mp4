@@ -43,11 +43,11 @@ try {
     $res = \Xiaosongshu\Flv2mp4\Client::runFlv2Hls($file, $outputDir1);
     echo "\n hls转换完成 index = {$res['index']} dir = {$res['outputDir']}\n\n";
 
-    echo "\n === 示例4: 转换hls回flv === \n";
-    $outputFlv = __DIR__ . "/output_from_hls.flv";
+    echo "\n === 示例4: HLS直接转换为mp4（不生成FLV中间文件） === \n";
+    $outputMp4 = __DIR__ . "/output_from_hls.mp4";
     try {
-        $res2 = \Xiaosongshu\Flv2mp4\Client::runHls2Flv($res['index'], $outputFlv);
-        echo "\n hls转flv完成: {$res2}\n\n";
+        $res2 = \Xiaosongshu\Flv2mp4\Client::runHls2Mp4($res['index'], $outputMp4);
+        echo "\n hls转mp4完成: {$res2}\n\n";
     } catch (\Exception $e) {
         echo "错误: " . $e->getMessage() . "\n\n";
     }
@@ -97,5 +97,19 @@ try {
 } catch (\Exception $e) {
     echo "错误: " . $e->getMessage() . "\n\n";
 }
+
+echo "=== 示例8: hls并合并为mp4文件 ===\n";
+
+$mp4HlsDir = __DIR__ . "/mp4_hls";
+$start1 = time();
+try{
+    $res = \Xiaosongshu\Flv2mp4\Client::runHls2Mp4($mp4HlsDir.'/dcc4514484c10342f3ce0ae9da0a529b/index.m3u8', __DIR__.'/hls_2_mp4.mp4');
+    echo "\n转换完成: " . $res . "\n\n";
+}catch (\Exception $e){
+    echo "错误: " . $e->getMessage() . "\n\n";
+}
+$end1 = time();
+$cost1 = $end1 - $start1;
+echo "耗时{$cost1}s\r\n";
 
 

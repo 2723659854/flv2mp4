@@ -5,6 +5,7 @@ namespace Xiaosongshu\Flv2mp4;
 use Xiaosongshu\Flv2mp4\Manage\Flv2Fmp4;
 use Xiaosongshu\Flv2mp4\Manage\Flv2Hls;
 use Xiaosongshu\Flv2mp4\Manage\Hls2Flv;
+use Xiaosongshu\Flv2mp4\Manage\Hls2Mp4;
 use Xiaosongshu\Flv2mp4\Manage\Mp4ToFlv;
 use Xiaosongshu\Flv2mp4\Manage\FlvToMp4;
 use Xiaosongshu\Flv2mp4\Manage\Fmp42Flv;
@@ -759,6 +760,18 @@ class Client
         }
         $hls2Flv = new Hls2Flv($outputFile);
         $hls2Flv->run($m3u8File);
+        return $outputFile;
+    }
+
+    /**
+     * hls转mp4
+     * @param string $m3u8File 索引文件
+     * @param string $outputFile 输出的mp4文件
+     * @return string
+     */
+    public static function runHls2Mp4(string $m3u8File, string $outputFile): string
+    {
+        (new Hls2Mp4($outputFile))->run($m3u8File);
         return $outputFile;
     }
 
