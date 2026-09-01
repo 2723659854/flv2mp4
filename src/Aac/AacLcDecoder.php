@@ -112,13 +112,21 @@ final class AacLcDecoder
                 if (!$common) throw new RuntimeException('Only common-window stereo AAC is supported');
                 $ics = $this->readIcsInfo($r);
                 $msMask = $r->read(2);
+                $msFlags = [];
                 if ($msMask === 1) {
-                    for ($i = 0; $i < $ics[0] * count($ics[3]); ++$i) $r->read(1);
+                    for ($group = 0; $group < count($ics[3]); ++$group) {
+                        for ($band = 0; $band < $ics[0]; ++$band) {
+                            $msFlags[$group][$band] = $r->read(1);
+                        }
+                    }
                 }
                 $gain = $r->read(8);
                 $a = $this->readChannel($r, $gain, $ics, $rateIndex);
                 $gain = $r->read(8);
                 $b = $this->readChannel($r, $gain, $ics, $rateIndex);
+                if ($msMask !== 0) {
+                    $this->applyMsStereo($a, $b, $ics, $msMask, $msFlags);
+                }
             } else {
                 $gain = $r->read(8); $ics = $this->readIcsInfo($r);
                 $a = $this->readChannel($r, $gain, $ics, $rateIndex); $b = null;
@@ -205,6 +213,34 @@ final class AacLcDecoder
             $window += $windowCount;
         }
         return $spectrum;
+    }
+
+    private function applyMsStereo(array &$mid, array &$side, array $ics, int $msMask, array $msFlags): void
+    {
+        [$max, , $sequence, $groups] = $ics;
+        $offsets = $sequence === 2
+            ? [0, 4, 8, 12, 16, 20, 28, 36, 44, 56, 68, 80, 96, 112, 128]
+            : AacTables::SWB_48K;
+        $window = 0;
+        foreach ($groups as $group => $windowCount) {
+            for ($band = 0; $band < $max; ++$band) {
+                $enabled = $msMask === 2 || (($msFlags[$group][$band] ?? 0) !== 0);
+                if ($enabled) {
+                    $start = $offsets[$band];
+                    $end = $offsets[$band + 1];
+                    for ($w = 0; $w < $windowCount; ++$w) {
+                        for ($i = $start; $i < $end; ++$i) {
+                            $index = $sequence === 2 ? ($window + $w) * 128 + $i : $i;
+                            $m = $mid[$index];
+                            $s = $side[$index];
+                            $mid[$index] = ($m + $s) * 0.7071067811865476;
+                            $side[$index] = ($m - $s) * 0.7071067811865476;
+                        }
+                    }
+                }
+            }
+            $window += $windowCount;
+        }
     }
 
     private function readChannel(AacBitReader $r, int $gain, array $ics, int $rateIndex): array
@@ -387,15 +423,15 @@ final class AacLcDecoder
     {
         if ($sequence === 1) {
             if ($n < 1024) return $this->windowCoefficient($n, 2048, $shape);
-            if ($n < 1280) return 1.0;
-            if ($n < 1536) return $this->shortWindow($n - 1280, $shape);
+            if ($n < 1472) return 1.0;
+            if ($n < 1600) return $this->shortWindow(127 - ($n - 1472), $shape);
             return 0.0;
         }
         if ($sequence === 3) {
-            if ($n < 512) return 0.0;
-            if ($n < 768) return $this->shortWindow($n - 512, $shape);
+            if ($n < 448) return 0.0;
+            if ($n < 576) return $this->shortWindow($n - 448, $shape);
             if ($n < 1024) return 1.0;
-            return $this->windowCoefficient($n - 1024, 2048, $shape);
+            return $this->windowCoefficient($n, 2048, $shape);
         }
         return $this->windowCoefficient($n, 2048, $shape);
     }
