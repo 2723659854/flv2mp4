@@ -133,9 +133,6 @@ final class HuffmanEncoder
         $linbits = self::TABLES[$table]['linbits'];
         $writer->write($encoded['code'], $encoded['length']);
         foreach ($encoded['linbits'] as $extra) {
-            if ($extra === null) {
-                continue;
-            }
             if ($extra !== null) {
                 $writer->write($extra, $linbits);
             }

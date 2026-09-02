@@ -10,8 +10,15 @@ final class Layer3ScalefactorBands
         90, 110, 134, 162, 196, 238, 288, 342, 418, 576,
     ];
 
-    public const LONG_48000 = self::LONG_44100;
-    public const LONG_32000 = self::LONG_44100;
+    public const LONG_48000 = [
+        0, 4, 8, 12, 16, 20, 24, 30, 36, 42, 50, 60, 72,
+        88, 106, 128, 156, 190, 230, 276, 330, 384, 576,
+    ];
+
+    public const LONG_32000 = [
+        0, 4, 8, 12, 16, 20, 24, 30, 36, 44, 54, 66, 82,
+        102, 126, 156, 194, 240, 296, 364, 448, 550, 576,
+    ];
 
     public static function long(int $sampleRate): array
     {
