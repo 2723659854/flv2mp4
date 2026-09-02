@@ -91,28 +91,30 @@ final class Encoder
             $ranked = [];
             foreach ($spectrum as $index => $value) {
                 $magnitude = abs((float) $value);
-                if ($magnitude > 1.0e-8) {
-                    $ranked[$index] = $magnitude;
-                }
+                if ($magnitude > 1.0e-8) $ranked[$index] = $magnitude;
             }
             arsort($ranked, SORT_NUMERIC);
             $selected = array_slice(array_keys($ranked), 0, 12);
             foreach ($selected as $index) {
-                $value = (float) $spectrum[$index];
-                $coefficients[$index] = $value < 0 ? -1 : 1;
+                $coefficients[$index] = (float) $spectrum[$index] < 0 ? -1 : 1;
                 $count1End = max($count1End, $index + 1);
             }
             $count1End = min(576, (int) (ceil($count1End / 4) * 4));
         }
         $count1 = intdiv($count1End, 4);
-        $bits = $count1 > 0
-            ? $this->huffman->countBits($coefficients, 32, $count1End)
-            : 0;
+        $bits = $count1 > 0 ? $this->huffman->countBits($coefficients, 32, $count1End) : 0;
         return [
-            'coefficients' => $coefficients, 'scalefactors' => array_fill(0, 22, 0),
-            'global_gain' => 210, 'big_values' => 0, 'count1' => $count1,
-            'count1table_select' => 0, 'preflag' => 0, 'scalefac_scale' => 0,
-            'scalefac_compress' => 0, 'part2_bits' => 0, 'huffman_bits' => $bits,
+            'coefficients' => $coefficients,
+            'scalefactors' => array_fill(0, 22, 0),
+            'global_gain' => 210,
+            'big_values' => 0,
+            'count1' => $count1,
+            'count1table_select' => 0,
+            'preflag' => 0,
+            'scalefac_scale' => 0,
+            'scalefac_compress' => 0,
+            'part2_bits' => 0,
+            'huffman_bits' => $bits,
             'candidate_tables' => [0, 0, 0],
         ];
     }

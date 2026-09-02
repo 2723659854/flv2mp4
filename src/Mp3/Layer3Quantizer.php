@@ -91,21 +91,37 @@ final class Layer3Quantizer
                 $coefficients[$i + 3],
             ];
             foreach ([32, 33] as $table) {
-                $count1BitsByTable[$table] += $this->huffman->encodeQuad($quad, $table)['bits'];
+                try {
+                    $count1BitsByTable[$table] += $this->huffman->encodeQuad($quad, $table)['bits'];
+                } catch (\InvalidArgumentException) {
+                    $count1BitsByTable[$table] = PHP_INT_MAX;
+                    break;
+                }
             }
         }
         $count1Table = $count1BitsByTable[32] <= $count1BitsByTable[33] ? 32 : 33;
         $bigBits = [];
-        foreach ($this->bigTables() as $table) {
-            try {
-                $bigBits[$table] = $bigCount > 0 ? $this->huffman->countBits(array_slice($coefficients, 0, $bigCount), $table, $bigCount) : 0;
-            } catch (\InvalidArgumentException) {
-                $bigBits[$table] = PHP_INT_MAX;
+        $regionEnds = [min($bigCount, 36), min($bigCount, 196), $bigCount];
+        $regionStarts = [0, $regionEnds[0], $regionEnds[1]];
+        $regionTables = [];
+        $regionBitCounts = [];
+        foreach ($regionStarts as $region => $start) {
+            $end = $regionEnds[$region];
+            $bestTable = 0;
+            $bestBits = $end > $start ? PHP_INT_MAX : 0;
+            foreach ($this->bigTables() as $table) {
+                try {
+                    $bits = $end > $start ? $this->huffman->countBits($coefficients, $table, $end - $start, $start) : 0;
+                    if ($bits < $bestBits) { $bestBits = $bits; $bestTable = $table; }
+                } catch (\InvalidArgumentException) {
+                }
             }
+            if ($end > $start && $bestTable === 0) throw new \LogicException('No Huffman table can encode the big-value region');
+            $regionTables[$region] = $bestTable;
+            $regionBitCounts[$region] = $bestBits;
         }
-        $bigTable = $bigCount ? array_keys($bigBits, min($bigBits), true)[0] : 0;
-        $huffmanBits = ($bigBits[$bigTable] ?? 0) + $count1BitsByTable[$count1Table];
-        return ['coefficients' => $coefficients, 'scalefactors' => array_fill(0, 22, 0), 'global_gain' => $gain, 'big_values' => intdiv($bigCount, 2), 'count1' => intdiv($count1End - $bigCount, 4), 'count1table_select' => $count1Table === 33 ? 1 : 0, 'preflag' => 0, 'scalefac_scale' => 0, 'scalefac_compress' => 0, 'part2_bits' => 0, 'big_values_bits' => $bigBits[$bigTable] ?? 0, 'count1_bits' => $count1BitsByTable[$count1Table], 'huffman_bits' => $huffmanBits, 'candidate_tables' => [$bigTable, $bigTable, $bigTable], 'candidates' => [], 'scalefactor_bands' => $bands];
+        $huffmanBits = array_sum($regionBitCounts) + $count1BitsByTable[$count1Table];
+        return ['coefficients' => $coefficients, 'scalefactors' => array_fill(0, 22, 0), 'global_gain' => $gain, 'big_values' => intdiv($bigCount, 2), 'count1' => intdiv($count1End - $bigCount, 4), 'count1table_select' => $count1Table === 33 ? 1 : 0, 'preflag' => 0, 'scalefac_scale' => 0, 'scalefac_compress' => 0, 'part2_bits' => 0, 'big_values_bits' => array_sum($regionBitCounts), 'count1_bits' => $count1BitsByTable[$count1Table], 'huffman_bits' => $huffmanBits, 'candidate_tables' => [$regionTables[0] ?? 0, $regionTables[1] ?? 0, $regionTables[2] ?? 0], 'region_ends' => $regionEnds, 'candidates' => [], 'scalefactor_bands' => $bands];
     }
 
     private function longBands(int $sampleRate): array
