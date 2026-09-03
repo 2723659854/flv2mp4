@@ -14,6 +14,8 @@ final class AacLcDecoder
     private int $channels = 0;
     private array $overlap = [[], []];
     private int $frameIndex = 0;
+    private static array $imdctFactors = [];
+    private static array $windowCache = [];
 
     public function push(string $data): string
     {
@@ -398,13 +400,36 @@ final class AacLcDecoder
     /** Direct AAC IMDCT; the reference form avoids phase/index errors in a fast convolution. */
     private function imdctBlock(array $spectrum, int $n): array
     {
+        $key = (string) $n;
+        if (!isset(self::$imdctFactors[$key])) {
+            $factors = [];
+            for ($m = 0; $m < $n * 2; ++$m) {
+                $row = [];
+                $time = $m + 0.5 + $n / 2.0;
+                for ($k = 0; $k < $n; ++$k) {
+                    $row[$k] = cos(M_PI / $n * $time * ($k + 0.5));
+                }
+                $factors[$m] = $row;
+            }
+            self::$imdctFactors[$key] = $factors;
+        }
         $out = array_fill(0, $n * 2, 0.0);
+        $active = [];
+        for ($k = 0; $k < $n; ++$k) {
+            if ($spectrum[$k] != 0.0) {
+                $active[] = $k;
+            }
+        }
+        if ($active === []) {
+            return $out;
+        }
         $scale = 2.0 / $n;
+        $factors = self::$imdctFactors[$key];
         for ($m = 0; $m < $n * 2; ++$m) {
             $sum = 0.0;
-            $time = $m + 0.5 + $n / 2.0;
-            for ($k = 0; $k < $n; ++$k) {
-                $sum += $spectrum[$k] * cos(M_PI / $n * $time * ($k + 0.5));
+            $row = $factors[$m];
+            foreach ($active as $k) {
+                $sum += $spectrum[$k] * $row[$k];
             }
             $out[$m] = $sum * $scale;
         }
@@ -443,7 +468,16 @@ final class AacLcDecoder
 
     private function windowCoefficient(int $n, int $length, int $shape): float
     {
-        if ($shape === 0) return sin(M_PI / $length * ($n + 0.5));
+        if ($shape === 0) {
+            $key = $length . ':0';
+            if (!isset(self::$windowCache[$key])) {
+                self::$windowCache[$key] = [];
+                for ($i = 0; $i < $length; ++$i) {
+                    self::$windowCache[$key][$i] = sin(M_PI / $length * ($i + 0.5));
+                }
+            }
+            return self::$windowCache[$key][$n];
+        }
         static $cache = [];
         $key = $length . ':' . $shape;
         if (!isset($cache[$key])) {
@@ -500,11 +534,4 @@ final class AacLcDecoder
     }
 }
 
-final class AacBitReader
-{
-    private int $pos = 0; public function __construct(private string $data) {}
-    public function position(): int { return $this->pos; }
-    public function read(int $n): int { $v = 0; for ($i = 0; $i < $n; ++$i) { if ($this->pos >= strlen($this->data) * 8) throw new RuntimeException('AAC bitstream truncated'); $v = ($v << 1) | ((ord($this->data[intdiv($this->pos, 8)]) >> (7 - ($this->pos++ % 8))) & 1); } return $v; }
-    public function skip(int $n): void { if ($n < 0 || $this->pos + $n > strlen($this->data) * 8) throw new RuntimeException('AAC bitstream truncated'); $this->pos += $n; }
-    public function align(): void { $this->pos = ($this->pos + 7) & ~7; }
-}
+
