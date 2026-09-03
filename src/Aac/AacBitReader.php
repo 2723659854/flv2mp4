@@ -2,6 +2,11 @@
 
 namespace Xiaosongshu\Flv2mp4\Aac;
 
+/**
+ * @purpose aac比特读取
+ * @author yanglong
+ * @time 2026年9月3日16:21:03
+ */
 final class AacBitReader
 {
     private int $pos = 0; public function __construct(private string $data) {}

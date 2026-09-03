@@ -5,7 +5,11 @@ namespace Xiaosongshu\Flv2mp4\Aac;
 use InvalidArgumentException;
 use RuntimeException;
 
-/** Pure PHP AAC-LC ADTS decoder for the baseline long-window syntax. */
+/**
+ * @purpose aac-lc 解码器
+ * @author yanglong
+ * @time 2026年9月3日16:21:41
+ */
 final class AacLcDecoder
 {
     private const RATES = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350];
@@ -80,11 +84,10 @@ final class AacLcDecoder
         $audio = null;
         while (true) {
             $element = $r->read(3);
-            if ($element === 7) break; // TYPE_END: raw_data_block terminator
+            if ($element === 7) break;
             $elementId = $r->read(4);
-            if ($element === 4) { // TYPE_DSE: data_stream_element
-                // FFmpeg reads element_id in the outer raw_data_block loop.
-                $align = $r->read(1); // data_byte_align_flag
+            if ($element === 4) {
+                $align = $r->read(1);
                 $count = $r->read(8);
                 if ($count === 255) {
                     $count += $r->read(8);
@@ -95,10 +98,9 @@ final class AacLcDecoder
                 $r->skip($count * 8);
                 continue;
             }
-            if ($element === 6) { // TYPE_FIL: fill_element
-                $count = $elementId; // FFmpeg outer loop uses elem_id as fill_count
+            if ($element === 6) {
+                $count = $elementId;
                 if ($count === 15) {
-                    // FFmpeg aacdec.c: elem_id += get_bits(gb, 8) - 1.
                     $count += $r->read(8) - 1;
                 }
                 $r->skip($count * 8);
@@ -107,7 +109,7 @@ final class AacLcDecoder
             if ($element !== $audioType || $audio !== null) {
                 throw new RuntimeException('Unsupported or duplicate AAC audio element');
             }
-            // elementId is element_instance_tag read by the outer loop.
+
             $ics = null;
             if ($channels === 2) {
                 $common = $r->read(1);
@@ -136,8 +138,6 @@ final class AacLcDecoder
             $audio = $channels === 1 ? [$this->imdct($a, 0, $ics[1], $ics[2])] : [$this->imdct($a, 0, $ics[1], $ics[2]), $this->imdct($b, 1, $ics[1], $ics[2])];
         }
         if ($audio === null) throw new RuntimeException('AAC raw_data_block has no audio element');
-        // FFmpeg does not byte-align after TYPE_END for a single ADTS RDB;
-        // only DSE applies byte alignment when its data_byte_align_flag is set.
         return $audio;
     }
 
