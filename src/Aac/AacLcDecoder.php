@@ -18,7 +18,6 @@ final class AacLcDecoder
     private int $channels = 0;
     private array $overlap = [[], []];
     private int $frameIndex = 0;
-    private static array $imdctFactors = [];
     private static array $windowCache = [];
 
     public function push(string $data): string
@@ -195,8 +194,13 @@ final class AacLcDecoder
         }
         if ($r->read(1)) throw new RuntimeException('AAC pulse tool is invalid for short windows');
         $tnsPresent = $r->read(1);
+        if ($tnsPresent) {
+            $this->skipTns($r, $sequence, $groups);
+        }
         $gainControlPresent = $r->read(1);
-        if ($tnsPresent || $gainControlPresent) throw new RuntimeException('Unsupported AAC TNS/gain control');
+        if ($gainControlPresent) {
+            throw new RuntimeException('AAC gain control is not supported');
+        }
         $spectrum = array_fill(0, 1024, 0.0); $window = 0;
         foreach ($groups as $group => $windowCount) {
             for ($band = 0; $band < $max; ++$band) {
@@ -300,8 +304,13 @@ final class AacLcDecoder
             }
         }
         $tnsPresent = $r->read(1);
+        if ($tnsPresent) {
+            $this->skipTns($r, $sequence, [1]);
+        }
         $gainControlPresent = $r->read(1);
-        if ($tnsPresent || $gainControlPresent) throw new RuntimeException('Unsupported AAC TNS/gain control');
+        if ($gainControlPresent) {
+            throw new RuntimeException('AAC gain control is not supported');
+        }
         $spectrum = array_fill(0, 1024, 0.0); $offsets = AacTables::SWB_48K;
         for ($i = 0; $i < $max; ++$i) {
             $start = $offsets[$i]; $end = $offsets[$i + 1];
@@ -320,6 +329,35 @@ final class AacLcDecoder
             }
         }
         return $spectrum;
+    }
+
+    private function skipTns(AacBitReader $r, int $sequence, array $groups): void
+    {
+        $windows = $sequence === 2 ? array_sum($groups) : 1;
+        $lengthBits = $sequence === 2 ? 4 : 6;
+        $orderBits = $sequence === 2 ? 3 : 5;
+
+        for ($window = 0; $window < $windows; ++$window) {
+            $filters = $r->read($sequence === 2 ? 1 : 2);
+            if ($filters === 0) {
+                continue;
+            }
+            $coefResolution = $r->read(1);
+            for ($filter = 0; $filter < $filters; ++$filter) {
+                $length = $r->read($lengthBits);
+                $order = $r->read($orderBits);
+                $r->read(1);
+                $compress = $r->read(1);
+                if ($order === 0) {
+                    continue;
+                }
+                $coefBits = 3 + $coefResolution - $compress;
+                if ($coefBits < 2 || $coefBits > 4) {
+                    throw new RuntimeException('Invalid AAC TNS coefficient size');
+                }
+                $r->skip($order * $coefBits);
+            }
+        }
     }
 
     private function readScaleFactor(AacBitReader $r): int
@@ -400,19 +438,6 @@ final class AacLcDecoder
     /** Direct AAC IMDCT; the reference form avoids phase/index errors in a fast convolution. */
     private function imdctBlock(array $spectrum, int $n): array
     {
-        $key = (string) $n;
-        if (!isset(self::$imdctFactors[$key])) {
-            $factors = [];
-            for ($m = 0; $m < $n * 2; ++$m) {
-                $row = [];
-                $time = $m + 0.5 + $n / 2.0;
-                for ($k = 0; $k < $n; ++$k) {
-                    $row[$k] = cos(M_PI / $n * $time * ($k + 0.5));
-                }
-                $factors[$m] = $row;
-            }
-            self::$imdctFactors[$key] = $factors;
-        }
         $out = array_fill(0, $n * 2, 0.0);
         $active = [];
         for ($k = 0; $k < $n; ++$k) {
@@ -424,12 +449,12 @@ final class AacLcDecoder
             return $out;
         }
         $scale = 2.0 / $n;
-        $factors = self::$imdctFactors[$key];
+        $angleScale = M_PI / $n;
         for ($m = 0; $m < $n * 2; ++$m) {
             $sum = 0.0;
-            $row = $factors[$m];
+            $time = $m + 0.5 + $n / 2.0;
             foreach ($active as $k) {
-                $sum += $spectrum[$k] * $row[$k];
+                $sum += $spectrum[$k] * cos($angleScale * $time * ($k + 0.5));
             }
             $out[$m] = $sum * $scale;
         }
