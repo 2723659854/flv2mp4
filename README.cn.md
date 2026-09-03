@@ -37,7 +37,8 @@
     - [FLV → FLV 重编码示例](#flv-flv)
     - [MP4 → MP4 重编码示例](#mp4-mp4)
     - [水印工具](#水印生成工具)
-- [性能测试报告](#性能测试报告)
+    - [性能测试报告](#性能测试报告)
+- [AAC/MP3/OPUS的编码解码](#AAC-MP3-OPUS的编码解码)
 - [技术说明](#-技术说明)
 - [开源协议 & 免责声明](#开源协议--免责声明)
 - [联系方式](#-联系方式)
@@ -121,6 +122,18 @@ $file = __DIR__ . '/test.flv';
 
 // 7. fMP4 → FLV（混合/分离均支持）
 \Xiaosongshu\Flv2mp4\Client::runFmp42Flv(__DIR__ . '/output_merge/index.m3u8', __DIR__ . '/output.flv');
+
+// 8. MP4 → HLS
+\Xiaosongshu\Flv2mp4\Client::runMp42Hls(__DIR__ . "/demo.mp4", __DIR__ . "/mp4_hls");
+
+// 9. HLS → MP4
+\Xiaosongshu\Flv2mp4\Client::runHls2Mp4( __DIR__ .'/mp4_hls/demo/index.m3u8', __DIR__.'/hls_2_mp4.mp4');
+
+// 10. MP4 → fMP4
+\Xiaosongshu\Flv2mp4\Client::runMp42Fmp4(__DIR__.'/demo.mp4', __DIR__.'/mp4_2_fmp4');
+
+// 11. fMP4 → MP4
+\Xiaosongshu\Flv2mp4\Client::runFmp42Mp4(__DIR__.'/mp4_2_fmp4/index.m3u8',__DIR__.'/1234567.mp4');
 ```
 
 ---
@@ -517,6 +530,18 @@ if ($result && file_exists($outputFile1)) {
 *Linux 环境未开启 OPcache，仍比 Windows 环境（已开启 JIT）快约 5~6 秒。*
 
 ---
+
+## AAC-MP3-OPUS的编码解码
+
+本项目支持aac-lc和opus音频解码，支持aac-lc和mp3编码。
+- 其中opus转aac-lc已经用于生产环境，详见上面`Opus 2 AAC`示例，已经用于`rtmp_server`项目的webrtc直播转rtmp部分。
+- aac-lc 转mp3，详细用法见源代码，示例方法如下：
+```php
+$converter = new \Xiaosongshu\Flv2mp4\Manage\AAC2MP3();
+$result = $converter->process( __DIR__ . '/test_demo.mp4',__DIR__ . '/aac2mp3_test.mp3');
+```
+此方法实现了aac-lc音频解码，生产pcm，然后封装为mp3音频。
+> ⚠️ **存在的问题**：本项目提取的aac-lc转mp3文件，播放存在噪音，目前尚无法解决，介意者请使用其他专业工具。
 
 ## 🔧 技术说明
 
