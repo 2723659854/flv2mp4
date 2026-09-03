@@ -2,6 +2,11 @@
 
 namespace Xiaosongshu\Flv2mp4\Mp3;
 
+/**
+ * @purpose 改进型离散余弦变换（MDCT）
+ * @author yanglong
+ * @time 2026年9月3日16:41:41
+ */
 final class SpectrumTransform
 {
     public function transform(array $samples): array

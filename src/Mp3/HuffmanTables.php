@@ -3,11 +3,9 @@
 namespace Xiaosongshu\Flv2mp4\Mp3;
 
 /**
- * MPEG-1 Layer III Huffman tables extracted from LAME tables.c.
- *
- * Copyright (c) 1999 Albert L Faber. The original LAME table data is
- * distributed under the GNU Library General Public License, version 2 or later.
- * This generated data file carries the same license; see the project LICENSE.
+ * @purpose MPEG-1 Layer III Huffman tables 霍夫曼表
+ * @author yanglong
+ * @time 2026年9月3日16:30:13
  */
 final class HuffmanTables
 {

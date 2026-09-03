@@ -5,6 +5,12 @@ namespace Xiaosongshu\Flv2mp4\Mp3;
 use InvalidArgumentException;
 use LogicException;
 
+/**
+ * @purpose mp3编码器
+ * @author yanglong
+ * @time 2026年9月3日16:25:09
+ * @note 当前版本编码器存在问题，将pcm编码为mp3后，播放有噪音，目前尚无法处理这个问题
+ */
 final class Encoder
 {
     public const FRAME_SAMPLES = 1152;

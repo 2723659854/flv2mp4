@@ -4,6 +4,11 @@ namespace Xiaosongshu\Flv2mp4\Mp3;
 
 use InvalidArgumentException;
 
+/**
+ * @purpose mp3配置
+ * @author yanglong
+ * @time 2026年9月3日16:24:43
+ */
 final class Config
 {
     public const SAMPLE_RATES = [44100, 48000, 32000];

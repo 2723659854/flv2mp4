@@ -2,6 +2,12 @@
 
 namespace Xiaosongshu\Flv2mp4\Mp3;
 
+/**
+ * @purpose MP3量化器
+ * @author yanglong
+ * @time 2026年9月3日16:31:15
+ * @note 噪音可能出自这个模块
+ */
 final class Layer3Quantizer
 {
     public function __construct(private readonly HuffmanEncoder $huffman = new HuffmanEncoder())
@@ -9,8 +15,8 @@ final class Layer3Quantizer
     }
 
     /**
-     * Quantizes one MPEG-1 Layer III 44.1 kHz long-block granule.
-     * The returned values are candidates only; no encoder side information is written.
+     * 对一个MPEG-1 Layer III 44.1 kHz长块颗粒进行量化。
+     * 返回的值仅为候选值；不写入编码器端信息。
      */
     public function quantize(array $spectrum, int $bitBudget = PHP_INT_MAX, int $sampleRate = 44100): array
     {

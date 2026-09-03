@@ -2,6 +2,11 @@
 
 namespace Xiaosongshu\Flv2mp4\Mp3;
 
+/**
+ * @purpose mp3的边信息
+ * @author yanglong
+ * @time 2026年9月3日16:39:56
+ */
 final class SideInfo
 {
     public function __construct(

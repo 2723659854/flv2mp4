@@ -2,6 +2,11 @@
 
 namespace Xiaosongshu\Flv2mp4\Mp3;
 
+/**
+ * @purpose MPEG-1 Layer III 比例因子带定义表
+ * @author yanglong
+ * @time 2026年9月3日16:35:08
+ */
 final class Layer3ScalefactorBands
 {
     /** MPEG-1 Layer III 44.1 kHz long-block band boundaries (576 spectral lines). */

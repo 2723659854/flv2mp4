@@ -2,6 +2,11 @@
 
 namespace Xiaosongshu\Flv2mp4\Mp3;
 
+/**
+ * @purpose mp3音频帧的颗粒包
+ * @author yanglong
+ * @time 2026年9月3日16:28:08
+ */
 final class GranuleInfo
 {
     public function __construct(

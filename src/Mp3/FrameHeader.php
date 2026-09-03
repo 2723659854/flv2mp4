@@ -2,6 +2,11 @@
 
 namespace Xiaosongshu\Flv2mp4\Mp3;
 
+/**
+ * @purpose 音频帧头
+ * @author yanglong
+ * @time 2026年9月3日16:26:26
+ */
 final class FrameHeader
 {
     public static function encode(Config $config, bool $padding): string

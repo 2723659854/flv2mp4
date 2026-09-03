@@ -5,11 +5,12 @@ namespace Xiaosongshu\Flv2mp4\Mp3;
 use InvalidArgumentException;
 
 /**
-     * MPEG-1 Layer III analysis filterbank and long-block MDCT.
-     *
-     * This implementation keeps the polyphase history and emits two complete
-     * 576-line granules for each input frame.
-     */
+ * @purpose MPEG-1 Layer III分析滤波器组和长块MDCT。
+ * 此实现保留了多相历史记录，并生成了两个完整的
+ * 每个输入帧有576行颗粒。
+ * @author yanglong
+ * @time 2026年9月3日16:36:34
+ */
 final class Mp3AnalysisFilterbank
 {
     public const INPUT_SAMPLES = 1152;

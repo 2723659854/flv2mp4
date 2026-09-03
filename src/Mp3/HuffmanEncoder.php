@@ -2,6 +2,11 @@
 
 namespace Xiaosongshu\Flv2mp4\Mp3;
 
+/**
+ * @purpose 霍夫曼编码器
+ * @author yanglong
+ * @time 2026年9月3日16:29:11
+ */
 final class HuffmanEncoder
 {
     private const TABLES = HuffmanTables::TABLES;

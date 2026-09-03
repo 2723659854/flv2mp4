@@ -2,6 +2,11 @@
 
 namespace Xiaosongshu\Flv2mp4\Mp3;
 
+/**
+ * @purpose 音频帧写入工具
+ * @author yanglong
+ * @time 2026年9月3日16:26:55
+ */
 final class FrameWriter
 {
     public static function sideInfo(Config $config, SideInfo $sideInfo): string

@@ -4,6 +4,11 @@ namespace Xiaosongshu\Flv2mp4\Mp3;
 
 use InvalidArgumentException;
 
+/**
+ * @purpose pcm数据暂存区
+ * @author yanglong
+ * @time 2026年9月3日16:37:20
+ */
 final class PcmBuffer
 {
     private string $data = '';
