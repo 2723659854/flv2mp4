@@ -1,6 +1,6 @@
 {
   "name": "xiaosongshu/flv2mp4",
-  "description": "Pure PHP native media processing library, realize FLV/MP4/HLS mutual conversion and H.264 re-encoding. Built-in live stream relay gateway, file server, multi-protocol push client: RTMP, HTTP-FLV, WebSocket-FLV, no FFmpeg external dependencies.",
+  "description": "Pure PHP native media processing library, realize FLV/MP4/HLS mutual conversion , H.264 re-encoding and mp3/aac re-encoding. Built-in live stream relay gateway, file server, multi-protocol push client: RTMP, HTTP-FLV, WebSocket-FLV, no FFmpeg external dependencies.",
   "keywords": [
     "h264",
     "flv",
@@ -12,6 +12,9 @@
     "http-flv",
     "websocket-flv",
     "gateway",
+    "aac",
+    "mp3",
+    "pcm",
     "php"
   ],
   "type": "library",
