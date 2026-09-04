@@ -1,4 +1,4 @@
-# FLV ↔ MP4 / HLS Converter + H.264 Re-encoding + OPUS2AAC
+# FLV ↔ MP4 / HLS Converter + H.264 Re-encoding + OPUS2AAC + AAC2MP3
 
 <p align="center">
 <img src="https://img.shields.io/badge/PHP-8.1%2B-blue" />
@@ -17,7 +17,7 @@
 ## Introduction
 
 A lightweight pure PHP 8.1+ media processing toolkit with **zero external dependencies (no FFmpeg required)**.  
-Supports FLV, FMP4, MP4, HLS mutual conversion, live streaming gateway, pushing, pulling, rebroadcasting, as well as **H.264 decoding + scaling + re-encoding** (Baseline Profile) and **OPUS → AAC** transcoding.
+Supports FLV, FMP4, MP4, HLS mutual conversion, live streaming gateway, pushing, pulling, rebroadcasting, as well as **H.264 decoding + scaling + re-encoding** (Baseline Profile) and **OPUS → AAC** transcoding + **AAC → MP3** transcoding.
 
 ---
 
@@ -42,7 +42,8 @@ Supports FLV, FMP4, MP4, HLS mutual conversion, live streaming gateway, pushing,
     - [FLV → FLV Re-encoding Example](#flv2flv)
     - [MP4 → MP4 Re-encoding Example](#mp42mp4)
     - [Watermark Generator](#watermark-generator)
-- [Performance Test Report](#performance-test-report)
+    - [Performance Test Report](#performance-test-report)
+- [Encoding/Decoding for AAC-MP3-OPUS](#encodingdecoding-for-aac-mp3-opus)
 - [Technical Notes](#-technical-notes)
 - [License & Disclaimer](#open-source-license--disclaimer)
 - [Contact](#-contact)
@@ -51,19 +52,20 @@ Supports FLV, FMP4, MP4, HLS mutual conversion, live streaming gateway, pushing,
 
 ## 🎯 Core Features
 
-| Feature | Direction | Description |
-| :--- | :--- | :--- |
-| Container conversion | FLV ↔ MP4 / FMP4 | Generate standard MP4 or fragmented fMP4 (MSE compatible) |
-| HLS slicing | FLV → HLS | Generate M3U8 + TS segments, compatible with hls.js, VLC, etc. |
-| HLS restoration | HLS → FLV | Merge HLS segments back into a single FLV file |
-| MP4 ↔ FLV | MP4 → FLV / FMP4 → FLV | Multi-container interconversion |
-| Live gateway | FLV gateway | High-performance multi-level forwarding, supports high concurrency |
-| Static file server | HTTP file gateway | Lightweight file server with directory browsing support |
-| Pushing client | FLV / MP4 → RTMP/HTTP-FLV/WS-FLV | Push static files as a pseudo-live stream |
-| Pulling client | RTMP/HTTP-FLV/WS-FLV → FLV | Pull live stream and save as local FLV |
-| Rebroadcasting | Multi-protocol input → Multi-protocol output | One pull, multiple forwards |
-| **H.264 re-encoding** | Decode → Scale → Encode | Baseline Profile, provides core support for multi-bitrate HLS |
-| **OPUS→AAC** | opus→pcm→aac | Convert WebRTC Opus audio to AAC-LC |
+| Feature               | Direction                                    | Description                                                        |
+|:----------------------|:---------------------------------------------|:-------------------------------------------------------------------|
+| Container conversion  | FLV ↔ MP4 / FMP4                             | Generate standard MP4 or fragmented fMP4 (MSE compatible)          |
+| HLS slicing           | FLV → HLS                                    | Generate M3U8 + TS segments, compatible with hls.js, VLC, etc.     |
+| HLS restoration       | HLS → FLV                                    | Merge HLS segments back into a single FLV file                     |
+| MP4 ↔ FLV             | MP4 → FLV / FMP4 → FLV                       | Multi-container interconversion                                    |
+| Live gateway          | FLV gateway                                  | High-performance multi-level forwarding, supports high concurrency |
+| Static file server    | HTTP file gateway                            | Lightweight file server with directory browsing support            |
+| Pushing client        | FLV / MP4 → RTMP/HTTP-FLV/WS-FLV             | Push static files as a pseudo-live stream                          |
+| Pulling client        | RTMP/HTTP-FLV/WS-FLV → FLV                   | Pull live stream and save as local FLV                             |
+| Rebroadcasting        | Multi-protocol input → Multi-protocol output | One pull, multiple forwards                                        |
+| **H.264 re-encoding** | Decode → Scale → Encode                      | Baseline Profile, provides core support for multi-bitrate HLS      |
+| **OPUS→AAC**          | opus→pcm→aac                                 | Convert WebRTC Opus audio to AAC-LC                                |
+| **AAC→MP3**           | aac→pcm→mp3                                  | Convert AAC-LC audio to MP3                                        |
 
 ---
 
@@ -123,6 +125,18 @@ $file = __DIR__ . '/test.flv';
 
 // 7. fMP4 → FLV (supports both merged and separate formats)
 \Xiaosongshu\Flv2mp4\Client::runFmp42Flv(__DIR__ . '/output_merge/index.m3u8', __DIR__ . '/output.flv');
+
+// 8. MP4 → HLS
+\Xiaosongshu\Flv2mp4\Client::runMp42Hls(__DIR__ . "/demo.mp4", __DIR__ . "/mp4_hls");
+
+// 9. HLS → MP4
+\Xiaosongshu\Flv2mp4\Client::runHls2Mp4( __DIR__ .'/mp4_hls/demo/index.m3u8', __DIR__.'/hls_2_mp4.mp4');
+
+// 10. MP4 → fMP4
+\Xiaosongshu\Flv2mp4\Client::runMp42Fmp4(__DIR__.'/demo.mp4', __DIR__.'/mp4_2_fmp4');
+
+// 11. fMP4 → MP4
+\Xiaosongshu\Flv2mp4\Client::runFmp42Mp4(__DIR__.'/mp4_2_fmp4/index.m3u8',__DIR__.'/1234567.mp4');
 ```
 
 ---
@@ -544,6 +558,21 @@ if ($result && file_exists($outputFile1)) {
 *Linux environment (without OPcache) is still about 5–6 seconds faster than Windows (with JIT enabled).*
 
 ---
+
+## Encoding/Decoding for AAC-MP3-OPUS
+
+This project supports decoding of AAC-LC and Opus audio, and encoding of AAC-LC and MP3.
+
+- The Opus-to-AAC-LC conversion has been used in production environments. See the `Opus 2 AAC` example above, which has been applied to the WebRTC live-to-RTMP part of the `rtmp_server` project.
+- For AAC-LC to MP3 conversion, see the source code for detailed usage. Example method:
+```php
+$converter = new \Xiaosongshu\Flv2mp4\Manage\AAC2MP3();
+$result = $converter->process( __DIR__ . '/test_demo.mp4',__DIR__ . '/aac2mp3_test.mp3');
+```
+This method decodes AAC-LC audio, produces PCM, and then wraps it into MP3 audio.
+
+> ⚠️ **Known Issue**: The MP3 files converted from AAC-LC extracted by this project may have noise during playback. This issue is currently unresolved. If this is a concern, please use other professional tools.
+
 
 ## 🔧 Technical Notes
 

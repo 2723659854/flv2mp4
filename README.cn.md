@@ -1,4 +1,4 @@
-# FLV ↔ MP4 / HLS 转换工具 + H264 重编码 + OPUS2AAC
+# FLV ↔ MP4 / HLS 转换工具 + H264 重编码 + OPUS2AAC + AAC2MP3
 <p align="center">
 <img src="https://img.shields.io/badge/PHP-8.1%2B-blue" />
 <img src="https://img.shields.io/badge/License-Apache%202.0-green" />
@@ -13,7 +13,7 @@
 
 ## 项目简介
 纯 PHP 8.1+ 实现的轻量级媒体处理工具包，**零外部依赖（无需 FFmpeg）**。  
-支持 FLV、FMP4、MP4、HLS 互转，直播流网关、推流、拉流、转播，以及 **H.264 解码 + 缩放 + 重新编码**（Baseline Profile）+ OPUS→AAC。
+支持 FLV、FMP4、MP4、HLS 互转，直播流网关、推流、拉流、转播，以及 **H.264 解码 + 缩放 + 重新编码**（Baseline Profile）+ OPUS→AAC + AAC→MP3。
 
 ---
 ## 📋 目录
@@ -62,7 +62,8 @@
 | 拉流客户端         | RTMP/HTTP-FLV/WS-FLV → FLV       | 从直播流拉取并保存为本地 FLV                    |
 | 转播客户端         | 多协议输入 → 多协议输出                    | 一路拉流，多路转发                           |
 | **H.264 重编码** | 解码 → 缩放 → 编码                     | 支持 Baseline Profile，为多码率 HLS 提供核心支持 |
-| **OPUS→AAC**  | opus→pcm→aac                   | 支持 webrtc的音频opus转码为AAC-LC           |
+| **OPUS→AAC**  | opus→pcm→aac                     | 支持 webrtc的音频opus转码为AAC-LC           |
+| **AAC→MP3**   | aac→pcm→mp3                      | 支持 AAC-LC 的音频转码为MP3                 |
 
 ---
 
