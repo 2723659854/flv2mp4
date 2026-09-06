@@ -34,11 +34,12 @@ final class HuffmanEncoder
         $extraX = null;
         $extraY = null;
         if ($h['linbits']) {
-            if ($ax > 15) {
+            // ISO 11172-3：表中索引 15 表示 ESC（值 >= 15），必须追加 linbits 位（值为 15 时写 0）
+            if ($ax >= 15) {
                 $extraX = $ax - 15;
                 $ax = 15;
             }
-            if ($ay > 15) {
+            if ($ay >= 15) {
                 $extraY = $ay - 15;
                 $ay = 15;
             }
@@ -83,13 +84,13 @@ final class HuffmanEncoder
             }
         }
         $signCount = count($signBits);
-        $codeLength = $h['lengths'][$index] - $signCount;
         return [
-            'code' => $h['codes'][$index] >> $signCount,
-            'length' => $codeLength,
+            // 表中 codes/lengths 已去除符号位，符号位由调用方在码字之后写入
+            'code' => $h['codes'][$index],
+            'length' => $h['lengths'][$index],
             'linbits' => [],
             'signBits' => $signBits,
-            'bits' => $h['lengths'][$index],
+            'bits' => $h['lengths'][$index] + $signCount,
         ];
     }
 
@@ -123,6 +124,28 @@ final class HuffmanEncoder
         return $bits;
     }
 
+    /**
+     * 写入一个大值区域（值区间 [start, end)，end-start 为偶数，系数带符号）。
+     * table 为 0 时区域全零，不写任何比特。
+     */
+    public function writeRegion(BitWriter $writer, array $coefficients, int $start, int $end, int $table): void
+    {
+        if ($table === 0) {
+            return;
+        }
+        for ($i = $start; $i < $end; $i += 2) {
+            $this->writePair($writer, (int) $coefficients[$i], (int) $coefficients[$i + 1], $table);
+        }
+    }
+
+    /** 写入 count1 区域：从 $start 起共 $quads 个四元组（值必须为 -1/0/1）。 */
+    public function writeCount1(BitWriter $writer, array $coefficients, int $start, int $quads, int $table): void
+    {
+        for ($k = 0; $k < $quads; ++$k) {
+            $this->writeQuad($writer, array_slice($coefficients, $start + $k * 4, 4), $table);
+        }
+    }
+
     private function writeQuad(BitWriter $writer, array $values, int $table): void
     {
         $encoded = $this->encodeQuad($values, $table);
@@ -136,16 +159,21 @@ final class HuffmanEncoder
     {
         $encoded = $this->encodePair($x, $y, $table);
         $linbits = self::TABLES[$table]['linbits'];
+        [$extraX, $extraY] = $encoded['linbits'];
         $writer->write($encoded['code'], $encoded['length']);
-        foreach ($encoded['linbits'] as $extra) {
-            if ($extra !== null) {
-                $writer->write($extra, $linbits);
-            }
+        // ISO 11172-3 位流顺序（与 lamejs Huffmancode 的 ext 打包一致）：
+        // 码字 → linbits_x → sign_x → linbits_y → sign_y（缺失项跳过）
+        if ($extraX !== null) {
+            $writer->write($extraX, $linbits);
         }
-        foreach ([$x, $y] as $value) {
-            if ($value !== 0) {
-                $writer->write($value < 0 ? 1 : 0, 1);
-            }
+        if ($x !== 0) {
+            $writer->write($x < 0 ? 1 : 0, 1);
+        }
+        if ($extraY !== null) {
+            $writer->write($extraY, $linbits);
+        }
+        if ($y !== 0) {
+            $writer->write($y < 0 ? 1 : 0, 1);
         }
     }
 }

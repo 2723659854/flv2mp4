@@ -9,7 +9,7 @@ use LogicException;
  * @purpose mp3编码器
  * @author yanglong
  * @time 2026年9月3日16:25:09
- * @note 当前版本编码器存在问题，将pcm编码为mp3后，播放有噪音，目前尚无法处理这个问题
+ * @note 量化器带 scalefactor 噪声整形（port 自 lamejs outer_loop），逐带控制量化失真
  */
 final class Encoder
 {
@@ -87,50 +87,12 @@ final class Encoder
             . str_repeat("\0", max(0, $length - 4 - strlen($payload)));
     }
 
-    private function quantizeSafe(array $spectrum, int $budget, int $sampleRate): array
-    {
-        $energy = 0.0;
-        foreach ($spectrum as $value) $energy += abs((float) $value);
-        $coefficients = array_fill(0, 576, 0);
-        $count1End = 0;
-        if ($energy > 0.000001 && $budget >= 6) {
-            $ranked = [];
-            foreach ($spectrum as $index => $value) {
-                $magnitude = abs((float) $value);
-                if ($magnitude > 1.0e-8) $ranked[$index] = $magnitude;
-            }
-            arsort($ranked, SORT_NUMERIC);
-            $selected = array_slice(array_keys($ranked), 0, 12);
-            foreach ($selected as $index) {
-                $coefficients[$index] = (float) $spectrum[$index] < 0 ? -1 : 1;
-                $count1End = max($count1End, $index + 1);
-            }
-            $count1End = min(576, (int) (ceil($count1End / 4) * 4));
-        }
-        $count1 = intdiv($count1End, 4);
-        $bits = $count1 > 0 ? $this->huffman->countBits($coefficients, 32, $count1End) : 0;
-        return [
-            'coefficients' => $coefficients,
-            'scalefactors' => array_fill(0, 22, 0),
-            'global_gain' => 210,
-            'big_values' => 0,
-            'count1' => $count1,
-            'count1table_select' => 0,
-            'preflag' => 0,
-            'scalefac_scale' => 0,
-            'scalefac_compress' => 0,
-            'part2_bits' => 0,
-            'huffman_bits' => $bits,
-            'candidate_tables' => [0, 0, 0],
-        ];
-    }
-
     private function mainData(string $pcm, int $framePayloadBits): array
     {
         $channels = $this->config->channels;
         $samples = array_fill(0, $channels, []);
         if ($pcm === '') {
-            for ($ch = 0; $ch < $channels; ++$ch) $samples[$ch] = array_fill(0, self::FRAME_SAMPLES, 0.0);
+            for ($ch = 0; $ch < $channels; ++$ch) $samples[$ch] = array_fill(0, self::FRAME_SAMPLES, 0);
         } else {
             $frameBytes = self::FRAME_SAMPLES * $channels * 2;
             if (strlen($pcm) !== $frameBytes) {
@@ -141,7 +103,8 @@ final class Encoder
                     $offset = ($i * $channels + $ch) * 2;
                     $value = unpack('v', substr($pcm, $offset, 2))[1];
                     if ($value >= 32768) $value -= 65536;
-                    $samples[$ch][] = $value / 32768.0;
+                    // 原始 int16 量级直接送入滤波器组（与 lamejs 一致，禁止缩放）
+                    $samples[$ch][] = $value;
                 }
             }
         }
@@ -157,38 +120,43 @@ final class Encoder
         $encoded = array_fill(0, 2, array_fill(0, $channels, []));
         for ($gr = 0; $gr < 2; ++$gr) {
             for ($ch = 0; $ch < $channels; ++$ch) {
-                $q = $this->quantizeSafe($spectra[$ch][$gr], $budget, $this->config->sampleRate);
-                $bits = $q['part2_bits'] + $q['huffman_bits'];
-                $table = $q['candidate_tables'][0];
+                $q = $this->quantizer->quantize($spectra[$ch][$gr], $budget, $this->config->sampleRate);
                 $granules[$gr][$ch] = new GranuleInfo(
-                    $bits, $q['big_values'], $q['global_gain'], $q['scalefac_compress'],
-                    false, [$table, $table, $table], 0, 0, $q['preflag'], $q['scalefac_scale'], $q['count1table_select']
+                    $q['part2_3_length'], $q['big_values'], $q['global_gain'], $q['scalefac_compress'],
+                    false, $q['table_select'], $q['region0_count'], $q['region1_count'],
+                    $q['preflag'], $q['scalefac_scale'], $q['count1table_select']
                 );
                 $encoded[$gr][$ch] = $q;
             }
         }
         $sideInfo = new SideInfo(0, array_fill(0, $channels, [0, 0, 0, 0]), $granules);
         $sideBytes = FrameWriter::sideInfo($this->config, $sideInfo);
+        if (strlen($sideBytes) !== strlen($emptySide)) {
+            throw new LogicException('Layer III side info size changed after granule assignment');
+        }
         $writer = new BitWriter();
         for ($gr = 0; $gr < 2; ++$gr) {
             for ($ch = 0; $ch < $channels; ++$ch) {
                 $q = $encoded[$gr][$ch];
+                // 比例因子（part2）：sfb 0-10 用 slen1，sfb 11-20 用 slen2（与 lamejs writeMainData 一致）
+                $slen1 = Layer3Quantizer::SLEN1_TAB[$q['scalefac_compress']];
+                $slen2 = Layer3Quantizer::SLEN2_TAB[$q['scalefac_compress']];
+                for ($sfb = 0; $sfb < 11; ++$sfb) {
+                    $writer->write($q['scalefactors'][$sfb], $slen1);
+                }
+                for ($sfb = 11; $sfb < 21; ++$sfb) {
+                    $writer->write($q['scalefactors'][$sfb], $slen2);
+                }
                 $local = new BitWriter();
-                $bigCount = $q['big_values'] * 2;
-                $table = $granules[$gr][$ch]->table_select[0];
-                if ($bigCount > 0) $this->huffman->writePairs($local, $q['coefficients'], $bigCount, $table);
-                $count1Count = $q['count1'] * 4;
-                if ($count1Count > 0) {
-                    $this->huffman->writePairs(
-                        $local,
-                        $q['coefficients'],
-                        $count1Count,
-                        32 + $q['count1table_select'],
-                        $q['big_values'] * 2
-                    );
+                $bigEnd = $q['big_values'] * 2;
+                $this->huffman->writeRegion($local, $q['coefficients'], 0, $q['region0_end'], $q['table_select'][0]);
+                $this->huffman->writeRegion($local, $q['coefficients'], $q['region0_end'], $q['region1_end'], $q['table_select'][1]);
+                $this->huffman->writeRegion($local, $q['coefficients'], $q['region1_end'], $bigEnd, $q['table_select'][2]);
+                if ($q['count1_quads'] > 0) {
+                    $this->huffman->writeCount1($local, $q['coefficients'], $bigEnd, $q['count1_quads'], 32 + $q['count1table_select']);
                 }
                 if ($local->bitCount() !== $granules[$gr][$ch]->part2_3_length) {
-                    throw new LogicException(sprintf('Layer III granule bit count mismatch: actual=%d expected=%d big=%d count1=%d', $local->bitCount(), $granules[$gr][$ch]->part2_3_length, $bigCount, $count1Count));
+                    throw new LogicException(sprintf('Layer III granule bit count mismatch: actual=%d expected=%d', $local->bitCount(), $granules[$gr][$ch]->part2_3_length));
                 }
                 $writer->writePacked($local->finish(), $granules[$gr][$ch]->part2_3_length);
             }
