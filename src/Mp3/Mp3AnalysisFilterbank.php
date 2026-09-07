@@ -6,12 +6,6 @@ use InvalidArgumentException;
 
 /**
  * @purpose MPEG-1 Layer III 分析滤波器组（polyphase + MDCT）。
- * 1:1 移植自 lamejs NewMDCT.js 的 window_subband / mdct_long / mdct_sub48，
- * 输入输出约定与 lamejs 完全一致：
- *  - 滚动缓冲区每帧写入 [528, 1680)，帧后左移 1152（ENCDELAY-MDCTDELAY=528）；
- *  - sb_sample 滚动槽位 [2][18][32]，颗粒交替复用；
- *  - 长块 NORM_TYPE，amp_filter 恒为 1。
- * 输出 [channel][granule][576] 频谱（xr），按子带 18 线顺序排列。
  * @author yanglong
  * @time 2026年9月3日16:36:34
  */
@@ -21,7 +15,7 @@ final class Mp3AnalysisFilterbank
     public const GRANULE_SAMPLES = 576;
     public const SUBBANDS = 32;
 
-    /** lamejs Lame.js: gfc.mf_size 起始为 ENCDELAY(576)-MDCTDELAY(48)。 */
+    /** gfc.mf_size 起始为 ENCDELAY(576)-MDCTDELAY(48)。 */
     private const MF_WRITE = 528;
     /** 滚动缓冲区大小：528 历史上限 + 1152 当前帧 + 余量（读取最大索引 1630）。 */
     private const MF_SIZE = 1728;
@@ -41,7 +35,7 @@ final class Mp3AnalysisFilterbank
 
     /**
      * Analyze exactly one MPEG-1 audio frame. Each channel contains 1152 PCM
-     * samples in chronological order (raw int16 scale, same as lamejs).
+     * samples in chronological order (raw int16 scale).
      * Returns [channel][granule][576] spectral lines.
      *
      * @return array<int, array<int, array<int, float>>>
@@ -70,7 +64,7 @@ final class Mp3AnalysisFilterbank
             unset($buf);
             $result[$channel] = $this->mdctSub48($channel);
         }
-        // 帧后滚动（lamejs Lame.js: mfbuf[i] = mfbuf[i + framesize]）：
+        // 帧后滚动（ mfbuf[i] = mfbuf[i + framesize]）：
         // 保留当前帧最后 528 个样本 [1152, 1680) 作为下一帧的多相历史。
         foreach ($this->mfbuf as &$buf) {
             for ($i = 0; $i < self::MF_WRITE; ++$i) {
@@ -98,7 +92,7 @@ final class Mp3AnalysisFilterbank
     }
 
     /**
-     * lamejs mdct_sub48：单通道一帧（两个颗粒）的多相滤波 + MDCT。
+     * mdct_sub48：单通道一帧（两个颗粒）的多相滤波 + MDCT。
      *
      * @return array<int, array<int, float>> [granule][576]
      */
@@ -114,7 +108,7 @@ final class Mp3AnalysisFilterbank
         $order = AnalysisTables::ORDER;
         $sqrt2 = AnalysisTables::SQRT2;
 
-        // lamejs：wkPos 在通道内跨颗粒连续推进（gr0 起点 286，gr1 起点 862）。
+        // wkPos 在通道内跨颗粒连续推进（gr0 起点 286，gr1 起点 862）。
         $wkPos = 286;
         for ($gr = 0; $gr < 2; ++$gr) {
             $samp = &$this->sbSample[$channel][1 - $gr];
@@ -173,7 +167,7 @@ final class Mp3AnalysisFilterbank
     }
 
     /**
-     * lamejs window_subband：一次消耗 32 个 PCM 样本，产出 32 个子带值。
+     * window_subband：一次消耗 32 个 PCM 样本，产出 32 个子带值。
      *
      * @param array<int, float> $x1 滚动输入缓冲
      * @param array<int, float> $a 输出子带值（32 个）
@@ -552,7 +546,7 @@ final class Mp3AnalysisFilterbank
     }
 
     /**
-     * lamejs mdct_long：18 点输入 → 18 线输出（写入 out 的 outPos 起）。
+     * mdct_long：18 点输入 → 18 线输出（写入 out 的 outPos 起）。
      *
      * @param array<int, float> $out 输出频谱（当前颗粒 576 线）
      * @param array<int, float> $in 工作数组（18 个）

@@ -4,7 +4,6 @@ namespace Xiaosongshu\Flv2mp4\Mp3;
 
 /**
  * @purpose MPEG-1 Layer III Huffman tables 霍夫曼表
- * 数据取自 lamejs Tables.js（与 LAME/ISO 11172-3 一致），
  * codes/lengths 已去除符号位：符号位由 HuffmanEncoder 在码字之后单独写入，
  * linbits 为 ESC 附加位宽（表 16-23/24-31），值为 >=15 时写 (v-15)。
  * @author yanglong

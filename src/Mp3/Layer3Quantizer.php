@@ -4,47 +4,38 @@ namespace Xiaosongshu\Flv2mp4\Mp3;
 
 /**
  * @purpose MPEG-1 Layer III 量化器（global_gain 搜索 + scalefactor 噪声整形 + 区域划分 + Huffman 比特计数）
- * 移植自 lamejs（Quantize::outer_loop / QuantizePVT::calc_noise / Takehiro::scale_bitcount）：
- *  - 量化公式 ix = |xr|^0.75 * IPOW20(step)，IPOW20(x) = 2^(-(x-210)*3/16)，
- *    与 ISO 反量化 xr = |ix|^(4/3) * 2^((step-210)/4) 严格互逆；
- *  - 取整采用 lamejs adj43 中点修正表（ROUNDFAC 0.4054）；
- *  - 噪声整形：按比例因子带计算量化失真（distort = noise/l3_xmin），
- *    对失真超限的带递增 scalefac（xrpow *= ifqstep34），即 ISO 11172-3 C.1.5.4.3.5；
- *  - scalefac 溢出时切换 scalefac_scale=1（inc_scalefac_scale）；
- *  - region0/region1 划分采用 lamejs bv_scf（subdv_table）预计算；
- *  - scalefac_compress 遍历全部 16 档选取 part2 比特数最小者（Takehiro::scale_bitcount）。
  * @author yanglong
  * @time 2026年9月6日15:40:00
  */
 final class Layer3Quantizer
 {
-    /** lamejs QuantizePVT.IXMAX_VAL */
+    /**  QuantizePVT.IXMAX_VAL */
     private const IXMAX = 8206;
-    /** lamejs Takehiro::subdv_table（按 scalefactor band 数索引 region0/region1 计数） */
+    /** Takehiro::subdv_table（按 scalefactor band 数索引 region0/region1 计数） */
     private const SUBDV = [
         [0, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0, 1], [1, 1], [1, 1], [1, 2], [2, 2],
         [2, 3], [2, 3], [3, 4], [3, 4], [3, 4], [4, 5], [4, 5], [4, 6], [5, 6], [5, 6],
         [5, 7], [6, 7], [6, 7],
     ];
-    /** lamejs huf_tbl_noESC：按区域最大值直接给候选表（无 ESC） */
+    /** huf_tbl_noESC：按区域最大值直接给候选表（无 ESC） */
     private const NO_ESC = [1, 2, 5, 7, 7, 10, 10, 13, 13, 13, 13, 13, 13, 13, 13];
-    /** lamejs PRECALC_SIZE = IXMAX_VAL + 2 */
+    /** PRECALC_SIZE = IXMAX_VAL + 2 */
     private const PRECALC_SIZE = 8208;
-    /** 长块可传输 scalefac 的带数（lamejs cod_info.sfbmax，sfb21 无 scalefac） */
+    /** 长块可传输 scalefac 的带数（cod_info.sfbmax，sfb21 无 scalefac） */
     private const SFBMAX = 21;
     /** 带内目标相对 SNR（TOL=0.1 即 20dB），噪声整形的核心参数 */
     private const BAND_TOL = 0.1;
     /** 允许噪声下限（相对最强带能量的比值），避免静音带无意义放大 */
     private const NOISE_FLOOR = 1e-8;
-    /** 噪声整形最大迭代次数（lamejs outer_loop 的精简上限） */
+    /** 噪声整形最大迭代次数（outer_loop 的精简上限） */
     private const MAX_ITER = 1;
-    /** lamejs Takehiro::slen1_n / slen2_n：各 compress 档位的 scalefac 容量 */
+    /** Takehiro::slen1_n / slen2_n：各 compress 档位的 scalefac 容量 */
     private const SLEN1_N = [1, 1, 1, 1, 8, 2, 2, 2, 4, 4, 4, 8, 8, 8, 16, 16];
     private const SLEN2_N = [1, 2, 4, 8, 1, 2, 4, 8, 2, 4, 8, 2, 4, 8, 4, 8];
-    /** lamejs Takehiro::slen1_tab / slen2_tab：各 compress 档位的 scalefac 位宽 */
+    /** Takehiro::slen1_tab / slen2_tab：各 compress 档位的 scalefac 位宽 */
     public const SLEN1_TAB = [0, 0, 0, 0, 3, 1, 1, 3, 2, 2, 2, 3, 3, 3, 4, 4];
     public const SLEN2_TAB = [0, 1, 2, 3, 0, 1, 2, 3, 1, 2, 3, 1, 2, 3, 2, 3];
-    /** lamejs Takehiro::scale_long = 11*slen1 + 10*slen2（长块 part2 比特数） */
+    /** Takehiro::scale_long = 11*slen1 + 10*slen2（长块 part2 比特数） */
     private const SCALE_LONG = [0, 10, 20, 30, 33, 21, 31, 41, 32, 42, 52, 43, 53, 63, 64, 74];
     /** 0..15 的位计数（count1 四元组中非零系数个数 = 符号位数） */
     private const POPCNT = [0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4];
@@ -65,7 +56,7 @@ final class Layer3Quantizer
 
     /**
      * 对一个 MPEG-1 Layer III 长块颗粒进行量化。
-     * $spectrum 为滤波器组输出的 576 条谱线（原始 int16 量级，与 lamejs 一致）；
+     * $spectrum 为滤波器组输出的 576 条谱线；
      * $bitBudget 为该颗粒可用的 main-data 比特预算（part2 + part3）。
      * 返回量化方案：系数（带符号）、global_gain、scalefac、区域划分与各区域 Huffman 表。
      */
@@ -106,7 +97,7 @@ final class Layer3Quantizer
             return $this->silence();
         }
 
-        // 阶段三：噪声整形（lamejs outer_loop：放大失真超限的带，重新搜索 global_gain）
+        // 阶段三：噪声整形
         $l3xmin = $this->allowedNoise($spectrum, $bands, $cutoff);
         $best = null;
         for ($iter = 0; $iter < self::MAX_ITER; ++$iter) {
@@ -190,7 +181,7 @@ final class Layer3Quantizer
         return $best;
     }
 
-    /** 保证放大后频谱在 gain=lo 处仍不超过 IXMAX（lamejs count_bits 的 xrpow_max 检查）。 */
+    /** 保证放大后频谱在 gain=lo 处仍不超过 IXMAX */
     private function gainFloor(array $xrpow, int $cutoff): int
     {
         $max = 0.0;
@@ -231,7 +222,7 @@ final class Layer3Quantizer
     }
 
     /**
-     * lamejs QuantizePVT::calc_noise：按带计算反量化误差。
+     * QuantizePVT::calc_noise：按带计算反量化误差。
      * 每带有效步长 s = global_gain - (scalefac << (scalefac_scale + 1))，
      * 反量化 xq = |ix|^(4/3) * 2^((s-210)/4)，distort = noise / l3xmin。
      */
@@ -253,7 +244,7 @@ final class Layer3Quantizer
     }
 
     /**
-     * lamejs Quantize::amp_scalefac_bands（noise_shaping_amp=1 语义）：
+     *  Quantize::amp_scalefac_bands（noise_shaping_amp=1 语义）：
      * 放大所有与最大失真相差 50%（dB）以内的带：scalefac++ 且带内 xrpow *= ifqstep34。
      */
     private function ampScalefacBands(array $distort, array &$scalefac, array &$xrpow, array $bands, int $scalefacScale): bool
@@ -281,7 +272,7 @@ final class Layer3Quantizer
         return $amplified;
     }
 
-    /** lamejs Quantize::loop_break：所有带都已放大过（无剩余选择空间）时返回 true。 */
+    /** Quantize::loop_break：所有带都已放大过（无剩余选择空间）时返回 true。 */
     private function allAmplified(array $scalefac): bool
     {
         for ($sfb = 0; $sfb < self::SFBMAX; ++$sfb) {
@@ -293,7 +284,7 @@ final class Layer3Quantizer
     }
 
     /**
-     * lamejs Takehiro::scale_bitcount：遍历全部 16 档 scalefac_compress，
+     * Takehiro::scale_bitcount：遍历全部 16 档 scalefac_compress，
      * 选 part2 比特数最小且能覆盖 max(slen1 区域)/max(slen2 区域) 的档位。
      * 返回 [scalefac_compress, part2_bits] 或 false（溢出）。
      */
@@ -318,7 +309,7 @@ final class Layer3Quantizer
     }
 
     /**
-     * lamejs Quantize::inc_scalefac_scale：切换 scalefac_scale=1，
+     *  Quantize::inc_scalefac_scale：切换 scalefac_scale=1，
      * 奇数 scalefac 先 +1 并放大 xrpow，再整体折半，等效步长翻倍。
      */
     private function incScalefacScale(array $scalefac, array &$xrpow, array $bands): array
@@ -339,9 +330,9 @@ final class Layer3Quantizer
     }
 
     /**
-     * lamejs QuantizePVT::quantize_xrpow + quantize_lines_xrpow（floor + adj43 变体）。
+     * QuantizePVT::quantize_xrpow + quantize_lines_xrpow（floor + adj43 变体）。
      * istep = IPOW20(gain) = 2^(-(gain-210)*3/16)；$cutoff 以上的谱线强制为 0。
-     * 返回 576 个量化幅度（非负，符号另行附加，与 lamejs l3_enc 一致）。
+     * 返回 576 个量化幅度（非负，符号另行附加）。
      */
     private function quantizeGain(array $xrpow, int $gain, int $cutoff): array
     {
@@ -363,7 +354,7 @@ final class Layer3Quantizer
     }
 
     /**
-     * lamejs Takehiro::noquant_count_bits：推导 big_values / count1 边界、
+     * Takehiro::noquant_count_bits：推导 big_values / count1 边界、
      * count1 表选择与 region0/1 划分，并统计 part3 比特数。
      */
     private function analyzeIx(array $ix, array $bands): array
@@ -391,7 +382,7 @@ final class Layer3Quantizer
                 break;
             }
             $p = (($ix[$i - 4] * 2 + $ix[$i - 3]) * 2 + $ix[$i - 2]) * 2 + $ix[$i - 1];
-            // 本包表数据的 lengths 已剥离符号位（lamejs hlen 含符号位），计数时补上四元组非零系数的符号位
+            // 本包表数据的 lengths 已剥离符号位，计数时补上四元组非零系数的符号位
             $signs = self::POPCNT[$p];
             $a1 += $t32[$p] + $signs;
             $a2 += $t33[$p] + $signs;
@@ -448,7 +439,7 @@ final class Layer3Quantizer
     }
 
     /**
-     * lamejs Takehiro::choose_table：按区域最大值选择候选表并取比特数最小者。
+     * Takehiro::choose_table：按区域最大值选择候选表并取比特数最小者。
      * 返回 [table, bits]。
      */
     private function chooseTable(array $ix, int $start, int $end): array
@@ -523,7 +514,7 @@ final class Layer3Quantizer
     }
 
     /**
-     * lamejs Takehiro::huffman_init 的 bv_scf 计算：按 big_values（值计数，偶数）
+     * Takehiro::huffman_init 的 bv_scf 计算：按 big_values（值计数，偶数）
      * 返回 [region0_count, region1_count]。
      */
     private function bvScfPair(int $bigValues, array $bands): array
@@ -617,7 +608,7 @@ final class Layer3Quantizer
         return $this->bandsCache[$sampleRate] = Layer3ScalefactorBands::long($sampleRate);
     }
 
-    /** lamejs QuantizePVT::iteration_init 的 adj43 表（量化取整修正）。 */
+    /** QuantizePVT::iteration_init 的 adj43 表（量化取整修正）。 */
     private static function adj43(): array
     {
         if (self::$adj43 !== null) {

@@ -161,7 +161,7 @@ final class HuffmanEncoder
         $linbits = self::TABLES[$table]['linbits'];
         [$extraX, $extraY] = $encoded['linbits'];
         $writer->write($encoded['code'], $encoded['length']);
-        // ISO 11172-3 位流顺序（与 lamejs Huffmancode 的 ext 打包一致）：
+        // ISO 11172-3 位流顺序：
         // 码字 → linbits_x → sign_x → linbits_y → sign_y（缺失项跳过）
         if ($extraX !== null) {
             $writer->write($extraX, $linbits);

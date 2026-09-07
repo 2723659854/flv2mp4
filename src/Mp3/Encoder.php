@@ -9,7 +9,7 @@ use LogicException;
  * @purpose mp3编码器
  * @author yanglong
  * @time 2026年9月3日16:25:09
- * @note 量化器带 scalefactor 噪声整形（port 自 lamejs outer_loop），逐带控制量化失真
+ * @note 量化器带 scalefactor 噪声整形，逐带控制量化失真
  */
 final class Encoder
 {
@@ -103,7 +103,7 @@ final class Encoder
                     $offset = ($i * $channels + $ch) * 2;
                     $value = unpack('v', substr($pcm, $offset, 2))[1];
                     if ($value >= 32768) $value -= 65536;
-                    // 原始 int16 量级直接送入滤波器组（与 lamejs 一致，禁止缩放）
+                    // 原始 int16 量级直接送入滤波器组
                     $samples[$ch][] = $value;
                 }
             }
@@ -138,7 +138,7 @@ final class Encoder
         for ($gr = 0; $gr < 2; ++$gr) {
             for ($ch = 0; $ch < $channels; ++$ch) {
                 $q = $encoded[$gr][$ch];
-                // 比例因子（part2）：sfb 0-10 用 slen1，sfb 11-20 用 slen2（与 lamejs writeMainData 一致）
+                // 比例因子（part2）：sfb 0-10 用 slen1，sfb 11-20 用 slen2
                 $slen1 = Layer3Quantizer::SLEN1_TAB[$q['scalefac_compress']];
                 $slen2 = Layer3Quantizer::SLEN2_TAB[$q['scalefac_compress']];
                 for ($sfb = 0; $sfb < 11; ++$sfb) {
