@@ -5,7 +5,11 @@ namespace Xiaosongshu\Flv2mp4\Manage;
 use InvalidArgumentException;
 use RuntimeException;
 
-/** 将交错 S16LE PCM 封装为 WAV 音频文件。 */
+/**
+ * @purpose 将交错 S16LE PCM 封装为 WAV 音频文件
+ * @author yanglong
+ * @time 2026年9月7日17:50:37
+ */
 final class Pcm2Wav
 {
     private string $inputFile;
@@ -13,6 +17,13 @@ final class Pcm2Wav
     private int $sampleRate;
     private int $channels;
 
+    /**
+     * pcm转wav
+     * @param string $inputFile pcm原始文件
+     * @param string $outputFile 输出wav文件
+     * @param int $sampleRate 采样率
+     * @param int $channels 声道
+     */
     public function __construct(string $inputFile, string $outputFile, int $sampleRate = 48000, int $channels = 2)
     {
         if (!is_file($inputFile)) {

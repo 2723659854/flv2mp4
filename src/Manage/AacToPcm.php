@@ -2,12 +2,21 @@
 
 namespace Xiaosongshu\Flv2mp4\Manage;
 
-/** 将 AAC-LC ADTS 文件流式解码为交错 S16LE PCM。 */
+/**
+ * @purpose 将 AAC-LC ADTS 文件流式解码为交错 S16LE PCM。
+ * @author yanglong
+ * @time 2026年9月7日17:49:04
+ */
 final class AacToPcm
 {
     private string $inputFile;
     private string $outputFile;
 
+    /**
+     * 初始化函数
+     * @param string $inputFile 原始音视频文件
+     * @param string $outputFile 输出pcm文件
+     */
     public function __construct(string $inputFile, string $outputFile)
     {
         if (!is_file($inputFile)) {
@@ -21,6 +30,10 @@ final class AacToPcm
         }
     }
 
+    /**
+     * 转码启动
+     * @return array
+     */
     public function run(): array
     {
         $input = fopen($this->inputFile, 'rb');

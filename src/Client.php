@@ -863,6 +863,12 @@ class Client
         return (new \Xiaosongshu\Flv2mp4\Manage\AacToPcm($aacFile, $pcmFile))->run();
     }
 
+    /** 从 MP4 或 FLV 提取 AAC-LC 并封装为 WAV。 */
+    public static function aac2wav(string $inputFile, string $outputFile): array
+    {
+        return (new \Xiaosongshu\Flv2mp4\Manage\Aac2Wav($inputFile, $outputFile))->run();
+    }
+
     /**
      * 从媒体片段中计算实际时长（毫秒）
      * @param array $segments 媒体片段数组
