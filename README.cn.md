@@ -532,17 +532,18 @@ if ($result && file_exists($outputFile1)) {
 
 ---
 
-## AAC-MP3-OPUS的编码解码
+## AAC-MP3-OPUS-WAV的编码解码
 
 本项目支持aac-lc和opus音频解码，支持aac-lc和mp3编码。
 - 其中opus转aac-lc已经用于生产环境，详见上面`Opus 2 AAC`示例，已经用于`rtmp_server`项目的webrtc直播转rtmp部分。
-- aac-lc 转mp3，详细用法见源代码，示例方法如下：
+- aac-lc 转mp3
 ```php
-$converter = new \Xiaosongshu\Flv2mp4\Manage\AAC2MP3();
-$result = $converter->process( __DIR__ . '/test_demo.mp4',__DIR__ . '/aac2mp3_test.mp3');
+\Xiaosongshu\Flv2mp4\Client::runAac2Mp3( __DIR__ . '/test_demo.mp4',__DIR__ . '/aac2mp3.mp3');
 ```
-此方法实现了aac-lc音频解码，生产pcm，然后封装为mp3音频。
-
+- aac-lc转wav
+```php
+\Xiaosongshu\Flv2mp4\Client::runAac2Wav(__DIR__ . '/test_demo.mp4',__DIR__ . '/aac2wav.wav');
+```
 
 ## 🔧 技术说明
 

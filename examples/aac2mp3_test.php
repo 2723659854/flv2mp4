@@ -21,9 +21,7 @@ $format = strtolower($argv[2] ?? 'mp3');
 $outputFile = $argv[3] ?? (__DIR__ . '/aac2mp3_test.' . $format);
 
 try {
-    $converter = new \Xiaosongshu\Flv2mp4\Manage\AAC2MP3();
-    $result = $converter->process($inputFile, $outputFile, $format);
-
+    $result = \Xiaosongshu\Flv2mp4\Client::runAac2Mp3($inputFile, $outputFile, $format);
     echo '转换成功' . PHP_EOL;
     echo '输入: ' . $inputFile . PHP_EOL;
     echo '输出: ' . $result['output'] . PHP_EOL;

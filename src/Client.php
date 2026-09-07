@@ -857,16 +857,39 @@ class Client
         return (new Fmp42Mp4($inputFile, $outputFile))->run();
     }
 
-    /** 将 AAC-LC ADTS 文件流式解码为交错 S16LE PCM。 */
+
+    /**
+     * 将 AAC-LC ADTS 文件流式解码为交错 S16LE PCM。
+     * @param string $aacFile aac文件
+     * @param string $pcmFile pcm文件
+     * @return array
+     */
     public static function runAac2Pcm(string $aacFile, string $pcmFile): array
     {
         return (new \Xiaosongshu\Flv2mp4\Manage\AacToPcm($aacFile, $pcmFile))->run();
     }
 
-    /** 从 MP4 或 FLV 提取 AAC-LC 并封装为 WAV。 */
-    public static function aac2wav(string $inputFile, string $outputFile): array
+    /**
+     * 提取 AAC-LC 并封装为 WAV
+     * @param string $inputFile mp4/flv音视频文件
+     * @param string $outputFile wav音频文件
+     * @return array
+     */
+    public static function runAac2Wav(string $inputFile, string $outputFile): array
     {
         return (new \Xiaosongshu\Flv2mp4\Manage\Aac2Wav($inputFile, $outputFile))->run();
+    }
+
+    /**
+     * 从文件中提取aac-lc转码封装为mp3
+     * @param string $inputFile mp4/flv音视频文件
+     * @param string $outputFile 输出mp3文件
+     * @param string $format 音频格式
+     * @return array
+     */
+    public static function runAac2Mp3(string $inputFile, string $outputFile,string $format = 'mp3'):array
+    {
+        return (new \Xiaosongshu\Flv2mp4\Manage\AAC2MP3())->process($inputFile,$outputFile,$format);
     }
 
     /**

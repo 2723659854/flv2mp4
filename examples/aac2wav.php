@@ -24,7 +24,7 @@ if (!is_file($inputFile)) {
 try {
     $start = microtime(true);
     echo "使用纯 PHP 从 MP4/FLV 提取 AAC-LC 并封装为 WAV..." . PHP_EOL;
-    $result = \Xiaosongshu\Flv2mp4\Client::aac2wav($inputFile, $outputFile);
+    $result = \Xiaosongshu\Flv2mp4\Client::runAac2Wav($inputFile, $outputFile);
     echo "WAV: {$result['output']} (" . filesize($result['output']) . " bytes)" . PHP_EOL;
     echo "参数: {$result['sampleRate']} Hz, {$result['channels']} 声道, {$result['bitsPerSample']} bit" . PHP_EOL;
     echo "AAC 帧数: {$result['frames']}" . PHP_EOL;

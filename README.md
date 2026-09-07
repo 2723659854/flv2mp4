@@ -564,12 +564,14 @@ if ($result && file_exists($outputFile1)) {
 This project supports decoding of AAC-LC and Opus audio, and encoding of AAC-LC and MP3.
 
 - The Opus-to-AAC-LC conversion has been used in production environments. See the `Opus 2 AAC` example above, which has been applied to the WebRTC live-to-RTMP part of the `rtmp_server` project.
-- For AAC-LC to MP3 conversion, see the source code for detailed usage. Example method:
+- AAC-LC to MP3
 ```php
-$converter = new \Xiaosongshu\Flv2mp4\Manage\AAC2MP3();
-$result = $converter->process( __DIR__ . '/test_demo.mp4',__DIR__ . '/aac2mp3_test.mp3');
+\Xiaosongshu\Flv2mp4\Client::runAac2Mp3( __DIR__ . '/test_demo.mp4',__DIR__ . '/aac2mp3.mp3');
 ```
-This method decodes AAC-LC audio, produces PCM, and then wraps it into MP3 audio.
+- AAC-LC to WAV
+```php
+\Xiaosongshu\Flv2mp4\Client::runAac2Wav(__DIR__ . '/test_demo.mp4',__DIR__ . '/aac2wav.wav');
+```
 
 
 ## 🔧 Technical Notes
