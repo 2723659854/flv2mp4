@@ -571,8 +571,6 @@ $result = $converter->process( __DIR__ . '/test_demo.mp4',__DIR__ . '/aac2mp3_te
 ```
 This method decodes AAC-LC audio, produces PCM, and then wraps it into MP3 audio.
 
-> ⚠️ **Known Issue**: The MP3 files converted from AAC-LC extracted by this project may have noise during playback. This issue is currently unresolved. If this is a concern, please use other professional tools.
-
 
 ## 🔧 Technical Notes
 

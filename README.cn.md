@@ -542,7 +542,7 @@ $converter = new \Xiaosongshu\Flv2mp4\Manage\AAC2MP3();
 $result = $converter->process( __DIR__ . '/test_demo.mp4',__DIR__ . '/aac2mp3_test.mp3');
 ```
 此方法实现了aac-lc音频解码，生产pcm，然后封装为mp3音频。
-> ⚠️ **存在的问题**：本项目提取的aac-lc转mp3文件，播放存在噪音，目前尚无法解决，介意者请使用其他专业工具。
+
 
 ## 🔧 技术说明
 
