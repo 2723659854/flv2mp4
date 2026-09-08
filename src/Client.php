@@ -928,6 +928,18 @@ class Client
     }
 
     /**
+     * 将 Ogg Opus 转码为 MPEG-1 Layer III MP3。
+     * @param string $inputFile Ogg Opus 文件
+     * @param string $outputFile 输出 MP3 文件
+     * @param int $bitrate MP3 码率
+     * @return array
+     */
+    public static function runOpus2Mp3(string $inputFile, string $outputFile, int $bitrate = 128000): array
+    {
+        return (new \Xiaosongshu\Flv2mp4\Manage\Opus2Mp3($inputFile, $outputFile, $bitrate))->run();
+    }
+
+    /**
      * 将项目支持范围内的 MP3 解码并封装为 WAV。
      * @param string $inputFile MP3 文件
      * @param string $outputFile 输出 WAV 文件
