@@ -881,6 +881,18 @@ class Client
     }
 
     /**
+     * 将 WAV 音频编码为 AAC-LC ADTS。
+     * @param string $inputFile wav音频文件
+     * @param string $outputFile 输出aac文件
+     * @param int $bitrate AAC码率
+     * @return array
+     */
+    public static function runWav2Aac(string $inputFile, string $outputFile, int $bitrate = 128000): array
+    {
+        return (new \Xiaosongshu\Flv2mp4\Manage\Wav2Aac($inputFile, $outputFile, $bitrate))->run();
+    }
+
+    /**
      * 从文件中提取aac-lc转码封装为mp3
      * @param string $inputFile mp4/flv音视频文件
      * @param string $outputFile 输出mp3文件
