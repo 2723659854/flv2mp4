@@ -547,6 +547,8 @@ if ($result && file_exists($outputFile1)) {
 \Xiaosongshu\Flv2mp4\Client::runOpus2Wav(__DIR__ . '/input.opus',__DIR__ . '/opus2wav.wav');
 # mp3 → wav
 \Xiaosongshu\Flv2mp4\Client::runMp32Wav(__DIR__ . '/pcm2mp3.mp3',__DIR__ . '/mp32wav.wav');
+# wav → mp3
+\Xiaosongshu\Flv2mp4\Client::runWav2Mp3(__DIR__ . '/mp32wav.wav',__DIR__ . '/wav2mp3.mp3');
 ```
 
 ## 🔧 技术说明
