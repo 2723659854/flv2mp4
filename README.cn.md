@@ -551,6 +551,8 @@ if ($result && file_exists($outputFile1)) {
 \Xiaosongshu\Flv2mp4\Client::runOpus2Mp3(__DIR__ . '/input.opus',__DIR__ . '/opus2mp3.mp3');
 # opus → aac-lc
 \Xiaosongshu\Flv2mp4\Client::runOpus2Aac(__DIR__ . '/input.opus',__DIR__ . '/opus2aac.aac');
+# mp3 → aac-lc
+\Xiaosongshu\Flv2mp4\Client::runMp32Aac(__DIR__ . '/aac2mp3.mp3',__DIR__ . '/mp32aac.aac');
 ```
 
 ## 🔧 技术说明
