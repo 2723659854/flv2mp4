@@ -8,10 +8,11 @@ if (version_compare(PHP_VERSION, '8.1.0', '<')) {
 require_once __DIR__ . '/vendor/autoload.php';
 
 $inputFile = $argv[1] ?? __DIR__ . '/test_demo.mp4';
+$inputFile = $argv[1] ?? __DIR__ . '/aac_recode_source.aac';
 $outputFile = $argv[2] ?? __DIR__ . '/aac2wav.wav';
 
 if (in_array($inputFile, ['-h', '--help'], true)) {
-    echo '用法：php843 .\\aac2wav.php [输入MP4或FLV] [输出WAV]' . PHP_EOL;
+    echo '用法：php843 .\aac2wav.php [输入AAC/MP4/FLV] [输出WAV]' . PHP_EOL;
     echo '示例：php843 .\\aac2wav.php .\\test_demo.mp4 .\\aac2wav.wav' . PHP_EOL;
     exit(0);
 }
@@ -23,7 +24,7 @@ if (!is_file($inputFile)) {
 
 try {
     $start = microtime(true);
-    echo "使用纯 PHP 从 MP4/FLV 提取 AAC-LC 并封装为 WAV..." . PHP_EOL;
+    echo "使用纯 PHP 将 AAC-LC 音频转换为 WAV..." . PHP_EOL;
     $result = \Xiaosongshu\Flv2mp4\Client::runAac2Wav($inputFile, $outputFile);
     echo "WAV: {$result['output']} (" . filesize($result['output']) . " bytes)" . PHP_EOL;
     echo "参数: {$result['sampleRate']} Hz, {$result['channels']} 声道, {$result['bitsPerSample']} bit" . PHP_EOL;

@@ -871,7 +871,7 @@ class Client
 
     /**
      * 提取 AAC-LC 并封装为 WAV
-     * @param string $inputFile mp4/flv音视频文件
+     * @param string $inputFile aac/mp4/flv音视频文件
      * @param string $outputFile wav音频文件
      * @return array
      */
@@ -928,7 +928,7 @@ class Client
 
     /**
      * 从文件中提取aac-lc转码封装为mp3
-     * @param string $inputFile mp4/flv音视频文件
+     * @param string $inputFile AAC、MP4 或 FLV 音频文件
      * @param string $outputFile 输出mp3文件
      * @param string $format 音频格式
      * @return array

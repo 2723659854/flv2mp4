@@ -12,7 +12,6 @@ use RuntimeException;
  * @purpose aac音频提取工具
  * @author yanglong
  * @time 2026年9月3日17:31:46
- * @note 此文件仅供测试用，目前生成的音频音质不高，存在噪音
  */
 final class AAC2MP3
 {
@@ -34,8 +33,10 @@ final class AAC2MP3
                 $source = $this->fromFlv($inputFile);
             } elseif (substr($signature, 4, 4) === 'ftyp') {
                 $source = $this->fromMp4($inputFile);
+            } elseif ((ord($signature[0] ?? "\0") === 0xff) && ((ord($signature[1] ?? "\0") & 0xf6) === 0xf0)) {
+                $source = $this->fromAdts($inputFile);
             } else {
-                throw new RuntimeException('仅支持 FLV 或 MP4 输入文件');
+                throw new RuntimeException('仅支持 AAC、FLV 或 MP4 输入文件');
             }
         } finally {
             if (is_resource($input)) fclose($input);
@@ -81,6 +82,50 @@ final class AAC2MP3
             if (is_resource($out)) fclose($out);
             if (is_file($part)) @unlink($part);
         }
+    }
+
+    private function fromAdts(string $inputFile): array
+    {
+        $input = fopen($inputFile, 'rb');
+        if (!$input) {
+            throw new RuntimeException('无法读取 AAC 文件');
+        }
+        $header = fread($input, 7);
+        if ($header === false || strlen($header) !== 7) {
+            fclose($input);
+            throw new RuntimeException('AAC ADTS 头部不完整');
+        }
+        $profile = (ord($header[2]) >> 6) & 3;
+        $index = (ord($header[2]) >> 2) & 15;
+        $channels = ((ord($header[2]) & 1) << 2) | ((ord($header[3]) >> 6) & 3);
+        $protectionAbsent = ord($header[1]) & 1;
+        $headerLength = $protectionAbsent ? 7 : 9;
+        $frameLength = ((ord($header[3]) & 3) << 11) | (ord($header[4]) << 3) | (ord($header[5]) >> 5);
+        if (!isset(self::RATES[$index]) || $channels < 1 || $channels > 2 || $frameLength < $headerLength) {
+            fclose($input);
+            throw new RuntimeException('AAC ADTS 参数无效');
+        }
+        $asc = chr((($profile + 1) << 3) | ($index >> 1)) . chr((($index & 1) << 7) | ($channels << 3));
+        fclose($input);
+        $frames = function () use ($inputFile, $headerLength): \Generator {
+            $input = fopen($inputFile, 'rb');
+            if (!$input) throw new RuntimeException('无法读取 AAC 文件');
+            try {
+                while (!feof($input)) {
+                    $header = fread($input, $headerLength);
+                    if ($header === '' || $header === false) break;
+                    if (strlen($header) !== $headerLength) throw new RuntimeException('AAC ADTS 头部不完整');
+                    if (ord($header[0]) !== 0xff || (ord($header[1]) & 0xf6) !== 0xf0) throw new RuntimeException('AAC ADTS 同步字无效');
+                    $frameLength = ((ord($header[3]) & 3) << 11) | (ord($header[4]) << 3) | (ord($header[5]) >> 5);
+                    $payloadLength = $frameLength - $headerLength;
+                    if ($payloadLength < 0) throw new RuntimeException('AAC ADTS 帧长度无效');
+                    $payload = $payloadLength ? fread($input, $payloadLength) : '';
+                    if ($payload === false || strlen($payload) !== $payloadLength) throw new RuntimeException('AAC ADTS 帧数据不完整');
+                    yield $payload;
+                }
+            } finally { fclose($input); }
+        };
+        return [$asc, $frames()];
     }
 
     private function fromFlv(string $inputFile): array

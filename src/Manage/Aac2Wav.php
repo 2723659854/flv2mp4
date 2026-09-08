@@ -5,7 +5,7 @@ namespace Xiaosongshu\Flv2mp4\Manage;
 use RuntimeException;
 
 /**
- * @purpose 从mp4/flv文件中提取aac-lc音频转码为wav
+ * @purpose 从 AAC、MP4 或 FLV 文件中提取 AAC-LC 音频并转码为 WAV。
  * @author yanglong
  * @time 2026年9月7日17:47:26
  */
