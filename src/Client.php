@@ -951,6 +951,18 @@ class Client
     }
 
     /**
+     * 将 MP3 解码并转码为 AAC-LC ADTS。
+     * @param string $inputFile MP3 文件
+     * @param string $outputFile 输出 AAC 文件
+     * @param int $bitrate AAC 码率
+     * @return array
+     */
+    public static function runMp32Aac(string $inputFile, string $outputFile, int $bitrate = 128000): array
+    {
+        return (new \Xiaosongshu\Flv2mp4\Manage\Mp32Aac($inputFile, $outputFile, $bitrate))->run();
+    }
+
+    /**
      * 从文件中提取aac-lc转码封装为mp3
      * @param string $inputFile AAC、MP4 或 FLV 音频文件
      * @param string $outputFile 输出mp3文件
