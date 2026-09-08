@@ -893,6 +893,18 @@ class Client
     }
 
     /**
+     * 将 WAV 音频编码为 MPEG-1 Layer III MP3。
+     * @param string $inputFile WAV 音频文件
+     * @param string $outputFile 输出 MP3 文件
+     * @param int $bitrate MP3 码率
+     * @return array
+     */
+    public static function runWav2Mp3(string $inputFile, string $outputFile, int $bitrate = 128000): array
+    {
+        return (new \Xiaosongshu\Flv2mp4\Manage\Wav2Mp3($inputFile, $outputFile, $bitrate))->run();
+    }
+
+    /**
      * 将 Ogg Opus 音频解码并封装为 WAV。
      * @param string $inputFile Ogg Opus 文件
      * @param string $outputFile 输出 WAV 文件
