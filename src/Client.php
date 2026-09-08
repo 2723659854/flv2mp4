@@ -893,6 +893,17 @@ class Client
     }
 
     /**
+     * 将 Ogg Opus 音频解码并封装为 WAV。
+     * @param string $inputFile Ogg Opus 文件
+     * @param string $outputFile 输出 WAV 文件
+     * @return array
+     */
+    public static function runOpus2Wav(string $inputFile, string $outputFile): array
+    {
+        return (new \Xiaosongshu\Flv2mp4\Manage\Opus2Wav($inputFile, $outputFile))->run();
+    }
+
+    /**
      * 从文件中提取aac-lc转码封装为mp3
      * @param string $inputFile mp4/flv音视频文件
      * @param string $outputFile 输出mp3文件

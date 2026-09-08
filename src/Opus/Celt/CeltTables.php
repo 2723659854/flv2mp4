@@ -13,7 +13,7 @@ use OverflowException;
 final class CeltTables
 {
     public const MAX_DIMENSIONS = 176;
-    public const MAX_PULSES = 128;
+    public const MAX_PULSES = 176;
     public const UINT32_MAX = 0xFFFFFFFF;
 
     private const HADAMARD_ORDER = [
