@@ -38,7 +38,7 @@
     - [MP4 → MP4 重编码示例](#mp4-mp4)
     - [水印工具](#水印生成工具)
     - [性能测试报告](#性能测试报告)
-- [AAC/MP3/OPUS的编码解码](#AAC-MP3-OPUS的编码解码)
+- [AAC/MP3/OPUS的编码解码](#AAC-MP3-OPUS-WAV的编码解码)
 - [技术说明](#-技术说明)
 - [开源协议 & 免责声明](#开源协议--免责声明)
 - [联系方式](#-联系方式)
@@ -534,13 +534,11 @@ if ($result && file_exists($outputFile1)) {
 
 ## AAC-MP3-OPUS-WAV的编码解码
 
-本项目支持aac-lc和opus音频解码，支持aac-lc和mp3编码。
-- 其中opus转aac-lc已经用于生产环境，详见上面`Opus 2 AAC`示例，已经用于`rtmp_server`项目的webrtc直播转rtmp部分。
 ```php
 # aac-lc → mp3
-\Xiaosongshu\Flv2mp4\Client::runAac2Mp3( __DIR__ . '/test_demo.mp4',__DIR__ . '/aac2mp3.mp3');
+\Xiaosongshu\Flv2mp4\Client::runAac2Mp3( __DIR__ . '/input.aac',__DIR__ . '/aac2mp3.mp3');
 # aac-lc → wav
-\Xiaosongshu\Flv2mp4\Client::runAac2Wav(__DIR__ . '/test_demo.mp4',__DIR__ . '/aac2wav.wav');
+\Xiaosongshu\Flv2mp4\Client::runAac2Wav(__DIR__ . '/input.aac',__DIR__ . '/aac2wav.wav');
 # wav → aac-lc
 \Xiaosongshu\Flv2mp4\Client::runWav2Aac(__DIR__ . '/pcm2wav.wav',__DIR__ . '/wav2aac.aac');
 # opus → wav
@@ -549,6 +547,10 @@ if ($result && file_exists($outputFile1)) {
 \Xiaosongshu\Flv2mp4\Client::runMp32Wav(__DIR__ . '/pcm2mp3.mp3',__DIR__ . '/mp32wav.wav');
 # wav → mp3
 \Xiaosongshu\Flv2mp4\Client::runWav2Mp3(__DIR__ . '/mp32wav.wav',__DIR__ . '/wav2mp3.mp3');
+# opus → mp3
+\Xiaosongshu\Flv2mp4\Client::runOpus2Mp3(__DIR__ . '/input.opus',__DIR__ . '/opus2mp3.mp3');
+# opus → aac-lc
+\Xiaosongshu\Flv2mp4\Client::runOpus2Aac(__DIR__ . '/input.opus',__DIR__ . '/opus2aac.aac');
 ```
 
 ## 🔧 技术说明

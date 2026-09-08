@@ -43,7 +43,7 @@ Supports FLV, FMP4, MP4, HLS mutual conversion, live streaming gateway, pushing,
     - [MP4 → MP4 Re-encoding Example](#mp42mp4)
     - [Watermark Generator](#watermark-generator)
     - [Performance Test Report](#performance-test-report)
-- [Encoding/Decoding for AAC-MP3-OPUS](#encodingdecoding-for-aac-mp3-opus)
+- [Encoding/Decoding for AAC-MP3-OPUS](#encodingdecoding-for-aac-mp3-opus-wav)
 - [Technical Notes](#-technical-notes)
 - [License & Disclaimer](#open-source-license--disclaimer)
 - [Contact](#-contact)
@@ -559,18 +559,25 @@ if ($result && file_exists($outputFile1)) {
 
 ---
 
-## Encoding/Decoding for AAC-MP3-OPUS
+## Encoding/Decoding for AAC-MP3-OPUS-WAV
 
-This project supports decoding of AAC-LC and Opus audio, and encoding of AAC-LC and MP3.
-
-- The Opus-to-AAC-LC conversion has been used in production environments. See the `Opus 2 AAC` example above, which has been applied to the WebRTC live-to-RTMP part of the `rtmp_server` project.
-- AAC-LC to MP3
 ```php
-\Xiaosongshu\Flv2mp4\Client::runAac2Mp3( __DIR__ . '/test_demo.mp4',__DIR__ . '/aac2mp3.mp3');
-```
-- AAC-LC to WAV
-```php
-\Xiaosongshu\Flv2mp4\Client::runAac2Wav(__DIR__ . '/test_demo.mp4',__DIR__ . '/aac2wav.wav');
+# aac-lc → mp3
+\Xiaosongshu\Flv2mp4\Client::runAac2Mp3( __DIR__ . '/input.aac',__DIR__ . '/aac2mp3.mp3');
+# aac-lc → wav
+\Xiaosongshu\Flv2mp4\Client::runAac2Wav(__DIR__ . '/input.aac',__DIR__ . '/aac2wav.wav');
+# wav → aac-lc
+\Xiaosongshu\Flv2mp4\Client::runWav2Aac(__DIR__ . '/pcm2wav.wav',__DIR__ . '/wav2aac.aac');
+# opus → wav
+\Xiaosongshu\Flv2mp4\Client::runOpus2Wav(__DIR__ . '/input.opus',__DIR__ . '/opus2wav.wav');
+# mp3 → wav
+\Xiaosongshu\Flv2mp4\Client::runMp32Wav(__DIR__ . '/pcm2mp3.mp3',__DIR__ . '/mp32wav.wav');
+# wav → mp3
+\Xiaosongshu\Flv2mp4\Client::runWav2Mp3(__DIR__ . '/mp32wav.wav',__DIR__ . '/wav2mp3.mp3');
+# opus → mp3
+\Xiaosongshu\Flv2mp4\Client::runOpus2Mp3(__DIR__ . '/input.opus',__DIR__ . '/opus2mp3.mp3');
+# opus → aac-lc
+\Xiaosongshu\Flv2mp4\Client::runOpus2Aac(__DIR__ . '/input.opus',__DIR__ . '/opus2aac.aac');
 ```
 
 
