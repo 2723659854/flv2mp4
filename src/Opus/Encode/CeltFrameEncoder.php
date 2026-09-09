@@ -6,6 +6,7 @@ use InvalidArgumentException;
 use Xiaosongshu\Flv2mp4\Opus\Celt\CeltBitAllocation;
 use Xiaosongshu\Flv2mp4\Opus\Celt\CeltMdct;
 use Xiaosongshu\Flv2mp4\Opus\Celt\CeltTables;
+use Xiaosongshu\Flv2mp4\Opus\Celt\CeltPvq;
 use Xiaosongshu\Flv2mp4\Opus\RangeDecoder;
 use Xiaosongshu\Flv2mp4\Opus\Celt\CeltEnergy;
 use Xiaosongshu\Flv2mp4\Opus\Encode\CeltPvqEncoder;
@@ -117,7 +118,15 @@ final class CeltFrameEncoder
                 if ($bits >= 8) $n1Signs[] = $spectrum[CeltBitAllocation::BAND_EDGES[$band] << 3] < 0 ? 1 : 0;
                 continue;
             }
-            if ($k > 0) CeltPvqEncoder::encode($encoder, $this->quantizeBand($spectrum, $band, $n, $k), $k);
+            if ($k > 0) {
+                $offset = CeltBitAllocation::BAND_EDGES[$band] << 3;
+                $values = array_slice($spectrum, $offset, $n);
+                $norm = sqrt(max(1.0e-20, array_sum(array_map(static fn(float $v): float => $v * $v, $values))));
+                $target = array_map(static fn(float $v): float => $v / $norm, $values);
+                $target = CeltPvq::expRotation($target, 1, $k, $allocation['spread'], true, true);
+                $vector = $this->quantizeValues($target, $k);
+                CeltPvqEncoder::encode($encoder, $vector, $k);
+            }
         }
         // 原始位从帧尾按解码消费顺序读取：fine、n=1 符号、anti-collapse、final。
         for ($band = 0; $band < 21; $band++) {
@@ -181,6 +190,24 @@ final class CeltFrameEncoder
         $energy = new CeltEnergy();
         $energy->decodeCoarse($decoder, 3, 1, true, strlen($data) * 8);
         return CeltBitAllocation::decode($decoder, 3, false, 1, strlen($data) * 8);
+    }
+
+    private function quantizeValues(array $values, int $pulses): array
+    {
+        $vector = array_fill(0, count($values), 0);
+        for ($pulse = 0; $pulse < $pulses; $pulse++) {
+            $best = 0;
+            $score = -1.0;
+            foreach ($values as $i => $value) {
+                $candidate = abs($value) - abs($vector[$i]) / max(1, $pulses);
+                if ($candidate > $score) {
+                    $score = $candidate;
+                    $best = $i;
+                }
+            }
+            $vector[$best] += $values[$best] < 0.0 ? -1 : 1;
+        }
+        return $vector;
     }
 
     private function quantizeBand(array $spectrum, int $band, int $dimensions, int $pulses): array
