@@ -963,6 +963,18 @@ class Client
     }
 
     /**
+     * 将 AAC-LC 解码并封装为 Ogg Opus。
+     * @param string $inputFile AAC、MP4 或 FLV 音频文件
+     * @param string $outputFile 输出 Ogg Opus 文件
+     * @param int $preSkip Opus pre-skip
+     * @return array
+     */
+    public static function runAac2Opus(string $inputFile, string $outputFile, int $preSkip = 312): array
+    {
+        return (new \Xiaosongshu\Flv2mp4\Manage\Aac2Opus($inputFile, $outputFile, $preSkip))->run();
+    }
+
+    /**
      * 从文件中提取aac-lc转码封装为mp3
      * @param string $inputFile AAC、MP4 或 FLV 音频文件
      * @param string $outputFile 输出mp3文件
