@@ -4,12 +4,11 @@ namespace Xiaosongshu\Flv2mp4\Opus\Encode;
 
 use InvalidArgumentException;
 use Xiaosongshu\Flv2mp4\Opus\Celt\CeltBitAllocation;
-use Xiaosongshu\Flv2mp4\Opus\Celt\CeltMdct;
 use Xiaosongshu\Flv2mp4\Opus\Celt\CeltTables;
-use Xiaosongshu\Flv2mp4\Opus\Celt\CeltPvq;
-use Xiaosongshu\Flv2mp4\Opus\RangeDecoder;
 use Xiaosongshu\Flv2mp4\Opus\Celt\CeltEnergy;
+use Xiaosongshu\Flv2mp4\Opus\Celt\CeltPvq;
 use Xiaosongshu\Flv2mp4\Opus\Encode\CeltPvqEncoder;
+use Xiaosongshu\Flv2mp4\Opus\RangeDecoder;
 
 /**
  * CELT 帧编码器入口（当前仅建立受限格式的安全边界）。
@@ -26,6 +25,7 @@ final class CeltFrameEncoder
     ];
 
     private int $channels;
+    private CeltAnalysisWindow $analysisWindow;
     private ?array $debugEnergies = null;
 
     private const ENERGY_MODEL_LM3_INTRA = [
@@ -41,6 +41,7 @@ final class CeltFrameEncoder
             throw new InvalidArgumentException('CELT encoder supports only mono or stereo');
         }
         $this->channels = $channels;
+        $this->analysisWindow = new CeltAnalysisWindow();
     }
 
     public function channels(): int
@@ -83,15 +84,15 @@ final class CeltFrameEncoder
             return $silent->finish();
         }
 
-        $analysis = array_merge(array_fill(0, self::FRAME_SAMPLES, 0.0), $pcm);
-        $spectrum = CeltMdct::forward($analysis);
+        $analysis = $this->analysisWindow->frame($pcm);
+        $spectrum = CeltMdctEncoder::forward($analysis);
         $energies = [];
         for ($band = 0; $band < 21; $band++) {
             $start = CeltBitAllocation::BAND_EDGES[$band] << 3;
             $length = CeltBitAllocation::BAND_WIDTHS[$band] << 3;
             $sum = 1.0e-12;
             for ($i = 0; $i < $length; $i++) $sum += $spectrum[$start + $i] ** 2;
-            $energies[$band] = (int) max(-28, min(28, round(log(sqrt($sum), 2) - self::MEAN_ENERGY[$band] + 4.4)));
+            $energies[$band] = (int) max(-28, min(28, round(log(sqrt($sum), 2) - self::MEAN_ENERGY[$band] + 1.25)));
         }
         $this->debugEnergies = $energies;
 
@@ -102,13 +103,15 @@ final class CeltFrameEncoder
         // 128 kb/s at 48 kHz with a 20 ms frame is 320 bytes. Using the
         // maximum 1275-byte CELT payload over-allocates PVQ pulses and can
         // make the PHP encoder spend an excessive amount of time quantizing.
-        $targetBytes = 320;
+        $targetBytes = 400;
         // 固定参数验证路径：暂不调用 allocationForBudget()，避免编码前重复构造
         // RangeDecoder 探测。先只编码前 8 个频带，每个频带使用极少量 PVQ
         // 比特；该路径用于验证单帧位流顺序，不代表最终码率分配。
         $allocation = $this->allocationForBudget($energies, $targetBytes * 8);
-        // 原始位从帧尾按解码消费顺序读取：fine、n=1 符号、anti-collapse、final。
-        $n1Signs = [];
+        $allocation['_totalBits'] = $targetBytes * 8;
+        $bandResult = CeltBandsEncoder::encode($encoder, $spectrum, $allocation, 3, false);
+        $n1Signs = $bandResult['n1Signs'];
+        /*
         for ($band = 0; $band < $allocation['coded']; $band++) {
             $n = CeltBitAllocation::BAND_WIDTHS[$band] << 3;
             $bits = $allocation['pulses'][$band];
@@ -124,10 +127,10 @@ final class CeltFrameEncoder
                 $norm = sqrt(max(1.0e-20, array_sum(array_map(static fn(float $v): float => $v * $v, $values))));
                 $target = array_map(static fn(float $v): float => $v / $norm, $values);
                 $target = CeltPvq::expRotation($target, 1, $k, $allocation['spread'], true, true);
-                $vector = $this->quantizeValues($target, $k);
-                CeltPvqEncoder::encode($encoder, $vector, $k);
+                CeltPvqEncoder::encode($encoder, $this->quantizeValues($target, $k), $k);
             }
         }
+        */
         // 原始位从帧尾按解码消费顺序读取：fine、n=1 符号、anti-collapse、final。
         for ($band = 0; $band < 21; $band++) {
             $bits = $allocation['fine'][$band];
@@ -195,17 +198,20 @@ final class CeltFrameEncoder
     private function quantizeValues(array $values, int $pulses): array
     {
         $vector = array_fill(0, count($values), 0);
+        if ($pulses <= 0) return $vector;
+        $norm = sqrt(max(1.0e-20, array_sum(array_map(static fn(float $v): float => $v * $v, $values))));
+        $target = array_map(static fn(float $v): float => $v / $norm, $values);
         for ($pulse = 0; $pulse < $pulses; $pulse++) {
             $best = 0;
-            $score = -1.0;
-            foreach ($values as $i => $value) {
-                $candidate = abs($value) - abs($vector[$i]) / max(1, $pulses);
-                if ($candidate > $score) {
-                    $score = $candidate;
+            $bestScore = -INF;
+            foreach ($target as $i => $value) {
+                $score = abs($value) - abs($vector[$i]) / max(1, $pulses);
+                if ($score > $bestScore) {
+                    $bestScore = $score;
                     $best = $i;
                 }
             }
-            $vector[$best] += $values[$best] < 0.0 ? -1 : 1;
+            $vector[$best] += $target[$best] < 0.0 ? -1 : 1;
         }
         return $vector;
     }

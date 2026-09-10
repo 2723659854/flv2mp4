@@ -174,6 +174,16 @@ final class RangeEncoder
         return $this->totalBits - self::ilog($this->range);
     }
 
+    public function tellFrac(): int
+    {
+        $correction = [35733, 38967, 42495, 46340, 50535, 55109, 60097, 65535];
+        $log = self::ilog($this->range);
+        $range = $this->range >> ($log - 16);
+        $index = ($range >> 12) - 8;
+        $index += $range > $correction[$index] ? 1 : 0;
+        return ($this->totalBits << 3) - (($log << 3) + $index);
+    }
+
     public function finish(?int $targetBytes = null): string
     {
         if ($this->finished) {
