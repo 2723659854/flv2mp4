@@ -7,7 +7,7 @@ use RuntimeException;
 /**
  * 将 AAC-LC 音频解码并编码为 Ogg Opus。
  *
- * 当前 Opus 编码器限制为 48000 Hz 单声道 CELT。
+ * 使用 ffmpeg 的 libopus（opus-main 正式编码器）输出 Ogg Opus。
  */
 final class Aac2Opus
 {

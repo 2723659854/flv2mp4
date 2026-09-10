@@ -2,6 +2,7 @@
 
 namespace Xiaosongshu\Flv2mp4\Opus\Celt;
 
+use Xiaosongshu\Flv2mp4\Opus\Encode\RangeEncoder;
 use Xiaosongshu\Flv2mp4\Opus\RangeDecoder;
 
 /**
@@ -161,5 +162,163 @@ final class CeltBitAllocation
         }
         for ($i = $coded; $i < 21; $i++) { $fine[$i] = ($pulses[$i] >> ($channels - 1)) >> 3; $pulses[$i] = 0; $priority[$i] = $fine[$i] < 1 ? 1 : 0; }
         return compact('tf','spread','caps','pulses','fine','priority','coded','intensity','dual','anti','extra');
+    }
+
+    /**
+     * Encoder-side allocation, faithful port of clt_compute_allocation() /
+     * interp_bits2pulses() (encode=1) in opus-main/celt/rate.c.
+     *
+     * The entropy coder already holds: silence/postfilter/transient/intra,
+     * coarse energies, tf flags, spread icdf, dynalloc flags and trim icdf.
+     * This routine performs the bisections, emits the normative coded-bands
+     * skip/stop bits itself, and returns the same allocation map as decode().
+     *
+     * Fixed profile: mono (C=1), LM=3, non-transient, no dynalloc boosts.
+     */
+    public static function encode(RangeEncoder $enc, int $lm, int $channels, int $frameBits, int $prev): array
+    {
+        $start = 0;
+        $end = 21;
+        $caps = array_fill(0, 21, 0);
+        for ($i = 0; $i < 21; $i++) {
+            $width = self::BAND_WIDTHS[$i] << $lm;
+            $caps[$i] = CeltTables::cap($i, $lm, $channels, $width);
+        }
+
+        // bits = packet size - tell - 1 (all in 1/8 bit units); no anti-collapse reservation.
+        $tbits = ($frameBits << 3) - $enc->tellFrac() - 1;
+        $skipBit = $tbits >= 8 ? 8 : 0;
+        $tbits -= $skipBit;
+        // Mono: no intensity/dual-stereo reservation.
+
+        $threshold = $trimOffset = array_fill(0, 21, 0);
+        $trim = 5;
+        for ($i = 0; $i < 21; $i++) {
+            $trimValue = $trim - 5 - $lm;
+            $threshold[$i] = max((3 * self::BAND_WIDTHS[$i] << ($lm + 3)) >> 4, $channels << 3);
+            $trimOffset[$i] = ($trimValue * (self::BAND_WIDTHS[$i] * (20 - $i) << ($lm + 3 + $channels - 1))) >> 6;
+            if ((self::BAND_WIDTHS[$i] << $lm) === 1) $trimOffset[$i] -= $channels << 3;
+        }
+        $norm = static fn(int $v): int => (($v << ($channels - 1)) << $lm) >> 2;
+        $boost = array_fill(0, 21, 0);
+
+        // Outer bisection over the 11 static allocation vectors.
+        $low = 1; $high = 10;
+        while ($low <= $high) {
+            $center = ($low + $high) >> 1; $total = 0; $done = false;
+            for ($i = 20; $i >= 0; $i--) {
+                $b = $norm(self::BAND_WIDTHS[$i] * self::STATIC_ALLOC[$center][$i]);
+                if ($b) $b = max($b + $trimOffset[$i], 0); $b += $boost[$i];
+                if ($b >= $threshold[$i] || $done) { $done = true; $total += min($b, $caps[$i]); }
+                elseif ($b >= ($channels << 3)) $total += $channels << 3;
+            }
+            if ($total > $tbits) $high = $center - 1; else $low = $center + 1;
+        }
+        $high = $low; $low--;
+        $bits1 = $bits2 = array_fill(0, 21, 0);
+        $skipStart = 0;
+        for ($i = 0; $i < 21; $i++) {
+            $bits1[$i] = $norm(self::BAND_WIDTHS[$i] * self::STATIC_ALLOC[$low][$i]);
+            $b2 = $high >= 11 ? $caps[$i] : $norm(self::BAND_WIDTHS[$i] * self::STATIC_ALLOC[$high][$i]);
+            if ($bits1[$i]) $bits1[$i] = max($bits1[$i] + $trimOffset[$i], 0);
+            if ($b2) $b2 = max($b2 + $trimOffset[$i], 0);
+            if ($low) $bits1[$i] += $boost[$i]; $b2 += $boost[$i];
+            if ($boost[$i]) $skipStart = $i;
+            $bits2[$i] = max($b2 - $bits1[$i], 0);
+        }
+        // Inner 64-step interpolation.
+        $lowStep = 0; $highStep = 64;
+        for ($step = 0; $step < 6; $step++) {
+            $center = ($lowStep + $highStep) >> 1; $total = 0; $done = false;
+            for ($j = 20; $j >= 0; $j--) {
+                $b = $bits1[$j] + (($center * $bits2[$j]) >> 6);
+                if ($b >= $threshold[$j] || $done) { $done = true; $total += min($b, $caps[$j]); }
+                elseif ($b >= ($channels << 3)) $total += $channels << 3;
+            }
+            if ($total > $tbits) $highStep = $center; else $lowStep = $center;
+        }
+        $pulses = array_fill(0, 21, 0); $total = 0; $done = false;
+        for ($i = 20; $i >= 0; $i--) {
+            $b = $bits1[$i] + (($lowStep * $bits2[$i]) >> 6);
+            if ($b >= $threshold[$i] || $done) $done = true; else $b = $b >= ($channels << 3) ? $channels << 3 : 0;
+            $pulses[$i] = min($b, $caps[$i]); $total += $pulses[$i];
+        }
+
+        // Decide which bands to skip, working backwards from the end, and emit
+        // the normative skip(0)/stop(1) bits exactly as the decoder will read.
+        $signalBandwidth = $end - 1;
+        for ($coded = 21;; $coded--) {
+            $j = $coded - 1;
+            if ($j <= $skipStart) { $tbits += $skipBit; break; }
+            $span = self::BAND_EDGES[$coded]; $remaining = $tbits - $total;
+            $bandbits = intdiv($remaining, $span); $remaining -= $bandbits * $span;
+            $allocation = $pulses[$j] + $bandbits * self::BAND_WIDTHS[$j] + max($remaining - self::BAND_EDGES[$j], 0);
+            if ($allocation >= max($threshold[$j], ($channels + 1) << 3)) {
+                // Encoder-only stop criterion (rate.c line 355-369).
+                if ($coded > 17) $depth = $j < $prev ? 7 : 9; else $depth = 0;
+                $depthNeed = ($depth * self::BAND_WIDTHS[$j] << ($lm + 3)) >> 4;
+                if ($coded <= $start + 2 || ($allocation > $depthNeed && $j <= $signalBandwidth)) {
+                    $enc->encodeBitLogp(1, 1);
+                    break;
+                }
+                $enc->encodeBitLogp(0, 1);
+                $total += 8; $allocation -= 8;
+            }
+            $total -= $pulses[$j];
+            $pulses[$j] = $allocation >= ($channels << 3) ? $channels << 3 : 0;
+            $total += $pulses[$j];
+        }
+
+        // Distribute the remaining bits evenly across the coded bands.
+        $remaining = $tbits - $total; $span = self::BAND_EDGES[$coded];
+        $bandbits = intdiv($remaining, $span); $remaining -= $bandbits * $span;
+        for ($i = 0; $i < $coded; $i++) {
+            $bits = min($remaining, self::BAND_WIDTHS[$i]);
+            $pulses[$i] += $bits + $bandbits * self::BAND_WIDTHS[$i];
+            $remaining -= $bits;
+        }
+
+        // Split PVQ bits from fine energy bits, carrying cap excess forward.
+        $fine = $priority = array_fill(0, 21, 0); $extra = 0;
+        for ($i = 0; $i < $coded; $i++) {
+            $n = self::BAND_WIDTHS[$i] << $lm; $prevExtra = $extra; $pulses[$i] += $extra;
+            if ($n > 1) {
+                $extra = max($pulses[$i] - $caps[$i], 0); $pulses[$i] -= $extra;
+                $dof = $n * $channels;
+                $temp = $dof * (self::LOG_WIDTHS[$i] + ($lm << 3)); $offset = ($temp >> 1) - $dof * 21;
+                if ($n === 2) $offset += $dof << 1;
+                if ($pulses[$i] + $offset < 2 * ($dof << 3)) $offset += $temp >> 2;
+                elseif ($pulses[$i] + $offset < 3 * ($dof << 3)) $offset += $temp >> 3;
+                $fine[$i] = max(0, min(intdiv($pulses[$i] + $offset + ($dof << 2), $dof << 3), min(($pulses[$i] >> 3) >> ($channels - 1), 8)));
+                $priority[$i] = ($fine[$i] * ($dof << 3) >= $pulses[$i] + $offset) ? 1 : 0;
+                $pulses[$i] -= $fine[$i] << ($channels - 1) << 3;
+            } else {
+                $extra = max($pulses[$i] - ($channels << 3), 0); $pulses[$i] -= $extra; $priority[$i] = 1;
+            }
+            if ($extra > 0) {
+                $fineExtra = min($extra >> ($channels + 2), 8 - $fine[$i]);
+                $fine[$i] += $fineExtra;
+                $fineExtra <<= $channels + 2;
+                $priority[$i] = $fineExtra >= $extra - $prevExtra ? 1 : 0;
+                $extra -= $fineExtra;
+            }
+        }
+        for ($i = $coded; $i < 21; $i++) {
+            $fine[$i] = ($pulses[$i] >> ($channels - 1)) >> 3; $pulses[$i] = 0; $priority[$i] = $fine[$i] < 1 ? 1 : 0;
+        }
+
+        return [
+            'tf' => array_fill(0, 21, 0),
+            'spread' => 2,
+            'caps' => $caps,
+            'pulses' => $pulses,
+            'fine' => $fine,
+            'priority' => $priority,
+            'coded' => $coded,
+            'intensity' => 0,
+            'dual' => 0,
+            'anti' => 0,
+            'extra' => $extra,
+        ];
     }
 }

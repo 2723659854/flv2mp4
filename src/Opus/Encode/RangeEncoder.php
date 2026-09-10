@@ -208,6 +208,10 @@ final class RangeEncoder
         if ($this->remainder >= 0 || $this->extension > 0) {
             $this->carryOut(0);
         }
+        $rangeOutput = $this->output;
+        
+        // Build raw stream from end: pack raw bits into bytes from LSB to MSB,
+        // then reverse to form tail bytes (matching ec_write_byte_at_end).
         $rawBytes = [];
         $rawWindow = 0;
         $rawBits = 0;
@@ -220,19 +224,48 @@ final class RangeEncoder
                 $rawBits -= 8;
             }
         }
-        if ($rawBits > 0) $rawBytes[] = $rawWindow & 0xFF;
-        $rangeOutput = $this->output;
-        $rawOutput = implode('', array_map('chr', array_reverse($rawBytes)));
+        $leftoverBits = $rawBits;
+        $leftoverWindow = $rawWindow & ((1 << $rawBits) - 1);
+        
         if ($targetBytes !== null) {
+            $rangeLen = strlen($rangeOutput);
+            $rawLen = count($rawBytes);
+            
+            // If leftover bits exist, they OR into the boundary byte.
+             // C reference (entenc.c:297-301): when offs+end_offs >= storage,
+             // leftover raw bits merge into buf[storage-end_offs-1].
+             if ($leftoverBits > 0) {
+                 // Merge leftover bits into the boundary byte (last in $rawBytes array,
+                 // which becomes first when reversed to form the tail stream).
+                 if ($rawLen > 0) {
+                     // OR into the last complete byte (boundary byte between range and raw).
+                     $rawBytes[$rawLen - 1] |= $leftoverWindow << (8 - $leftoverBits);
+                 } else {
+                     // No complete raw bytes; leftover bits go into the padding area.
+                     // This case never happens in practice (fine energy always produces >8 bits).
+                     $rawBytes[] = $leftoverWindow;
+                 }
+             }
+             
+             if ($rangeLen + $rawLen > $targetBytes) {
+                 throw new RuntimeException(sprintf(
+                     'Encoded frame exceeds target size: range=%d raw=%d leftover=%d total=%d target=%d',
+                     $rangeLen, $rawLen, $leftoverBits, $rangeLen + $rawLen, $targetBytes
+                 ));
+             }
+            
+            $rawOutput = implode('', array_map('chr', array_reverse($rawBytes)));
             $rangeBytes = $targetBytes - strlen($rawOutput);
-            if ($rangeBytes < strlen($rangeOutput)) {
+            if ($rangeBytes < $rangeLen) {
                 throw new RuntimeException('Encoded frame exceeds target size');
             }
-            // Padding belongs between the range stream and the raw tail:
-            // RangeDecoder::rawBits() consumes bytes from the frame end.
             $rangeOutput = str_pad($rangeOutput, $rangeBytes, "\0");
+            $this->output = $rangeOutput . $rawOutput;
+        } else {
+            if ($leftoverBits > 0) $rawBytes[] = $leftoverWindow;
+            $this->output = $rangeOutput . implode('', array_map('chr', array_reverse($rawBytes)));
         }
-        $this->output = $rangeOutput . $rawOutput;
+        
         $this->finished = true;
         return $this->output;
     }

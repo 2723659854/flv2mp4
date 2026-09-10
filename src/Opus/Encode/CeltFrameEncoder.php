@@ -4,11 +4,7 @@ namespace Xiaosongshu\Flv2mp4\Opus\Encode;
 
 use InvalidArgumentException;
 use Xiaosongshu\Flv2mp4\Opus\Celt\CeltBitAllocation;
-use Xiaosongshu\Flv2mp4\Opus\Celt\CeltTables;
-use Xiaosongshu\Flv2mp4\Opus\Celt\CeltEnergy;
-use Xiaosongshu\Flv2mp4\Opus\Celt\CeltPvq;
 use Xiaosongshu\Flv2mp4\Opus\Encode\CeltPvqEncoder;
-use Xiaosongshu\Flv2mp4\Opus\RangeDecoder;
 
 /**
  * CELT 帧编码器入口（当前仅建立受限格式的安全边界）。
@@ -27,6 +23,7 @@ final class CeltFrameEncoder
     private int $channels;
     private CeltAnalysisWindow $analysisWindow;
     private ?array $debugEnergies = null;
+    private int $lastCodedBands = 0;
 
     private const ENERGY_MODEL_LM3_INTRA = [
         [22,178],[63,114],[74,82],[84,83],[92,82],[103,62],[96,72],[96,67],[101,73],[107,72],[113,55],
@@ -86,65 +83,76 @@ final class CeltFrameEncoder
 
         $analysis = $this->analysisWindow->frame($pcm);
         $spectrum = CeltMdctEncoder::forward($analysis);
-        $energies = [];
+        // Band energies in log2(amplitude) units relative to MEAN_ENERGY,
+        // matching amp2Log2() + eMeans subtraction in opus-main/celt/quant_bands.c.
+        $floatEnergy = [];
+        $rawBandE = [];  // Linear energy for normalisation (compute_band_energies)
         for ($band = 0; $band < 21; $band++) {
             $start = CeltBitAllocation::BAND_EDGES[$band] << 3;
             $length = CeltBitAllocation::BAND_WIDTHS[$band] << 3;
-            $sum = 1.0e-12;
+            $sum = 1.0e-27;
             for ($i = 0; $i < $length; $i++) $sum += $spectrum[$start + $i] ** 2;
-            $energies[$band] = (int) max(-28, min(28, round(log(sqrt($sum), 2) - self::MEAN_ENERGY[$band] + 1.25)));
+            $rawBandE[$band] = sqrt($sum);
+            $floatEnergy[$band] = log($rawBandE[$band], 2) - self::MEAN_ENERGY[$band];
         }
-        $this->debugEnergies = $energies;
-
+        // 128 kb/s at 48 kHz with a 20 ms frame is 320 bytes per CELT frame.
+        $targetBytes = 320;
+        $budget = $targetBytes * 8;
         $encoder = new RangeEncoder();
-        $this->encodeHeader($encoder, $energies);
-        // Keep the profile deliberately fixed. The allocation decoder is the
-        // normative source of the per-band pulse/fine-bit decisions.
-        // 128 kb/s at 48 kHz with a 20 ms frame is 320 bytes. Using the
-        // maximum 1275-byte CELT payload over-allocates PVQ pulses and can
-        // make the PHP encoder spend an excessive amount of time quantizing.
-        $targetBytes = 400;
-        // 固定参数验证路径：暂不调用 allocationForBudget()，避免编码前重复构造
-        // RangeDecoder 探测。先只编码前 8 个频带，每个频带使用极少量 PVQ
-        // 比特；该路径用于验证单帧位流顺序，不代表最终码率分配。
-        $allocation = $this->allocationForBudget($energies, $targetBytes * 8);
-        $allocation['_totalBits'] = $targetBytes * 8;
-        $bandResult = CeltBandsEncoder::encode($encoder, $spectrum, $allocation, 3, false);
-        $n1Signs = $bandResult['n1Signs'];
-        /*
-        for ($band = 0; $band < $allocation['coded']; $band++) {
-            $n = CeltBitAllocation::BAND_WIDTHS[$band] << 3;
-            $bits = $allocation['pulses'][$band];
-            $q = CeltTables::bitsToPulses($band, 3, $bits);
-            $k = CeltTables::pulseCount($q);
-            if ($n === 1) {
-                if ($bits >= 8) $n1Signs[] = $spectrum[CeltBitAllocation::BAND_EDGES[$band] << 3] < 0 ? 1 : 0;
-                continue;
-            }
-            if ($k > 0) {
-                $offset = CeltBitAllocation::BAND_EDGES[$band] << 3;
-                $values = array_slice($spectrum, $offset, $n);
-                $norm = sqrt(max(1.0e-20, array_sum(array_map(static fn(float $v): float => $v * $v, $values))));
-                $target = array_map(static fn(float $v): float => $v / $norm, $values);
-                $target = CeltPvq::expRotation($target, 1, $k, $allocation['spread'], true, true);
-                CeltPvqEncoder::encode($encoder, $this->quantizeValues($target, $k), $k);
-            }
-        }
-        */
-        // 原始位从帧尾按解码消费顺序读取：fine、n=1 符号、anti-collapse、final。
+        // Encode silence/postfilter/transient/intra flags, then coarse energy
+        // with budget guards (quant_coarse_energy_impl), then TF/spread/dynalloc/trim.
+        $coarseError = $this->encodeHeader($encoder, $floatEnergy, $budget);
+        // The allocation runs on the real entropy coder: it performs the
+        // normative bisections and emits the coded-bands stop/skip bit(s).
+        $allocation = CeltBitAllocation::encode($encoder, 3, 1, $budget, $this->lastCodedBands);
+        $this->lastCodedBands = min($this->lastCodedBands + 1, max($this->lastCodedBands - 1, $allocation['coded']));
+        // Fine energy raw bits are written BEFORE the PVQ band stream
+        // (quant_fine_energy, quant_bands.c). Encode the real residual q2.
         for ($band = 0; $band < 21; $band++) {
             $bits = $allocation['fine'][$band];
-            if ($bits > 0) $encoder->encodeBits(1 << ($bits - 1), $bits);
+            if ($bits <= 0) continue;
+            if ($encoder->tell() + $bits > $budget) continue;
+            $levels = 1 << $bits;
+            $q2 = (int) floor(($coarseError[$band] + 0.5) * $levels);
+            $q2 = max(0, min($levels - 1, $q2));
+            $encoder->encodeBits($q2, $bits);
+            $offset = ($q2 + 0.5) * (1.0 / (1 << ($bits + 1))) - 0.5;
+            $coarseError[$band] -= $offset;
         }
-        foreach ($n1Signs as $sign) $encoder->encodeBits($sign, 1);
-        if ($allocation['anti'] !== 0) $encoder->encodeBits(0, 1);
-        for ($pass = 0; $pass < 2; $pass++) {
-            for ($band = 0; $band < 21; $band++) {
-                if ($allocation['priority'][$band] === $pass && $allocation['fine'][$band] < 8) $encoder->encodeBits(0, 1);
+        $allocation['_totalBits'] = $budget;
+        
+        // Normalise bands: divide spectrum by raw (unquantized) energy (bands.c:178-180).
+        // C reference uses bandE from compute_band_energies(), NOT quantized energy.
+        // Decoder will denormalise using quantized energy to restore amplitude.
+        $normalizedSpectrum = [];
+        for ($band = 0; $band < 21; $band++) {
+            $start = CeltBitAllocation::BAND_EDGES[$band] << 3;
+            $length = CeltBitAllocation::BAND_WIDTHS[$band] << 3;
+            $g = 1.0 / (1e-27 + $rawBandE[$band]);
+            for ($i = 0; $i < $length; $i++) {
+                $normalizedSpectrum[] = $spectrum[$start + $i] * $g;
             }
         }
-        $frame = $encoder->finish($targetBytes);
-        return $frame;
+        
+        $bandResult = CeltBandsEncoder::encode($encoder, $normalizedSpectrum, $allocation, 3, false);
+        // LM=3 never has N=1 bands, so the n=1 sign queue is always empty;
+        // every band receives pulses, hence no anti-collapse bits either.
+        foreach ($bandResult['n1Signs'] as $sign) $encoder->encodeBits($sign, 1);
+        // Spend the remaining raw bits on one-bit energy refinements, gated by
+        // the same bits_left budget as quant_energy_finalise() in quant_bands.c.
+        // Use tellFrac() (1/8-bit precision) and reserve 1 byte of headroom for
+        // the range coder's final carry/remainder propagation (ec_enc_done).
+        $bitsLeftFrac = ($budget << 3) - $encoder->tellFrac() - 8;
+        for ($pass = 0; $pass < 2; $pass++) {
+            for ($band = 0; $band < 21 && $bitsLeftFrac >= 8; $band++) {
+                if ($allocation['fine'][$band] >= 8 || $allocation['priority'][$band] !== $pass) continue;
+                $q2 = $coarseError[$band] < 0.0 ? 0 : 1;
+                $encoder->encodeBits($q2, 1);
+                $coarseError[$band] -= ($q2 - 0.5) * (1.0 / (1 << ($allocation['fine'][$band] + 1)));
+                $bitsLeftFrac -= 8;
+            }
+        }
+        return $encoder->finish($targetBytes);
     }
 
     public function debugEnergies(): ?array
@@ -152,7 +160,13 @@ final class CeltFrameEncoder
         return $this->debugEnergies;
     }
 
-    private function encodeHeader(RangeEncoder $encoder, array $energies): void
+    /**
+     * Encode silence/postfilter/transient/intra, coarse energy (with budget
+     * guards from quant_coarse_energy_impl), TF/spread/dynalloc/trim.
+     *
+     * @return float[] Coarse energy quantization errors per band.
+     */
+    private function encodeHeader(RangeEncoder $encoder, array $floatEnergy, int $budget): array
     {
         // The first bit distinguishes the CELT silence packet.
         $encoder->encodeBitLogp(0, 15);
@@ -160,20 +174,58 @@ final class CeltFrameEncoder
         $encoder->encodeBitLogp(0, 1);
         $encoder->encodeBitLogp(0, 3);
         $encoder->encodeBitLogp(1, 3);
+
+        // Coarse energy encoding with budget guards, faithful port of
+        // quant_coarse_energy_impl() in opus-main/celt/quant_bands.c.
+        // For intra mode: coef=0, beta=beta_intra(~0.85).
+        // Prediction update: prev += q - beta*q = q*(1-beta).
+        $coarseError = [];
+        $deltas = [];
         $prediction = 0.0;
-        foreach ($energies as $band => $energy) {
-            [$probability, $decay] = self::ENERGY_MODEL_LM3_INTRA[$band];
-            $delta = (int) round($energy - $prediction);
-            $encoder->encodeLaplace($delta, $probability << 7, $decay << 6);
+        $end = 21;
+        for ($band = 0; $band < $end; $band++) {
+            $f = $floatEnergy[$band] - $prediction;
+            $delta = (int) floor(0.5 + $f);
+            // Budget guards: clamp qi when running low on bits.
+            $tell = $encoder->tell();
+            $bitsLeft = $budget - $tell - 3 * ($end - $band);
+            if ($band !== 0 && $bitsLeft < 30) {
+                if ($bitsLeft < 24) $delta = min(1, $delta);
+                if ($bitsLeft < 16) $delta = max(-1, $delta);
+            }
+            // Fallback encoding chain based on remaining budget.
+            if ($budget - $tell >= 15) {
+                [$probability, $decay] = self::ENERGY_MODEL_LM3_INTRA[$band];
+                $encoder->encodeLaplace($delta, $probability << 7, $decay << 6);
+            } elseif ($budget - $tell >= 2) {
+                $delta = max(-1, min(1, $delta));
+                $symbol = (2 * $delta) ^ -((int) ($delta < 0));
+                $encoder->encodeCdf([2, 1, 0], $symbol, 2);
+            } elseif ($budget - $tell >= 1) {
+                $delta = min(0, $delta);
+                $encoder->encodeBitLogp(-$delta, 1);
+            } else {
+                $delta = -1;
+            }
+            $coarseError[$band] = $f - $delta;
+            $deltas[$band] = $delta;
             $prediction += self::INTRA_BETA * $delta;
         }
+        $this->debugEnergies = $deltas;
+
+        // TF flags (all zero for non-transient LM=3).
         for ($band = 0; $band < 21; $band++) {
             $encoder->encodeBitLogp(0, $band === 0 ? 4 : 5);
         }
+        // Spread (value 2 = normal).
         $encoder->encodeCdf([25, 23, 2, 0], 2, 5);
+        // Dynalloc (no boosts: one 0-bit per band).
         for ($band = 0; $band < 21; $band++) $encoder->encodeBitLogp(0, 6);
+        // Trim (value 5 = center).
         $encoder->encodeCdf([126, 124, 119, 109, 87, 41, 19, 9, 4, 2, 0], 5, 7);
-        for ($band = 20; $band >= 1; $band--) $encoder->encodeBitLogp(0, 1);
+        // The coded-bands skip/stop bit(s) are emitted normatively by
+        // CeltBitAllocation::encode() right after this header (see rate.c).
+        return $coarseError;
     }
 
     private function allocationForBudget(array $energies, int $budget): array

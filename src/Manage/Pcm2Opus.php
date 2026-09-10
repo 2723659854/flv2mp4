@@ -121,9 +121,7 @@ final class Pcm2Opus
         }
     }
 
-    /**
-     * @return float[]
-     */
+    /** @return float[] */
     private function decodeS16le(string $data): array
     {
         $samples = [];

@@ -70,8 +70,11 @@ final class CeltBandsEncoder
         while ($ctx->remaining < 0 && $q > 0) { $ctx->remaining += $cost; $q--; $cost = CeltTables::pulsesToBits($ctx->band, $lm, $q); $ctx->remaining -= $cost; }
         if ($q <= 0) return ['vector' => array_fill(0, $n, 0.0), 'mask' => 0];
         $k = CeltTables::pulseCount($q); $rotated = CeltPvq::expRotation($target, $blocks, $k, $ctx->spread, true, true); $vector = self::search($rotated, $k); $actual = array_sum(array_map(static fn(int $v): int => abs($v), $vector)); if ($actual !== $k) $vector[0] += $vector[0] < 0 ? -($k - $actual) : ($k - $actual); CeltPvqEncoder::encode($ctx->encoder, $vector, $k);
-        $norm = sqrt(max(1, array_sum(array_map(static fn(int $v): int => $v * $v, $vector))));
-        return ['vector' => array_map(static fn(int $v): float => $gain * $v / $norm, $vector), 'mask' => 1];
+        // Rotate back to original domain (inverse rotation) before normalization
+        $vectorFloat = array_map('floatval', $vector);
+        $vectorFloat = CeltPvq::expRotation($vectorFloat, $blocks, $k, $ctx->spread, false, true);
+        $norm = sqrt(max(1, array_sum(array_map(static fn(float $v): float => $v * $v, $vectorFloat))));
+        return ['vector' => array_map(static fn(float $v): float => $gain * $v / $norm, $vectorFloat), 'mask' => 1];
     }
 
     private static function theta(stdClass $ctx, array $target, int $n, int $b, int $blocks, int $b0, int $lm, bool $stereo, int &$fill): array
@@ -99,7 +102,7 @@ final class CeltBandsEncoder
         }
 
         $out = array_fill(0, $count, 0);
-        $double = array_fill(0, $count, 0.0);
+        $y = array_fill(0, $count, 0.0);
         $xy = 0.0;
         $yy = 0.0;
         $remaining = $k;
@@ -108,10 +111,11 @@ final class CeltBandsEncoder
             for ($i = 0; $i < $count; $i++) {
                 $value = (int) floor($absolute[$i] * $scale);
                 $out[$i] = $value;
-                $double[$i] = 2.0 * $value;
                 $remaining -= $value;
                 $xy += $absolute[$i] * $value;
                 $yy += $value * $value;
+                // C implementation: y[j] *= 2 (line 279)
+                $y[$i] = 2.0 * $value;
             }
         }
 
@@ -121,7 +125,9 @@ final class CeltBandsEncoder
             $bestDenominator = 1.0;
             foreach ($absolute as $i => $value) {
                 $numerator = ($xy + $value) ** 2;
-                $denominator = $yy + $double[$i] + 1.0;
+                // C implementation line 322/334: Ryy = ADD16(yy, y[j])
+                // where y[j] has already been multiplied by 2
+                $denominator = $yy + $y[$i] + 1.0;
                 if ($numerator * $bestDenominator > $bestNumerator * $denominator) {
                     $bestNumerator = $numerator;
                     $bestDenominator = $denominator;
@@ -129,8 +135,10 @@ final class CeltBandsEncoder
                 }
             }
             $xy += $absolute[$best];
-            $yy += $double[$best] + 1.0;
-            $double[$best] += 2.0;
+            // C implementation line 356: yy = ADD16(yy, y[best_id])
+            $yy += $y[$best] + 1.0;
+            // C implementation line 360: y[best_id] += 2
+            $y[$best] += 2.0;
             $out[$best]++;
         }
 
