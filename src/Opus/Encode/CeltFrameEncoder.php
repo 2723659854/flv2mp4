@@ -20,10 +20,9 @@ final class CeltFrameEncoder
         4.4375, 4.875, 4.625, 4.3125, 4.5, 4.375, 4.625, 4.75, 4.4375, 3.75,
     ];
 
-    private int $channels;
+    private CeltEncoderState $state;
     private CeltAnalysisWindow $analysisWindow;
     private ?array $debugEnergies = null;
-    private int $lastCodedBands = 0;
 
     private const ENERGY_MODEL_LM3_INTRA = [
         [22,178],[63,114],[74,82],[84,83],[92,82],[103,62],[96,72],[96,67],[101,73],[107,72],[113,55],
@@ -31,19 +30,25 @@ final class CeltFrameEncoder
     ];
 
     private const INTRA_BETA = 1 - 4915 / 32768;
+    private const INTER_ALPHA = 0.5;
+    private const INTER_BETA = 1 - 6554 / 32768;
+    private const ENERGY_MODEL_LM3_INTER = [
+        [42,121],[96,66],[108,43],[111,40],[117,44],[123,32],[120,36],[119,33],[127,33],[134,34],[139,21],
+        [147,23],[152,20],[158,25],[154,26],[166,21],[173,16],[184,13],[184,10],[150,13],[139,15],
+    ];
 
-    public function __construct(int $channels = 2)
+    public function __construct(int $channels = 1)
     {
-        if ($channels !== 1 && $channels !== 2) {
-            throw new InvalidArgumentException('CELT encoder supports only mono or stereo');
+        if ($channels !== 1) {
+            throw new InvalidArgumentException('CELT encoder supports only mono');
         }
-        $this->channels = $channels;
+        $this->state = new CeltEncoderState($channels);
         $this->analysisWindow = new CeltAnalysisWindow();
     }
 
     public function channels(): int
     {
-        return $this->channels;
+        return $this->state->channels;
     }
 
     public function sampleRate(): int
@@ -58,7 +63,7 @@ final class CeltFrameEncoder
      */
     public function encodeFrame(array $pcm): string
     {
-        $expected = self::FRAME_SAMPLES * $this->channels;
+        $expected = self::FRAME_SAMPLES * $this->state->channels;
         if (count($pcm) !== $expected) {
             throw new InvalidArgumentException(sprintf(
                 'CELT frame must contain %d interleaved float samples, got %d',
@@ -66,6 +71,8 @@ final class CeltFrameEncoder
                 count($pcm)
             ));
         }
+        $this->state->stages = [];
+        $this->state->stageDiagnostics = [];
         foreach ($pcm as $sample) {
             if (!is_float($sample) && !is_int($sample)) {
                 throw new InvalidArgumentException('CELT PCM samples must be finite numbers');
@@ -76,13 +83,34 @@ final class CeltFrameEncoder
         }
 
         if ($this->isSilent($pcm)) {
+            $this->state->oldEBands = array_fill(0, 21, -28.0);
+            $this->state->oldLogE = array_fill(0, 21, -28.0);
+            $this->state->oldLogE2 = array_fill(0, 21, -28.0);
+            $this->state->energyError = array_fill(0, 21, 0.0);
             $silent = new RangeEncoder();
             $silent->encodeBitLogp(1, 15);
             return $silent->finish();
         }
 
-        $analysis = $this->analysisWindow->frame($pcm);
+        $analysisPcm = [];
+        for ($channel = 0; $channel < $this->state->channels; $channel++) {
+            $memory = $this->state->preemph_memE[$channel];
+            for ($i = $channel; $i < count($pcm); $i += $this->state->channels) {
+                $sample = (float) $pcm[$i];
+                $analysisPcm[$i] = $sample - $memory;
+                $memory = 0.8500061035 * $sample;
+            }
+            $this->state->preemph_memE[$channel] = $memory;
+        }
+        $analysis = $this->analysisWindow->frame($analysisPcm);
+        $this->state->analysisHistory[] = ['preemphasized' => $analysisPcm, 'windowed' => $analysis];
+        if (count($this->state->analysisHistory) > 2) array_shift($this->state->analysisHistory);
         $spectrum = CeltMdctEncoder::forward($analysis);
+        $this->state->stages = [
+            'preemphasis' => $analysisPcm,
+            'window_mdct_input' => $analysis,
+            'mdct' => $spectrum,
+        ];
         // Band energies in log2(amplitude) units relative to MEAN_ENERGY,
         // matching amp2Log2() + eMeans subtraction in opus-main/celt/quant_bands.c.
         $floatEnergy = [];
@@ -95,20 +123,29 @@ final class CeltFrameEncoder
             $rawBandE[$band] = sqrt($sum);
             $floatEnergy[$band] = log($rawBandE[$band], 2) - self::MEAN_ENERGY[$band];
         }
+        $this->state->stages['bandE'] = $rawBandE;
+        $this->state->stages['bandLogE'] = $floatEnergy;
         // 128 kb/s at 48 kHz with a 20 ms frame is 320 bytes per CELT frame.
         $targetBytes = 320;
         $budget = $targetBytes * 8;
         $encoder = new RangeEncoder();
         // Encode silence/postfilter/transient/intra flags, then coarse energy
         // with budget guards (quant_coarse_energy_impl), then TF/spread/dynalloc/trim.
+        // Encode the header against the complete frame bit budget.
         $coarseError = $this->encodeHeader($encoder, $floatEnergy, $budget);
+        $reconstructed = $this->state->oldEBands;
+        $this->state->stages['coarse_quantized_energy'] = [
+            'error' => $coarseError,
+            'reconstructed' => $this->state->oldEBands,
+        ];
         // The allocation runs on the real entropy coder: it performs the
         // normative bisections and emits the coded-bands stop/skip bit(s).
-        $allocation = CeltBitAllocation::encode($encoder, 3, 1, $budget, $this->lastCodedBands);
-        if ($this->lastCodedBands !== 0) {
-            $this->lastCodedBands = min($this->lastCodedBands + 1, max($this->lastCodedBands - 1, $allocation['coded']));
+        $allocation = CeltBitAllocation::encode($encoder, 3, 1, $budget, $this->state->lastCodedBands);
+        $this->state->stages['allocation'] = $allocation;
+        if ($this->state->lastCodedBands !== 0) {
+            $this->state->lastCodedBands = min($this->state->lastCodedBands + 1, max($this->state->lastCodedBands - 1, $allocation['coded']));
         } else {
-            $this->lastCodedBands = $allocation['coded'];
+            $this->state->lastCodedBands = $allocation['coded'];
         }
         // Fine energy raw bits are written BEFORE the PVQ band stream
         // (quant_fine_energy, quant_bands.c). Encode the real residual q2.
@@ -120,9 +157,11 @@ final class CeltFrameEncoder
             $q2 = (int) floor(($coarseError[$band] + 0.5) * $levels);
             $q2 = max(0, min($levels - 1, $q2));
             $encoder->encodeBits($q2, $bits);
-            $offset = ($q2 + 0.5) * (1.0 / (1 << ($bits + 1))) - 0.5;
+            $offset = ($q2 + 0.5) * (1.0 / (1 << $bits)) - 0.5;
             $coarseError[$band] -= $offset;
+            $reconstructed[$band] += $offset;
         }
+        $this->state->stages['fine_energy'] = ['error' => $coarseError, 'reconstructed' => $reconstructed];
         $allocation['_totalBits'] = $budget;
         
         // Normalise bands: divide spectrum by raw (unquantized) energy (bands.c:178-180).
@@ -138,7 +177,9 @@ final class CeltFrameEncoder
             }
         }
         
+        $this->state->stages['normalized_bands'] = $normalizedSpectrum;
         $bandResult = CeltBandsEncoder::encode($encoder, $normalizedSpectrum, $allocation, 3, false);
+        $this->state->stages['pvq_lowband'] = $bandResult;
         // LM=3 never has N=1 bands, so the n=1 sign queue is always empty;
         // every band receives pulses, hence no anti-collapse bits either.
         foreach ($bandResult['n1Signs'] as $sign) $encoder->encodeBits($sign, 1);
@@ -152,11 +193,64 @@ final class CeltFrameEncoder
                 if ($allocation['fine'][$band] >= 8 || $allocation['priority'][$band] !== $pass) continue;
                 $q2 = $coarseError[$band] < 0.0 ? 0 : 1;
                 $encoder->encodeBits($q2, 1);
-                $coarseError[$band] -= ($q2 - 0.5) * (1.0 / (1 << ($allocation['fine'][$band] + 1)));
+                $offset = ($q2 - 0.5) * (1.0 / (1 << ($allocation['fine'][$band] + 1)));
+                $coarseError[$band] -= $offset;
+                $reconstructed[$band] += $offset;
                 $bitsLeftFrac -= 8;
             }
         }
+        $this->state->energyError = array_map(static fn(float $error): float => max(-0.5, min(0.5, $error)), $coarseError);
+        $this->state->oldEBands = $reconstructed;
+        $this->state->oldLogE2 = $this->state->oldLogE;
+        $this->state->oldLogE = $this->state->oldEBands;
+        $this->state->stages['final_energy'] = [
+            'error' => $coarseError,
+            'reconstructed' => $reconstructed,
+            'energy_error' => $this->state->energyError,
+        ];
+        $this->state->rng = $encoder->tellFrac();
         return $encoder->finish($targetBytes);
+    }
+
+    /** @return array<string,mixed> */
+    public function debugStages(): array
+    {
+        return $this->state->stages;
+    }
+
+    /**
+     * Compare deterministic stage vectors with reference dumps supplied by a caller.
+     * No claim is made that a reference encoder was executed.
+     *
+     * @param array<string,array<int,int|float>> $reference
+     * @return array<string,array{maxAbs:float,meanAbs:float,mismatches:int}>
+     */
+    public function compareStages(array $reference, float $tolerance = 1.0e-6): array
+    {
+        $result = [];
+        foreach ($reference as $stage => $expected) {
+            $actual = $this->state->stages[$stage] ?? null;
+            if (!is_array($actual)) {
+                $result[$stage] = ['maxAbs' => INF, 'meanAbs' => INF, 'mismatches' => count($expected)];
+                continue;
+            }
+            $actual = array_values($actual);
+            $max = 0.0; $sum = 0.0; $mismatches = 0;
+            foreach ($expected as $index => $value) {
+                $delta = abs((float) ($actual[$index] ?? 0.0) - (float) $value);
+                $max = max($max, $delta); $sum += $delta;
+                if ($delta > $tolerance) $mismatches++;
+            }
+            $result[$stage] = ['maxAbs' => $max, 'meanAbs' => $expected === [] ? 0.0 : $sum / count($expected), 'mismatches' => $mismatches];
+        }
+        $this->state->stageDiagnostics = $result;
+        return $result;
+    }
+
+    /** @return array<string,array{maxAbs:float,meanAbs:float,mismatches:int}> */
+    public function stageDiagnostics(): array
+    {
+        return $this->state->stageDiagnostics;
     }
 
     public function debugEnergies(): ?array
@@ -177,7 +271,6 @@ final class CeltFrameEncoder
         // Then mirror CeltFrameDecoder::decodePostfilter(), transient, intra.
         $encoder->encodeBitLogp(0, 1);
         $encoder->encodeBitLogp(0, 3);
-        $encoder->encodeBitLogp(1, 3);
 
         // Coarse energy encoding with budget guards, faithful port of
         // quant_coarse_energy_impl() in opus-main/celt/quant_bands.c.
@@ -186,10 +279,21 @@ final class CeltFrameEncoder
         $coarseError = [];
         $deltas = [];
         $prediction = 0.0;
+        $reconstructed = [];
+        $intra = true;
+        $encoder->encodeBitLogp($intra ? 1 : 0, 3);
         $end = 21;
+        $coef = $intra ? 0.0 : 0.5;
+        $beta = $intra ? self::INTRA_BETA : self::INTER_BETA;
         for ($band = 0; $band < $end; $band++) {
-            $f = $floatEnergy[$band] - $prediction;
+            $old = max(-9.0, $this->state->oldEBands[$band]);
+            $f = $floatEnergy[$band] - $coef * $old - $prediction;
             $delta = (int) floor(0.5 + $f);
+            $decayBound = max(-28.0, $this->state->oldEBands[$band]) - 16.0;
+            if ($delta < 0 && $floatEnergy[$band] < $decayBound) {
+                $delta += (int) floor($decayBound - $floatEnergy[$band]);
+                if ($delta > 0) $delta = 0;
+            }
             // Budget guards: clamp qi when running low on bits.
             $tell = $encoder->tell();
             $bitsLeft = $budget - $tell - 3 * ($end - $band);
@@ -199,7 +303,7 @@ final class CeltFrameEncoder
             }
             // Fallback encoding chain based on remaining budget.
             if ($budget - $tell >= 15) {
-                [$probability, $decay] = self::ENERGY_MODEL_LM3_INTRA[$band];
+                [$probability, $decay] = ($intra ? self::ENERGY_MODEL_LM3_INTRA : self::ENERGY_MODEL_LM3_INTER)[$band];
                 $encoder->encodeLaplace($delta, $probability << 7, $decay << 6);
             } elseif ($budget - $tell >= 2) {
                 $delta = max(-1, min(1, $delta));
@@ -213,9 +317,12 @@ final class CeltFrameEncoder
             }
             $coarseError[$band] = $f - $delta;
             $deltas[$band] = $delta;
-            $prediction += self::INTRA_BETA * $delta;
+            $reconstructed[$band] = $coef * $old + $prediction + $delta;
+            $prediction += $beta * $delta;
+            $this->state->energyError[$band] = max(-0.5, min(0.5, $coarseError[$band]));
         }
         $this->debugEnergies = $deltas;
+        $this->state->oldEBands = $reconstructed;
 
         // TF flags (all zero for non-transient LM=3).
         for ($band = 0; $band < 21; $band++) {
@@ -230,63 +337,6 @@ final class CeltFrameEncoder
         // The coded-bands skip/stop bit(s) are emitted normatively by
         // CeltBitAllocation::encode() right after this header (see rate.c).
         return $coarseError;
-    }
-
-    private function allocationForBudget(array $energies, int $budget): array
-    {
-        $probe = new RangeEncoder();
-        $this->encodeHeader($probe, $energies);
-        $data = $probe->finish();
-        $probeBytes = intdiv($budget + 7, 8);
-        // Keep the complete range stream.  Truncating it changes the probe
-        // state, and "\\0" would add two literal bytes instead of NULs.
-        if (strlen($data) < $probeBytes) $data = str_pad($data, $probeBytes, "\0");
-        $decoder = new RangeDecoder($data);
-        $decoder->decodeBitLogp(15);
-        $decoder->decodeBitLogp(1);
-        $decoder->decodeBitLogp(3);
-        $decoder->decodeBitLogp(3);
-        $energy = new CeltEnergy();
-        $energy->decodeCoarse($decoder, 3, 1, true, strlen($data) * 8);
-        return CeltBitAllocation::decode($decoder, 3, false, 1, strlen($data) * 8);
-    }
-
-    private function quantizeValues(array $values, int $pulses): array
-    {
-        $vector = array_fill(0, count($values), 0);
-        if ($pulses <= 0) return $vector;
-        $norm = sqrt(max(1.0e-20, array_sum(array_map(static fn(float $v): float => $v * $v, $values))));
-        $target = array_map(static fn(float $v): float => $v / $norm, $values);
-        for ($pulse = 0; $pulse < $pulses; $pulse++) {
-            $best = 0;
-            $bestScore = -INF;
-            foreach ($target as $i => $value) {
-                $score = abs($value) - abs($vector[$i]) / max(1, $pulses);
-                if ($score > $bestScore) {
-                    $bestScore = $score;
-                    $best = $i;
-                }
-            }
-            $vector[$best] += $target[$best] < 0.0 ? -1 : 1;
-        }
-        return $vector;
-    }
-
-    private function quantizeBand(array $spectrum, int $band, int $dimensions, int $pulses): array
-    {
-        $offset = CeltBitAllocation::BAND_EDGES[$band] << 3;
-        $values = array_slice($spectrum, $offset, $dimensions);
-        $norm = sqrt(max(1.0e-20, array_sum(array_map(static fn(float $v): float => $v * $v, $values))));
-        $vector = array_fill(0, $dimensions, 0);
-        for ($pulse = 0; $pulse < $pulses; $pulse++) {
-            $best = 0; $score = -1.0;
-            foreach ($values as $i => $value) {
-                $candidate = abs($value) / $norm - abs($vector[$i]) / max(1, $pulses);
-                if ($candidate > $score) { $score = $candidate; $best = $i; }
-            }
-            $vector[$best] += ($values[$best] < 0.0 ? -1 : 1);
-        }
-        return $vector;
     }
 
     private function isSilent(array $pcm): bool
@@ -310,7 +360,7 @@ final class CeltFrameEncoder
         }
 
         $config = 31;
-        $toc = ($config << 3) | ($this->channels === 2 ? 4 : 0);
+        $toc = ($config << 3) | ($this->state->channels === 2 ? 4 : 0);
         return chr($toc) . $celtFrame;
     }
 

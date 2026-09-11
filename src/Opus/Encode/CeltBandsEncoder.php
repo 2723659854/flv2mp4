@@ -19,17 +19,33 @@ final class CeltBandsEncoder
         $ctx->tf = 0; $ctx->spread = $allocation['spread']; $ctx->intensity = $allocation['intensity'];
         $balance = $allocation['extra']; $totalFrac = ($allocation['_totalBits'] << 3) - $allocation['anti'];
         $collapse = array_fill(0, 42, 0); $rawSigns = [];
+        $ctx->norm = [];
+        $lowbandOffset = -1; $updateLowband = true;
         for ($band = 0; $band < 21; $band++) {
             $tell = $encoder->tellFrac(); if ($band !== 0) $balance -= $tell;
             $remaining = $totalFrac - $tell - 1; $ctx->remaining = $remaining; $ctx->band = $band; $ctx->tf = $allocation['tf'][$band];
             $n = CeltBitAllocation::BAND_WIDTHS[$band] << $lm;
             $b = $band < $allocation['coded'] ? max(0, min(16383, min($remaining + 1, $allocation['pulses'][$band] + self::sdiv($balance, min(3, $allocation['coded'] - $band))))) : 0;
             $offset = CeltBitAllocation::BAND_EDGES[$band] << $lm;
+            if (($offset - $n >= 0 || $band === 1) && ($updateLowband || $lowbandOffset < 0)) $lowbandOffset = $band;
+            if ($lowbandOffset >= 0 && $lowbandOffset < $band && ($offset - $n) < ($lowbandOffset << $lm)) $lowbandOffset = -1;
+            $effective = -1;
+            $fill = 1;
+            if ($lowbandOffset !== 0) {
+                $effective = max(0, (CeltBitAllocation::BAND_EDGES[$lowbandOffset] << $lm) - $n);
+                $fill = 0;
+                for ($j = max(0, $lowbandOffset - 1); $j < $band; $j++) $fill |= $collapse[2 * $j];
+            }
+            $lowband = $effective >= 0 && $effective + $n <= count($ctx->norm) ? array_slice($ctx->norm, $effective, $n) : null;
             $values = array_slice($spectrum, $offset, $n);
-            $result = self::quantBand($ctx, $values, $n, $b, 1, null, $lm, 1.0, (1 << 1) - 1, $rawSigns);
+            $result = self::quantBand($ctx, $values, $n, $b, 1, $lowband, $lm, 1.0, $fill, $rawSigns);
             $collapse[2 * $band] = $result['mask'];
-            if ($band < 20) $ctx->norm = array_merge($ctx->norm ?? [], array_map(static fn(float $v): float => $v * sqrt($n), $result['vector']));
+            if ($band < 20) {
+                $scale = sqrt($n);
+                for ($j = 0; $j < $n; $j++) $ctx->norm[$offset + $j] = $result['vector'][$j] * $scale;
+            }
             $balance += $allocation['pulses'][$band] + $tell;
+            $updateLowband = $b > ($n << 3);
         }
         return ['collapse' => $collapse, 'n1Signs' => $rawSigns];
     }
@@ -42,18 +58,27 @@ final class CeltBandsEncoder
         $blocks >>= $recombine; $nb <<= $recombine; $divide = 0; $tf = $ctx->tf;
         while (($nb & 1) === 0 && $tf < 0) { $fill |= $fill << $blocks; $blocks <<= 1; $nb >>= 1; $divide++; $tf++; }
         $b0 = $blocks; $nb0 = $nb;
-        if ($b0 > 1) $target = CeltPvq::deinterleaveHadamard($target, $b0, $originalBlocks === 1);
-        if ($divide > 0) for ($k = 0; $k < $divide; $k++) $target = self::haar($target, $nb << ($divide - $k - 1), $blocks >> ($k + 1));
-        $result = self::partition($ctx, $target, $n, $b, $blocks, $lm, $gain, $fill, $rawSigns);
+        if ($b0 > 1) {
+            $target = CeltPvq::deinterleaveHadamard($target, $b0, $originalBlocks === 1);
+            if ($lowband !== null) $lowband = CeltPvq::deinterleaveHadamard($lowband, $b0, $originalBlocks === 1);
+        }
+        if ($divide > 0) {
+            for ($k = 0; $k < $divide; $k++) {
+                $target = self::haar($target, $nb << ($divide - $k - 1), $blocks >> ($k + 1));
+                if ($lowband !== null) $lowband = self::haar($lowband, $nb << ($divide - $k - 1), $blocks >> ($k + 1));
+            }
+        }
+        $result = self::partition($ctx, $target, $n, $b, $blocks, $lowband, $lm, $gain, $fill, $rawSigns);
         $vector = $result['vector'];
         if ($b0 > 1) $vector = CeltPvq::interleaveHadamard($vector, $b0, $originalBlocks === 1);
+        $mask = $result['mask'];
         $nb = $nb0; $blocks = $b0;
-        for ($k = 0; $k < $divide; $k++) { $blocks >>= 1; $nb <<= 1; $vector = self::haar($vector, $nb, $blocks); }
-        for ($k = 0; $k < $recombine; $k++) { $vector = self::haar($vector, $n0 >> $k, 1 << $k); }
-        return ['vector' => $vector, 'mask' => $result['mask']];
+        for ($k = 0; $k < $divide; $k++) { $blocks >>= 1; $nb <<= 1; $vector = self::haar($vector, $nb, $blocks); $mask |= $mask >> $blocks; }
+        for ($k = 0; $k < $recombine; $k++) { $mask = self::deinterleaveMask($mask); $vector = self::haar($vector, $n0 >> $k, 1 << $k); }
+        return ['vector' => $vector, 'mask' => $mask & ((1 << ($blocks << $recombine)) - 1)];
     }
 
-    private static function partition(stdClass $ctx, array $target, int $n, int $b, int $blocks, int $lm, float $gain, int $fill, array &$rawSigns): array
+    private static function partition(stdClass $ctx, array $target, int $n, int $b, int $blocks, ?array $lowband, int $lm, float $gain, int $fill, array &$rawSigns): array
     {
         $cache = CeltTables::pulseCache($ctx->band, $lm);
         if ($lm !== -1 && $b > $cache[$cache[0]] + 12 && $n > 2) {
@@ -61,20 +86,29 @@ final class CeltBandsEncoder
             $theta = self::theta($ctx, $target, $half, $b, $blocks, $b0, $lm, false, $fill); $b = $theta['bits']; $delta = $theta['delta'];
             if ($b0 > 1 && ($theta['itheta'] & 0x3fff)) $delta = $theta['itheta'] > 8192 ? $delta - ($delta >> (4 - $lm)) : min(0, $delta + (($half << 3) >> (5 - $lm)));
             $mbits = max(0, min($b, self::sdiv($b - $delta, 2))); $sbits = $b - $mbits; $ctx->remaining -= $theta['qalloc']; $before = $ctx->remaining;
-            $a = self::partition($ctx, array_slice($target, 0, $half), $half, $mbits, $blocks, $lm, $gain * $theta['mid'], $fill, $rawSigns);
+            $low1 = $lowband === null ? null : array_slice($lowband, 0, $half);
+            $low2 = $lowband === null ? null : array_slice($lowband, $half);
+            $a = self::partition($ctx, array_slice($target, 0, $half), $half, $mbits, $blocks, $low1, $lm, $gain * $theta['mid'], $fill, $rawSigns);
             $rebalance = $mbits - ($before - $ctx->remaining); if ($rebalance > 24 && $theta['itheta'] !== 0) $sbits += $rebalance - 24;
-            $z = self::partition($ctx, array_slice($target, $half), $half, $sbits, $blocks, $lm, $gain * $theta['side'], $fill >> $blocks, $rawSigns);
+            $z = self::partition($ctx, array_slice($target, $half), $half, $sbits, $blocks, $low2, $lm, $gain * $theta['side'], $fill >> $blocks, $rawSigns);
             return ['vector' => array_merge($a['vector'], $z['vector']), 'mask' => $a['mask'] | ($z['mask'] << intdiv($b0, 2))];
         }
         $q = CeltTables::bitsToPulses($ctx->band, $lm, $b); $cost = CeltTables::pulsesToBits($ctx->band, $lm, $q); $ctx->remaining -= $cost;
         while ($ctx->remaining < 0 && $q > 0) { $ctx->remaining += $cost; $q--; $cost = CeltTables::pulsesToBits($ctx->band, $lm, $q); $ctx->remaining -= $cost; }
-        if ($q <= 0) return ['vector' => array_fill(0, $n, 0.0), 'mask' => 0];
+        if ($q <= 0) {
+            $mask = ((1 << $blocks) - 1) & $fill;
+            if ($mask === 0) return ['vector' => array_fill(0, $n, 0.0), 'mask' => 0];
+            if ($lowband === null) return ['vector' => array_fill(0, $n, 0.0), 'mask' => 0];
+            $vector = [];
+            for ($j = 0; $j < $n; $j++) $vector[] = $lowband[$j] ?? 0.0;
+            return ['vector' => self::normalize($vector, $gain), 'mask' => $fill];
+        }
         $k = CeltTables::pulseCount($q); $rotated = CeltPvq::expRotation($target, $blocks, $k, $ctx->spread, true, true); $vector = self::search($rotated, $k); CeltPvqEncoder::encode($ctx->encoder, $vector, $k);
         // Rotate back to original domain (inverse rotation) before normalization
         $vectorFloat = array_map('floatval', $vector);
         $vectorFloat = CeltPvq::expRotation($vectorFloat, $blocks, $k, $ctx->spread, false, true);
         $norm = sqrt(max(1, array_sum(array_map(static fn(float $v): float => $v * $v, $vectorFloat))));
-        return ['vector' => array_map(static fn(float $v): float => $gain * $v / $norm, $vectorFloat), 'mask' => 1];
+        return ['vector' => array_map(static fn(float $v): float => $gain * $v / $norm, $vectorFloat), 'mask' => CeltPvq::collapseMask($vector, $blocks, true)];
     }
 
     private static function theta(stdClass $ctx, array $target, int $n, int $b, int $blocks, int $b0, int $lm, bool $stereo, int &$fill): array
@@ -150,6 +184,8 @@ final class CeltBandsEncoder
         }
         return $out;
     }
+    private static function normalize(array $x, float $gain): array { $e = 0.0; foreach ($x as $v) $e += $v * $v; if ($e <= 0.0) return array_fill(0, count($x), 0.0); $scale = $gain / sqrt($e); return array_map(static fn(float $v): float => $v * $scale, $x); }
+    private static function deinterleaveMask(int $mask): int { $result = 0; for ($i = 0; $i < 4; $i++) $result |= (($mask >> (2 * $i)) & 1) << $i; return $result; }
     private static function bitInterleave(int $x): int { $r = 0; for ($i = 0; $i < 4; $i++) { $r |= (($x >> $i) & 1) << (2 * $i); } return $r; }
     private static function haar(array $x, int $n0, int $stride): array { $n0 >>= 1; for ($i = 0; $i < $stride; $i++) for ($j = 0; $j < $n0; $j++) { $a = $stride * 2 * $j + $i; $z = $stride * (2 * $j + 1) + $i; $u = $x[$a]; $v = $x[$z]; $x[$a] = ($u + $v) * M_SQRT1_2; $x[$z] = ($u - $v) * M_SQRT1_2; } return $x; }
     private static function bitexactCos(int $x): int { $x2 = (4096 + $x * $x) >> 13; $x2 = (32767 - $x2) + self::fracMul($x2, -7651 + self::fracMul($x2, 8277 + self::fracMul(-626, $x2))); return 1 + $x2; }
