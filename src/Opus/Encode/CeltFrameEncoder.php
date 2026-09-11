@@ -56,6 +56,13 @@ final class CeltFrameEncoder
         return self::SAMPLE_RATE;
     }
 
+    public function reset(): void
+    {
+        $this->state->reset();
+        $this->analysisWindow->reset();
+        $this->debugEnergies = null;
+    }
+
     /**
      * Encode one interleaved 20 ms PCM float frame into the CELT elementary payload.
      *
