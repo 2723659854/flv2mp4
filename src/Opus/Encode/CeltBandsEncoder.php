@@ -69,7 +69,7 @@ final class CeltBandsEncoder
         $q = CeltTables::bitsToPulses($ctx->band, $lm, $b); $cost = CeltTables::pulsesToBits($ctx->band, $lm, $q); $ctx->remaining -= $cost;
         while ($ctx->remaining < 0 && $q > 0) { $ctx->remaining += $cost; $q--; $cost = CeltTables::pulsesToBits($ctx->band, $lm, $q); $ctx->remaining -= $cost; }
         if ($q <= 0) return ['vector' => array_fill(0, $n, 0.0), 'mask' => 0];
-        $k = CeltTables::pulseCount($q); $rotated = CeltPvq::expRotation($target, $blocks, $k, $ctx->spread, true, true); $vector = self::search($rotated, $k); $actual = array_sum(array_map(static fn(int $v): int => abs($v), $vector)); if ($actual !== $k) $vector[0] += $vector[0] < 0 ? -($k - $actual) : ($k - $actual); CeltPvqEncoder::encode($ctx->encoder, $vector, $k);
+        $k = CeltTables::pulseCount($q); $rotated = CeltPvq::expRotation($target, $blocks, $k, $ctx->spread, true, true); $vector = self::search($rotated, $k); CeltPvqEncoder::encode($ctx->encoder, $vector, $k);
         // Rotate back to original domain (inverse rotation) before normalization
         $vectorFloat = array_map('floatval', $vector);
         $vectorFloat = CeltPvq::expRotation($vectorFloat, $blocks, $k, $ctx->spread, false, true);
@@ -95,10 +95,11 @@ final class CeltBandsEncoder
         $count = count($target);
         $absolute = array_map('abs', $target);
         $sum = array_sum($absolute);
-        if ($sum <= 1.0e-20) {
-            $out = array_fill(0, $count, 0);
-            $out[0] = $k;
-            return $out;
+        if (!($sum > 1.0e-20 && $sum < 64.0) || !is_finite($sum)) {
+            $target = array_fill(0, $count, 0.0);
+            $target[0] = 1.0;
+            $absolute = array_map('abs', $target);
+            $sum = 1.0;
         }
 
         $out = array_fill(0, $count, 0);
@@ -107,7 +108,7 @@ final class CeltBandsEncoder
         $yy = 0.0;
         $remaining = $k;
         if ($k > intdiv($count, 2)) {
-            $scale = ($k + 0.8) / $sum;
+            $scale = ($k + 0.8) / max($sum, PHP_FLOAT_MIN);
             for ($i = 0; $i < $count; $i++) {
                 $value = (int) floor($absolute[$i] * $scale);
                 $out[$i] = $value;
@@ -123,11 +124,13 @@ final class CeltBandsEncoder
             $best = 0;
             $bestNumerator = -INF;
             $bestDenominator = 1.0;
+            // C implementation line 314: the squared magnitude of the new pulse.
+            $yy += 1.0;
             foreach ($absolute as $i => $value) {
                 $numerator = ($xy + $value) ** 2;
                 // C implementation line 322/334: Ryy = ADD16(yy, y[j])
                 // where y[j] has already been multiplied by 2
-                $denominator = $yy + $y[$i] + 1.0;
+                $denominator = $yy + $y[$i];
                 if ($numerator * $bestDenominator > $bestNumerator * $denominator) {
                     $bestNumerator = $numerator;
                     $bestDenominator = $denominator;
@@ -136,7 +139,7 @@ final class CeltBandsEncoder
             }
             $xy += $absolute[$best];
             // C implementation line 356: yy = ADD16(yy, y[best_id])
-            $yy += $y[$best] + 1.0;
+            $yy += $y[$best];
             // C implementation line 360: y[best_id] += 2
             $y[$best] += 2.0;
             $out[$best]++;

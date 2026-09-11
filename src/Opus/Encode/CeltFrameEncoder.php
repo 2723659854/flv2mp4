@@ -105,7 +105,11 @@ final class CeltFrameEncoder
         // The allocation runs on the real entropy coder: it performs the
         // normative bisections and emits the coded-bands stop/skip bit(s).
         $allocation = CeltBitAllocation::encode($encoder, 3, 1, $budget, $this->lastCodedBands);
-        $this->lastCodedBands = min($this->lastCodedBands + 1, max($this->lastCodedBands - 1, $allocation['coded']));
+        if ($this->lastCodedBands !== 0) {
+            $this->lastCodedBands = min($this->lastCodedBands + 1, max($this->lastCodedBands - 1, $allocation['coded']));
+        } else {
+            $this->lastCodedBands = $allocation['coded'];
+        }
         // Fine energy raw bits are written BEFORE the PVQ band stream
         // (quant_fine_energy, quant_bands.c). Encode the real residual q2.
         for ($band = 0; $band < 21; $band++) {

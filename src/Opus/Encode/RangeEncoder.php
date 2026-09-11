@@ -230,24 +230,8 @@ final class RangeEncoder
         if ($targetBytes !== null) {
             $rangeLen = strlen($rangeOutput);
             $rawLen = count($rawBytes);
-            
-            // If leftover bits exist, they OR into the boundary byte.
-             // C reference (entenc.c:297-301): when offs+end_offs >= storage,
-             // leftover raw bits merge into buf[storage-end_offs-1].
-             if ($leftoverBits > 0) {
-                 // Merge leftover bits into the boundary byte (last in $rawBytes array,
-                 // which becomes first when reversed to form the tail stream).
-                 if ($rawLen > 0) {
-                     // OR into the last complete byte (boundary byte between range and raw).
-                     $rawBytes[$rawLen - 1] |= $leftoverWindow << (8 - $leftoverBits);
-                 } else {
-                     // No complete raw bytes; leftover bits go into the padding area.
-                     // This case never happens in practice (fine energy always produces >8 bits).
-                     $rawBytes[] = $leftoverWindow;
-                 }
-             }
-             
-             if ($rangeLen + $rawLen > $targetBytes) {
+
+            if ($rangeLen + $rawLen > $targetBytes) {
                  throw new RuntimeException(sprintf(
                      'Encoded frame exceeds target size: range=%d raw=%d leftover=%d total=%d target=%d',
                      $rangeLen, $rawLen, $leftoverBits, $rangeLen + $rawLen, $targetBytes
@@ -256,13 +240,20 @@ final class RangeEncoder
             
             $rawOutput = implode('', array_map('chr', array_reverse($rawBytes)));
             $rangeBytes = $targetBytes - strlen($rawOutput);
-            if ($rangeBytes < $rangeLen) {
+            if ($rangeBytes < $rangeLen || $rangeBytes < 1) {
                 throw new RuntimeException('Encoded frame exceeds target size');
             }
             $rangeOutput = str_pad($rangeOutput, $rangeBytes, "\0");
+            if ($leftoverBits > 0) {
+                $last = strlen($rangeOutput) - 1;
+                $rangeOutput[$last] = chr(ord($rangeOutput[$last]) | $leftoverWindow);
+            }
             $this->output = $rangeOutput . $rawOutput;
         } else {
-            if ($leftoverBits > 0) $rawBytes[] = $leftoverWindow;
+            if ($leftoverBits > 0 && $rangeOutput !== '') {
+                $last = strlen($rangeOutput) - 1;
+                $rangeOutput[$last] = chr(ord($rangeOutput[$last]) | $leftoverWindow);
+            }
             $this->output = $rangeOutput . implode('', array_map('chr', array_reverse($rawBytes)));
         }
         
