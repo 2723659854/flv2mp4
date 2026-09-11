@@ -29,7 +29,7 @@ final class CeltFrameEncoder
         [118,52],[125,52],[118,52],[117,55],[135,49],[137,39],[157,32],[145,29],[97,33],[77,40],
     ];
 
-    private const INTRA_BETA = 1 - 4915 / 32768;
+    private const INTRA_BETA = 4915 / 32768;
     private const INTER_ALPHA = 0.5;
     private const INTER_BETA = 1 - 6554 / 32768;
     private const ENERGY_MODEL_LM3_INTER = [
@@ -128,7 +128,9 @@ final class CeltFrameEncoder
             $sum = 1.0e-27;
             for ($i = 0; $i < $length; $i++) $sum += $spectrum[$start + $i] ** 2;
             $rawBandE[$band] = sqrt($sum);
-            $floatEnergy[$band] = log($rawBandE[$band], 2) - self::MEAN_ENERGY[$band];
+            // quant_coarse_energy_impl receives absolute log2 amplitude; eMeans
+            // is applied by the model, not subtracted from the transmitted energy.
+            $floatEnergy[$band] = log($rawBandE[$band], 2);
         }
         $this->state->stages['bandE'] = $rawBandE;
         $this->state->stages['bandLogE'] = $floatEnergy;
@@ -192,18 +194,22 @@ final class CeltFrameEncoder
         foreach ($bandResult['n1Signs'] as $sign) $encoder->encodeBits($sign, 1);
         // Spend the remaining raw bits on one-bit energy refinements, gated by
         // the same bits_left budget as quant_energy_finalise() in quant_bands.c.
-        // Use tellFrac() (1/8-bit precision) and reserve 1 byte of headroom for
-        // the range coder's final carry/remainder propagation (ec_enc_done).
-        $bitsLeftFrac = ($budget << 3) - $encoder->tellFrac() - 8;
+        // quant_energy_finalise() uses the real integer bit budget.
+        // quant_energy_finalise() receives the actual number of bits left;
+        // do not reserve a fixed bit, since the range coder's tell is the
+        // authoritative budget boundary.
+        $bitsLeft = max(0, $budget - $encoder->tell());
         for ($pass = 0; $pass < 2; $pass++) {
-            for ($band = 0; $band < 21 && $bitsLeftFrac >= 8; $band++) {
+            for ($band = 0; $band < 21 && $bitsLeft >= 1; $band++) {
                 if ($allocation['fine'][$band] >= 8 || $allocation['priority'][$band] !== $pass) continue;
                 $q2 = $coarseError[$band] < 0.0 ? 0 : 1;
+                if ($encoder->tell() + 1 > $budget) break;
                 $encoder->encodeBits($q2, 1);
-                $offset = ($q2 - 0.5) * (1.0 / (1 << ($allocation['fine'][$band] + 1)));
+                $fineBits = $allocation['fine'][$band];
+                $offset = ($q2 - 0.5) * (1.0 / (1 << ($fineBits + 1)));
                 $coarseError[$band] -= $offset;
                 $reconstructed[$band] += $offset;
-                $bitsLeftFrac -= 8;
+                $bitsLeft--;
             }
         }
         $this->state->energyError = array_map(static fn(float $error): float => max(-0.5, min(0.5, $error)), $coarseError);
@@ -215,8 +221,9 @@ final class CeltFrameEncoder
             'reconstructed' => $reconstructed,
             'energy_error' => $this->state->energyError,
         ];
-        $this->state->rng = $encoder->tellFrac();
-        return $encoder->finish($targetBytes);
+        $payload = $encoder->finish($targetBytes);
+        $this->state->rng = $encoder->tell();
+        return $payload;
     }
 
     /** @return array<string,mixed> */
@@ -311,7 +318,7 @@ final class CeltFrameEncoder
             // Fallback encoding chain based on remaining budget.
             if ($budget - $tell >= 15) {
                 [$probability, $decay] = ($intra ? self::ENERGY_MODEL_LM3_INTRA : self::ENERGY_MODEL_LM3_INTER)[$band];
-                $encoder->encodeLaplace($delta, $probability << 7, $decay << 6);
+                $encoder->encodeLaplace($delta, ($probability << 7), ($decay << 6));
             } elseif ($budget - $tell >= 2) {
                 $delta = max(-1, min(1, $delta));
                 $symbol = (2 * $delta) ^ -((int) ($delta < 0));
@@ -325,7 +332,7 @@ final class CeltFrameEncoder
             $coarseError[$band] = $f - $delta;
             $deltas[$band] = $delta;
             $reconstructed[$band] = $coef * $old + $prediction + $delta;
-            $prediction += $beta * $delta;
+            $prediction += $delta - $beta * $delta;
             $this->state->energyError[$band] = max(-0.5, min(0.5, $coarseError[$band]));
         }
         $this->debugEnergies = $deltas;

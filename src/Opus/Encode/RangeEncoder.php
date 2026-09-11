@@ -24,6 +24,9 @@ final class RangeEncoder
 
     public function encode(int $low, int $high, int $total): void
     {
+        if ($this->finished) {
+            throw new RuntimeException('Cannot encode after finishing');
+        }
         if ($total < 2 || $total > 0xFFFF || $low < 0 || $low >= $high || $high > $total) {
             throw new InvalidArgumentException('Invalid range interval');
         }
@@ -35,6 +38,21 @@ final class RangeEncoder
             $this->range = self::u32($this->range - $unit * ($total - $high));
         }
         $this->normalize();
+    }
+
+    public function ec_encode(int $low, int $high, int $total): void
+    {
+        $this->encode($low, $high, $total);
+    }
+
+    public function ec_enc_bits(int $value, int $bits): void
+    {
+        $this->encodeBits($value, $bits);
+    }
+
+    public function ec_enc_icdf(int $symbol, array $inverseCdf, int $precision): void
+    {
+        $this->encodeCdf($inverseCdf, $symbol, $precision);
     }
 
     public function encodeBits(int $value, int $bits): void
@@ -169,6 +187,16 @@ final class RangeEncoder
         $this->normalize();
     }
 
+    public function ec_tell(): int
+    {
+        return $this->tell();
+    }
+
+    public function ec_tell_frac(): int
+    {
+        return $this->tellFrac();
+    }
+
     public function tell(): int
     {
         return $this->totalBits - self::ilog($this->range);
@@ -259,6 +287,30 @@ final class RangeEncoder
         
         $this->finished = true;
         return $this->output;
+    }
+
+    public function ec_enc_done(): string
+    {
+        return $this->finish();
+    }
+
+    public function getFinalRange(): int
+    {
+        return self::u32($this->value + $this->range);
+    }
+
+    public function snapshot(): array
+    {
+        return get_object_vars($this);
+    }
+
+    public function restore(array $snapshot): void
+    {
+        foreach ($snapshot as $name => $value) {
+            if (property_exists($this, $name)) {
+                $this->$name = $value;
+            }
+        }
     }
 
     public function getData(): string

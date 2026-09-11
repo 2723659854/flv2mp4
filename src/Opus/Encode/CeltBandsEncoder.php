@@ -20,7 +20,7 @@ final class CeltBandsEncoder
         $balance = $allocation['extra']; $totalFrac = ($allocation['_totalBits'] << 3) - $allocation['anti'];
         $collapse = array_fill(0, 42, 0); $rawSigns = [];
         $ctx->norm = [];
-        $lowbandOffset = -1; $updateLowband = true;
+        $lowbandOffset = 0; $updateLowband = true;
         for ($band = 0; $band < 21; $band++) {
             $tell = $encoder->tellFrac(); if ($band !== 0) $balance -= $tell;
             $remaining = $totalFrac - $tell - 1; $ctx->remaining = $remaining; $ctx->band = $band; $ctx->tf = $allocation['tf'][$band];
@@ -116,7 +116,7 @@ final class CeltBandsEncoder
         $pulseCap = CeltBitAllocation::LOG_WIDTHS[$ctx->band] + ($lm << 3); $offset = ($pulseCap >> 1) - ($stereo && $n === 2 ? 16 : 4); $n2 = 2 * $n - 1 - (($stereo && $n === 2) ? 1 : 0);
         $qb = intdiv($b + $n2 * $offset, $n2); $qb = min($b - $pulseCap - 32, $qb, 64); $qn = $qb < 4 ? 1 : ((self::EXP2_TABLE8[$qb & 7] >> (14 - ($qb >> 3))) + 1) >> 1 << 1;
         $itheta = 0; $qalloc = 0; $tell = $ctx->encoder->tellFrac();
-        if ($qn !== 1) { $energyL = 0.0; $energyR = 0.0; for ($i = 0; $i < $n; $i++) { $energyL += ($target[$i] ?? 0.0) ** 2; $energyR += ($target[$i + $n] ?? 0.0) ** 2; } $itheta = (int) round($qn * 0.5 * (1.0 + atan2(sqrt($energyR), sqrt($energyL)) / (M_PI / 2))); $itheta = max(0, min($qn, $itheta)); if ($b0 > 1) $ctx->encoder->encodeUint($itheta, $qn + 1); else $ctx->encoder->encodeTriangular($itheta, $qn); $itheta = intdiv($itheta * 16384, $qn); }
+        if ($qn !== 1) { $energyL = 0.0; $energyR = 0.0; for ($i = 0; $i < $n; $i++) { $energyL += ($target[$i] ?? 0.0) ** 2; $energyR += ($target[$i + $n] ?? 0.0) ** 2; } $itheta = (int) round($qn * atan2(sqrt($energyR), sqrt($energyL)) / (M_PI / 2)); $itheta = max(0, min($qn, $itheta)); if ($b0 > 1) $ctx->encoder->encodeUint($itheta, $qn + 1); else $ctx->encoder->encodeTriangular($itheta, $qn); $itheta = intdiv($itheta * 16384, $qn); }
         $qalloc = $ctx->encoder->tellFrac() - $tell; $b -= $qalloc;
         if ($itheta === 0) { $mid = 32767 / 32768; $side = 0.0; $fill &= (1 << $blocks) - 1; $delta = -16384; }
         elseif ($itheta === 16384) { $mid = 0.0; $side = 32767 / 32768; $fill &= ((1 << $blocks) - 1) << $blocks; $delta = 16384; }

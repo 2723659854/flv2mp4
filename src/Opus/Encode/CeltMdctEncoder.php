@@ -52,18 +52,24 @@ final class CeltMdctEncoder
             $im[$i] = $xim * $t0 + $xre * $t1;
         }
 
-        // 480 点复数 FFT（非 2 的幂，用 Bluestein 转到 1024 点 radix-2）。
+        // kiss_fft 的浮点配置 scale=1；Bluestein 的逆变换已在 radix2 中除以 M，
+        // 因而这里不能再按卷积长度或 FFT 长度重复缩放。
         self::fft480($re, $im);
 
-        // 后旋转，输出 960 个实数频谱；stride=1。
+        // mdct.c 的 post-rotate：yp1 从 out[0] 以 2*stride 前进，
+        // yp2 从 out[N2-1] 以 2*stride 后退（stride=1）。
         $out = array_fill(0, self::N2, 0.0);
+        $yp1 = 0;
+        $yp2 = self::N2 - 1;
         for ($i = 0; $i < self::N4; $i++) {
             $t0 = $trig[$i];
             $t1 = $trig[self::N4 + $i];
             $fr = $re[$i];
             $fi = $im[$i];
-            $out[2 * $i] = $fi * $t1 - $fr * $t0;
-            $out[self::N2 - 1 - 2 * $i] = $fr * $t1 + $fi * $t0;
+            $out[$yp1] = $fi * $t1 - $fr * $t0;
+            $out[$yp2] = $fr * $t1 + $fi * $t0;
+            $yp1 += 2;
+            $yp2 -= 2;
         }
         return $out;
     }
