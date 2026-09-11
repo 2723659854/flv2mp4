@@ -11,7 +11,11 @@ final class CeltEncoderState
     public int $overlap = 120;
     public int $lastCodedBands = 0;
     public int $rng = 0;
+    public float $delayedIntra = 0.0;
+    public int $consecTransient = 0;
+    public int $oldLogEBands = 21;
     public array $preemph_memE;
+    public array $inMem = [];
     public array $oldEBands;
     public array $oldLogE;
     public array $oldLogE2;
@@ -44,6 +48,10 @@ final class CeltEncoderState
         $this->energyError = array_fill(0, $this->channels * 21, 0.0);
         $this->lastCodedBands = 0;
         $this->rng = 0;
+        $this->delayedIntra = 0.0;
+        $this->consecTransient = 0;
+        $this->oldLogEBands = 21;
+        $this->inMem = [];
         $this->analysisHistory = [];
         $this->stages = [];
         $this->stageDiagnostics = [];

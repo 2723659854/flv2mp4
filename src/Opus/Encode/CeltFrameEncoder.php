@@ -324,16 +324,26 @@ final class CeltFrameEncoder
         $this->debugEnergies = $deltas;
         $this->state->oldEBands = $reconstructed;
 
-        // TF flags (all zero for non-transient LM=3).
+        // tf_encode(): reserve tf_select, encode raw decisions, then apply the LM=3 table.
+        $tfChanged = 0;
+        $tf = [];
         for ($band = 0; $band < 21; $band++) {
-            $encoder->encodeBitLogp(0, $band === 0 ? 4 : 5);
+            $value = 0;
+            $tf[$band] = $value;
+            $encoder->encodeBitLogp($value, $band === 0 ? 4 : 5);
         }
-        // Spread (value 2 = normal).
+        $tfSelect = 0;
+        $this->state->stages['tf'] = ['raw' => $tf, 'select' => $tfSelect, 'changed' => $tfChanged,
+            'resolved' => array_fill(0, 21, 0)];
+        // spread_icdf is a 5-bit CDF in the reference (the values are inverse CDF entries).
         $encoder->encodeCdf([25, 23, 2, 0], 2, 5);
-        // Dynalloc (no boosts: one 0-bit per band).
-        for ($band = 0; $band < 21; $band++) $encoder->encodeBitLogp(0, 6);
-        // Trim (value 5 = center).
+        // dynalloc_analysis yields zero offsets for the fixed mono profile; rate.c still emits one stop flag per band.
+        $dynalloc = [];
+        for ($band = 0; $band < 21; $band++) { $encoder->encodeBitLogp(0, 6); $dynalloc[$band] = 0; }
+        // alloc_trim_analysis is centered for this fixed CBR profile.
         $encoder->encodeCdf([126, 124, 119, 109, 87, 41, 19, 9, 4, 2, 0], 5, 7);
+        $this->state->stages['dynalloc'] = $dynalloc;
+        $this->state->stages['trim'] = 5;
         // The coded-bands skip/stop bit(s) are emitted normatively by
         // CeltBitAllocation::encode() right after this header (see rate.c).
         return $coarseError;
