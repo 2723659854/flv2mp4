@@ -10,7 +10,7 @@ use RuntimeException;
  * @author yanglong
  * @time 2026年8月12日17:27:57
  */
-final class RangeDecoder
+/*TEMP-final*/ class RangeDecoder
 {
     private const CODE_BOT = 0x00800000;
     private const CODE_TOP = 0x80000000;

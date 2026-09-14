@@ -112,14 +112,25 @@ final class CeltFrameEncoder
         $analysis = $this->analysisWindow->frame($analysisPcm);
         $this->state->analysisHistory[] = ['preemphasized' => $analysisPcm, 'windowed' => $analysis];
         if (count($this->state->analysisHistory) > 2) array_shift($this->state->analysisHistory);
-        $spectrum = CeltMdctEncoder::forward($analysis);
+        // CELT float builds operate in SIG units (RES2SIG = x*32768), and the
+        // forward MDCT applies the kiss-fft forward scale 1/nfft (=1/480 for
+        // N=1920) during pre-rotation (kiss_fft.c: st->scale=1.f/nfft). The
+        // decoder's backward MDCT has NO matching 1/nfft, so the transmitted
+        // band gains MUST live in this scaled domain, otherwise every decoded
+        // band comes out 20*log10(32768/480)=36.7 dB too quiet.
+        $mdctScale = 32768.0 / 480.0;
+        $spectrum = array_map(static fn($v) => $v * $mdctScale, CeltMdctEncoder::forward($analysis));
         $this->state->stages = [
             'preemphasis' => $analysisPcm,
             'window_mdct_input' => $analysis,
             'mdct' => $spectrum,
         ];
-        // Band energies in log2(amplitude) units relative to MEAN_ENERGY,
-        // matching amp2Log2() + eMeans subtraction in opus-main/celt/quant_bands.c.
+        // Band energies in log2(amplitude) units relative to eMeans,
+        // matching compute_band_energies() + amp2Log2() in opus-main/celt:
+        // bandLogE = celt_log2_db(bandE) - eMeans[i]. The decoder reconstructs
+        // the gain as 2**(transmitted_energy + MEAN_ENERGY), so the eMeans
+        // offset MUST be subtracted here (effEnd == end == 21 for LM=3 FB,
+        // hence no -14 fill for bands past effEnd).
         $floatEnergy = [];
         $rawBandE = [];  // Linear energy for normalisation (compute_band_energies)
         for ($band = 0; $band < 21; $band++) {
@@ -128,19 +139,25 @@ final class CeltFrameEncoder
             $sum = 1.0e-27;
             for ($i = 0; $i < $length; $i++) $sum += $spectrum[$start + $i] ** 2;
             $rawBandE[$band] = sqrt($sum);
-            // quant_coarse_energy_impl receives absolute log2 amplitude; eMeans
-            // is applied by the model, not subtracted from the transmitted energy.
-            $floatEnergy[$band] = log($rawBandE[$band], 2);
+            $floatEnergy[$band] = log($rawBandE[$band], 2) - self::MEAN_ENERGY[$band];
         }
         $this->state->stages['bandE'] = $rawBandE;
         $this->state->stages['bandLogE'] = $floatEnergy;
-        // 128 kb/s at 48 kHz with a 20 ms frame is 320 bytes per CELT frame.
-        $targetBytes = 320;
+        // 128 kb/s at 48 kHz with a 20 ms frame is 320 bytes TOTAL per CELT
+        // packet: 1 toc byte + 319 bytes of range-coder payload (the decoder
+        // initialises its range coder on the whole packet, so the toc serves
+        // as the initial "rem" byte and the 319 CE bytes follow it).
+        $targetBytes = 319;
         $budget = $targetBytes * 8;
         $encoder = new RangeEncoder();
         // Encode silence/postfilter/transient/intra flags, then coarse energy
         // with budget guards (quant_coarse_energy_impl), then TF/spread/dynalloc/trim.
         // Encode the header against the complete frame bit budget.
+        // Fixed profile: mono, LM=3, non-transient long blocks, so every raw
+        // tf decision is 0. With tf_changed=0 the normative tf_select_table
+        // entries are equal, hence no tf_select bit is written or read.
+        // spread is fixed to SPREAD_NORMAL(2) and alloc_trim to 5, matching
+        // both opus-main defaults and the read-only allocation profile.
         $coarseError = $this->encodeHeader($encoder, $floatEnergy, $budget);
         $reconstructed = $this->state->oldEBands;
         $this->state->stages['coarse_quantized_energy'] = [
@@ -318,7 +335,8 @@ final class CeltFrameEncoder
             // Fallback encoding chain based on remaining budget.
             if ($budget - $tell >= 15) {
                 [$probability, $decay] = ($intra ? self::ENERGY_MODEL_LM3_INTRA : self::ENERGY_MODEL_LM3_INTER)[$band];
-                $encoder->encodeLaplace($delta, ($probability << 7), ($decay << 6));
+                // C rewrites qi via the pointer; the clamped value drives error/reconstruction.
+                $delta = $encoder->encodeLaplace($delta, ($probability << 7), ($decay << 6));
             } elseif ($budget - $tell >= 2) {
                 $delta = max(-1, min(1, $delta));
                 $symbol = (2 * $delta) ^ -((int) ($delta < 0));
@@ -338,26 +356,25 @@ final class CeltFrameEncoder
         $this->debugEnergies = $deltas;
         $this->state->oldEBands = $reconstructed;
 
-        // tf_encode(): reserve tf_select, encode raw decisions, then apply the LM=3 table.
-        $tfChanged = 0;
-        $tf = [];
+        // tf_encode(): non-transient long blocks use raw tf=0 for every band
+        // (logp 4 for the first band, 5 afterwards). tf_changed stays 0 and
+        // tf_select_table[3][0] == tf_select_table[3][2], so no tf_select bit.
+        $tf = array_fill(0, 21, 0);
         for ($band = 0; $band < 21; $band++) {
-            $value = 0;
-            $tf[$band] = $value;
-            $encoder->encodeBitLogp($value, $band === 0 ? 4 : 5);
+            $encoder->encodeBitLogp(0, $band === 0 ? 4 : 5);
         }
-        $tfSelect = 0;
-        $this->state->stages['tf'] = ['raw' => $tf, 'select' => $tfSelect, 'changed' => $tfChanged,
+        $this->state->stages['tf'] = ['raw' => $tf, 'select' => 0, 'changed' => 0,
             'resolved' => array_fill(0, 21, 0)];
         // spread_icdf is a 5-bit CDF in the reference (the values are inverse CDF entries).
-        $encoder->encodeCdf([25, 23, 2, 0], 2, 5);
+        $encoder->encodeCdf([25, 23, 2, 0], 0, 5); // TEMP spread=0
         // dynalloc_analysis yields zero offsets for the fixed mono profile; rate.c still emits one stop flag per band.
         $dynalloc = [];
         for ($band = 0; $band < 21; $band++) { $encoder->encodeBitLogp(0, 6); $dynalloc[$band] = 0; }
-        // alloc_trim_analysis is centered for this fixed CBR profile.
+        // alloc_trim fixed to the neutral value 5 (trim_icdf, 7 bits).
         $encoder->encodeCdf([126, 124, 119, 109, 87, 41, 19, 9, 4, 2, 0], 5, 7);
         $this->state->stages['dynalloc'] = $dynalloc;
         $this->state->stages['trim'] = 5;
+        $this->state->stages['analysis'] = ['spread' => 2, 'trim' => 5];
         // The coded-bands skip/stop bit(s) are emitted normatively by
         // CeltBitAllocation::encode() right after this header (see rate.c).
         return $coarseError;

@@ -12,9 +12,17 @@ final class CeltBandsEncoder
 {
     private const EXP2_TABLE8 = [16384,17866,19483,21247,23170,25267,27554,30048];
 
+    /** @var array<int,array<int,array<int,array<string,int>>>> TEMP trace: frame -> band -> ordered events */
+    public static array $trace = [];
+    public static bool $traceOn = false;
+    private static int $frame = -1;
+
+    public static function resetTrace(): void { self::$trace = []; self::$frame = -1; }
+
     public static function encode(RangeEncoder $encoder, array $spectrum, array $allocation, int $lm = 3, bool $transient = false): array
     {
         if ($lm !== 3 || $transient) throw new \InvalidArgumentException('Only mono LM=3 non-transient CELT bands are supported');
+        if (self::$traceOn) self::$frame++;
         $ctx = new stdClass(); $ctx->encoder = $encoder; $ctx->remaining = 0; $ctx->band = 0;
         $ctx->tf = 0; $ctx->spread = $allocation['spread']; $ctx->intensity = $allocation['intensity'];
         $balance = $allocation['extra']; $totalFrac = ($allocation['_totalBits'] << 3) - $allocation['anti'];
@@ -26,9 +34,12 @@ final class CeltBandsEncoder
             $remaining = $totalFrac - $tell - 1; $ctx->remaining = $remaining; $ctx->band = $band; $ctx->tf = $allocation['tf'][$band];
             $n = CeltBitAllocation::BAND_WIDTHS[$band] << $lm;
             $b = $band < $allocation['coded'] ? max(0, min(16383, min($remaining + 1, $allocation['pulses'][$band] + self::sdiv($balance, min(3, $allocation['coded'] - $band))))) : 0;
+            if (self::$traceOn) self::$trace[self::$frame][] = ['ev' => 'band', 'i' => $band, 'N' => $n, 'b' => $b, 'alloc' => $allocation['pulses'][$band], 'fine' => $allocation['fine'][$band], 'coded' => $allocation['coded'], 'rem' => $remaining, 'tell' => $tell];
             $offset = CeltBitAllocation::BAND_EDGES[$band] << $lm;
-            if (($offset - $n >= 0 || $band === 1) && ($updateLowband || $lowbandOffset < 0)) $lowbandOffset = $band;
-            if ($lowbandOffset >= 0 && $lowbandOffset < $band && ($offset - $n) < ($lowbandOffset << $lm)) $lowbandOffset = -1;
+            // Matches bands.c quant_all_bands() (resynth path) and the
+            // read-only decoder CeltBands: lowband_offset updates while 0
+            // ("unassigned"); it is never invalidated to -1 in the reference.
+            if (($offset - $n >= 0 || $band === 1) && ($updateLowband || $lowbandOffset === 0)) $lowbandOffset = $band;
             $effective = -1;
             $fill = 1;
             if ($lowbandOffset !== 0) {
@@ -39,6 +50,7 @@ final class CeltBandsEncoder
             $lowband = $effective >= 0 && $effective + $n <= count($ctx->norm) ? array_slice($ctx->norm, $effective, $n) : null;
             $values = array_slice($spectrum, $offset, $n);
             $result = self::quantBand($ctx, $values, $n, $b, 1, $lowband, $lm, 1.0, $fill, $rawSigns);
+            if (self::$traceOn) self::$trace[self::$frame][] = ['ev' => 'recon', 'i' => $band, 'n' => $n, 'b' => $b, 'tgt' => $values, 'rec' => $result['vector']];
             $collapse[2 * $band] = $result['mask'];
             if ($band < 20) {
                 $scale = sqrt($n);
@@ -85,13 +97,34 @@ final class CeltBandsEncoder
             $b0 = $blocks; $half = intdiv($n, 2); $lm--; if ($blocks === 1) $fill = ($fill & 1) | ($fill << 1); $blocks = intdiv($blocks + 1, 2);
             $theta = self::theta($ctx, $target, $half, $b, $blocks, $b0, $lm, false, $fill); $b = $theta['bits']; $delta = $theta['delta'];
             if ($b0 > 1 && ($theta['itheta'] & 0x3fff)) $delta = $theta['itheta'] > 8192 ? $delta - ($delta >> (4 - $lm)) : min(0, $delta + (($half << 3) >> (5 - $lm)));
-            $mbits = max(0, min($b, self::sdiv($b - $delta, 2))); $sbits = $b - $mbits; $ctx->remaining -= $theta['qalloc']; $before = $ctx->remaining;
+            // Normative coding order from quant_partition() (bands.c 1055-1080):
+            // whichever half receives more bits is quantised FIRST; the other
+            // half inherits the bits the first half could not spend (rebalance).
+            // The decoder enforces the same order, so getting it wrong desyncs
+            // the range coder for this half and every band coded afterwards.
+            $mbits = max(0, min($b, self::sdiv($b - $delta, 2)));
+            $sbits = $b - $mbits;
+            $ctx->remaining -= $theta['qalloc'];
             $low1 = $lowband === null ? null : array_slice($lowband, 0, $half);
             $low2 = $lowband === null ? null : array_slice($lowband, $half);
-            $a = self::partition($ctx, array_slice($target, 0, $half), $half, $mbits, $blocks, $low1, $lm, $gain * $theta['mid'], $fill, $rawSigns);
-            $rebalance = $mbits - ($before - $ctx->remaining); if ($rebalance > 24 && $theta['itheta'] !== 0) $sbits += $rebalance - 24;
-            $z = self::partition($ctx, array_slice($target, $half), $half, $sbits, $blocks, $low2, $lm, $gain * $theta['side'], $fill >> $blocks, $rawSigns);
-            return ['vector' => array_merge($a['vector'], $z['vector']), 'mask' => $a['mask'] | ($z['mask'] << intdiv($b0, 2))];
+            if ($mbits >= $sbits) {
+                if (self::$traceOn) self::$trace[self::$frame][] = ['ev' => 'split', 'i' => $ctx->band, 'lm' => $lm, 'n' => $half, 'mbits' => $mbits, 'sbits' => $sbits, 'first' => 'M'];
+                $before = $ctx->remaining;
+                $a = self::partition($ctx, array_slice($target, 0, $half), $half, $mbits, $blocks, $low1, $lm, $gain * $theta['mid'], $fill, $rawSigns);
+                $rebalance = $mbits - ($before - $ctx->remaining);
+                if ($rebalance > 24 && $theta['itheta'] !== 0) $sbits += $rebalance - 24;
+                $z = self::partition($ctx, array_slice($target, $half), $half, $sbits, $blocks, $low2, $lm, $gain * $theta['side'], $fill >> $blocks, $rawSigns);
+                $mask = $a['mask'] | ($z['mask'] << intdiv($b0, 2));
+            } else {
+                if (self::$traceOn) self::$trace[self::$frame][] = ['ev' => 'split', 'i' => $ctx->band, 'lm' => $lm, 'n' => $half, 'mbits' => $mbits, 'sbits' => $sbits, 'first' => 'S'];
+                $before = $ctx->remaining;
+                $z = self::partition($ctx, array_slice($target, $half), $half, $sbits, $blocks, $low2, $lm, $gain * $theta['side'], $fill >> $blocks, $rawSigns);
+                $rebalance = $sbits - ($before - $ctx->remaining);
+                if ($rebalance > 24 && $theta['itheta'] !== 16384) $mbits += $rebalance - 24;
+                $a = self::partition($ctx, array_slice($target, 0, $half), $half, $mbits, $blocks, $low1, $lm, $gain * $theta['mid'], $fill, $rawSigns);
+                $mask = ($z['mask'] << intdiv($b0, 2)) | $a['mask'];
+            }
+            return ['vector' => array_merge($a['vector'], $z['vector']), 'mask' => $mask];
         }
         $q = CeltTables::bitsToPulses($ctx->band, $lm, $b); $cost = CeltTables::pulsesToBits($ctx->band, $lm, $q); $ctx->remaining -= $cost;
         while ($ctx->remaining < 0 && $q > 0) { $ctx->remaining += $cost; $q--; $cost = CeltTables::pulsesToBits($ctx->band, $lm, $q); $ctx->remaining -= $cost; }
@@ -103,10 +136,11 @@ final class CeltBandsEncoder
             for ($j = 0; $j < $n; $j++) $vector[] = $lowband[$j] ?? 0.0;
             return ['vector' => self::normalize($vector, $gain), 'mask' => $fill];
         }
-        $k = CeltTables::pulseCount($q); $rotated = CeltPvq::expRotation($target, $blocks, $k, $ctx->spread, true, true); $vector = self::search($rotated, $k); CeltPvqEncoder::encode($ctx->encoder, $vector, $k);
+        $k = CeltTables::pulseCount($q); $rotated = CeltPvq::expRotation($target, $blocks, $k, $ctx->spread, true, true); $vector = self::search($rotated, $k); $idx = CeltPvqEncoder::encode($ctx->encoder, $vector, $k);
         // Rotate back to original domain (inverse rotation) before normalization
         $vectorFloat = array_map('floatval', $vector);
         $vectorFloat = CeltPvq::expRotation($vectorFloat, $blocks, $k, $ctx->spread, false, true);
+        if (self::$traceOn) self::$trace[self::$frame][] = ['ev' => 'leaf', 'i' => $ctx->band, 'lm' => $lm, 'n' => $n, 'b' => $b, 'B' => $blocks, 'q' => $q, 'k' => $k, 'idx' => $idx, 'v' => CeltTables::v($n, $k), 'rem' => $ctx->remaining, 'tgt' => $target, 'vec' => $vectorFloat];
         $norm = sqrt(max(1, array_sum(array_map(static fn(float $v): float => $v * $v, $vectorFloat))));
         return ['vector' => array_map(static fn(float $v): float => $gain * $v / $norm, $vectorFloat), 'mask' => CeltPvq::collapseMask($vector, $blocks, true)];
     }
@@ -116,7 +150,7 @@ final class CeltBandsEncoder
         $pulseCap = CeltBitAllocation::LOG_WIDTHS[$ctx->band] + ($lm << 3); $offset = ($pulseCap >> 1) - ($stereo && $n === 2 ? 16 : 4); $n2 = 2 * $n - 1 - (($stereo && $n === 2) ? 1 : 0);
         $qb = intdiv($b + $n2 * $offset, $n2); $qb = min($b - $pulseCap - 32, $qb, 64); $qn = $qb < 4 ? 1 : ((self::EXP2_TABLE8[$qb & 7] >> (14 - ($qb >> 3))) + 1) >> 1 << 1;
         $itheta = 0; $qalloc = 0; $tell = $ctx->encoder->tellFrac();
-        if ($qn !== 1) { $energyL = 0.0; $energyR = 0.0; for ($i = 0; $i < $n; $i++) { $energyL += ($target[$i] ?? 0.0) ** 2; $energyR += ($target[$i + $n] ?? 0.0) ** 2; } $itheta = (int) round($qn * atan2(sqrt($energyR), sqrt($energyL)) / (M_PI / 2)); $itheta = max(0, min($qn, $itheta)); if ($b0 > 1) $ctx->encoder->encodeUint($itheta, $qn + 1); else $ctx->encoder->encodeTriangular($itheta, $qn); $itheta = intdiv($itheta * 16384, $qn); }
+        if ($qn !== 1) { $energyL = 0.0; $energyR = 0.0; for ($i = 0; $i < $n; $i++) { $energyL += ($target[$i] ?? 0.0) ** 2; $energyR += ($target[$i + $n] ?? 0.0) ** 2; } $rawTheta = (int) floor(0.5 + $qn * atan2(sqrt($energyR), sqrt($energyL)) / (M_PI / 2)); $rawTheta = max(0, min($qn, $rawTheta)); if (self::$traceOn) self::$trace[self::$frame][] = ['ev' => 'theta', 'i' => $ctx->band, 'n' => $n, 'B' => $blocks, 'qn' => $qn, 'raw' => $rawTheta, 'pos' => $tell, 'type' => $b0 > 1 ? 'U' : 'T']; $itheta = $rawTheta; if ($b0 > 1) $ctx->encoder->encodeUint($itheta, $qn + 1); else $ctx->encoder->encodeTriangular($itheta, $qn); $itheta = intdiv($itheta * 16384, $qn); }
         $qalloc = $ctx->encoder->tellFrac() - $tell; $b -= $qalloc;
         if ($itheta === 0) { $mid = 32767 / 32768; $side = 0.0; $fill &= (1 << $blocks) - 1; $delta = -16384; }
         elseif ($itheta === 16384) { $mid = 0.0; $side = 32767 / 32768; $fill &= ((1 << $blocks) - 1) << $blocks; $delta = 16384; }

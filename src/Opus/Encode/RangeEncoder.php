@@ -22,6 +22,11 @@ final class RangeEncoder
     private array $rawQueue = [];
     private bool $finished = false;
 
+    /** @var bool TEMP diagnostic */
+    public static bool $dbgLog = false;
+    /** @var array<int,array{0:string,1:int,2:int}> TEMP diagnostic */
+    public static array $dbgSeq = [];
+
     public function encode(int $low, int $high, int $total): void
     {
         if ($this->finished) {
@@ -73,54 +78,74 @@ final class RangeEncoder
             throw new InvalidArgumentException('Invalid inverse CDF');
         }
         $total = 1 << $precision;
-        $high = $total;
+        $previous = $total;
         foreach ($inverseCdf as $index => $cdf) {
-            if (!is_int($cdf) || $cdf < 0 || $cdf >= $total || ($index > 0 && $cdf > $inverseCdf[$index - 1])) {
+            if (!is_int($cdf) || $cdf < 0 || $cdf > $previous) {
                 throw new InvalidArgumentException('Invalid inverse CDF entry');
             }
-            if ($index === $symbol) {
-                if ($cdf >= $high) {
-                    throw new InvalidArgumentException('Invalid inverse CDF interval');
-                }
-                $this->encode($cdf, $high, $total);
-                return;
-            }
-            $high = $cdf;
+            $previous = $cdf;
         }
-        if ($inverseCdf[count($inverseCdf) - 1] !== 0) {
+        if (end($inverseCdf) !== 0) {
             throw new InvalidArgumentException('Invalid inverse CDF');
         }
-        throw new InvalidArgumentException('Invalid inverse CDF symbol');
+        // Direct port of ec_enc_icdf()/ec_enc_icdf16() in opus-main/celt/entenc.c.
+        // For symbol 0 the coder narrows the range without moving value; for
+        // s>0 it shifts value by the previous (higher) cumulative boundary.
+        $unit = $this->range >> $precision;
+        if ($symbol > 0) {
+            $this->value = self::u32($this->value + $this->range - $unit * $inverseCdf[$symbol - 1]);
+            $this->range = $unit * ($inverseCdf[$symbol - 1] - $inverseCdf[$symbol]);
+        } else {
+            $this->range = self::u32($this->range - $unit * $inverseCdf[0]);
+        }
+        $this->normalize();
     }
 
-    public function encodeLaplace(int $value, int $zeroFrequency, int $decay): void
+    /**
+     * Normative Laplace encode, direct port of ec_laplace_encode() /
+     * ec_laplace_get_freq1() in opus-main/celt/laplace.c (LAPLACE_MINP=1,
+     * LAPLACE_NMIN=16). Returns the (possibly clamped) coded magnitude, which
+     * the caller must use exactly as C rewrites *value.
+     */
+    public function encodeLaplace(int $value, int $zeroFrequency, int $decay): int
     {
         if ($zeroFrequency < 1 || $zeroFrequency >= 32768 || $decay < 0 || $decay > 11456) {
             throw new InvalidArgumentException('Invalid Laplace parameters');
         }
-        if ($value === 0) {
-            $this->encode(0, $zeroFrequency, 32768);
-            return;
+        $fl = 0;
+        $fs = $zeroFrequency;
+        if ($value !== 0) {
+            $s = $value < 0 ? -1 : 0;
+            $val = abs($value);
+            $fl = $zeroFrequency;
+            // ec_laplace_get_freq1(): (32768 - 2*16*MINP - fs0)*(16384-decay)>>15
+            $fs = ((32768 - 32 - $zeroFrequency) * (16384 - $decay)) >> 15;
+            $i = 1;
+            while ($fs > 0 && $i < $val) {
+                $fs *= 2;
+                $fl += $fs + 2 * 1; // +2*LAPLACE_MINP
+                $fs = ($fs * $decay) >> 15;
+                $i++;
+            }
+            if ($fs === 0) {
+                // LAPLACE_LOG_MINP=0, LAPLACE_MINP=1:
+                // ndi_max = (32768-fl+MINP-1)>>0 = 32768-fl; then (..-s)>>1.
+                $ndiMax = (32768 - $fl - $s) >> 1;
+                $di = min($val - $i, $ndiMax - 1);
+                $fl += 2 * $di + 1 + $s;
+                $fs = min(1, 32768 - $fl);
+                // *value = (i+di+s)^s: positive -> i+di, negative -> -(i+di).
+                $value = $s === -1 ? -($i + $di) : ($i + $di);
+            } else {
+                $fs += 1; // LAPLACE_MINP
+                // C: fl += fs & ~s on 32-bit ints (~(-1)==0). Positive (s=0)
+                // adds fs; negative (s=-1) adds nothing.
+                $fl += $s === 0 ? $fs : 0;
+            }
         }
-        $negative = $value < 0;
-        $magnitude = abs($value);
-        $low = $zeroFrequency;
-        $frequency = (((32768 - 32 - $zeroFrequency) * (16384 - $decay)) >> 15) + 1;
-        $current = 1;
-        while ($current < $magnitude && $frequency > 1) {
-            $low += 2 * $frequency;
-            $frequency = ((($frequency * 2 - 2) * $decay) >> 15) + 1;
-            $current++;
-        }
-        if ($current < $magnitude) {
-            $low += 2 * ($magnitude - $current);
-            $frequency = 1;
-        }
-        if ($negative) {
-            $this->encode($low, $low + $frequency, 32768);
-        } else {
-            $this->encode($low + $frequency, min($low + 2 * $frequency, 32768), 32768);
-        }
+        // C uses ec_encode_bin(fl, fl+fs, 15) == encode with total 1<<15.
+        $this->encode($fl, min($fl + $fs, 32768), 32768);
+        return $value;
     }
 
     public function encodeStep(int $value, int $k0): void
@@ -141,6 +166,7 @@ final class RangeEncoder
 
     public function encodeTriangular(int $value, int $qn): void
     {
+        if (self::$dbgLog) self::$dbgSeq[] = ['T', $qn, $value];
         if ($qn < 0 || $value < 0 || $value > $qn) {
             throw new InvalidArgumentException('Invalid triangular value');
         }
@@ -157,6 +183,7 @@ final class RangeEncoder
 
     public function encodeUint(int $value, int $total): void
     {
+        if (self::$dbgLog) self::$dbgSeq[] = ['U', $total - 1, $value];
         if ($total < 1 || $total > self::U32 || $value < 0 || $value >= $total) {
             throw new InvalidArgumentException('Uniform value must be in 0..total-1');
         }
