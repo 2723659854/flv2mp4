@@ -975,6 +975,18 @@ class Client
     }
 
     /**
+     * 将 MP3 解码并编码为 Ogg Opus。
+     * @param string $inputFile 输入 MP3 文件
+     * @param string $outputFile 输出 Ogg Opus 文件
+     * @param int $preSkip Opus pre-skip
+     * @return array
+     */
+    public static function runMp32Opus(string $inputFile, string $outputFile, int $preSkip = 312): array
+    {
+        return (new \Xiaosongshu\Flv2mp4\Manage\Mp32Opus($inputFile, $outputFile, $preSkip))->run();
+    }
+
+    /**
      * 将 AAC-LC 解码并封装为 Ogg Opus。
      * @param string $inputFile AAC、MP4 或 FLV 音频文件
      * @param string $outputFile 输出 Ogg Opus 文件
