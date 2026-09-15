@@ -142,14 +142,14 @@ final class AacLcDecoder
                     $this->applyMsStereo($a, $b, $ics, $msMask, $msFlags);
                 }
                 $this->applyIntensityStereo($a, $b, $ics, $msMask);
-                $this->applyTns($a, $this->channelTns[0], $ics[2], $ics[3], $ics[2] === 2 ? [0, 4, 8, 12, 16, 20, 28, 36, 44, 56, 68, 80, 96, 112, 128] : AacTables::SWB_48K);
-                $this->applyTns($b, $this->channelTns[1], $ics[2], $ics[3], $ics[2] === 2 ? [0, 4, 8, 12, 16, 20, 28, 36, 44, 56, 68, 80, 96, 112, 128] : AacTables::SWB_48K);
+                $this->applyTns($a, $this->channelTns[0], $ics[2], $ics[3], $ics[2] === 2 ? [0, 4, 8, 12, 16, 20, 28, 36, 44, 56, 68, 80, 96, 112, 128] : AacTables::SWB_48K, $ics[0], $rateIndex);
+                $this->applyTns($b, $this->channelTns[1], $ics[2], $ics[3], $ics[2] === 2 ? [0, 4, 8, 12, 16, 20, 28, 36, 44, 56, 68, 80, 96, 112, 128] : AacTables::SWB_48K, $ics[0], $rateIndex);
             } else {
                 $gain = $r->read(8); $ics = $this->readIcsInfo($r);
                 $this->readingChannel = 0;
                 $a = $this->readChannel($r, $gain, $ics, $rateIndex); $b = null;
                 $offsets = $ics[2] === 2 ? [0, 4, 8, 12, 16, 20, 28, 36, 44, 56, 68, 80, 96, 112, 128] : AacTables::SWB_48K;
-                $this->applyTns($a, $this->channelTns[0], $ics[2], $ics[3], $offsets);
+                $this->applyTns($a, $this->channelTns[0], $ics[2], $ics[3], $offsets, $ics[0], $rateIndex);
             }
             $audio = $channels === 1 ? [$this->imdct($a, 0, $ics[1], $ics[2])] : [$this->imdct($a, 0, $ics[1], $ics[2]), $this->imdct($b, 1, $ics[1], $ics[2])];
         }
@@ -189,14 +189,21 @@ final class AacLcDecoder
             }
         }
         $scaleFactors = [];
+        // 与 ffmpeg decode_scalefactors 一致：offset（last/noise/intensity/noiseSeen）跨 window group 持续
+        $last = $gain; $noise = $gain - 90; $intensity = 0; $noiseSeen = false;
         foreach ($groups as $group => $_) {
-            $last = $gain; $noise = $gain; $intensity = 0; $noiseSeen = false;
             for ($band = 0; $band < $max; ++$band) {
                 $codebook = $codebooks[$group][$band] ?? 0;
                 if ($codebook === 0) continue;
                 if ($codebook === 13) {
-                    $noise = $noiseSeen ? $noise + $this->readScaleFactor($r) : ($gain - 90 + $r->read(9) - 256);
-                    $noiseSeen = true; $scaleFactors[$group][$band] = $noise; continue;
+                    if (!$noiseSeen) {
+                        // ISO 14496-3: noiseStartNrg 为 9bit 无符号值，基准偏移 -256（同 ffmpeg get_bits(9)-NOISE_PRE）
+                        $noise += $r->read(9) - 256;
+                        $noiseSeen = true;
+                    } else {
+                        $noise += $this->readScaleFactor($r);
+                    }
+                    $scaleFactors[$group][$band] = $noise; continue;
                 }
                 if ($codebook === 14 || $codebook === 15) {
                     $intensity += $this->readScaleFactor($r);
@@ -221,7 +228,9 @@ final class AacLcDecoder
                 $codebook = $codebooks[$group][$band] ?? 0;
                 if ($codebook === 0) continue;
                 if ($codebook === 13) {
-                    $scale = pow(2.0, ($scaleFactors[$group][$band] - 100) / 4.0) / 32768.0;
+                    // PNS 目标带能量（PHP 系值域）：2^((nrg-60)/2)，故幅度 2^((nrg-60)/4)。
+                    // 依据 ffmpeg dequant_scalefactors: 浮点域 sf=2^(nrg/4)，而本解码系数域比 ffmpeg 小 2^15（IMDCT 增益互补）。
+                    $scale = pow(2.0, ($scaleFactors[$group][$band] - 60) / 4.0);
                     for ($w = 0; $w < $windowCount; ++$w) {
                         $this->fillPnsBand($spectrum, ($window + $w) * 128, $offsets[$band], $offsets[$band + 1], $scale);
                     }
@@ -240,7 +249,8 @@ final class AacLcDecoder
             }
             $window += $windowCount;
         }
-        $this->applyTns($spectrum, $tns, $sequence, $groups, $offsets);
+        // TNS 与长窗路径一致：仅记录，由 readRawData 对最终谱统一应用一次（避免短窗被重复滤波/串用前帧参数）
+        $this->channelTns[$this->readingChannel] = $tns;
         return $spectrum;
     }
 
@@ -269,26 +279,49 @@ final class AacLcDecoder
         return $result;
     }
 
-    private function applyTns(array &$spectrum, array $tns, int $sequence, array $groups, array $offsets): void
+    private function applyTns(array &$spectrum, array $tns, int $sequence, array $groups, array $offsets, int $maxSfb, int $rateIndex): void
     {
-        foreach ($tns as $w => $filters) {
-            $top = $sequence === 2 ? 14 : count($offsets) - 1;
-            foreach ($filters as [$length, $order, $direction, $reflection]) {
-                if ($order === 0) { $top -= $length; continue; }
-                $bottom = max(0, $top - $length); $start = $offsets[$bottom] ?? 0; $end = $offsets[$top] ?? 1024;
-                $lpc = [];
-                for ($i = 0; $i < $order; ++$i) {
-                    $value = $reflection[$i];
-                    for ($j = 0; $j < $i; ++$j) $value -= $lpc[$j] * $reflection[$i - $j - 1];
-                    $lpc[$i] = $value;
-                }
-                $step = $direction ? -1 : 1; $pos = $direction ? $end - 1 : $start;
-                for ($n = 0; $n < $end - $start; ++$n, $pos += $step) {
-                    $value = $spectrum[($w * 128) + $pos] ?? 0.0;
-                    for ($i = 1; $i <= min($n, $order); ++$i) $value -= $lpc[$i - 1] * ($spectrum[($w * 128) + $pos - $i * $step] ?? 0.0);
-                    $spectrum[($w * 128) + $pos] = $value;
-                }
+        if (!$tns) return;
+        // ffmpeg ff_tns_max_bands_{1024,128}，按 sampling_index
+        $tnsMaxBandsTable = $sequence === 2
+            ? [9, 9, 10, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14]
+            : [31, 31, 34, 40, 42, 51, 46, 46, 42, 42, 42, 39, 39];
+        $mmm = min($tnsMaxBandsTable[$rateIndex] ?? ($sequence === 2 ? 14 : 40), $maxSfb);
+        $numSwb = count($offsets) - 1;
+        $windows = $sequence === 2 ? array_sum($groups) : 1;
+        for ($w = 0; $w < $windows; ++$w) {
+            if (!isset($tns[$w]) || !$tns[$w]) continue;
+            $bottom = $numSwb; // ffmpeg: bottom 在每个 window 起始重置为 num_swb
+            foreach ($tns[$w] as [$length, $order, $direction, $reflection]) {
                 $top = $bottom;
+                $bottom = max(0, $top - $length);
+                if ($order === 0) continue;
+                // ffmpeg compute_lpc_coefs（lpc_functions.h, float 路径 normalize=0）：
+                // r = -coef[m]，再按对称对更新后向预测系数
+                $lpc = array_fill(0, $order, 0.0);
+                for ($m = 0; $m < $order; ++$m) {
+                    $r = -$reflection[$m];
+                    $lpc[$m] = $r;
+                    for ($i = 0; $i < (($m + 1) >> 1); ++$i) {
+                        $f = $lpc[$i];
+                        $b = $lpc[$m - 1 - $i];
+                        $lpc[$i] = $f + $r * $b;
+                        $lpc[$m - 1 - $i] = $b + $r * $f;
+                    }
+                }
+                $start = $offsets[min($bottom, $mmm)] ?? 0;
+                $end = $offsets[min($top, $mmm)] ?? ($sequence === 2 ? 128 : 1024);
+                if (($size = $end - $start) <= 0) continue;
+                $inc = $direction ? -1 : 1;
+                if ($direction) $start = $end - 1;
+                $base = ($sequence === 2 ? $w * 128 : 0);
+                $pos = $start;
+                // decode=1：AR 滤波
+                for ($n = 0; $n < $size; ++$n, $pos += $inc) {
+                    $value = $spectrum[$base + $pos] ?? 0.0;
+                    for ($i = 1; $i <= min($n, $order); ++$i) $value -= $lpc[$i - 1] * ($spectrum[$base + $pos - $i * $inc] ?? 0.0);
+                    $spectrum[$base + $pos] = $value;
+                }
             }
         }
     }
@@ -347,6 +380,7 @@ final class AacLcDecoder
             if ($codebook === 0) continue;
             if ($codebook === 13) {
                 if (!$noiseSeen) {
+                    // ISO 14496-3: noiseStartNrg 为 9bit 无符号值，基准偏移 -256（同 ffmpeg get_bits(9)-NOISE_PRE）
                     $noise = $gain - 90 + $r->read(9) - 256;
                     $noiseSeen = true;
                 } else {
@@ -369,7 +403,7 @@ final class AacLcDecoder
         $pulsePresent = $r->read(1);
         if ($pulsePresent) {
             $pulseCount = $r->read(2) + 1;
-            $r->read(6);
+            $pulseStartSfb = $r->read(6);
             for ($i = 0; $i < $pulseCount; ++$i) {
                 $r->read(5);
                 $r->read(4);
@@ -386,7 +420,8 @@ final class AacLcDecoder
             $codebook = $cb[$i] ?? 0;
             if ($codebook === 0) continue;
             if ($codebook === 13) {
-                $scale = pow(2.0, ($sf[$i] - 100) / 4.0) / 32768.0;
+                // PNS 目标带能量（PHP 系值域）：2^((nrg-60)/2)，故幅度 2^((nrg-60)/4)。
+                $scale = pow(2.0, ($sf[$i] - 60) / 4.0);
                 $this->fillPnsBand($spectrum, 0, $start, $end, $scale);
                 continue;
             }
@@ -469,6 +504,7 @@ final class AacLcDecoder
             $spectrum[$base + $start + $i] = $value;
             $energy += $value * $value;
         }
+        // PNS：noise_nrg 编码频带总能量 E=scale^2，归一化白噪声使 Σx²=E。
         $normal = $energy > 0.0 ? $scale / sqrt($energy) : 0.0;
         for ($i = 0; $i < $count; ++$i) $spectrum[$base + $start + $i] *= $normal;
     }
@@ -676,9 +712,16 @@ final class AacLcDecoder
 
     private function windowArray(int $length, int $shape): array
     {
+        // Tables passed to vector_fmul_window(len=N/2):
+        //  - sine: ff_sine_window_init gives the rising half,
+        //    sin((i+0.5)*pi/(2*N)) (see sinewin_tablegen.h);
+        //  - KBD: ff_kbd_window_init(alpha, N) gives the full N-point
+        //    symmetric arch (see kbdwin.c).
         $window = [];
         for ($i = 0; $i < $length; ++$i) {
-            $window[$i] = $this->windowCoefficient($i, $length, $shape);
+            $window[$i] = $shape === 0
+                ? sin(M_PI / (2.0 * $length) * ($i + 0.5))
+                : $this->windowCoefficient($i, $length, 1);
         }
         return $window;
     }
@@ -694,6 +737,9 @@ final class AacLcDecoder
         if ($active === []) return $out;
 
         $half = intdiv($n, 2);
+        // FFmpeg MDCT conventions: global sign is opposite to the textbook
+        // IMDCT; scale is 1/n for both mdct1024 and mdct128 (see ffmpeg
+        // aacdec.c MDCT_INIT: 1.0/1024, 1.0/128).
         $scale = 1.0 / $n;
         $phase = M_PI / (4.0 * $n);
         for ($i = 0; $i < $half; ++$i) {
@@ -706,8 +752,8 @@ final class AacLcDecoder
                 $down += $spectrum[$j] * cos($term * $downFactor * $phase);
                 $up += $spectrum[$j] * cos($term * $upFactor * $phase);
             }
-            $out[$i] = $down * $scale;
-            $out[$i + $half] = -$up * $scale;
+            $out[$i] = -$down * $scale;
+            $out[$i + $half] = $up * $scale;
         }
         return $out;
     }

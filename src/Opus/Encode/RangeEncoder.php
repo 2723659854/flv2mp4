@@ -22,11 +22,6 @@ final class RangeEncoder
     private array $rawQueue = [];
     private bool $finished = false;
 
-    /** @var bool TEMP diagnostic */
-    public static bool $dbgLog = false;
-    /** @var array<int,array{0:string,1:int,2:int}> TEMP diagnostic */
-    public static array $dbgSeq = [];
-
     public function encode(int $low, int $high, int $total): void
     {
         if ($this->finished) {
@@ -166,7 +161,6 @@ final class RangeEncoder
 
     public function encodeTriangular(int $value, int $qn): void
     {
-        if (self::$dbgLog) self::$dbgSeq[] = ['T', $qn, $value];
         if ($qn < 0 || $value < 0 || $value > $qn) {
             throw new InvalidArgumentException('Invalid triangular value');
         }
@@ -183,7 +177,6 @@ final class RangeEncoder
 
     public function encodeUint(int $value, int $total): void
     {
-        if (self::$dbgLog) self::$dbgSeq[] = ['U', $total - 1, $value];
         if ($total < 1 || $total > self::U32 || $value < 0 || $value >= $total) {
             throw new InvalidArgumentException('Uniform value must be in 0..total-1');
         }

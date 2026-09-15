@@ -309,7 +309,7 @@ final class CeltBitAllocation
 
         return [
             'tf' => array_fill(0, 21, 0),
-            'spread' => 0,
+            'spread' => 2,
             'caps' => $caps,
             'pulses' => $pulses,
             'fine' => $fine,

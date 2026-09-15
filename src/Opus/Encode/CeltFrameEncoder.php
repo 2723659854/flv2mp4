@@ -366,7 +366,7 @@ final class CeltFrameEncoder
         $this->state->stages['tf'] = ['raw' => $tf, 'select' => 0, 'changed' => 0,
             'resolved' => array_fill(0, 21, 0)];
         // spread_icdf is a 5-bit CDF in the reference (the values are inverse CDF entries).
-        $encoder->encodeCdf([25, 23, 2, 0], 0, 5); // TEMP spread=0
+        $encoder->encodeCdf([25, 23, 2, 0], 2, 5); // SPREAD_NORMAL=2 (celt.h spread_icdf, ftb=5)
         // dynalloc_analysis yields zero offsets for the fixed mono profile; rate.c still emits one stop flag per band.
         $dynalloc = [];
         for ($band = 0; $band < 21; $band++) { $encoder->encodeBitLogp(0, 6); $dynalloc[$band] = 0; }
