@@ -6,7 +6,11 @@ use InvalidArgumentException;
 use Xiaosongshu\Flv2mp4\Opus\Celt\CeltBitAllocation;
 use Xiaosongshu\Flv2mp4\Opus\Celt\CeltMdct;
 
-/** CELT analysis transform and per-band normalized spectra. */
+/**
+ * @purpose CELT 分析变换与逐频带归一化频谱。
+ * @author yanglong
+ * @time 2026年9月15日16:03:03
+ */
 final class CeltAnalysis
 {
     public const SAMPLE_RATE = 48000;

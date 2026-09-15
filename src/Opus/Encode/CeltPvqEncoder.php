@@ -5,7 +5,11 @@ namespace Xiaosongshu\Flv2mp4\Opus\Encode;
 use InvalidArgumentException;
 use Xiaosongshu\Flv2mp4\Opus\Celt\CeltTables;
 
-/** Encodes one CELT PVQ pulse vector using the reference CWRS ordering. */
+/**
+ * @purpose 单个 CELT PVQ 脉冲向量采用参考 CWRS 排序进行编码
+ * @author yanglong
+ * @time 2026年9月15日16:08:50
+ */
 final class CeltPvqEncoder
 {
     public static function index(array $vector, ?int $pulses = null): int

@@ -7,7 +7,9 @@ use Xiaosongshu\Flv2mp4\Opus\Celt\CeltBitAllocation;
 use Xiaosongshu\Flv2mp4\Opus\Encode\CeltPvqEncoder;
 
 /**
- * CELT 帧编码器入口（当前仅建立受限格式的安全边界）。
+ * @purpose CELT 帧编码器入口（当前仅建立受限格式的安全边界）
+ * @author yanglong
+ * @time 2026年9月15日16:07:01
  */
 final class CeltFrameEncoder
 {

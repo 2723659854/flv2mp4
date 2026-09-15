@@ -6,13 +6,13 @@ use InvalidArgumentException;
 use Xiaosongshu\Flv2mp4\Opus\Celt\CeltWindow;
 
 /**
- * CELT 正变换（48 kHz / 20 ms / LM=3 / 非瞬态）。
- *
- * 严格对照 opus-main/celt/mdct.c 的 clt_mdct_forward_c（浮点路径）：
+ * @purpose CELT 正变换（48 kHz / 20 ms / LM=3 / 非瞬态）。
  *   MDCT 全尺寸 N=1920，N2=960，N4=480，overlap=120。
  *   输入只有 N2+overlap=1080 个样本：前 120 个是上一帧尾部历史，
  *   后 960 个是当前帧。窗折叠后得到 480 个复数，做 480 点复数 FFT，
  *   再旋转出 960 个频谱系数。
+ * @author yanglong
+ * @time 2026年9月15日16:07:45
  */
 final class CeltMdctEncoder
 {

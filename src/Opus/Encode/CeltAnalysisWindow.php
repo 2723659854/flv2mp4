@@ -3,13 +3,12 @@
 namespace Xiaosongshu\Flv2mp4\Opus\Encode;
 
 /**
- * 编码端 CELT 跨帧输入状态（48 kHz / 20 ms）。
- *
- * 对照 opus-main/celt/celt_encoder.c：
- *   正变换缓冲长度为 N+overlap = 960+120 = 1080，前 120 个样本是上一帧
- *   尾部保存的 in_mem，后 960 个是当前帧。窗函数不在此外部应用，而是在
- *   clt_mdct_forward 的折叠阶段使用。当前帧最后 120 个样本成为下一帧的
- *   in_mem。
+ * @purpose 编码端 CELT 跨帧输入状态（48 kHz / 20 ms）。
+ * 正变换缓冲长度为 N+overlap = 960+120 = 1080，前 120 个样本是上一帧
+ * 尾部保存的 in_mem，后 960 个是当前帧。窗函数不在此外部应用，而是在
+ * clt_mdct_forward 的折叠阶段使用。当前帧最后 120 个样本成为下一帧的in_mem。
+ * @author yanglong
+ * @time 2026年9月15日16:03:53
  */
 final class CeltAnalysisWindow
 {

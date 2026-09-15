@@ -83,7 +83,6 @@ final class RangeEncoder
         if (end($inverseCdf) !== 0) {
             throw new InvalidArgumentException('Invalid inverse CDF');
         }
-        // Direct port of ec_enc_icdf()/ec_enc_icdf16() in opus-main/celt/entenc.c.
         // For symbol 0 the coder narrows the range without moving value; for
         // s>0 it shifts value by the previous (higher) cumulative boundary.
         $unit = $this->range >> $precision;

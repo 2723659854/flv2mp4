@@ -5,6 +5,11 @@ namespace Xiaosongshu\Flv2mp4\Opus\Encode;
 use InvalidArgumentException;
 use RuntimeException;
 
+/**
+ * @purpose opus-ogg格式封装器
+ * @author yanglong
+ * @time 2026年9月15日16:09:38
+ */
 final class OggOpusWriter
 {
     private int $channels;

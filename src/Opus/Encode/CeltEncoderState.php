@@ -4,6 +4,11 @@ namespace Xiaosongshu\Flv2mp4\Opus\Encode;
 
 use InvalidArgumentException;
 
+/**
+ * @purpose CELT编码器
+ * @author yanglong
+ * @time 2026年9月15日16:05:44
+ */
 final class CeltEncoderState
 {
     public int $channels;

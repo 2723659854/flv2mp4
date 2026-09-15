@@ -7,7 +7,11 @@ use Xiaosongshu\Flv2mp4\Opus\Celt\CeltBitAllocation;
 use Xiaosongshu\Flv2mp4\Opus\Celt\CeltPvq;
 use Xiaosongshu\Flv2mp4\Opus\Celt\CeltTables;
 
-/** Encodes the mono CELT band stream for the fixed LM=3 profile. */
+/**
+ * @purpose 固定 LM=3 模式下的单声道 CELT 频带流进行编码
+ * @yanglong
+ * @time 2026年9月15日16:04:47
+ */
 final class CeltBandsEncoder
 {
     private const EXP2_TABLE8 = [16384,17866,19483,21247,23170,25267,27554,30048];
