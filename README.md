@@ -598,8 +598,10 @@ if ($result && file_exists($outputFile1)) {
 
 ## Open Source License & Disclaimer
 
-This project is licensed under the [Apache License 2.0](http://www.apache.org/licenses/LICENSE-2.0). You are free to use, modify, and distribute it (including commercial use).  
-The code is provided "AS IS", without warranty of any kind, express or implied. The author is not liable for any damages arising from its use.
+- **Open Source License**: This project is released under the [Apache License 2.0](http://www.apache.org/licenses/LICENSE-2.0), which permits free use, modification, and distribution (including for commercial purposes). The code is provided "AS IS", without any express or implied warranties. The author shall not be held liable for any damages arising from the use of this software.
+- **Patent Risk Notice**: This project contains pure PHP implementations of patent-protected audio/video codecs, including H.264, AAC-LC, and MP3. The above open source license grants only a copyright license and **does not include any patent license**.
+- **Usage Restrictions & Transfer of Liability**: The above codec implementations are intended solely for **learning, research, testing, and personal non-commercial use**. If you use them for any **commercial product distribution or commercial operation**, you must obtain the appropriate patent licenses from the relevant patent holders (e.g., Via Licensing, MPEG LA, Fraunhofer IIS) at your own expense and assume all patent infringement risks. The author of this project shall not be liable for any patent infringement liabilities arising therefrom.
+- **Final Interpretation**: By using this project, you are deemed to have read, understood, and agreed to all terms of this disclaimer.
 
 ---
 
