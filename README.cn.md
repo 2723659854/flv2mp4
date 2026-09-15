@@ -64,7 +64,7 @@
 | **H.264 重编码** | 解码 → 缩放 → 编码                     | 支持 Baseline Profile，为多码率 HLS 提供核心支持 |
 | **OPUS→AAC**  | opus→pcm→aac                     | 支持 webrtc的音频opus转码为AAC-LC           |
 | **AAC→MP3**   | aac→pcm→mp3                      | 支持 AAC-LC 的音频转码为MP3                 |
-| **opus/aac/mp3/wav格式互转** | 原始格式音频→pcm→目标格式音频                | 支持 opus/aac/mp3/wav格式音频像话转码       |
+| **opus/aac/mp3/wav格式互转** | 原始格式音频→pcm→目标格式音频                | 支持 opus/aac/mp3/wav格式音频相互转码         |
 ---
 ## 环境依赖
 
