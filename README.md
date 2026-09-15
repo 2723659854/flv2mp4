@@ -1,4 +1,4 @@
-# FLV ↔ MP4 / HLS Converter + H.264 Re-encoding + OPUS2AAC + AAC2MP3
+# Pure PHP Audio/Video Processing Engine: FLV/MP4/HLS Interconversion · H.264 Decoding and Re-encoding · Full-format Interconversion of AAC/MP3/Opus/WAV
 
 <p align="center">
 <img src="https://img.shields.io/badge/PHP-8.1%2B-blue" />
@@ -17,7 +17,7 @@
 ## Introduction
 
 A lightweight pure PHP 8.1+ media processing toolkit with **zero external dependencies (no FFmpeg required)**.  
-Supports FLV, FMP4, MP4, HLS mutual conversion, live streaming gateway, pushing, pulling, rebroadcasting, as well as **H.264 decoding + scaling + re-encoding** (Baseline Profile) and **OPUS → AAC** transcoding + **AAC → MP3** transcoding.
+Supports FLV, FMP4, MP4, HLS mutual conversion, live streaming gateway, pushing, pulling, rebroadcasting, as well as **H.264 decoding + scaling + re-encoding** (Baseline Profile) and **Full-format Interconversion of AAC/MP3/Opus/WAV**.
 
 ---
 
@@ -66,24 +66,26 @@ Supports FLV, FMP4, MP4, HLS mutual conversion, live streaming gateway, pushing,
 | **H.264 re-encoding** | Decode → Scale → Encode                      | Baseline Profile, provides core support for multi-bitrate HLS      |
 | **OPUS→AAC**          | opus→pcm→aac                                 | Convert WebRTC Opus audio to AAC-LC                                |
 | **AAC→MP3**           | aac→pcm→mp3                                  | Convert AAC-LC audio to MP3                                        |
+| **opus/aac/mp3/wav format conversion** | Source audio → PCM → target format audio | Supports mutual conversion among Opus/AAC/MP3/WAV audio formats |
+---
+
+## Environment Requirements
+
+| Dependency     | Description                                                                                          |
+|----------------|------------------------------------------------------------------------------------------------------|
+| PHP            | ≥ 8.1 (**CLI mode only**)                                                                            |
+| `sockets` ext  | **Optional**, provides low-level Socket communication. Only required for live streaming and H.264 re-encoding scenarios. |
+| `gd` ext       | **Optional**, used to generate watermarks from PNG/JPG images. If not installed, it automatically falls back to the built-in bitmap font mode. |
+
+- 💡 **Only supported in PHP CLI mode. Not supported under Nginx/FPM or web server environments.**
+- 💡 **No FFmpeg, no third-party binaries required — fully implemented in pure PHP.**
+- 💡 **Container remuxing (FLV/MP4/HLS conversion) only changes the container format and is very fast.**
+- ⚠️ **H.264 re-encoding requires `proc_open` to be enabled.** (This module uses multi-process distributed computing and spawns child processes to process frames in parallel.)
+- ⚠️ **Opus real-time transcoding (live streaming only) requires `proc_open` to be enabled.** (In real-time scenarios such as WebRTC to RTMP, it launches a standalone background Worker process for audio transcoding. Static file Opus transcoding does not require this function.)
+- ⚠️ **H.264 re-encoding is a CPU-intensive task. Performance depends on server configuration. It is not recommended for live real-time transcoding. Enabling JIT acceleration is highly recommended.**
 
 ---
 
-## Requirements
-
-| Dependency | Description |
-| :--- | :--- |
-| PHP | ≥ 8.1 (**CLI mode only**) |
-| `sockets` extension | **Required**, provides low-level socket communication |
-| `gd` extension | **Optional**, used for generating watermarks from PNG/JPG images. Falls back to built‑in bitmap font if not available. |
-
-- 💡 **CLI only** – does not work under Nginx/FPM web mode.
-- 💡 **No FFmpeg, no third-party binaries** – 100% pure PHP.
-- 💡 **Container‑level conversion** (FLV/MP4/HLS interop) is fast as it only changes the container.
-- ⚠️ **H.264 re-encoding and Opus transcoding require `proc_open` to be enabled.**
-- ⚠️ **H.264 re-encoding module is CPU‑intensive** – suitable for short offline videos, not for live real‑time transcoding. Enabling JIT is strongly recommended.
-
----
 
 ## 🚀 Installation
 
