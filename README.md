@@ -43,7 +43,7 @@ Supports FLV, FMP4, MP4, HLS mutual conversion, live streaming gateway, pushing,
     - [MP4 → MP4 Re-encoding Example](#mp42mp4)
     - [Watermark Generator](#watermark-generator)
     - [Performance Test Report](#performance-test-report)
-- [Encoding/Decoding for AAC-MP3-OPUS](#encodingdecoding-for-aac-mp3-opus-wav)
+- [Encoding/Decoding for AAC-MP3-OPUS-WAV](#encodingdecoding-for-aac-mp3-opus-wav)
 - [Technical Notes](#-technical-notes)
 - [License & Disclaimer](#open-source-license--disclaimer)
 - [Contact](#-contact)
