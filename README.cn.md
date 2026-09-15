@@ -540,19 +540,25 @@ if ($result && file_exists($outputFile1)) {
 # aac-lc → wav
 \Xiaosongshu\Flv2mp4\Client::runAac2Wav(__DIR__ . '/input.aac',__DIR__ . '/aac2wav.wav');
 # wav → aac-lc
-\Xiaosongshu\Flv2mp4\Client::runWav2Aac(__DIR__ . '/pcm2wav.wav',__DIR__ . '/wav2aac.aac');
+\Xiaosongshu\Flv2mp4\Client::runWav2Aac(__DIR__ . '/input.wav',__DIR__ . '/wav2aac.aac');
 # opus → wav
 \Xiaosongshu\Flv2mp4\Client::runOpus2Wav(__DIR__ . '/input.opus',__DIR__ . '/opus2wav.wav');
 # mp3 → wav
-\Xiaosongshu\Flv2mp4\Client::runMp32Wav(__DIR__ . '/pcm2mp3.mp3',__DIR__ . '/mp32wav.wav');
+\Xiaosongshu\Flv2mp4\Client::runMp32Wav(__DIR__ . '/input.mp3',__DIR__ . '/mp32wav.wav');
 # wav → mp3
-\Xiaosongshu\Flv2mp4\Client::runWav2Mp3(__DIR__ . '/mp32wav.wav',__DIR__ . '/wav2mp3.mp3');
+\Xiaosongshu\Flv2mp4\Client::runWav2Mp3(__DIR__ . '/input.wav',__DIR__ . '/wav2mp3.mp3');
 # opus → mp3
 \Xiaosongshu\Flv2mp4\Client::runOpus2Mp3(__DIR__ . '/input.opus',__DIR__ . '/opus2mp3.mp3');
 # opus → aac-lc
 \Xiaosongshu\Flv2mp4\Client::runOpus2Aac(__DIR__ . '/input.opus',__DIR__ . '/opus2aac.aac');
 # mp3 → aac-lc
-\Xiaosongshu\Flv2mp4\Client::runMp32Aac(__DIR__ . '/aac2mp3.mp3',__DIR__ . '/mp32aac.aac');
+\Xiaosongshu\Flv2mp4\Client::runMp32Aac(__DIR__ . '/input.mp3',__DIR__ . '/mp32aac.aac');
+# mp3 → opus
+\Xiaosongshu\Flv2mp4\Client::runMp32Opus(__DIR__ . '/input.mp3', __DIR__ . '/mp32opus.opus');
+# wav → opus
+\Xiaosongshu\Flv2mp4\Client::runWav2Opus(__DIR__ . '/input.wav', __DIR__ . '/wav2opus.opus');
+# aac-lc → opus 
+\Xiaosongshu\Flv2mp4\Client::runAac2Opus(__DIR__ . '/input.aac', __DIR__ . '/aac2opus.opus');
 ```
 
 ## 🔧 技术说明
