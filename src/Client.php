@@ -905,6 +905,18 @@ class Client
     }
 
     /**
+     * 将 PCM WAV 编码为 Ogg Opus。
+     * @param string $inputFile 输入 WAV 文件
+     * @param string $outputFile 输出 Ogg Opus 文件
+     * @param int $preSkip Opus pre-skip
+     * @return array
+     */
+    public static function runWav2Opus(string $inputFile, string $outputFile, int $preSkip = 312): array
+    {
+        return (new \Xiaosongshu\Flv2mp4\Manage\Wav2Opus($inputFile, $outputFile, $preSkip))->run();
+    }
+
+    /**
      * 将 Ogg Opus 音频解码并封装为 WAV。
      * @param string $inputFile Ogg Opus 文件
      * @param string $outputFile 输出 WAV 文件
