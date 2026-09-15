@@ -6,7 +6,9 @@ use InvalidArgumentException;
 use RuntimeException;
 
 /**
- * 将 MP3 解码并编码为 Ogg Opus。
+ * @purpose 将 MP3 解码并编码为 Ogg Opus。
+ * @author yanglong
+ * @time 2026年9月15日16:20:08
  */
 final class Mp32Opus
 {

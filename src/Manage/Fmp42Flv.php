@@ -6,6 +6,7 @@ namespace Xiaosongshu\Flv2mp4\Manage;
  * @purpose 将fmp4转码合并为flv文件核心文件
  * @author yanglong
  * @note 仅兼容标准h264,标准aac,其他格式兼容太复杂了，暂时不处理了
+ * @time 2026年7月10日
  */
 class Fmp42Flv
 {

@@ -5,7 +5,7 @@ use Xiaosongshu\Flv2mp4\Mp3\Mp3L3Decoder;
 use RuntimeException;
 
 /**
- * @purpose mp3提取pcm（S16LE 交错），解码链路见 Mp3L3Decoder（按 FFmpeg float 解码移植）
+ * @purpose mp3提取pcm（S16LE 交错）
  * @author yanglong
  * @time 2026年9月8日15:08:46
  */

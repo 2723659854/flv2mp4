@@ -22,6 +22,7 @@ namespace Xiaosongshu\Flv2mp4\Manage;
  *
  * @author yanglong
  * @version 1.1.0
+ * @time 2026年5月31日
  */
 
 class FlvPusherAll {

@@ -5,9 +5,9 @@ namespace Xiaosongshu\Flv2mp4\Manage;
 use RuntimeException;
 
 /**
- * 将 AAC-LC 音频解码并编码为 Ogg Opus。
- *
- * 使用 ffmpeg 的 libopus（opus-main 正式编码器）输出 Ogg Opus。
+ * @purpose 将 AAC-LC 音频解码并编码为 Ogg Opus。
+ * @author yanglong
+ * @time 2026年9月15日16:14:09
  */
 final class Aac2Opus
 {

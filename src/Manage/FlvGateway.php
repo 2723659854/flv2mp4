@@ -5,6 +5,7 @@ namespace Xiaosongshu\Flv2mp4\Manage;
 /**
  * @purpose flv网关（epoll/select 自适应，HTTP-FLV + WebSocket-FLV 双协议支持）
  * @author yanglong
+ * @time 2026年5月31日
  */
 class FlvGateway
 {

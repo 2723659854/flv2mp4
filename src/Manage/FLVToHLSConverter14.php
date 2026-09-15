@@ -10,7 +10,8 @@ use MediaServer\MediaReader\VideoFrame;
 /**
  * rtmp转码hls
  * @author yanglong
- * @note 此版本正确，留作备份
+ * @note 此版本正确，留作备份 ，从2024年开始编写flv转hls，过程太过坎坷，累计编写了二十多个版本，耗时两年，所以保留此文件留作纪念
+ * @time 2026年9月15日16:16:00
  */
 class FLVToHLSConverter14
 {

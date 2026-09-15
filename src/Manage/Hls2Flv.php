@@ -3,7 +3,9 @@
 namespace Xiaosongshu\Flv2mp4\Manage;
 
 /**
- * 将本地 HLS（H.264 + AAC）转换为 FLV。
+ * @purpose 将本地 HLS（H.264 + AAC）转换为 FLV。
+ * @author yanglong
+ * @time 2026年6月3日
  */
 class Hls2Flv
 {

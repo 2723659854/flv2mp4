@@ -6,7 +6,7 @@ use InvalidArgumentException;
 use RuntimeException;
 
 /**
- * @purpose PCM WAV =>Ogg Opus。
+ * @purpose 将PCM WAV封装为 Ogg Opus。
  * @author yanglong
  * @time 2026年9月15日10:40:36
  */

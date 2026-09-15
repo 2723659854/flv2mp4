@@ -8,9 +8,10 @@ use Xiaosongshu\Flv2mp4\Opus\Encode\CeltFrameEncoder;
 use Xiaosongshu\Flv2mp4\Opus\Encode\OggOpusWriter;
 
 /**
- * 将 S16LE PCM 封装并编码为 Ogg Opus 音频文件。
- *
- * 当前编码器限制为 48 kHz、20 ms、单声道 CELT。
+ * @purpose 将 S16LE PCM 封装并编码为 Ogg Opus 音频文件。
+ * @note 当前编码器限制为 48 kHz、20 ms、单声道 CELT。
+ * @author yanglong
+ * @time 2026年9月15日16:21:20
  */
 final class Pcm2Opus
 {
