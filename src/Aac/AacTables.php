@@ -104,4 +104,80 @@ final class AacTables
     {
         return self::$tables[$book]??[];
     }
+
+    /** @var array<int, array{ch: array<int, int|null>, sym: array<int, array<int, int>>, signed: bool}> */
+    private static array $huffCache = [];
+
+    /**
+     * 谱系数霍夫曼 trie（惰性构建并缓存）。
+     * ch 为扁平双槽节点数组：null=空分支，>=0=内部节点索引，<0=叶子（~原始表索引）；
+     * sym 为该索引对应的无符号量化值（已减码书偏移），signed 码书由调用方读符号位。
+     * @return array{ch: array<int, int|null>, sym: array<int, array<int, int>>, signed: bool}
+     */
+    public static function huffman(int $book): array
+    {
+        if (isset(self::$huffCache[$book])) return self::$huffCache[$book];
+
+        [$codes, $bits] = self::$tables[$book];
+        $ch = [null, null];
+        $nodeCount = 1;
+        foreach ($codes as $index => $code) {
+            $n = $bits[$index];
+            $node = 0;
+            for ($b = $n - 1; $b >= 0; --$b) {
+                $slot = ($node << 1) | (($code >> $b) & 1);
+                if ($b === 0) { $ch[$slot] = ~$index; break; }
+                $child = $ch[$slot];
+                if ($child === null) {
+                    $child = $nodeCount++;
+                    $ch[$slot] = $child;
+                    $ch[] = null; $ch[] = null;
+                }
+                $node = $child;
+            }
+        }
+
+        $components = $book <= 4 ? 4 : 2;
+        $base = $book <= 4 ? 3 : ($book <= 6 ? 9 : ($book <= 8 ? 8 : ($book <= 10 ? 13 : 17)));
+        $offset = ($book === 1 || $book === 2) ? 1 : (($book === 5 || $book === 6) ? 4 : 0);
+        $sym = [];
+        foreach ($codes as $index => $_) {
+            $digits = array_fill(0, $components, 0);
+            $q = $index;
+            for ($j = $components - 1; $j >= 0; --$j) {
+                $digits[$j] = ($q % $base) - $offset;
+                $q = intdiv($q, $base);
+            }
+            $sym[$index] = $digits;
+        }
+
+        return self::$huffCache[$book] = ['ch' => $ch, 'sym' => $sym, 'signed' => $book === 3 || $book === 4 || $book >= 7];
+    }
+
+    /** @var array<int, int|null>|null 比例因子霍夫曼 trie，叶子 ~i（值为 i-60） */
+    private static ?array $sfCh = null;
+
+    /** @return array<int, int|null> */
+    public static function scaleFactorTrie(): array
+    {
+        if (self::$sfCh !== null) return self::$sfCh;
+        $ch = [null, null];
+        $nodeCount = 1;
+        foreach (self::SCALEFACTOR_BITS as $i => $n) {
+            $code = self::SCALEFACTOR_CODES[$i];
+            $node = 0;
+            for ($b = $n - 1; $b >= 0; --$b) {
+                $slot = ($node << 1) | (($code >> $b) & 1);
+                if ($b === 0) { $ch[$slot] = ~$i; break; }
+                $child = $ch[$slot];
+                if ($child === null) {
+                    $child = $nodeCount++;
+                    $ch[$slot] = $child;
+                    $ch[] = null; $ch[] = null;
+                }
+                $node = $child;
+            }
+        }
+        return self::$sfCh = $ch;
+    }
 }

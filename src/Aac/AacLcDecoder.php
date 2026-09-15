@@ -74,11 +74,11 @@ final class AacLcDecoder
         }
         $reader = new AacBitReader(substr($frame, $header, $length - $header));
         $pcm = $this->readRawData($reader, $channels, $rateIndex);
-        $result = '';
+        $vals = [];
         for ($i = 0; $i < 1024; ++$i) for ($ch = 0; $ch < $channels; ++$ch) {
-            $v = max(-32768, min(32767, (int) round($pcm[$ch][$i] * 32767.0)));
-            $result .= pack('v', $v < 0 ? $v + 65536 : $v);
+            $vals[] = max(-32768, min(32767, (int) round($pcm[$ch][$i] * 32767.0))) & 0xFFFF;
         }
+        $result = pack('v*', ...$vals);
         return $result;
     }
 
@@ -189,7 +189,7 @@ final class AacLcDecoder
             }
         }
         $scaleFactors = [];
-        // 与 ffmpeg decode_scalefactors 一致：offset（last/noise/intensity/noiseSeen）跨 window group 持续
+        // offset（last/noise/intensity/noiseSeen）跨 window group 持续
         $last = $gain; $noise = $gain - 90; $intensity = 0; $noiseSeen = false;
         foreach ($groups as $group => $_) {
             for ($band = 0; $band < $max; ++$band) {
@@ -197,7 +197,7 @@ final class AacLcDecoder
                 if ($codebook === 0) continue;
                 if ($codebook === 13) {
                     if (!$noiseSeen) {
-                        // ISO 14496-3: noiseStartNrg 为 9bit 无符号值，基准偏移 -256（同 ffmpeg get_bits(9)-NOISE_PRE）
+                        // ISO 14496-3: noiseStartNrg 为 9bit 无符号值，基准偏移 -256
                         $noise += $r->read(9) - 256;
                         $noiseSeen = true;
                     } else {
@@ -229,7 +229,6 @@ final class AacLcDecoder
                 if ($codebook === 0) continue;
                 if ($codebook === 13) {
                     // PNS 目标带能量（PHP 系值域）：2^((nrg-60)/2)，故幅度 2^((nrg-60)/4)。
-                    // 依据 ffmpeg dequant_scalefactors: 浮点域 sf=2^(nrg/4)，而本解码系数域比 ffmpeg 小 2^15（IMDCT 增益互补）。
                     $scale = pow(2.0, ($scaleFactors[$group][$band] - 60) / 4.0);
                     for ($w = 0; $w < $windowCount; ++$w) {
                         $this->fillPnsBand($spectrum, ($window + $w) * 128, $offsets[$band], $offsets[$band + 1], $scale);
@@ -242,7 +241,10 @@ final class AacLcDecoder
                 for ($w = 0; $w < $windowCount; ++$w) {
                     for ($p = $offsets[$band]; $p < $offsets[$band + 1]; $p += $step) {
                         foreach ($this->readSpectral($r, $codebook) as $j => $value) {
-                            if ($p + $j < $offsets[$band + 1]) $spectrum[($window + $w) * 128 + $p + $j] = ($value < 0 ? -1 : 1) * pow(abs($value), 4.0 / 3.0) * $scale;
+                            if ($p + $j < $offsets[$band + 1]) {
+                                $mag = self::mag43(abs($value));
+                                $spectrum[($window + $w) * 128 + $p + $j] = ($value < 0 ? -$mag : $mag) * $scale;
+                            }
                         }
                     }
                 }
@@ -282,7 +284,7 @@ final class AacLcDecoder
     private function applyTns(array &$spectrum, array $tns, int $sequence, array $groups, array $offsets, int $maxSfb, int $rateIndex): void
     {
         if (!$tns) return;
-        // ffmpeg ff_tns_max_bands_{1024,128}，按 sampling_index
+        // ff_tns_max_bands_{1024,128}，按 sampling_index
         $tnsMaxBandsTable = $sequence === 2
             ? [9, 9, 10, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14]
             : [31, 31, 34, 40, 42, 51, 46, 46, 42, 42, 42, 39, 39];
@@ -291,12 +293,12 @@ final class AacLcDecoder
         $windows = $sequence === 2 ? array_sum($groups) : 1;
         for ($w = 0; $w < $windows; ++$w) {
             if (!isset($tns[$w]) || !$tns[$w]) continue;
-            $bottom = $numSwb; // ffmpeg: bottom 在每个 window 起始重置为 num_swb
+            $bottom = $numSwb; // bottom 在每个 window 起始重置为 num_swb
             foreach ($tns[$w] as [$length, $order, $direction, $reflection]) {
                 $top = $bottom;
                 $bottom = max(0, $top - $length);
                 if ($order === 0) continue;
-                // ffmpeg compute_lpc_coefs（lpc_functions.h, float 路径 normalize=0）：
+                // compute_lpc_coefs（lpc_functions.h, float 路径 normalize=0）：
                 // r = -coef[m]，再按对称对更新后向预测系数
                 $lpc = array_fill(0, $order, 0.0);
                 for ($m = 0; $m < $order; ++$m) {
@@ -380,7 +382,7 @@ final class AacLcDecoder
             if ($codebook === 0) continue;
             if ($codebook === 13) {
                 if (!$noiseSeen) {
-                    // ISO 14496-3: noiseStartNrg 为 9bit 无符号值，基准偏移 -256（同 ffmpeg get_bits(9)-NOISE_PRE）
+                    // ISO 14496-3: noiseStartNrg 为 9bit 无符号值，基准偏移 -256
                     $noise = $gain - 90 + $r->read(9) - 256;
                     $noiseSeen = true;
                 } else {
@@ -433,7 +435,8 @@ final class AacLcDecoder
                 $values = $this->readSpectral($r, $codebook);
                 foreach ($values as $j => $value) {
                     if ($p + $j < $end) {
-                        $spectrum[$p + $j] = ($value < 0 ? -1 : 1) * pow(abs($value), 4.0 / 3.0) * $scale;
+                        $mag = self::mag43(abs($value));
+                        $spectrum[$p + $j] = ($value < 0 ? -$mag : $mag) * $scale;
                     }
                 }
             }
@@ -511,54 +514,68 @@ final class AacLcDecoder
 
     private function readScaleFactor(AacBitReader $r): int
     {
-        $code = 0;
-        for ($n = 1; $n <= 19; ++$n) { $code = ($code << 1) | $r->read(1); foreach (AacTables::SCALEFACTOR_BITS as $i => $bits) if ($bits === $n && $code === AacTables::SCALEFACTOR_CODES[$i]) return $i - 60; }
+        $ch = AacTables::scaleFactorTrie();
+        $win = $r->peek(19);
+        $node = 0;
+        for ($len = 0; $len < 19; ++$len) {
+            $child = $ch[($node << 1) | (($win >> (18 - $len)) & 1)];
+            if ($child === null) throw new RuntimeException('Invalid AAC scale factor code');
+            if ($child < 0) {
+                $r->skip($len + 1);
+                return (~$child) - 60;
+            }
+            $node = $child;
+        }
         throw new RuntimeException('Invalid AAC scale factor code');
     }
 
     private function readSpectral(AacBitReader $r, int $book): array
     {
-        [$codes, $bits] = AacTables::spectral($book);
-        $code = 0;
-        foreach (range(1, 16) as $n) {
-            $code = ($code << 1) | $r->read(1);
-            foreach ($codes as $index => $value) {
-                if ($bits[$index] === $n && $value === $code) {
-                    $width = $book <= 4 ? 2 : ($book <= 6 ? 4 : ($book <= 8 ? 3 : ($book <= 10 ? 4 : 5)));
-                    $base = $book <= 4 ? 3 : ($book <= 6 ? 9 : ($book <= 8 ? 8 : ($book <= 10 ? 13 : 17)));
-                    $components = $book <= 4 ? 4 : 2;
-                    $values = [];
-                    $indexValues = [];
-                    for ($j = 0; $j < $components; ++$j) {
-                        $digit = $index % $base;
-                        $index = intdiv($index, $base);
-                        $indexValues[$components - 1 - $j] = $digit;
+        $h = AacTables::huffman($book);
+        $ch = $h['ch'];
+        // 一次预读 20 位（最大码长 16 + 最多 4 个符号位），trie 直达叶子
+        $win = $r->peek(20);
+        $node = 0;
+        $len = 0;
+        while (true) {
+            $child = $ch[($node << 1) | (($win >> (19 - $len)) & 1)];
+            ++$len;
+            if ($child === null) throw new RuntimeException('Invalid AAC spectral code');
+            if ($child < 0) { $idx = ~$child; break; }
+            $node = $child;
+        }
+        $values = $h['sym'][$idx];
+
+        if ($h['signed']) {
+            $vals = $values; // 拷贝，避免污染缓存
+            $bitPos = $len;
+            foreach ($values as $j => $v) {
+                if ($v !== 0) {
+                    if ($bitPos < 20) {
+                        $neg = ($win >> (19 - $bitPos)) & 1;
+                        ++$bitPos;
+                    } else {
+                        $neg = $r->read(1);
                     }
-                    for ($j = 0; $j < $components; ++$j) {
-                        $v = $indexValues[$j];
-                        if ($book === 1 || $book === 2) $v -= 1;
-                        if ($book === 5 || $book === 6) $v -= 4;
-                        $values[] = $v;
-                    }
-                    if ($book === 3 || $book === 4 || $book >= 7) {
-                        foreach ($values as $j => $v) {
-                            if ($v !== 0 && $r->read(1)) $values[$j] = -$v;
-                        }
-                    }
-                    if ($book === 11) {
-                        foreach ($values as $j => $v) {
-                            if (abs($v) !== 16) continue;
-                            $negative = $v < 0;
-                            $n = 4; while ($r->read(1)) ++$n;
-                            $values[$j] = (1 << $n) + $r->read($n);
-                            if ($negative) $values[$j] = -$values[$j];
-                        }
-                    }
-                    return $values;
+                    if ($neg) $vals[$j] = -$v;
                 }
             }
+            $r->skip($bitPos);
+            $values = $vals;
+        } else {
+            $r->skip($len);
         }
-        throw new RuntimeException('Invalid AAC spectral code');
+
+        if ($book === 11) {
+            foreach ($values as $j => $v) {
+                if (abs($v) !== 16) continue;
+                $negative = $v < 0;
+                $n = 4; while ($r->read(1)) ++$n;
+                $values[$j] = (1 << $n) + $r->read($n);
+                if ($negative) $values[$j] = -$values[$j];
+            }
+        }
+        return $values;
     }
 
     private function imdct(array $spectrum, int $channel, int $windowShape, int $sequence): array
@@ -569,14 +586,10 @@ final class AacLcDecoder
 
         if ($sequence === 2) {
             for ($w = 0; $w < 8; ++$w) {
-                $block = $this->imdctBlock(array_slice($spectrum, $w * 128, 128), 128);
-                for ($i = 0; $i < 128; ++$i) {
-                    $buf[$w * 128 + $i] = $block[$i];
-                }
+                $this->imdctFast($spectrum, 128, $w * 128, $buf, $w * 128);
             }
         } else {
-            $block = $this->imdctBlock(array_slice($spectrum, 0, 1024), 1024);
-            for ($i = 0; $i < 1024; ++$i) $buf[$i] = $block[$i];
+            $this->imdctFast($spectrum, 1024, 0, $buf, 0);
         }
 
         $out = array_fill(0, 1024, 0.0);
@@ -710,8 +723,13 @@ final class AacLcDecoder
     }
     */
 
+    /** @var array<string, array<int, float>> 窗函数静态缓存（键 "length/shape"） */
+    private static array $winCache = [];
+
     private function windowArray(int $length, int $shape): array
     {
+        $key = $length . '/' . $shape;
+        if (isset(self::$winCache[$key])) return self::$winCache[$key];
         // Tables passed to vector_fmul_window(len=N/2):
         //  - sine: ff_sine_window_init gives the rising half,
         //    sin((i+0.5)*pi/(2*N)) (see sinewin_tablegen.h);
@@ -723,10 +741,9 @@ final class AacLcDecoder
                 ? sin(M_PI / (2.0 * $length) * ($i + 0.5))
                 : $this->windowCoefficient($i, $length, 1);
         }
-        return $window;
+        return self::$winCache[$key] = $window;
     }
 
-    /** Inverse MDCT output layout consumed by FFmpeg-style window overlap. */
     private function imdctBlock(array $spectrum, int $n): array
     {
         $out = array_fill(0, $n, 0.0);
@@ -737,9 +754,6 @@ final class AacLcDecoder
         if ($active === []) return $out;
 
         $half = intdiv($n, 2);
-        // FFmpeg MDCT conventions: global sign is opposite to the textbook
-        // IMDCT; scale is 1/n for both mdct1024 and mdct128 (see ffmpeg
-        // aacdec.c MDCT_INIT: 1.0/1024, 1.0/128).
         $scale = 1.0 / $n;
         $phase = M_PI / (4.0 * $n);
         for ($i = 0; $i < $half; ++$i) {
@@ -756,6 +770,129 @@ final class AacLcDecoder
             $out[$i + $half] = $up * $scale;
         }
         return $out;
+    }
+
+    /** @var array<int, float> |v|^(4/3) 小值查表（非 escape 谱系数 |v|<=16） */
+    private static array $quant43 = [];
+
+    private static function mag43(int $av): float
+    {
+        if ($av <= 16) return self::$quant43[$av] ??= pow($av, 4.0 / 3.0);
+        return pow($av, 4.0 / 3.0);
+    }
+
+    /** @var array<int, mixed> 快速 IMDCT 预计算表（按 n=1024/128 缓存） */
+    private static array $imdctTab = [];
+
+    /**
+     * 快速 IMDCT（N/2 点复 FFT）：
+     * 预旋转 z[rev[k]]=(X[N-1-2k]+j·X[2k])(tcos+j·tsin)，
+     * tcos=-cos(π(k+1/8)/N)、tsin=-sin(π(k+1/8)/N)；一次 M=N/2 点正指数 FFT；
+     * 后旋转后输出 out[2j]=-Re(z[j])/N、out[2j+1]=-Im(z[j])/N。
+     */
+    private function imdctFast(array &$x, int $n, int $off, array &$dst, int $dstOff): void
+    {
+        $tab = self::$imdctTab[$n] ?? null;
+        if ($tab === null) {
+            $tab = self::initImdctTab($n);
+            self::$imdctTab[$n] = $tab;
+        }
+        $m = $n >> 1;
+        $n8 = $n >> 2;
+        $invN = 1.0 / $n;
+
+        // 全零快速路径（dst 已由调用方预填零）
+        $nz = false;
+        for ($k = 0; $k < $n; ++$k) {
+            if ($x[$off + $k] != 0.0) { $nz = true; break; }
+        }
+        if (!$nz) return;
+
+        $tcos = $tab['tcos']; $tsin = $tab['tsin']; $rev = $tab['rev'];
+        $zRe = array_fill(0, $m, 0.0);
+        $zIm = array_fill(0, $m, 0.0);
+        // 预旋转：直接写入位反转位置
+        for ($k = 0; $k < $m; ++$k) {
+            $in1 = $x[$off + 2 * $k];
+            $in2 = $x[$off + $n - 1 - 2 * $k];
+            $c = $tcos[$k];
+            $s = $tsin[$k];
+            $j = $rev[$k];
+            $zRe[$j] = $in2 * $c - $in1 * $s;
+            $zIm[$j] = $in2 * $s + $in1 * $c;
+        }
+
+        // M 点正指数复 FFT，radix-2 DIT
+        $twRe = $tab['twRe']; $twIm = $tab['twIm'];
+        for ($length = 2, $step = $m >> 1; $length <= $m; $length <<= 1, $step >>= 1) {
+            $halfLen = $length >> 1;
+            for ($base = 0; $base < $m; $base += $length) {
+                $idx = 0;
+                for ($j = 0; $j < $halfLen; ++$j, $idx += $step) {
+                    $p = $base + $j;
+                    $q = $p + $halfLen;
+                    $c = $twRe[$idx];
+                    $s = $twIm[$idx];
+                    $br = $zRe[$q]; $bi = $zIm[$q];
+                    $tr = $br * $c - $bi * $s;
+                    $ti = $br * $s + $bi * $c;
+                    $zRe[$q] = $zRe[$p] - $tr;
+                    $zIm[$q] = $zIm[$p] - $ti;
+                    $zRe[$p] += $tr;
+                    $zIm[$p] += $ti;
+                }
+            }
+        }
+
+        // 后旋转（注意 im 分量交叉赋值：i1 位置的 im 取自 i2 侧，反之亦然）
+        for ($k = 0; $k < $n8; ++$k) {
+            $i1 = $n8 - 1 - $k;
+            $i2 = $n8 + $k;
+            $cm = $tsin[$i1]; $dm = $tcos[$i1];
+            $cp = $tsin[$i2]; $dp = $tcos[$i2];
+            $am = $zIm[$i1]; $bm = $zRe[$i1];
+            $ap = $zIm[$i2]; $bp = $zRe[$i2];
+            $zRe[$i1] = $am * $cm - $bm * $dm;
+            $zIm[$i1] = $ap * $dp + $bp * $cp;
+            $zRe[$i2] = $ap * $cp - $bp * $dp;
+            $zIm[$i2] = $am * $dm + $bm * $cm;
+        }
+
+        // 输出（re/im 交错即最终时域顺序）
+        for ($j = 0; $j < $m; ++$j) {
+            $d = $dstOff + 2 * $j;
+            $dst[$d] = -$zRe[$j] * $invN;
+            $dst[$d + 1] = -$zIm[$j] * $invN;
+        }
+    }
+
+    private static function initImdctTab(int $n): array
+    {
+        $m = $n >> 1;
+        $tcos = []; $tsin = [];
+        for ($k = 0; $k < $m; ++$k) {
+            $a = M_PI * ($k + 0.125) / $n;
+            $tcos[$k] = -cos($a);
+            $tsin[$k] = -sin($a);
+        }
+        // M 点位反转
+        $bits = 0;
+        for ($v = $m; $v > 1; $v >>= 1) ++$bits;
+        $rev = [];
+        for ($i = 0; $i < $m; ++$i) {
+            $r = 0; $v = $i;
+            for ($b = 0; $b < $bits; ++$b) { $r = ($r << 1) | ($v & 1); $v >>= 1; }
+            $rev[$i] = $r;
+        }
+        // FFT 旋转因子 e^{+j2πk/M}
+        $twRe = []; $twIm = [];
+        $hm = $m >> 1;
+        for ($k = 0; $k < $hm; ++$k) {
+            $a = 2.0 * M_PI * $k / $m;
+            $twRe[$k] = cos($a);
+            $twIm[$k] = sin($a);
+        }
+        return compact('tcos', 'tsin', 'rev', 'twRe', 'twIm');
     }
 
     private function inverseFft(array &$real, array &$imag): void
