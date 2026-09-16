@@ -27,6 +27,7 @@ final class CeltDsp
     private float $postfilterOldGain = 0.0;
     private int $postfilterOldTapset = 0;
     private float $deemphasisMemory = 0.0;
+    private bool $postfilterEverActive = false;
 
     /**
      * Synthesizes one CELT frame. For transient packets, pass 2, 4, or 8
@@ -59,14 +60,14 @@ final class CeltDsp
             }
         }
         if ($shortBlocks === 1) {
-            CeltWindow::overlapAdd($buffer, CeltMdct::inverse($coefficients), 0);
+            CeltWindow::overlapAdd($buffer, CeltMdct::inverseFast($coefficients), 0);
         } else {
             for ($block = 0; $block < $shortBlocks; $block++) {
                 $spectrum = [];
                 for ($i = 0; $i < $blockSize; $i++) {
                     $spectrum[] = $coefficients[$block + $i * $shortBlocks];
                 }
-                CeltWindow::overlapAdd($buffer, CeltMdct::inverse($spectrum), $block * $blockSize);
+                CeltWindow::overlapAdd($buffer, CeltMdct::inverseFast($spectrum), $block * $blockSize);
             }
         }
         $output = array_slice($buffer, 0, $frameSize);
@@ -82,13 +83,7 @@ final class CeltDsp
         $output = [];
         $memory = $this->deemphasisMemory;
         foreach ($samples as $sample) {
-            if (!is_int($sample) && !is_float($sample)) {
-                throw new InvalidArgumentException('CELT samples must be numeric');
-            }
             $memory = (float) $sample + self::DEEMPHASIS * $memory;
-            if (!is_finite($memory)) {
-                $memory = 0.0;
-            }
             $output[] = $memory;
         }
         $this->deemphasisMemory = $memory;
@@ -139,16 +134,22 @@ final class CeltDsp
         $this->postfilterOldGain = 0.0;
         $this->postfilterOldTapset = 0;
         $this->deemphasisMemory = 0.0;
+        $this->postfilterEverActive = false;
     }
 
     private function postfilterTransition(array $samples, ?int $period, float $gain, int $tapset): array
     {
         $newPeriod = $period ?? 15;
         $newGain = $period === null ? 0.0 : $gain;
-        $history = $this->postfilterHistory;
-        $input = array_merge($history, $samples);
         if ($this->postfilterOldGain === 0.0 && $this->postfilterGain === 0.0 && $newGain === 0.0) {
-            $this->postfilterHistory = array_slice($input, -1024);
+            // 滤波器从未启用过时不维护历史；启用过则仅做最小长度的滑动（避免整表 merge）
+            if ($this->postfilterEverActive) {
+                $keep = 1024 - count($samples);
+                $history = $keep > 0 ? array_slice($this->postfilterHistory, -$keep) : [];
+                $this->postfilterHistory = array_merge($history, $samples);
+            } else {
+                $this->postfilterHistory = [];
+            }
             $this->postfilterOldPeriod = $this->postfilterPeriod;
             $this->postfilterOldGain = 0.0;
             $this->postfilterOldTapset = $this->postfilterTapset;
@@ -157,6 +158,9 @@ final class CeltDsp
             $this->postfilterTapset = $tapset;
             return $samples;
         }
+        $this->postfilterEverActive = true;
+        $history = $this->postfilterHistory;
+        $input = array_merge($history, $samples);
         $historyLength = count($history);
         $output = [];
         $window = CeltWindow::coefficients();

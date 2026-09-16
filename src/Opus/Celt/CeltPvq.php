@@ -153,7 +153,8 @@ final class CeltPvq
         if ($pulses < 0 || $pulses > CeltTables::MAX_PULSES || $spread < 0 || $spread > 3) {
             throw new InvalidArgumentException('Invalid CELT pulse count or spread mode');
         }
-        $result = array_map(static fn (int|float $value): float => (float) $value, $vector);
+        // trusted 路径输入已由 normalizePulses 转为 float，直接借用（COW 在旋转写入时复制）
+        $result = $trusted ? $vector : array_map(static fn (int|float $value): float => (float) $value, $vector);
         if (2 * $pulses >= $length || $spread === self::SPREAD_NONE) {
             return $result;
         }

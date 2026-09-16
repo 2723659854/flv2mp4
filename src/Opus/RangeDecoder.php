@@ -17,6 +17,7 @@ class RangeDecoder
     private const CODE_EXTRA = 7;
     private const UINT_BITS = 8;
     private const U32 = 0xFFFFFFFF;
+    private const TELL_CORRECTION = [35733, 38967, 42495, 46340, 50535, 55109, 60097, 65535];
 
     private string $data;
     private int $storage;
@@ -192,11 +193,10 @@ class RangeDecoder
 
     public function tellFrac(): int
     {
-        $correction = [35733, 38967, 42495, 46340, 50535, 55109, 60097, 65535];
         $log = self::ilog($this->range);
         $range = $this->range >> ($log - 16);
         $index = ($range >> 12) - 8;
-        $index += $range > $correction[$index] ? 1 : 0;
+        $index += $range > self::TELL_CORRECTION[$index] ? 1 : 0;
         return ($this->totalBits << 3) - (($log << 3) + $index);
     }
 

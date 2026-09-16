@@ -97,22 +97,27 @@ final class CeltBands
                 $xb = ['vector' => $st['x']]; $yb = ['vector' => $st['y']];
                 $cmX = $cmY = $st['mask'];
             }
-            for ($j = 0; $j < $n; $j++) {
-                $x[$offset + $j] = $xb['vector'][$j];
-            }
-            if ($channels !== 1) {
-                for ($j = 0; $j < $n; $j++) {
-                    $y[$offset + $j] = $yb['vector'][$j];
-                }
-            }
             if ($band < 20) {
                 $scale = sqrt($n);
                 for ($j = 0; $j < $n; $j++) {
-                    $norm[$offset + $j] = $xb['vector'][$j] * $scale;
+                    $v = $xb['vector'][$j];
+                    $x[$offset + $j] = $v;
+                    $norm[$offset + $j] = $v * $scale;
                 }
                 if ($channels !== 1) {
                     for ($j = 0; $j < $n; $j++) {
-                        $norm2[$offset + $j] = $yb['vector'][$j] * $scale;
+                        $v = $yb['vector'][$j];
+                        $y[$offset + $j] = $v;
+                        $norm2[$offset + $j] = $v * $scale;
+                    }
+                }
+            } else {
+                for ($j = 0; $j < $n; $j++) {
+                    $x[$offset + $j] = $xb['vector'][$j];
+                }
+                if ($channels !== 1) {
+                    for ($j = 0; $j < $n; $j++) {
+                        $y[$offset + $j] = $yb['vector'][$j];
                     }
                 }
             }
@@ -267,7 +272,9 @@ final class CeltBands
         $cross = $sideEnergy = 0.0; foreach ($x as $i => $v) { $cross += $y[$i] * $v; $sideEnergy += $y[$i] ** 2; }
         $cross *= $mid; $el = $mid * $mid + $sideEnergy - 2 * $cross; $er = $mid * $mid + $sideEnergy + 2 * $cross;
         if ($el < 6e-4 || $er < 6e-4) return [$x, $x];
-        $left = $right = []; foreach ($x as $i => $v) { $left[] = ($mid * $v - $y[$i]) / sqrt($el); $right[] = ($mid * $v + $y[$i]) / sqrt($er); }
+        $invL = 1.0 / sqrt($el);
+        $invR = 1.0 / sqrt($er);
+        $left = $right = []; foreach ($x as $i => $v) { $left[] = ($mid * $v - $y[$i]) * $invL; $right[] = ($mid * $v + $y[$i]) * $invR; }
         return [$left, $right];
     }
 
