@@ -15,6 +15,7 @@ final class HlsPipelineProtocol
     public const END = 2;
     public const FINISHED = 3;
     public const ERROR = 4;
+    public const CONTROL = 5;
     public const MAX_FRAME_LENGTH = 67108864;
     public const HIGH_WATERMARK = 50331648;
     public const MAX_BUFFER_LENGTH = 67108868;

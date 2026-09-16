@@ -367,7 +367,7 @@ class H264Decoder
                         'heightUv' => (int)($mbAlignedHeight / 2),
                     ];
                     $this->dpb[] = $dpbEntry;
-                    
+
                     $maxFrameNum = 1 << ($this->log2MaxFrameNumMinus4 + 4);
                     $shortTermCount = 0;
                     $oldestKey = null;

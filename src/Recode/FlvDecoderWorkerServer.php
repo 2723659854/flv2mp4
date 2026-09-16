@@ -20,8 +20,6 @@ final class FlvDecoderWorkerServer
     private string $pps = '';
     private int $width = 0;
     private int $height = 0;
-    private int $baseTimestamp = -1;
-    private int $selected = 0;
 
     public function __construct(private array $config)
     {
@@ -48,7 +46,9 @@ final class FlvDecoderWorkerServer
                     $input .= $chunk; if (strlen($input) > HlsPipelineProtocol::MAX_BUFFER_LENGTH) throw new RuntimeException('解码进程输入缓冲超限');
                 }
                 foreach (HlsPipelineProtocol::take($input, 1) as $event) {
-                    if ($event['type'] === HlsPipelineProtocol::END) { $output .= HlsPipelineProtocol::frame(HlsPipelineProtocol::END, $event['sequence']); $ended = true; }
+                    if ($event['type'] === HlsPipelineProtocol::CONTROL) {
+                        if (($event['metadata']['cmd'] ?? '') === 'config') $this->parseConfiguration(substr($event['payload'], 5));
+                    } elseif ($event['type'] === HlsPipelineProtocol::END) { $output .= HlsPipelineProtocol::frame(HlsPipelineProtocol::END, $event['sequence']); $ended = true; }
                     else $output .= $this->transform($event);
                     if (strlen($output) > HlsPipelineProtocol::MAX_BUFFER_LENGTH) throw new RuntimeException('解码进程下游缓冲超限');
                 }
@@ -90,15 +90,8 @@ final class FlvDecoderWorkerServer
         if ($this->sps !== '') array_unshift($nals, ['type' => 7, 'data' => $this->sps]);
         if ($this->pps !== '') array_unshift($nals, ['type' => 8, 'data' => $this->pps]);
         $frame = $this->decoder->decode($nals);
-        if (!$frame || empty($frame['data'])) return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, $body);
-        $isKey = (ord($body[0]) >> 4) === 1; $timestamp = (int)($meta['timestamp'] ?? 0);
-        if ($this->baseTimestamp < 0) { if (!$isKey) { $meta['drop'] = true; return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, $body); } $this->baseTimestamp = $timestamp; }
-        $sourceFps = isset($this->config['source_fps']) ? (float)$this->config['source_fps'] : 0.0;
-        $targetFps = (int)($this->config['fps'] ?? 0);
-        $dropFrames = $targetFps > 0 && $sourceFps > 0 && $targetFps < $sourceFps - 0.01;
-        $relative = $timestamp - $this->baseTimestamp;
-        if ($dropFrames && $this->selected > 0 && $relative * $targetFps < $this->selected * 1000) { $meta['drop'] = true; return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, $body); }
-        $this->selected++;
+        if (!$frame || empty($frame['data'])) { unset($meta['drop']); return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, $body); }
+        if (!empty($meta['drop'])) return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, $body);
         $w = ($this->config['width'] ?? 0) > 0 ? (int)$this->config['width'] : $this->width;
         $h = ($this->config['height'] ?? 0) > 0 ? (int)$this->config['height'] : $this->height;
         $yuv = ($w === $this->width && $h === $this->height) ? $frame['data'] : $this->scaler->scaleYUV420P($frame['data'], $this->width, $this->height, $w, $h);
