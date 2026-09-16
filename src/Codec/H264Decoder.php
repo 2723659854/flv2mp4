@@ -279,10 +279,9 @@ class H264Decoder
      * @param bool $parseOnly 是否只解析SPS/PPS获取宽高，不解码帧
      * @return array|null ['data' => 二进制流, 'width', 'height', 'pix_fmt']
      */
-    public function decode(array $nalUnits, bool $parseOnly = false): ?array
+    public function decode(array $nalUnits, bool $parseOnly = false, bool $buildOutput = true): ?array
     {
-
-        // 记录之前的分辨率（用于判断是否需要重新初始化）
+        // 记录之前的分辨率（用于判断是否需要重初始化）
         $prevWidth = $this->width;
         $prevHeight = $this->height;
 
@@ -399,7 +398,7 @@ class H264Decoder
                             }
                         }
                     }
-                    
+
                     $this->refFrameY = $dpbEntry['y'];
                     $this->refFrameU = $dpbEntry['u'];
                     $this->refFrameV = $dpbEntry['v'];
@@ -416,20 +415,22 @@ class H264Decoder
                 $this->height = $origHeight;
 
                 // 将本帧转为二进制并追加到输出（裁剪到实际图像尺寸）
-                $yBin = '';
-                for ($y = 0; $y < $this->height; $y++) {
-                    $yBin .= substr($this->yPlane, $y * $mbAlignedWidth, $this->width);
+                if ($buildOutput) {
+                    $yBin = '';
+                    for ($y = 0; $y < $this->height; $y++) {
+                        $yBin .= substr($this->yPlane, $y * $mbAlignedWidth, $this->width);
+                    }
+                    $uvMbAlignedWidth = (int)($mbAlignedWidth / 2);
+                    $uvWidth = (int)($this->width / 2);
+                    $uvHeight = (int)($this->height / 2);
+                    $uBin = '';
+                    $vBin = '';
+                    for ($y = 0; $y < $uvHeight; $y++) {
+                        $uBin .= substr($this->uPlane, $y * $uvMbAlignedWidth, $uvWidth);
+                        $vBin .= substr($this->vPlane, $y * $uvMbAlignedWidth, $uvWidth);
+                    }
+                    $outputData .= $yBin . $uBin . $vBin;
                 }
-                $uvMbAlignedWidth = (int)($mbAlignedWidth / 2);
-                $uvWidth = (int)($this->width / 2);
-                $uvHeight = (int)($this->height / 2);
-                $uBin = '';
-                $vBin = '';
-                for ($y = 0; $y < $uvHeight; $y++) {
-                    $uBin .= substr($this->uPlane, $y * $uvMbAlignedWidth, $uvWidth);
-                    $vBin .= substr($this->vPlane, $y * $uvMbAlignedWidth, $uvWidth);
-                }
-                $outputData .= $yBin . $uBin . $vBin;
             }
         }
 

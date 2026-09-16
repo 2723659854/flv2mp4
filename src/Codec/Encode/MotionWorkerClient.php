@@ -101,12 +101,13 @@ final class MotionWorkerClient
                 $entry = dirname(__DIR__, 3) . '/bin/motion-worker.php';
                 $autoload = dirname((new \ReflectionClass(\Composer\Autoload\ClassLoader::class))->getFileName(), 2) . '/autoload.php';
                 $descriptors = [fopen('php://stdin', 'r'), fopen('php://stdout', 'a'), fopen('php://stderr', 'a')];
+                // 多进程转码时多个 PHP 冷启动并发，2 秒窗口会偶发连接超时；放宽到 15 秒
                 $process = @proc_open([PHP_BINARY, $entry, '--owned', "--port={$port}", "--autoload={$autoload}"], $descriptors, $pipes, null, null, ['bypass_shell' => true]);
                 if (!is_resource($process)) throw new RuntimeException('Unable to start motion worker');
                 $this->processes[] = $process;
-                $end = microtime(true) + 2;
+                $end = microtime(true) + 15;
                 do {
-                    usleep(20000);
+                    usleep(50000);
                     $socket = @stream_socket_client("tcp://127.0.0.1:{$port}", $errno, $error, 0.1);
                 } while ($socket === false && microtime(true) < $end);
             }

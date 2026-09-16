@@ -15,8 +15,6 @@ final class Mp4DecoderWorkerServer
 {
     private H264Decoder $decoder;
     private VideoScaler $scaler;
-    private int $baseTimestamp = -1;
-    private int $selected = 0;
 
     public function __construct(private array $config)
     {
@@ -84,20 +82,12 @@ final class Mp4DecoderWorkerServer
         $pps = base64_decode($pipeline['srcPps'], true) ?: '';
         if ($sps !== '') array_unshift($nals, ['type' => 7, 'data' => $sps]);
         if ($pps !== '') array_unshift($nals, ['type' => 8, 'data' => $pps]);
-        $frame = $this->decoder->decode($nals);
-        if (!$frame || empty($frame['data'])) return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, $payload);
-        $timestamp = (int)$meta['dtsMs'];
-        if ($this->baseTimestamp < 0) {
-            if (empty($meta['keyframe'])) { $meta['drop'] = true; return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, $payload); }
-            $this->baseTimestamp = $timestamp;
-        }
-        $fps = isset($pipeline['effectiveTargetFps']) ? (float)$pipeline['effectiveTargetFps'] : 0.0;
-        $relative = $timestamp - $this->baseTimestamp;
-        if (!empty($pipeline['dropFrames']) && $this->selected > 0 && $relative * $fps < $this->selected * 1000) {
-            $meta['drop'] = true;
-            return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, $payload);
-        }
-        $this->selected++;
+        $dropFrame = !empty($meta['drop']);
+        // 被丢弃的帧仍需完整解码以维持本GOP参考链，但它的YUV不会进入后续流水线，跳过裁剪输出
+        $frame = $this->decoder->decode($nals, false, !$dropFrame);
+        // 抽帧决策由主进程统一下发
+        if ($dropFrame) return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, $payload);
+        if (!$frame || empty($frame['data'])) { unset($meta['drop']); return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, $payload); }
         $srcW = (int)$pipeline['srcWidth']; $srcH = (int)$pipeline['srcHeight'];
         $outW = (int)$pipeline['outputWidth']; $outH = (int)$pipeline['outputHeight'];
         $yuv = ($srcW === $outW && $srcH === $outH) ? $frame['data'] : $this->scaler->scaleYUV420P($frame['data'], $srcW, $srcH, $outW, $outH);

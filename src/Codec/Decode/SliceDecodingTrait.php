@@ -289,7 +289,6 @@ trait SliceDecodingTrait
             $this->mbQpForDeblock[$mbIdx] = $qp;
             $this->mvTopLeft = [$nextMvTopLeft, $nextMvTopLeft, $nextMvTopLeft, $nextMvTopLeft];
         }
-
         $this->applyDeblockingFilter();
     }
 }

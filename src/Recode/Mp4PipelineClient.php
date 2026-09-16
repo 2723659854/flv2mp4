@@ -8,12 +8,14 @@ use RuntimeException;
 use Throwable;
 
 /**
- * @purpose mp4重编码分布式架构-管道
+ * @purpose mp4重编码分布式架构-管道（多解码worker按GOP并行）
  * @author yanglong
  */
 final class Mp4PipelineClient
 {
     private array $processes = [];
+    /** 每个解码worker待写入缓冲区的软上限 */
+    private const PER_WORKER_SOFT_LIMIT = 8388608;
 
     public function __construct(private array $config, private ?int $maxFrames)
     {
@@ -21,77 +23,150 @@ final class Mp4PipelineClient
 
     public function process(string $inputFile, string $outputFile): void
     {
-        [$decoderAddress, $decoderPort] = $this->reserveAddress();
-        [, $outputPort] = $this->reserveAddress();
+        $workerCount = max(1, min(8, (int)($this->config['decode_workers'] ?? 4)));
         $autoload = $this->locateAutoload();
         $worker = dirname(__DIR__, 2) . DIRECTORY_SEPARATOR . 'bin' . DIRECTORY_SEPARATOR . 'mp4-recode-worker.php';
         [$streamMetadata, $samples] = (new Mp4Recoder($this->config, false))->preparePipelineInput($inputFile);
+        // MP4 只能在关键帧边界切分并行，worker 超过 GOP 数纯属空转（白白承担进程启动与等待开销）
+        $gopCount = 0;
+        foreach ($samples as $sample) if ($sample['type'] === 'video' && !empty($sample['keyframe'])) $gopCount++;
+        if ($gopCount > 0) $workerCount = max(1, min($workerCount, $gopCount));
+        [, $outputPort] = $this->reserveAddress();
+        $decoderAddresses = [];
+        for ($i = 0; $i < $workerCount; $i++) $decoderAddresses[] = $this->reserveAddress();
         $config = $this->config;
         $config['pipeline'] = $streamMetadata;
         $encodedConfig = base64_encode(json_encode($config, JSON_THROW_ON_ERROR));
+        $sockets = [];
         try {
-            $this->startWorker([$worker, '--mode', 'output', '--autoload', $autoload, '--port', (string)$outputPort, '--config', $encodedConfig, '--output', $outputFile]);
-            $this->startWorker([$worker, '--mode', 'decoder', '--autoload', $autoload, '--port', (string)$decoderPort, '--output-port', (string)$outputPort, '--config', $encodedConfig]);
-            $socket = $this->connect($decoderAddress);
-            stream_set_blocking($socket, false);
-            $sequence = 0; $videoCount = 0; $buffer = ''; $response = ''; $finished = false;
-            foreach ($samples as $sample) {
-                if ($sample['type'] === 'video') $videoCount++;
-                if ($this->maxFrames !== null && $sample['type'] === 'audio' && $videoCount >= $this->maxFrames) continue;
-                $buffer .= HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $sequence++, [
-                    'sampleType' => $sample['type'], 'dtsMs' => $sample['dtsMs'],
-                    'ctsMs' => $sample['ctsMs'], 'keyframe' => $sample['keyframe'],
-                ], $sample['data']);
-                $this->drainUntilLow($socket, $buffer, $response);
-                if ($this->maxFrames !== null && $videoCount >= $this->maxFrames) break;
-                if ($videoCount > 0 && $videoCount % 10 === 0 && $sample['type'] === 'video') echo "Processed {$videoCount} video frames\n";
+            $this->startWorker([$worker, '--mode', 'output', '--autoload', $autoload, '--port', (string)$outputPort, '--workers', (string)$workerCount, '--config', $encodedConfig, '--output', $outputFile]);
+            foreach ($decoderAddresses as [$decoderAddress, $decoderPort]) {
+                $this->startWorker([$worker, '--mode', 'decoder', '--autoload', $autoload, '--port', (string)$decoderPort, '--output-port', (string)$outputPort, '--config', $encodedConfig]);
             }
-            $buffer .= HlsPipelineProtocol::frame(HlsPipelineProtocol::END, $sequence++);
-            while (!$finished) {
-                $read = [$socket]; $write = $buffer === '' ? [] : [$socket]; $except = null;
-                if (@stream_select($read, $write, $except, 1) === false) continue;
-                if ($write !== []) $this->writeSome($socket, $buffer);
-                if ($read !== []) $this->readResponses($socket, $response, $finished);
-                if ($buffer === '' && feof($socket) && !$finished) throw new RuntimeException('解码进程未返回 FINISHED');
+            foreach ($decoderAddresses as [$decoderAddress]) {
+                $socket = $this->connect($decoderAddress);
+                stream_set_blocking($socket, false);
+                $sockets[] = $socket;
             }
-            fclose($socket);
+
+            $dropFrames = !empty($streamMetadata['dropFrames']);
+            $targetFps = isset($streamMetadata['effectiveTargetFps']) ? (float)$streamMetadata['effectiveTargetFps'] : 0.0;
+
+            $sequence = 0;
+            $gopSeq = 0;
+            $currentWorker = 0;
+            $baseTimestamp = -1;
+            $selected = 0;
+            $videoCount = 0;
+            $index = 0;
+            $total = count($samples);
+            $outbound = array_fill(0, $workerCount, '');
+            $inbound = array_fill(0, $workerCount, '');
+            $alive = array_fill(0, $workerCount, true);
+            $allEnqueued = false;
+            $endEnqueued = false;
+            $finishedCount = 0;
+
+            while (true) {
+                if (!$allEnqueued) {
+                    while ($index < $total && $this->bufferedBytes($outbound) < $workerCount * self::PER_WORKER_SOFT_LIMIT) {
+                        $sample = $samples[$index++];
+                        if ($sample['type'] === 'video') {
+                            $videoCount++;
+                            if (!empty($sample['keyframe'])) {
+                                // 每个关键帧开启一个独立GOP，轮询分配给解码worker
+                                $currentWorker = $gopSeq % $workerCount;
+                                $gopSeq++;
+                            }
+                            $meta = [
+                                'sampleType' => 'video', 'dtsMs' => $sample['dtsMs'],
+                                'ctsMs' => $sample['ctsMs'], 'keyframe' => $sample['keyframe'],
+                            ];
+                            $drop = false;
+                            $timestamp = (int)$sample['dtsMs'];
+                            if ($baseTimestamp < 0) {
+                                if (empty($sample['keyframe'])) $drop = true;
+                                else $baseTimestamp = $timestamp;
+                            }
+                            if (!$drop && $dropFrames && $selected > 0 && ($timestamp - $baseTimestamp) * $targetFps < $selected * 1000) {
+                                $drop = true;
+                            }
+                            if (!$drop) $selected++;
+                            if ($drop) $meta['drop'] = true;
+                            $outbound[$currentWorker] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $sequence++, $meta, $sample['data']);
+                            if ($this->maxFrames !== null && $videoCount >= $this->maxFrames) { echo "Reached max frames limit ({$this->maxFrames}), stopping...\n"; $allEnqueued = true; break; }
+                            if ($videoCount % 10 === 0) echo "Processed {$videoCount} video frames\n";
+                        } else {
+                            if ($this->maxFrames !== null && $videoCount >= $this->maxFrames) continue;
+                            $outbound[$currentWorker] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $sequence++, [
+                                'sampleType' => 'audio', 'dtsMs' => $sample['dtsMs'],
+                                'ctsMs' => $sample['ctsMs'], 'keyframe' => $sample['keyframe'],
+                            ], $sample['data']);
+                        }
+                    }
+                    if ($index >= $total) $allEnqueued = true;
+                    if ($allEnqueued && !$endEnqueued) {
+                        $outbound[0] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::END, $sequence++);
+                        $endEnqueued = true;
+                    }
+                }
+
+                $read = [];
+                foreach ($alive as $id => $isAlive) if ($isAlive) $read[] = $sockets[$id];
+                $write = [];
+                foreach ($outbound as $id => $buffer) if ($buffer !== '' && $alive[$id]) $write[] = $sockets[$id];
+                if ($read === [] && $write === []) {
+                    if ($finishedCount >= $workerCount) break;
+                    throw new RuntimeException('解码进程媒体连接意外关闭');
+                }
+                $except = null;
+                if (@stream_select($read, $write, $except, 1) === false) {
+                    if ($finishedCount >= $workerCount) break;
+                    continue;
+                }
+                foreach ($write as $socket) {
+                    $id = (int)array_search($socket, $sockets, true);
+                    $n = @fwrite($socket, substr($outbound[$id], 0, 65536));
+                    if ($n === false || ($n === 0 && feof($socket))) {
+                        if (!$endEnqueued) throw new RuntimeException('解码进程媒体连接意外关闭');
+                        $alive[$id] = false;
+                    }
+                    if ($n > 0) $outbound[$id] = substr($outbound[$id], $n);
+                }
+                foreach ($read as $socket) {
+                    $id = (int)array_search($socket, $sockets, true);
+                    $chunk = @fread($socket, 65536);
+                    if ($chunk === false || ($chunk === '' && feof($socket))) {
+                        // END 发送前关闭一定是 worker 崩溃；END 后关闭可能是转发 FINISHED 后正常退出
+                        if (!$endEnqueued) throw new RuntimeException('解码进程媒体连接意外关闭');
+                        $alive[$id] = false;
+                    } elseif ($chunk !== '') $inbound[$id] .= $chunk;
+                }
+                foreach ($inbound as $id => $buffer) {
+                    foreach (HlsPipelineProtocol::take($inbound[$id], PHP_INT_MAX) as $event) {
+                        if ($event['type'] === HlsPipelineProtocol::ERROR) throw new RuntimeException($event['metadata']['message'] ?? 'MP4 流水线失败');
+                        if ($event['type'] === HlsPipelineProtocol::FINISHED) $finishedCount++;
+                    }
+                    if (strlen($inbound[$id]) > HlsPipelineProtocol::MAX_BUFFER_LENGTH) throw new RuntimeException('主进程响应缓冲超限');
+                }
+                if ($finishedCount >= $workerCount) break;
+                if ($endEnqueued && !in_array(true, $alive, true)) throw new RuntimeException('解码进程未返回 FINISHED');
+            }
+            foreach ($sockets as $socket) @fclose($socket);
             $this->waitWorkers();
             echo "Done! Output: {$outputFile}\nOutput size: " . filesize($outputFile) . " bytes\n";
         } catch (Throwable $e) {
-            if (isset($socket) && is_resource($socket)) @fclose($socket);
+            foreach ($sockets as $socket) if (is_resource($socket)) @fclose($socket);
             $this->terminateWorkers();
             throw $e;
         }
     }
 
-    private function drainUntilLow($socket, string &$buffer, string &$response): void
+    private function bufferedBytes(array $buffers): int
     {
-        while (strlen($buffer) >= HlsPipelineProtocol::HIGH_WATERMARK) {
-            $read = [$socket]; $write = [$socket]; $except = null;
-            if (@stream_select($read, $write, $except, 1) === false) continue;
-            if ($write !== []) $this->writeSome($socket, $buffer);
-            $ignored = false; if ($read !== []) $this->readResponses($socket, $response, $ignored);
-        }
-        if ($buffer !== '') $this->writeSome($socket, $buffer);
-        if (strlen($buffer) > HlsPipelineProtocol::MAX_BUFFER_LENGTH) throw new RuntimeException('主进程发送缓冲超限');
-    }
-
-    private function writeSome($socket, string &$buffer): void
-    {
-        $n = @fwrite($socket, substr($buffer, 0, 65536));
-        if ($n === false || ($n === 0 && feof($socket))) throw new RuntimeException('解码进程媒体连接意外关闭');
-        if ($n > 0) $buffer = substr($buffer, $n);
-    }
-
-    private function readResponses($socket, string &$buffer, bool &$finished): void
-    {
-        $chunk = @fread($socket, 65536);
-        if ($chunk === false || ($chunk === '' && feof($socket))) throw new RuntimeException('解码进程响应连接意外关闭');
-        $buffer .= $chunk;
-        foreach (HlsPipelineProtocol::take($buffer, 4) as $event) {
-            if ($event['type'] === HlsPipelineProtocol::ERROR) throw new RuntimeException($event['metadata']['message'] ?? 'MP4 流水线失败');
-            if ($event['type'] === HlsPipelineProtocol::FINISHED) $finished = true;
-        }
+        $total = 0;
+        foreach ($buffers as $buffer) $total += strlen($buffer);
+        return $total;
     }
 
     private function startWorker(array $arguments): void
@@ -108,7 +183,7 @@ final class Mp4PipelineClient
         $error = null;
         foreach ($this->processes as $key => $process) {
             if (!is_resource($process)) { unset($this->processes[$key]); continue; }
-            $deadline = microtime(true) + 15;
+            $deadline = microtime(true) + 30;
             do { $status = proc_get_status($process); if (!$status['running']) break; usleep(50000); } while (microtime(true) < $deadline);
             $timedOut = $status['running'];
             if ($timedOut) @proc_terminate($process);

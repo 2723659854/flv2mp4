@@ -1,7 +1,7 @@
 <?php
 
 try {
-    $options = getopt('', ['mode:', 'autoload:', 'port:', 'output-port:', 'config:', 'output:']);
+    $options = getopt('', ['mode:', 'autoload:', 'port:', 'output-port:', 'config:', 'output:', 'workers:']);
     $mode = $options['mode'] ?? '';
     if (empty($options['autoload']) || empty($options['port']) || empty($options['config'])) {
         throw new RuntimeException('MP4 recode worker 参数不完整');
@@ -21,7 +21,8 @@ try {
     } elseif ($mode === 'output') {
         if (!isset($options['output'])) throw new RuntimeException('输出 worker 缺少 output');
         (new \Xiaosongshu\Flv2mp4\Recode\Mp4OutputWorkerServer($config, $options['output']))->run(
-            'tcp://127.0.0.1:' . (int)$options['port']
+            'tcp://127.0.0.1:' . (int)$options['port'],
+            (int)($options['workers'] ?? 1)
         );
     } else throw new RuntimeException('未知 MP4 recode worker 模式');
 } catch (Throwable $e) {
