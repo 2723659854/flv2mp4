@@ -549,15 +549,40 @@ if ($result && file_exists($outputFile1)) {
 | **Encoding settings** | H.264 Constrained Baseline, AAC 128 kbps | Same as left |
 
 
-### Cross‑Platform Performance Comparison
+### Cross-Platform Performance Comparison
 
-| Output Format | Windows Time | **Linux (Docker) Time** | Performance Gain |
+| Output Format | Windows Time | Linux (Docker) Time | Performance Gain |
 | :--- | :--- | :--- | :--- |
-| **FLV Re‑encoding** | 28 s | **23 s** | **↓ 17.9%** |
-| **MP4 Re‑encoding** | 29 s | **24 s** | **↓ 17.2%** |
-| **HLS (mpegts + m3u8)** | 37 s | **31 s** | **↓ 16.2%** |
+| **FLV Re-encoding** | 22 s | **17 s** | **↓ 22.7%** |
+| **MP4 Re-encoding** | 22 s | **17 s** | **↓ 22.7%** |
+| **HLS (mpegts + m3u8)** | 22 s | **17 s** | **↓ 22.7%** |
 
-*Linux environment (without OPcache) is still about 5–6 seconds faster than Windows (with JIT enabled).*
+---
+
+### Optimization History
+
+| Optimization Stage | FLV Re-encoding | MP4 Re-encoding | HLS Pipeline | Notes |
+| :--- | :--- | :--- | :--- | :--- |
+| **Initial Version** | ~91 s | ~60 s (old) | **135 s** | Serial, no optimization |
+| **Algorithm-Level Optimization** | 60 s | — | 97 s | DCT butterfly unrolling, string slicing, reduced array_fill, quantization + Zigzag merged |
+| **Multi-Process Motion Estimation (4 processes)** | 51 s | — | 73 s | First introduction of distributed parallelism |
+| **HLS Muxing I/O Optimization** | — | — | 69 s | Batch writes, fewer file operations |
+| **Encoding Core Optimization** | 44 s | 44 s | 67 s | All-zero block skip, I/P frame QP strategy |
+| **Decoding Cache Optimization** | 41 s | 42 s | 64 s | Reuse of repeated calculations |
+| **OPcache + JIT Enabled** | 39 s | 39 s | 60 s | Runtime environment acceleration |
+| **Multi-Process Model Optimization (select, etc.)** | 33 s | — | — | Event-driven, process communication optimization |
+| **Further Fine-Tuning** | 32 s | — | — | Specific method not specified |
+| **Extreme Optimization (Windows)** | 28 s | 29 s | 37 s | Windows + PHP 8.4.3 + JIT |
+| **Linux Docker Deployment** | 23 s | 24 s | 31 s | Linux + PHP 8.1.24, OPcache disabled |
+| **GOP Distributed Multi-Process Decoding** | 22 s | 22 s | 22 s | OPcache disabled; Windows platform |
+| **GOP Distributed Multi-Process Decoding** | 17 s | 17 s | 17 s | OPcache disabled; Linux platform |
+
+**Notes:**
+- Test clip: `test.flv`, 3.02 s, 720×742, 30 fps; Output specs: 360×360, 10 fps.
+- Encoding settings: H.264 Constrained Baseline, AAC 128 kbps.
+- Best stable value taken from multiple test runs.
+- “—” indicates the format was not separately tested at this stage.
+- GOP distributed multi-process decoding is the latest optimization, achieving significant improvements on both Windows and Linux.
 
 ---
 
