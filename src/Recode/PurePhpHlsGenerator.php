@@ -285,13 +285,22 @@ class PurePhpHlsGenerator
                 $this->tagType = (int)$metadata['tagType'];
                 $this->body = $payload;
             }
-            public function getTime(): int { return (int)($this->metadata['timestamp'] ?? 0); }
+            public function getTime(): int {
+                // 抽帧保留帧使用主进程重映射后的均匀网格时间戳，音频/未抽帧使用源时间戳
+                return (int)($this->metadata['outTimestamp'] ?? $this->metadata['timestamp'] ?? 0);
+            }
         };
         if (!empty($metadata['decoded'])) {
             $bodyLength = unpack('N', substr($payload, 0, 4))[1];
             $tag->body = substr($payload, 4, $bodyLength);
             $this->pipelineVariants = $metadata['variants'];
             $this->pipelineYuvPayload = substr($payload, 4 + $bodyLength);
+        }
+        // 抽帧丢弃帧：decoder 已解码维持参考链，输出端不编码、不写 TS，时间轴由保留帧推进
+        if ($tag->tagType === 9 && !empty($metadata['drop'])) {
+            $this->pipelineVariants = null;
+            $this->pipelineYuvPayload = '';
+            return;
         }
         if ($tag->tagType === 9) $this->handleVideoFrame($tag);
         elseif ($tag->tagType === 8) $this->handleAudioFrame($tag);

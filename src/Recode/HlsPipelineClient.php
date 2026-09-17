@@ -25,8 +25,18 @@ final class HlsPipelineClient
     public function process(string $flvFile): void
     {
         $workerCount = max(1, min(8, $this->decodeWorkers));
-        $gopCount = $this->countIdrGops($flvFile);
+        $sourceInfo = $this->scanSource($flvFile);
+        $gopCount = $sourceInfo['gopCount'];
         if ($gopCount > 0) $workerCount = max(1, min($workerCount, $gopCount));
+        // 抽帧目标帧率：各 profile fps>0 的最小值（多 profile 共享一路解码，只能按最低帧率抽一次）；
+        // fps=0 表示该 profile 保持源帧率；仅当目标帧率低于源帧率时才抽帧（不升帧）
+        $targetFps = 0.0;
+        foreach ($this->profiles as $profile) {
+            $fps = (int)($profile['fps'] ?? 0);
+            if ($fps > 0 && ($targetFps <= 0 || $fps < $targetFps)) $targetFps = $fps;
+        }
+        $sourceFps = $sourceInfo['fps'];
+        $dropFrames = $targetFps > 0 && $sourceFps !== null && $targetFps < $sourceFps - 0.01;
         $autoload = $this->locateAutoload();
         $worker = dirname(__DIR__, 2) . DIRECTORY_SEPARATOR . 'bin' . DIRECTORY_SEPARATOR . 'hls-worker.php';
         $decoderAddresses = [];
@@ -63,6 +73,9 @@ final class HlsPipelineClient
             $currentWorker = 0;
             $frameCount = 0;
             $videoCount = 0;
+            // 抽帧状态：首个输出 IDR 的源时间戳基准；已保留帧计数（含首 IDR）
+            $baseVideoTimestamp = -1;
+            $selectedFrames = 0;
             $outbound = array_fill(0, $workerCount, '');
             $inbound = array_fill(0, $workerCount, '');
             $alive = array_fill(0, $workerCount, true);
@@ -116,8 +129,9 @@ final class HlsPipelineClient
                                 $control = HlsPipelineProtocol::frame(HlsPipelineProtocol::CONTROL, 0, ['cmd' => 'config'], $body);
                                 for ($i = 0; $i < $workerCount; $i++) $outbound[$i] .= $control;
                             } else {
+                                $isKey = (ord($body[0]) >> 4) === 1 && $this->containsIdrNal($body);
                                 // 每个 IDR 开启一个独立 GOP，轮询分配给解码 worker
-                                if ((ord($body[0]) >> 4) === 1 && $this->containsIdrNal($body)) {
+                                if ($isKey) {
                                     $newGop = $gopSeq;
                                     if ($newGop > 0) {
                                         // 上一 GOP 所有帧之后插入边界标记：worker 处理到此处即代表该 GOP 已解码完
@@ -127,7 +141,32 @@ final class HlsPipelineClient
                                     $currentWorker = $newGop % $workerCount;
                                     $gopSeq++;
                                 }
-                                $enqueue($currentWorker, HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $sequence++, ['tagType' => 9, 'timestamp' => $tag['timestamp']], $body), max(0, $gopSeq - 1));
+                                // 抽帧选帧（保持播放时长不变：保留帧时间戳重映射到目标帧率均匀网格，
+                                // 音频沿用源时间轴，两轴同源同刻度故仍同步）：
+                                // IDR 强制保留（切片边界/解码器刷新点），其余帧按目标帧率时间量化，
+                                // 被抽掉的帧仍送解码维持参考链，但标记 drop 不缩放不编码
+                                $timestamp = (int)$tag['timestamp'];
+                                $videoMeta = ['tagType' => 9, 'timestamp' => $timestamp];
+                                if ($dropFrames) {
+                                    if ($baseVideoTimestamp < 0) {
+                                        if ($isKey) {
+                                            $baseVideoTimestamp = $timestamp;
+                                            $videoMeta['outTimestamp'] = $timestamp;
+                                            $selectedFrames = 1;
+                                        } else {
+                                            $videoMeta['drop'] = true;
+                                        }
+                                    } elseif (!$isKey
+                                        && ($timestamp - $baseVideoTimestamp) * $targetFps < $selectedFrames * 1000) {
+                                        $videoMeta['drop'] = true;
+                                    } else {
+                                        // 第 $selectedFrames 个保留帧（首 IDR 为 0）-> 均匀网格时间戳
+                                        $videoMeta['outTimestamp'] = $baseVideoTimestamp
+                                            + (int)round($selectedFrames * 1000 / $targetFps);
+                                        $selectedFrames++;
+                                    }
+                                }
+                                $enqueue($currentWorker, HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $sequence++, $videoMeta, $body), max(0, $gopSeq - 1));
                                 if ($this->maxFrames !== null && $videoCount >= $this->maxFrames) {
                                     echo "Reached max frames limit ({$this->maxFrames}), stopping...\n";
                                     $stopReading = true;
@@ -227,17 +266,23 @@ final class HlsPipelineClient
         return false;
     }
 
-    /** 预扫描关键帧数（IDR数=可并行GOP数），用于收敛worker数量避免空转 */
-    private function countIdrGops(string $flvFile): int
+    /**
+     * 预扫描（单次遍历）：统计源帧率与 IDR/GOP 数量。
+     * IDR 数即可并行 GOP 数（用于收敛 worker 数量避免空转）；帧率用于抽帧判定。
+     * @return array{fps: ?float, gopCount: int}
+     */
+    private function scanSource(string $flvFile): array
     {
-        $count = 0;
+        $first = null; $last = null; $count = 0; $gopCount = 0;
         foreach ($this->readFlvTags($flvFile) as $tag) {
             if ($tag['tagType'] !== 9) continue;
             $body = $tag['body'];
             if (strlen($body) < 2 || ord($body[1]) !== 1) continue;
-            if ($this->containsIdrNal($body)) $count++;
+            $first ??= $tag['timestamp']; $last = $tag['timestamp']; $count++;
+            if ($this->containsIdrNal($body)) $gopCount++;
         }
-        return $count;
+        $fps = $count >= 2 && $last > $first ? ($count - 1) * 1000 / ($last - $first) : null;
+        return ['fps' => $fps, 'gopCount' => $gopCount];
     }
 
     private function bufferedBytes(array $buffers): int

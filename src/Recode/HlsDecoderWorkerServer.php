@@ -143,6 +143,11 @@ final class HlsDecoderWorkerServer
         if ($this->pps !== '') array_unshift($nals, ['type' => 8, 'data' => $this->pps]);
         $frame = $this->decoder->decode($nals);
         if (!$frame || empty($frame['data'])) return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, $body);
+        // 抽帧丢弃：解码已完成（维持 GOP 内后续帧的参考链），但不缩放/不附 YUV，
+        // meta.drop 原样透传，输出端直接跳过编码
+        if (!empty($meta['drop'])) {
+            return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, $body);
+        }
         $meta['decoded'] = true;
         $meta['sourceWidth'] = $this->width;
         $meta['sourceHeight'] = $this->height;
