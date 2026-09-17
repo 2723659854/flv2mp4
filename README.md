@@ -583,6 +583,8 @@ if ($result && file_exists($outputFile1)) {
 - Best stable value taken from multiple test runs.
 - “—” indicates the format was not separately tested at this stage.
 - GOP distributed multi-process decoding is the latest optimization, achieving significant improvements on both Windows and Linux.
+- GOP-based multi-process parallel processing splits the serial encoding workload of long videos into multiple independent tasks that are executed concurrently, thereby reducing the cumulative processing time caused by frame-by-frame serial processing. In a test using another 7-minute video, the re-encoding process took 13 minutes.
+
 
 ---
 
