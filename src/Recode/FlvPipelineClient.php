@@ -24,13 +24,16 @@ final class FlvPipelineClient
 
     public function process(string $flvFile, string $outputFile): void
     {
+        $sourceInfo = $this->scanSource($flvFile);
+        $sourceFps = $sourceInfo['fps'];
         $workerCount = max(1, min(8, (int)($this->config['decode_workers'] ?? 4)));
+        // FLV 只能在关键帧边界切分并行，worker 超过 GOP 数纯属空转（白白承担进程启动与等待开销）
+        if ($sourceInfo['gopCount'] > 0) $workerCount = max(1, min($workerCount, $sourceInfo['gopCount']));
         [, $outputPort] = $this->reserveAddress();
         $decoderAddresses = [];
         for ($i = 0; $i < $workerCount; $i++) $decoderAddresses[] = $this->reserveAddress();
         $autoload = $this->locateAutoload();
         $worker = dirname(__DIR__, 2) . DIRECTORY_SEPARATOR . 'bin' . DIRECTORY_SEPARATOR . 'flv-recode-worker.php';
-        $sourceFps = $this->detectSourceFps($flvFile);
         $config = $this->config;
         $config['source_fps'] = $sourceFps;
         $encodedConfig = base64_encode(json_encode($config, JSON_THROW_ON_ERROR));
@@ -218,14 +221,20 @@ final class FlvPipelineClient
         return $total;
     }
 
-    private function detectSourceFps(string $file): ?float
+    /**
+     * 预扫描（复用同一次全文件遍历）：统计源帧率与 IDR/GOP 数量。
+     * @return array{fps: ?float, gopCount: int}
+     */
+    private function scanSource(string $file): array
     {
-        $first = null; $last = null; $count = 0;
+        $first = null; $last = null; $count = 0; $gopCount = 0;
         foreach ($this->readFlvTags($file) as $tag) {
             if ($tag['tagType'] !== 9 || strlen($tag['body']) < 2 || ord($tag['body'][1]) !== 1) continue;
             $first ??= $tag['timestamp']; $last = $tag['timestamp']; $count++;
+            if ((ord($tag['body'][0]) >> 4) === 1 && $this->containsIdrNal($tag['body'])) $gopCount++;
         }
-        return $count >= 2 && $last > $first ? ($count - 1) * 1000 / ($last - $first) : null;
+        $fps = $count >= 2 && $last > $first ? ($count - 1) * 1000 / ($last - $first) : null;
+        return ['fps' => $fps, 'gopCount' => $gopCount];
     }
 
     private function readFlvTags(string $file): Generator
