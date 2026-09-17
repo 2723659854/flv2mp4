@@ -39,6 +39,7 @@ final class HlsDecoderWorkerServer
         stream_set_blocking($downstream, false);
         $input = '';
         $output = '';
+        $upOutput = '';
         $downstreamInput = '';
         $ended = false;
         try {
@@ -46,6 +47,7 @@ final class HlsDecoderWorkerServer
                 $read = [$downstream];
                 if (!$ended && strlen($input) < HlsPipelineProtocol::HIGH_WATERMARK) $read[] = $upstream;
                 $write = $output === '' ? [] : [$downstream];
+                if ($upOutput !== '') $write[] = $upstream;
                 $except = null;
                 @stream_select($read, $write, $except, 0, 1);
                 if (in_array($upstream, $read, true)) {
@@ -58,7 +60,14 @@ final class HlsDecoderWorkerServer
                     ? HlsPipelineProtocol::take($input, 1)
                     : [];
                 foreach ($events as $event) {
-                    if ($event['type'] === HlsPipelineProtocol::END) {
+                    if ($event['type'] === HlsPipelineProtocol::CONTROL) {
+                        $cmd = $event['metadata']['cmd'] ?? '';
+                        if ($cmd === 'config') $this->parseConfiguration(substr($event['payload'], 5));
+                        elseif ($cmd === 'gopEnd') {
+                            // 处理到此处时，该 GOP 之前的所有帧均已解码并转发
+                            $upOutput .= HlsPipelineProtocol::frame(HlsPipelineProtocol::PROGRESS, 0, ['gop' => (int)($event['metadata']['gop'] ?? -1)]);
+                        }
+                    } elseif ($event['type'] === HlsPipelineProtocol::END) {
                         $output .= HlsPipelineProtocol::frame(HlsPipelineProtocol::END, $event['sequence']);
                         $ended = true;
                     } else {
@@ -70,6 +79,10 @@ final class HlsDecoderWorkerServer
                     $written = @fwrite($downstream, substr($output, 0, 65536));
                     if ($written === false || ($written === 0 && feof($downstream))) throw new RuntimeException('编码进程媒体连接意外关闭');
                     if ($written > 0) $output = substr($output, $written);
+                }
+                if (in_array($upstream, $write, true) && $upOutput !== '') {
+                    $written = @fwrite($upstream, substr($upOutput, 0, 65536));
+                    if ($written > 0) $upOutput = substr($upOutput, $written);
                 }
                 if (in_array($downstream, $read, true)) {
                     $chunk = @fread($downstream, 65536);
@@ -124,7 +137,9 @@ final class HlsDecoderWorkerServer
             $profile = $this->profiles[$name];
             $width = ($profile['width'] ?? 0) > 0 ? (int)$profile['width'] : $this->width;
             $height = ($profile['height'] ?? 0) > 0 ? (int)$profile['height'] : $this->height;
-            if ($width !== $this->width || $height !== $this->height) $yuv = $this->scaler->scaleYUV420P($yuv, $this->width, $this->height, $width, $height);
+            if ($width !== $this->width || $height !== $this->height) {
+                $yuv = $this->scaler->scaleYUV420P($yuv, $this->width, $this->height, $width, $height);
+            }
             if (!empty($profile['watermark']) && !empty($profile['watermark_file'])) $yuv = $this->applyWatermark($yuv, $width, $height, $profile['watermark_file']);
             $meta['variants'] = [$name => ['offset' => 0, 'length' => strlen($yuv), 'width' => $width, 'height' => $height]];
         }

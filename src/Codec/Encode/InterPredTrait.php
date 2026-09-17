@@ -17,14 +17,9 @@ trait InterPredTrait
         string $refVPlane,
         int $motionRange = 32
     ): array {
-        $lumaPixels = array_fill(0, 16, array_fill(0, 16, 0));
-        for ($y = 0; $y < 16; $y++) {
-            for ($x = 0; $x < 16; $x++) {
-                $lumaPixels[$y][$x] = ord($luma[$y * 16 + $x]);
-            }
-        }
+        $curFlat = array_values(unpack('C*', $luma));
 
-        [$mvX, $mvY, $sad] = $this->motionEstimate16x16($lumaPixels, $refYPlane, $mbX, $mbY, $motionRange);
+        [$mvX, $mvY, $sad] = $this->motionEstimate16x16($curFlat, $refYPlane, $mbX, $mbY, $motionRange);
         $refX = $mbX * 64 + $mvX;
         $refY = $mbY * 64 + $mvY;
         $predBlock = $this->mcLumaBlock($refYPlane, $refX, $refY, $this->mbAlignedWidth, $this->mbAlignedHeight);
@@ -35,22 +30,15 @@ trait InterPredTrait
         for ($by = 0; $by < 4; $by++) {
             for ($bx = 0; $bx < 4; $bx++) {
                 $blkIdx = $by * 4 + $bx;
-                $blk4x4 = array_fill(0, 4, array_fill(0, 4, 0));
+                $res = [];
                 for ($y = 0; $y < 4; $y++) {
+                    $row = $by * 4 + $y;
                     for ($x = 0; $x < 4; $x++) {
-                        $blk4x4[$y][$x] = $lumaPixels[$by * 4 + $y][$bx * 4 + $x] - $predBlock[$by * 4 + $y][$bx * 4 + $x];
+                        $res[] = $curFlat[$row * 16 + $bx * 4 + $x] - $predBlock[$row * 16 + $bx * 4 + $x];
                     }
                 }
-                $quantBlock = $this->quantize($this->dct($blk4x4), 0, true);
-                $nz = 0;
-                $quantResidual[$blkIdx] = array_fill(0, 16, 0);
-                for ($y = 0; $y < 4; $y++) {
-                    for ($x = 0; $x < 4; $x++) {
-                        $value = $quantBlock[$y][$x];
-                        $quantResidual[$blkIdx][$y * 4 + $x] = $value;
-                        if ($value != 0) $nz++;
-                    }
-                }
+                [$quantBlock, $nz] = $this->quantizeFlatInter($this->dctFlat($res));
+                $quantResidual[$blkIdx] = $quantBlock;
                 $nzCache[$blkIdx] = min(15, $nz);
                 if ($nz > 0) $cbpLuma |= 1 << (intdiv($by, 2) * 2 + intdiv($bx, 2));
             }
@@ -67,14 +55,11 @@ trait InterPredTrait
                 $block8x8Idx = intdiv($by, 2) * 2 + intdiv($bx, 2);
                 $idctResult = null;
                 if ($cbpLuma & (1 << $block8x8Idx)) {
-                    $acDequant = $this->dequantize4x4($quantResidual[$blkIdx], 0, $this->qp);
-                    $acBlock = array_fill(0, 4, array_fill(0, 4, 0));
-                    for ($y = 0; $y < 4; $y++) for ($x = 0; $x < 4; $x++) $acBlock[$y][$x] = $acDequant[$y * 4 + $x];
-                    $idctResult = $this->idct4x4($acBlock);
+                    $idctResult = $this->idctFlat($this->dequantize4x4($quantResidual[$blkIdx], 0, $this->qp));
                 }
                 for ($y = 0; $y < 4; $y++) {
                     for ($x = 0; $x < 4; $x++) {
-                        $value = $predBlock[$by * 4 + $y][$bx * 4 + $x] + ($idctResult[$y][$x] ?? 0);
+                        $value = $predBlock[($by * 4 + $y) * 16 + $bx * 4 + $x] + ($idctResult[$y * 4 + $x] ?? 0);
                         $reconY[($by * 4 + $y) * 16 + $bx * 4 + $x] = chr(max(0, min(255, $value)));
                     }
                 }
@@ -87,8 +72,12 @@ trait InterPredTrait
         $chromaRefY = $mbY * 64 + $mvY;
         $cbPred = $this->mcChromaBlock($refUPlane, $chromaRefX, $chromaRefY, $chromaW, $chromaH);
         $crPred = $this->mcChromaBlock($refVPlane, $chromaRefX, $chromaRefY, $chromaW, $chromaH);
-        $reconU = $reconV = '';
-        for ($y = 0; $y < 8; $y++) for ($x = 0; $x < 8; $x++) { $reconU .= chr($cbPred[$y][$x]); $reconV .= chr($crPred[$y][$x]); }
+        $reconU = str_repeat("\0", 64);
+        $reconV = str_repeat("\0", 64);
+        for ($y = 0; $y < 8; $y++) for ($x = 0; $x < 8; $x++) {
+            $reconU[$y * 8 + $x] = chr($cbPred[$y * 8 + $x]);
+            $reconV[$y * 8 + $x] = chr($crPred[$y * 8 + $x]);
+        }
 
         return [$mvX, $mvY, $sad, $cbpLuma, $nzCache, $quantResidual, $reconY, $reconU, $reconV];
     }
@@ -420,24 +409,47 @@ trait InterPredTrait
      */
     private function mcChromaBlock(string $refPlane, int $chromaRefX, int $chromaRefY, int $chromaW, int $chromaH): array
     {
-        $pred = array_fill(0, 8, array_fill(0, 8, 128));
+        $pred = array_fill(0, 64, 0);
         $fracX = $chromaRefX & 7;
         $fracY = $chromaRefY & 7;
         $intX = $chromaRefX >> 3;
         $intY = $chromaRefY >> 3;
 
+        // 坐标预先钳位，避免逐像素 max/min 与方法调用
+        $bx = [];
+        $bx1 = [];
+        for ($i = 0; $i < 8; $i++) {
+            $v = $intX + $i;
+            $bx[$i] = $v < 0 ? 0 : ($v >= $chromaW ? $chromaW - 1 : $v);
+            $v1 = $v + 1;
+            $bx1[$i] = $v1 < 0 ? 0 : ($v1 >= $chromaW ? $chromaW - 1 : $v1);
+        }
+        $by = [];
+        $by1 = [];
         for ($j = 0; $j < 8; $j++) {
-            for ($i = 0; $i < 8; $i++) {
-                $a00 = $this->getClampedPixel($refPlane, $intX + $i, $intY + $j, $chromaW, $chromaH);
-                $a10 = $this->getClampedPixel($refPlane, $intX + $i + 1, $intY + $j, $chromaW, $chromaH);
-                $a01 = $this->getClampedPixel($refPlane, $intX + $i, $intY + $j + 1, $chromaW, $chromaH);
-                $a11 = $this->getClampedPixel($refPlane, $intX + $i + 1, $intY + $j + 1, $chromaW, $chromaH);
+            $v = $intY + $j;
+            $by[$j] = $v < 0 ? 0 : ($v >= $chromaH ? $chromaH - 1 : $v);
+            $v1 = $v + 1;
+            $by1[$j] = $v1 < 0 ? 0 : ($v1 >= $chromaH ? $chromaH - 1 : $v1);
+        }
 
-                $val = ((8 - $fracX) * (8 - $fracY) * $a00 +
-                        $fracX * (8 - $fracY) * $a10 +
-                        (8 - $fracX) * $fracY * $a01 +
-                        $fracX * $fracY * $a11 + 32) >> 6;
-                $pred[$j][$i] = max(0, min(255, $val));
+        $w00 = (8 - $fracX) * (8 - $fracY);
+        $w10 = $fracX * (8 - $fracY);
+        $w01 = (8 - $fracX) * $fracY;
+        $w11 = $fracX * $fracY;
+        for ($j = 0; $j < 8; $j++) {
+            $row0 = $by[$j] * $chromaW;
+            $row1 = $by1[$j] * $chromaW;
+            for ($i = 0; $i < 8; $i++) {
+                $x0 = $bx[$i];
+                $x1 = $bx1[$i];
+                $a00 = ord($refPlane[$row0 + $x0]);
+                $a10 = ord($refPlane[$row0 + $x1]);
+                $a01 = ord($refPlane[$row1 + $x0]);
+                $a11 = ord($refPlane[$row1 + $x1]);
+
+                $val = ($w00 * $a00 + $w10 * $a10 + $w01 * $a01 + $w11 * $a11 + 32) >> 6;
+                $pred[$j * 8 + $i] = $val < 0 ? 0 : ($val > 255 ? 255 : $val);
             }
         }
         return $pred;
@@ -459,19 +471,33 @@ trait InterPredTrait
      */
     private function mcLumaBlock(string $refPlane, int $refX, int $refY, int $w, int $h): array
     {
-        $pred = array_fill(0, 16, array_fill(0, 16, 0));
+        $pred = array_fill(0, 256, 0);
 
         $fracX = $refX & 3;
         $fracY = $refY & 3;
         $intX = $refX >> 2;
         $intY = $refY >> 2;
-        $blockW = 16;
-        $blockH = 16;
+
+        // 参考帧整数数组（unpack 为 1 基下标），与运动估计阶段共用
+        $ref = $this->refInts ?? unpack('C*', $refPlane);
+
+        // 预钳位坐标：键 = 相对位移 + 2
+        $cx = [];
+        for ($d = -2; $d <= 19; $d++) {
+            $v = $intX + $d;
+            $cx[$d + 2] = $v < 0 ? 0 : ($v >= $w ? $w - 1 : $v);
+        }
+        $cy = [];
+        for ($d = -2; $d <= 22; $d++) {
+            $v = $intY + $d;
+            $cy[$d + 2] = $v < 0 ? 0 : ($v >= $h ? $h - 1 : $v);
+        }
 
         if ($fracX === 0 && $fracY === 0) {
-            for ($j = 0; $j < $blockH; $j++) {
-                for ($i = 0; $i < $blockW; $i++) {
-                    $pred[$j][$i] = $this->getClampedPixel($refPlane, $intX + $i, $intY + $j, $w, $h);
+            for ($j = 0; $j < 16; $j++) {
+                $row = $cy[$j + 2] * $w;
+                for ($i = 0; $i < 16; $i++) {
+                    $pred[$j * 16 + $i] = $ref[$row + $cx[$i + 2] + 1];
                 }
             }
             return $pred;
@@ -481,49 +507,42 @@ trait InterPredTrait
         $hStart = 0;
         if ($fracX !== 0) {
             if ($fracY === 0) {
-                $hRows = $blockH;
+                $hRows = 16;
                 $hStart = 0;
             } else {
-                $hRows = $blockH + 5;
+                $hRows = 21;
                 $hStart = -2;
             }
         }
 
-        $vCols = 0;
-        if ($fracY !== 0) {
-            if ($fracX === 0) {
-                $vCols = $blockW;
-            } else {
-                $vCols = $blockW + 1;
-            }
-        }
+        $vCols = $fracY !== 0 ? ($fracX === 0 ? 16 : 17) : 0;
 
         $H = null;
         $Hfull = null;
         if ($fracX !== 0) {
             if ($fracY === 0) {
-                $H = array_fill(0, $hRows, array_fill(0, $blockW, 0));
+                $H = array_fill(0, $hRows, array_fill(0, 16, 0));
             } else {
-                $Hfull = array_fill(0, $hRows, array_fill(0, $blockW, 0));
-                $H = array_fill(0, $hRows, array_fill(0, $blockW, 0));
+                $Hfull = array_fill(0, $hRows, array_fill(0, 16, 0));
+                $H = array_fill(0, $hRows, array_fill(0, 16, 0));
             }
             for ($j = $hStart; $j < $hStart + $hRows; $j++) {
-                $ry = $this->clampInt($intY + $j, 0, $h - 1);
-                for ($i = 0; $i < $blockW; $i++) {
-                    $px0 = $this->getClampedPixel($refPlane, $intX + $i - 2, $ry, $w, $h);
-                    $px1 = $this->getClampedPixel($refPlane, $intX + $i - 1, $ry, $w, $h);
-                    $px2 = $this->getClampedPixel($refPlane, $intX + $i, $ry, $w, $h);
-                    $px3 = $this->getClampedPixel($refPlane, $intX + $i + 1, $ry, $w, $h);
-                    $px4 = $this->getClampedPixel($refPlane, $intX + $i + 2, $ry, $w, $h);
-                    $px5 = $this->getClampedPixel($refPlane, $intX + $i + 3, $ry, $w, $h);
-                    $fullVal = $px0 - 5 * $px1 + 20 * $px2 + 20 * $px3 - 5 * $px4 + $px5;
+                $row = $cy[$j + 2] * $w;
+                $jr = $j - $hStart;
+                for ($i = 0; $i < 16; $i++) {
+                    $fullVal = $ref[$row + $cx[$i] + 1]
+                        - 5 * $ref[$row + $cx[$i + 1] + 1]
+                        + 20 * $ref[$row + $cx[$i + 2] + 1]
+                        + 20 * $ref[$row + $cx[$i + 3] + 1]
+                        - 5 * $ref[$row + $cx[$i + 4] + 1]
+                        + $ref[$row + $cx[$i + 5] + 1];
                     if ($fracY === 0) {
                         $hVal = ($fullVal + 16) >> 5;
-                        $H[$j - $hStart][$i] = $this->clip255Int($hVal);
+                        $H[$jr][$i] = $hVal < 0 ? 0 : ($hVal > 255 ? 255 : $hVal);
                     } else {
-                        $Hfull[$j - $hStart][$i] = $fullVal;
+                        $Hfull[$jr][$i] = $fullVal;
                         $hVal = ($fullVal + 16) >> 5;
-                        $H[$j - $hStart][$i] = $this->clip255Int($hVal);
+                        $H[$jr][$i] = $hVal < 0 ? 0 : ($hVal > 255 ? 255 : $hVal);
                     }
                 }
             }
@@ -531,27 +550,33 @@ trait InterPredTrait
 
         $V = null;
         if ($fracY !== 0) {
-            $V = array_fill(0, $blockH, array_fill(0, $vCols, 0));
-            for ($j = 0; $j < $blockH; $j++) {
+            $V = array_fill(0, 16, array_fill(0, $vCols, 0));
+            for ($j = 0; $j < 16; $j++) {
+                $r0 = $cy[$j] * $w;
+                $r1 = $cy[$j + 1] * $w;
+                $r2 = $cy[$j + 2] * $w;
+                $r3 = $cy[$j + 3] * $w;
+                $r4 = $cy[$j + 4] * $w;
+                $r5 = $cy[$j + 5] * $w;
                 for ($i = 0; $i < $vCols; $i++) {
-                    $rx = $this->clampInt($intX + $i, 0, $w - 1);
-                    $px0 = $this->getClampedPixel($refPlane, $rx, $intY + $j - 2, $w, $h);
-                    $px1 = $this->getClampedPixel($refPlane, $rx, $intY + $j - 1, $w, $h);
-                    $px2 = $this->getClampedPixel($refPlane, $rx, $intY + $j, $w, $h);
-                    $px3 = $this->getClampedPixel($refPlane, $rx, $intY + $j + 1, $w, $h);
-                    $px4 = $this->getClampedPixel($refPlane, $rx, $intY + $j + 2, $w, $h);
-                    $px5 = $this->getClampedPixel($refPlane, $rx, $intY + $j + 3, $w, $h);
-                    $hVal = ($px0 - 5 * $px1 + 20 * $px2 + 20 * $px3 - 5 * $px4 + $px5 + 16) >> 5;
-                    $V[$j][$i] = $this->clip255Int($hVal);
+                    $col = $cx[$i + 2];
+                    $fullVal = $ref[$r0 + $col + 1]
+                        - 5 * $ref[$r1 + $col + 1]
+                        + 20 * $ref[$r2 + $col + 1]
+                        + 20 * $ref[$r3 + $col + 1]
+                        - 5 * $ref[$r4 + $col + 1]
+                        + $ref[$r5 + $col + 1];
+                    $hVal = ($fullVal + 16) >> 5;
+                    $V[$j][$i] = $hVal < 0 ? 0 : ($hVal > 255 ? 255 : $hVal);
                 }
             }
         }
 
         $C = null;
         if ($fracX !== 0 && $fracY !== 0) {
-            $C = array_fill(0, $blockH, array_fill(0, $blockW, 0));
-            for ($j = 0; $j < $blockH; $j++) {
-                for ($i = 0; $i < $blockW; $i++) {
+            $C = array_fill(0, 16, array_fill(0, 16, 0));
+            for ($j = 0; $j < 16; $j++) {
+                for ($i = 0; $i < 16; $i++) {
                     $px0 = $Hfull[$j][$i];
                     $px1 = $Hfull[$j + 1][$i];
                     $px2 = $Hfull[$j + 2][$i];
@@ -560,80 +585,72 @@ trait InterPredTrait
                     $px5 = $Hfull[$j + 5][$i];
                     $fullVal = $px0 - 5 * $px1 + 20 * $px2 + 20 * $px3 - 5 * $px4 + $px5;
                     $hVal = ($fullVal + 512) >> 10;
-                    $C[$j][$i] = $this->clip255Int($hVal);
+                    $C[$j][$i] = $hVal < 0 ? 0 : ($hVal > 255 ? 255 : $hVal);
                 }
             }
         }
 
-        $avg = function($a, $b) {
-            return ($a + $b + 1) >> 1;
-        };
-
         if ($fracY === 0) {
-            for ($j = 0; $j < $blockH; $j++) {
-                $ry = $this->clampInt($intY + $j, 0, $h - 1);
-                for ($i = 0; $i < $blockW; $i++) {
+            for ($j = 0; $j < 16; $j++) {
+                $row = $cy[$j + 2] * $w;
+                for ($i = 0; $i < 16; $i++) {
                     if ($fracX === 1) {
-                        $I = $this->getClampedPixel($refPlane, $intX + $i, $ry, $w, $h);
-                        $pred[$j][$i] = $avg($I, $H[$j][$i]);
+                        $I = $ref[$row + $cx[$i + 2] + 1];
+                        $pred[$j * 16 + $i] = ($I + $H[$j][$i] + 1) >> 1;
                     } elseif ($fracX === 2) {
-                        $pred[$j][$i] = $H[$j][$i];
+                        $pred[$j * 16 + $i] = $H[$j][$i];
                     } else {
-                        $I1 = $this->getClampedPixel($refPlane, $intX + $i + 1, $ry, $w, $h);
-                        $pred[$j][$i] = $avg($H[$j][$i], $I1);
+                        $I1 = $ref[$row + $cx[$i + 3] + 1];
+                        $pred[$j * 16 + $i] = ($H[$j][$i] + $I1 + 1) >> 1;
                     }
                 }
             }
         } elseif ($fracX === 0) {
-            for ($j = 0; $j < $blockH; $j++) {
-                for ($i = 0; $i < $blockW; $i++) {
-                    $rx = $this->clampInt($intX + $i, 0, $w - 1);
+            for ($j = 0; $j < 16; $j++) {
+                $row = $cy[$j + 2] * $w;
+                $row1 = $cy[$j + 3] * $w;
+                for ($i = 0; $i < 16; $i++) {
+                    $col = $cx[$i + 2];
                     if ($fracY === 1) {
-                        $I = $this->getClampedPixel($refPlane, $rx, $intY + $j, $w, $h);
-                        $pred[$j][$i] = $avg($I, $V[$j][$i]);
+                        $I = $ref[$row + $col + 1];
+                        $pred[$j * 16 + $i] = ($I + $V[$j][$i] + 1) >> 1;
                     } elseif ($fracY === 2) {
-                        $pred[$j][$i] = $V[$j][$i];
+                        $pred[$j * 16 + $i] = $V[$j][$i];
                     } else {
-                        $I_1 = $this->getClampedPixel($refPlane, $rx, $intY + $j + 1, $w, $h);
-                        $pred[$j][$i] = $avg($V[$j][$i], $I_1);
+                        $I1 = $ref[$row1 + $col + 1];
+                        $pred[$j * 16 + $i] = ($V[$j][$i] + $I1 + 1) >> 1;
                     }
                 }
             }
         } elseif ($fracX === 2) {
-            for ($j = 0; $j < $blockH; $j++) {
-                for ($i = 0; $i < $blockW; $i++) {
+            for ($j = 0; $j < 16; $j++) {
+                for ($i = 0; $i < 16; $i++) {
                     if ($fracY === 1) {
-                        $pred[$j][$i] = $avg($H[$j + 2][$i], $C[$j][$i]);
+                        $pred[$j * 16 + $i] = ($H[$j + 2][$i] + $C[$j][$i] + 1) >> 1;
                     } elseif ($fracY === 2) {
-                        $pred[$j][$i] = $C[$j][$i];
+                        $pred[$j * 16 + $i] = $C[$j][$i];
                     } else {
-                        $pred[$j][$i] = $avg($C[$j][$i], $H[$j + 3][$i]);
+                        $pred[$j * 16 + $i] = ($C[$j][$i] + $H[$j + 3][$i] + 1) >> 1;
                     }
                 }
             }
         } elseif ($fracY === 2) {
-            for ($j = 0; $j < $blockH; $j++) {
-                for ($i = 0; $i < $blockW; $i++) {
+            for ($j = 0; $j < 16; $j++) {
+                for ($i = 0; $i < 16; $i++) {
                     if ($fracX === 1) {
-                        $pred[$j][$i] = $avg($V[$j][$i], $C[$j][$i]);
+                        $pred[$j * 16 + $i] = ($V[$j][$i] + $C[$j][$i] + 1) >> 1;
                     } else {
-                        $pred[$j][$i] = $avg($C[$j][$i], $V[$j][$i + 1]);
+                        $pred[$j * 16 + $i] = ($C[$j][$i] + $V[$j][$i + 1] + 1) >> 1;
                     }
                 }
             }
         } else {
             $hIdx = ($fracY === 1) ? 2 : 3;
             $vIdx = ($fracX === 3) ? 1 : 0;
-            for ($j = 0; $j < $blockH; $j++) {
-                for ($i = 0; $i < $blockW; $i++) {
-                    $pred[$j][$i] = $avg($H[$j + $hIdx][$i], $V[$j][$i + $vIdx]);
+            for ($j = 0; $j < 16; $j++) {
+                for ($i = 0; $i < 16; $i++) {
+                    $pred[$j * 16 + $i] = ($H[$j + $hIdx][$i] + $V[$j][$i + $vIdx] + 1) >> 1;
                 }
-            }
-        }
-
-        for ($j = 0; $j < $blockH; $j++) {
-            for ($i = 0; $i < $blockW; $i++) {
-                $pred[$j][$i] = $this->clip255Int($pred[$j][$i]);
             }
         }
 

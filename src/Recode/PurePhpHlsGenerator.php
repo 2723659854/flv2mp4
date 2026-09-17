@@ -71,6 +71,7 @@ class PurePhpHlsGenerator
     private string $srcSpsData = '';
     private string $srcPpsData = '';
     private bool $multi;
+    private int $decodeWorkers;
     private ?array $pipelineVariants = null;
     private string $pipelineYuvPayload = '';
 
@@ -83,12 +84,14 @@ class PurePhpHlsGenerator
      * @param array $profiles 规格
      * @param string $outputDir 输出目录
      * @param bool $multi 是否开启多进程
+     * @param int $decodeWorkers 多进程解码worker数（按GOP并行，实际数收敛为min(配置值,GOP数)）
      */
-    public function __construct(array $profiles, string $outputDir,bool $multi = false)
+    public function __construct(array $profiles, string $outputDir,bool $multi = false, int $decodeWorkers = 4)
     {
         $this->profiles = $profiles;
         $this->outputDir = rtrim($outputDir, '/');
         $this->multi = $multi;
+        $this->decodeWorkers = $decodeWorkers;
 
         $this->decoder = new H264Decoder();
         $this->scaler = new VideoScaler();
@@ -120,6 +123,17 @@ class PurePhpHlsGenerator
 
         /** 初始化空m3u8 */
         $this->ensureInitialPlaylist();
+    }
+
+    /**
+     * 预热各 profile 的运动估计子进程（输出 worker 启动时调用，
+     * 让 PHP 冷启动与解码首 GOP 并行发生）
+     */
+    public function warmupMotionWorkers(): void
+    {
+        foreach ($this->encoders as $encoder) {
+            $encoder->warmupMotionWorkers();
+        }
     }
 
     /**
@@ -231,7 +245,7 @@ class PurePhpHlsGenerator
     {
         if (!file_exists($flvFile)) throw new \Exception("FLV file not found: {$flvFile}");
         if ($this->multi) {
-            (new HlsPipelineClient($this->profiles, $this->outputDir, $this->maxFrames))->process($flvFile);
+            (new HlsPipelineClient($this->profiles, $this->outputDir, $this->maxFrames, $this->decodeWorkers))->process($flvFile);
             return;
         }
 

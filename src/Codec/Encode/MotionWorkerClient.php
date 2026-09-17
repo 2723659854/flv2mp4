@@ -32,13 +32,15 @@ final class MotionWorkerClient
         $chunks = array_fill(0, $this->workers, []);
         foreach ($blocks as $key => $block) $chunks[$key % $this->workers][$key] = $block;
         $ids = [];
+        $referenceFrame = null;
         foreach ($chunks as $worker => $chunk) {
             if ($chunk === []) continue;
             $id = $this->id++;
             $ids[$worker] = $id;
             $frameKey = bin2hex($frameId);
             if (($this->references[$worker] ?? null) !== $frameKey) {
-                $this->outputs[$worker] .= MotionWorkerProtocol::loadReference($frameId, $width, $height, $aw, $ah, $refY, $refU, $refV);
+                $referenceFrame ??= MotionWorkerProtocol::loadReference($frameId, $width, $height, $aw, $ah, $refY, $refU, $refV);
+                $this->outputs[$worker] .= $referenceFrame;
                 $this->references[$worker] = $frameKey;
             }
             $this->outputs[$worker] .= MotionWorkerProtocol::batch($id, $frameId, $qp, $chunk);
@@ -85,8 +87,13 @@ final class MotionWorkerClient
         return (int)substr(strrchr($name, ':'), 1);
     }
 
-    private function connectAll(): void
+    public function connectAll(): void
     {
+        // 第一阶段：一次性拉起全部子进程（PHP 冷启动并发进行，避免逐个等待）
+        $pending = [];
+        $entry = dirname(__DIR__, 3) . '/bin/motion-worker.php';
+        $autoload = dirname((new \ReflectionClass(\Composer\Autoload\ClassLoader::class))->getFileName(), 2) . '/autoload.php';
+        $descriptors = [fopen('php://stdin', 'r'), fopen('php://stdout', 'a'), fopen('php://stderr', 'a')];
         for ($worker = 0; $worker < $this->workers; $worker++) {
             if (isset($this->sockets[$worker]) && is_resource($this->sockets[$worker])) continue;
             $lock = null;
@@ -94,33 +101,40 @@ final class MotionWorkerClient
                 $lock = fopen(sys_get_temp_dir() . '/flv2mp4-motion-worker-port.lock', 'c');
                 if ($lock === false || !flock($lock, LOCK_EX)) throw new RuntimeException('Unable to lock motion worker port allocation');
                 $this->workerPorts[$worker] = $this->allocatePort();
+                flock($lock, LOCK_UN);
+                fclose($lock);
             }
             $port = $this->workerPorts[$worker];
             $socket = $this->port === 0 ? false : @stream_socket_client("tcp://127.0.0.1:{$port}", $errno, $error, 0.1);
             if ($socket === false) {
-                $entry = dirname(__DIR__, 3) . '/bin/motion-worker.php';
-                $autoload = dirname((new \ReflectionClass(\Composer\Autoload\ClassLoader::class))->getFileName(), 2) . '/autoload.php';
-                $descriptors = [fopen('php://stdin', 'r'), fopen('php://stdout', 'a'), fopen('php://stderr', 'a')];
                 // 多进程转码时多个 PHP 冷启动并发，2 秒窗口会偶发连接超时；放宽到 15 秒
                 $process = @proc_open([PHP_BINARY, $entry, '--owned', "--port={$port}", "--autoload={$autoload}"], $descriptors, $pipes, null, null, ['bypass_shell' => true]);
                 if (!is_resource($process)) throw new RuntimeException('Unable to start motion worker');
                 $this->processes[] = $process;
-                $end = microtime(true) + 15;
-                do {
-                    usleep(50000);
-                    $socket = @stream_socket_client("tcp://127.0.0.1:{$port}", $errno, $error, 0.1);
-                } while ($socket === false && microtime(true) < $end);
+                $pending[$worker] = $port;
+            } else {
+                stream_set_blocking($socket, false);
+                $this->sockets[$worker] = $socket;
+                $this->inputs[$worker] = '';
+                $this->outputs[$worker] = '';
+                unset($this->references[$worker]);
             }
-            if ($socket === false) {
-                if (is_resource($lock)) { flock($lock, LOCK_UN); fclose($lock); }
-                throw new RuntimeException("Unable to connect motion worker {$port}: {$error} ({$errno})");
+        }
+
+        // 第二阶段：并发轮询，等待所有子进程监听就绪
+        $deadline = microtime(true) + 15;
+        while ($pending !== []) {
+            if (microtime(true) >= $deadline) throw new RuntimeException('Unable to connect motion workers (timeout): ' . implode(',', $pending));
+            foreach ($pending as $worker => $port) {
+                $socket = @stream_socket_client("tcp://127.0.0.1:{$port}", $errno, $error, 0.1);
+                if ($socket === false) continue;
+                stream_set_blocking($socket, false);
+                $this->sockets[$worker] = $socket;
+                $this->inputs[$worker] = '';
+                $this->outputs[$worker] = '';
+                unset($this->references[$worker], $pending[$worker]);
             }
-            if (is_resource($lock)) { flock($lock, LOCK_UN); fclose($lock); }
-            stream_set_blocking($socket, false);
-            $this->sockets[$worker] = $socket;
-            $this->inputs[$worker] = '';
-            $this->outputs[$worker] = '';
-            unset($this->references[$worker]);
+            if ($pending !== []) usleep(50000);
         }
     }
 

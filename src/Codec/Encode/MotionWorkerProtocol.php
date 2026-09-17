@@ -106,11 +106,13 @@ final class MotionWorkerProtocol
             [$mvX, $mvY, $sad, $cbpLuma, $nzCache, $quantResidual, $reconY, $reconU, $reconV] = $result;
             if (count($nzCache) !== 24 || strlen($reconY) !== 256 || strlen($reconU) !== 64 || strlen($reconV) !== 64) throw new InvalidArgumentException('Invalid motion worker result');
             $body .= pack('N5', $index, $mvX, $mvY, $sad, $cbpLuma);
-            foreach ($nzCache as $value) $body .= chr($value);
+            $body .= pack('C24', ...array_values($nzCache));
+            $flat = [];
             for ($block = 0; $block < 16; $block++) {
                 if (!isset($quantResidual[$block]) || count($quantResidual[$block]) !== 16) throw new InvalidArgumentException('Invalid motion worker residual');
-                foreach ($quantResidual[$block] as $value) $body .= pack('N', $value);
+                foreach ($quantResidual[$block] as $value) $flat[] = $value;
             }
+            $body .= pack('N256', ...$flat);
             $body .= $reconY . $reconU . $reconV;
         }
         return self::frame($body);
@@ -133,21 +135,24 @@ final class MotionWorkerProtocol
         $results = [];
         $offset = 16;
         for ($i = 0; $i < $header['count']; $i++) {
-            $values = unpack('Nindex/NmvX/NmvY/Nsad/Ncbp', substr($body, $offset, 20));
-            $offset += 20;
-            $nzCache = array_values(unpack('C24', substr($body, $offset, 24)));
-            $offset += 24;
+            $packed = unpack('N5h/C24z/N256r', substr($body, $offset, 20 + 24 + 1024));
+            $nzCache = [];
+            for ($k = 1; $k <= 24; $k++) $nzCache[] = $packed['z' . $k];
             $quantResidual = [];
-            for ($block = 0; $block < 16; $block++) {
-                $quantResidual[$block] = [];
-                foreach (unpack('N16', substr($body, $offset, 64)) as $value) $quantResidual[$block][] = self::signed($value);
-                $offset += 64;
+            for ($k = 0; $k < 256; $k++) {
+                $value = $packed['r' . ($k + 1)];
+                if ($value >= 0x80000000) $value -= 0x100000000;
+                $quantResidual[$k >> 4][$k & 15] = $value;
             }
-            $reconY = substr($body, $offset, 256);
-            $reconU = substr($body, $offset + 256, 64);
-            $reconV = substr($body, $offset + 320, 64);
-            $offset += 384;
-            $results[$values['index']] = [self::signed($values['mvX']), self::signed($values['mvY']), self::signed($values['sad']), self::signed($values['cbp']), $nzCache, $quantResidual, $reconY, $reconU, $reconV];
+            $reconY = substr($body, $offset + 1068, 256);
+            $reconU = substr($body, $offset + 1324, 64);
+            $reconV = substr($body, $offset + 1388, 64);
+            $offset += 1452;
+            $mvX = $packed['h2']; if ($mvX >= 0x80000000) $mvX -= 0x100000000;
+            $mvY = $packed['h3']; if ($mvY >= 0x80000000) $mvY -= 0x100000000;
+            $sad = $packed['h4']; if ($sad >= 0x80000000) $sad -= 0x100000000;
+            $cbp = $packed['h5']; if ($cbp >= 0x80000000) $cbp -= 0x100000000;
+            $results[$packed['h1']] = [$mvX, $mvY, $sad, $cbp, $nzCache, $quantResidual, $reconY, $reconU, $reconV];
         }
         return [$header['id'], true, $results];
     }

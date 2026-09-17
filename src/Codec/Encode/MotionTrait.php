@@ -129,19 +129,13 @@ trait MotionTrait
 
     /**
      * 运动估计：整数像素搜索，菱形搜索
+     * @param array $curFlat 当前宏块亮度像素（0基、长度256）
      * @return array [mvX, mvY, sad] 运动向量和SAD值（mvX/mvY为1/4像素单位）
      */
-    public function motionEstimate16x16(array $currentBlock, string $refPlane, int $mbX, int $mbY, int $searchRange = 16): array
+    public function motionEstimate16x16(array $curFlat, string $refPlane, int $mbX, int $mbY, int $searchRange = 16): array
     {
         if (!isset($this->refInts) || $this->refInts === null) {
             $this->refInts = unpack('C*', $refPlane);
-        }
-
-        $curFlat = [];
-        foreach ($currentBlock as $row) {
-            foreach ($row as $val) {
-                $curFlat[] = $val;
-            }
         }
 
         $origX = $mbX * 16;

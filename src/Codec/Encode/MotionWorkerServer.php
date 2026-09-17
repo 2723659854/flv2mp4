@@ -106,6 +106,7 @@ final class MotionWorkerHelper
     public int $qp;
     public array $dequant4Table = [];
     public $refInts = null;
+    private static ?array $sharedDequantTable = null;
 
     public function __construct(int $width, int $height, int $aw, int $ah, int $qp, private string $refY, private string $refU, private string $refV)
     {
@@ -114,13 +115,17 @@ final class MotionWorkerHelper
         $this->mbAlignedWidth = $aw;
         $this->mbAlignedHeight = $ah;
         $this->qp = $qp;
-        $positionClass = [0,1,0,1,1,2,1,2,0,1,0,1,1,2,1,2];
-        $this->dequant4Table = array_fill(0, 6, array_fill(0, 52, array_fill(0, 16, 0)));
-        for ($i = 0; $i < 6; $i++) for ($q = 0; $q < 52; $q++) {
-            $shift = intdiv($q, 6) + 2;
-            $index = $q % 6;
-            for ($x = 0; $x < 16; $x++) $this->dequant4Table[$i][$q][$x] = (self::DEQUANT4_COEFF_INIT[$index][$positionClass[$x]] * 16) << $shift;
+        if (self::$sharedDequantTable === null) {
+            $positionClass = [0,1,0,1,1,2,1,2,0,1,0,1,1,2,1,2];
+            $table = array_fill(0, 6, array_fill(0, 52, array_fill(0, 16, 0)));
+            for ($i = 0; $i < 6; $i++) for ($q = 0; $q < 52; $q++) {
+                $shift = intdiv($q, 6) + 2;
+                $index = $q % 6;
+                for ($x = 0; $x < 16; $x++) $table[$i][$q][$x] = (self::DEQUANT4_COEFF_INIT[$index][$positionClass[$x]] * 16) << $shift;
+            }
+            self::$sharedDequantTable = $table;
         }
+        $this->dequant4Table = self::$sharedDequantTable;
     }
 
     public function prepare(array $job): array

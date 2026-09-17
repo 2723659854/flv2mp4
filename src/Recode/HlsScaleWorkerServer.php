@@ -19,8 +19,9 @@ final class HlsScaleWorkerServer
         $this->scaler = new VideoScaler();
     }
 
-    public function run(string $listenAddress, array $outputAddresses): void
+    public function run(string $listenAddress, array $outputAddresses, int $workers = 1): void
     {
+        $workers = max(1, $workers);
         $server = @stream_socket_server($listenAddress, $errno, $error);
         if ($server === false) throw new RuntimeException("缩放进程监听失败: {$error} ({$errno})");
         $downstreams = [];
@@ -29,12 +30,19 @@ final class HlsScaleWorkerServer
             $downstreams[$name] = $this->connect($outputAddresses[$name], $name);
             stream_set_blocking($downstreams[$name], false);
         }
-        $upstream = @stream_socket_accept($server, 15);
+        $upstreams = [];
+        for ($i = 0; $i < $workers; $i++) {
+            $socket = @stream_socket_accept($server, 30);
+            if ($socket === false) throw new RuntimeException("缩放进程等待解码进程连接超时 ({$i}/{$workers})");
+            stream_set_blocking($socket, false);
+            $upstreams[] = $socket;
+        }
         fclose($server);
-        if ($upstream === false) throw new RuntimeException('缩放进程等待解码进程连接超时');
-        stream_set_blocking($upstream, false);
 
-        $input = '';
+        $inputs = array_fill(0, $workers, '');
+        $upstreamOutputs = array_fill(0, $workers, '');
+        $pending = [];
+        $expected = 0;
         $outputs = array_fill_keys(array_keys($this->profiles), '');
         $responses = array_fill_keys(array_keys($this->profiles), '');
         $finished = [];
@@ -43,20 +51,32 @@ final class HlsScaleWorkerServer
         try {
             while (true) {
                 $read = [];
-                if (!$ended && $this->outputsBelowHighWatermark($outputs)) $read[] = $upstream;
+                if (!$ended && $this->outputsBelowHighWatermark($outputs)) foreach ($upstreams as $socket) $read[] = $socket;
                 foreach ($downstreams as $name => $socket) if (!isset($finished[$name])) $read[] = $socket;
                 $write = [];
+                foreach ($upstreamOutputs as $id => $buffer) if ($buffer !== '') $write[] = $upstreams[$id];
                 foreach ($downstreams as $name => $socket) if ($outputs[$name] !== '') $write[] = $socket;
                 $except = null;
                 @stream_select($read, $write, $except, 0, 1);
 
-                if (in_array($upstream, $read, true)) {
-                    $chunk = @fread($upstream, 65536);
-                    if ($chunk === false || ($chunk === '' && feof($upstream))) throw new RuntimeException('解码进程媒体连接意外关闭');
-                    $input .= $chunk;
-                    if (strlen($input) > HlsPipelineProtocol::MAX_BUFFER_LENGTH) throw new RuntimeException('缩放进程输入缓冲超限');
+                foreach ($upstreams as $id => $socket) {
+                    if (!in_array($socket, $read, true)) continue;
+                    $chunk = @fread($socket, 65536);
+                    if ($chunk === false || ($chunk === '' && feof($socket))) throw new RuntimeException('解码进程媒体连接意外关闭');
+                    $inputs[$id] .= $chunk;
+                    if (strlen($inputs[$id]) > HlsPipelineProtocol::MAX_BUFFER_LENGTH) throw new RuntimeException('缩放进程输入缓冲超限');
                 }
-                foreach (HlsPipelineProtocol::take($input, 1) as $event) {
+                foreach ($inputs as $id => $buffer) {
+                    foreach (HlsPipelineProtocol::take($inputs[$id], PHP_INT_MAX) as $event) {
+                        $seq = $event['sequence'];
+                        if ($seq < $expected) continue;
+                        if (isset($pending[$seq])) throw new RuntimeException("媒体事件 sequence 重复: {$seq}");
+                        $pending[$seq] = $event;
+                    }
+                }
+                while (isset($pending[$expected])) {
+                    $event = $pending[$expected];
+                    unset($pending[$expected]);
                     if ($event['type'] === HlsPipelineProtocol::END) {
                         $ended = true;
                         $endSequence = $event['sequence'];
@@ -65,8 +85,15 @@ final class HlsScaleWorkerServer
                         foreach ($this->fanout($event) as $name => $frame) $outputs[$name] .= $frame;
                     } else throw new RuntimeException('缩放进程收到未知事件');
                     foreach ($outputs as $buffer) if (strlen($buffer) > HlsPipelineProtocol::MAX_BUFFER_LENGTH) throw new RuntimeException('缩放进程下游缓冲超限');
+                    $expected++;
                 }
 
+                foreach ($upstreams as $id => $socket) {
+                    if (!in_array($socket, $write, true)) continue;
+                    $n = @fwrite($socket, substr($upstreamOutputs[$id], 0, 65536));
+                    if ($n === false || ($n === 0 && feof($socket))) throw new RuntimeException('无法发送缩放进程响应');
+                    if ($n > 0) $upstreamOutputs[$id] = substr($upstreamOutputs[$id], $n);
+                }
                 foreach ($downstreams as $name => $socket) {
                     if (in_array($socket, $write, true)) {
                         $n = @fwrite($socket, substr($outputs[$name], 0, 65536));
@@ -85,17 +112,21 @@ final class HlsScaleWorkerServer
                 }
                 if ($ended && count($finished) === count($downstreams)) {
                     (new PurePhpHlsGenerator($this->profiles, $this->outputDir, false))->finishPipelineOutput();
-                    $this->writeAll($upstream, HlsPipelineProtocol::frame(HlsPipelineProtocol::FINISHED, $endSequence));
-                    return;
+                    $frame = HlsPipelineProtocol::frame(HlsPipelineProtocol::FINISHED, $endSequence);
+                    for ($i = 0; $i < $workers; $i++) $upstreamOutputs[$i] .= $frame;
+                    $allDrained = true;
+                    foreach ($upstreamOutputs as $buffer) if ($buffer !== '') { $allDrained = false; break; }
+                    if ($allDrained) return;
                 }
             }
         } catch (Throwable $e) {
-            if (is_resource($upstream)) {
-                try { $this->writeAll($upstream, HlsPipelineProtocol::frame(HlsPipelineProtocol::ERROR, $endSequence, ['message' => $e->getMessage()])); } catch (Throwable) {}
+            $errorFrame = HlsPipelineProtocol::frame(HlsPipelineProtocol::ERROR, $endSequence, ['message' => $e->getMessage()]);
+            foreach ($upstreams as $socket) {
+                try { $this->writeAll($socket, $errorFrame); } catch (Throwable) {}
             }
             throw $e;
         } finally {
-            if (is_resource($upstream)) @fclose($upstream);
+            foreach ($upstreams as $socket) if (is_resource($socket)) @fclose($socket);
             foreach ($downstreams as $socket) if (is_resource($socket)) @fclose($socket);
         }
     }

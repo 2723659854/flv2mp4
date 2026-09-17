@@ -477,4 +477,15 @@ class H264Encoder
     public int $motionWorkers = 4;
     public array $motionWorkerResults = [];
 
+    /**
+     * 预热运动估计子进程：在首批 P 帧到来之前完成 PHP 冷启动与建链，
+     * 避免把启动开销计入首帧等待（仅多进程 worker 入口调用）。
+     */
+    public function warmupMotionWorkers(): void
+    {
+        if ($this->enableInter) {
+            ($this->motionWorkerClient ??= new \Xiaosongshu\Flv2mp4\Codec\Encode\MotionWorkerClient(workers: $this->motionWorkers))->connectAll();
+        }
+    }
+
 }

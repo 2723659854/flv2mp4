@@ -41,6 +41,18 @@ trait TransformTrait
         $pDct = array_fill(0, 16, 0);
         for ($y = 0; $y < 4; $y++) for ($x = 0; $x < 4; $x++) $pDct[$y * 4 + $x] = $block[$y][$x];
 
+        $pDct = $this->dctFlat($pDct);
+
+        $result = array_fill(0, 4, array_fill(0, 4, 0));
+        for ($y = 0; $y < 4; $y++) for ($x = 0; $x < 4; $x++) $result[$y][$x] = $pDct[$y * 4 + $x];
+        return $result;
+    }
+
+    /**
+     * 4x4 正向整数变换（16 元素行优先一维数组，原地变换后返回）
+     */
+    public function dctFlat(array $pDct): array
+    {
         for ($i = 0; $i < 16; $i += 4) {
             $kiI1 = 1 + $i;
             $kiI2 = 2 + $i;
@@ -73,9 +85,62 @@ trait TransformTrait
             $pDct[$kiI12] = $d03 - 2 * $d12;
         }
 
-        $result = array_fill(0, 4, array_fill(0, 4, 0));
-        for ($y = 0; $y < 4; $y++) for ($x = 0; $x < 4; $x++) $result[$y][$x] = $pDct[$y * 4 + $x];
-        return $result;
+        return $pDct;
+    }
+
+    /**
+     * 4x4 Inter AC 量化（一维行优先），返回 [量化数组, 非零数]
+     */
+    public function quantizeFlatInter(array $block): array
+    {
+        $qp = $this->qp;
+        $mf = self::QUANT_MF[$qp];
+        $ff = self::QUANT_INTER_FF[$qp];
+        $nz = 0;
+        for ($i = 0; $i < 16; $i++) {
+            $val = $block[$i];
+            $j = $i & 7;
+            $absVal = $val < 0 ? -$val : $val;
+            $absQuant = (($ff[$j] + $absVal) * $mf[$j]) >> 16;
+            $block[$i] = $val >= 0 ? $absQuant : -$absQuant;
+            if ($block[$i] !== 0) $nz++;
+        }
+        return [$block, $nz];
+    }
+
+    /**
+     * 4x4 IDCT 整数逆变换（一维行优先输入输出）
+     */
+    public function idctFlat(array $coeffs): array
+    {
+        $coeffs[0] = $coeffs[0] + 32;
+
+        for ($i = 0; $i < 4; $i++) {
+            $row = 4 * $i;
+            $z0 = $coeffs[$row] + $coeffs[$row + 2];
+            $z1 = $coeffs[$row] - $coeffs[$row + 2];
+            $z2 = ($coeffs[$row + 1] >> 1) - $coeffs[$row + 3];
+            $z3 = $coeffs[$row + 1] + ($coeffs[$row + 3] >> 1);
+
+            $coeffs[$row] = $z0 + $z3;
+            $coeffs[$row + 1] = $z1 + $z2;
+            $coeffs[$row + 2] = $z1 - $z2;
+            $coeffs[$row + 3] = $z0 - $z3;
+        }
+
+        $d = [];
+        for ($i = 0; $i < 4; $i++) {
+            $z0 = $coeffs[$i] + $coeffs[$i + 8];
+            $z1 = $coeffs[$i] - $coeffs[$i + 8];
+            $z2 = ($coeffs[$i + 4] >> 1) - $coeffs[$i + 12];
+            $z3 = $coeffs[$i + 4] + ($coeffs[$i + 12] >> 1);
+
+            $d[$i] = ($z0 + $z3) >> 6;
+            $d[$i + 4] = ($z1 + $z2) >> 6;
+            $d[$i + 8] = ($z1 - $z2) >> 6;
+            $d[$i + 12] = ($z0 - $z3) >> 6;
+        }
+        return $d;
     }
 
     public function hadamardTransformDC(array $b): array
