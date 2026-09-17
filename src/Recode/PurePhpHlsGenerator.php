@@ -72,6 +72,8 @@ class PurePhpHlsGenerator
     private string $srcPpsData = '';
     private bool $multi;
     private int $decodeWorkers;
+    /** 单 profile 模式（与 recode 同形的一维配置）：分片/索引直接输出到 outputDir 根部，不生成 master.m3u8 */
+    private bool $singleProfile = false;
     private ?array $pipelineVariants = null;
     private string $pipelineYuvPayload = '';
 
@@ -81,14 +83,32 @@ class PurePhpHlsGenerator
 
     /**
      * 转码器初始化
-     * @param array $profiles 规格
+     *
+     * 支持两种配置形态：
+     * 1. 一维单路配置（与 FlvRecoder/Mp4Recoder 同形，推荐）：
+     *    ['width'=>..,'height'=>..,'bitrate'=>..,'fps'=>..,'qp'=>..,'decode_workers'=>6,'motionWorkers'=>6,...]
+     *    分片与 index.m3u8 直接输出到 outputDir 根部，不生成 master.m3u8；
+     *    decode_workers 从配置读取，避免与 recode 入口配置不一致。
+     * 2. 多码率 profile map（向后兼容）：['360p' => [...], '240p' => [...]]
+     *    每路输出到 outputDir/{name}/ 子目录并生成 master.m3u8；
+     *    单元素 map 且键名为空字符串时视为单路模式（worker 进程据此还原布局）。
+     *
+     * @param array $configOrProfiles 单路一维配置或多码率 profile map
      * @param string $outputDir 输出目录
      * @param bool $multi 是否开启多进程
-     * @param int $decodeWorkers 多进程解码worker数（按GOP并行，实际数收敛为min(配置值,GOP数)）
+     * @param int $decodeWorkers 多进程解码worker数（仅多码率形态使用；单路形态取配置中的 decode_workers）
      */
-    public function __construct(array $profiles, string $outputDir,bool $multi = false, int $decodeWorkers = 6)
+    public function __construct(array $configOrProfiles, string $outputDir = '', bool $multi = false, int $decodeWorkers = 6)
     {
-        $this->profiles = $profiles;
+        // 一维配置：所有值均为标量；profile map：值均为数组
+        if ($configOrProfiles !== [] && count(array_filter($configOrProfiles, 'is_array')) === 0) {
+            $this->singleProfile = true;
+            $decodeWorkers = (int)($configOrProfiles['decode_workers'] ?? $decodeWorkers);
+            $this->profiles = ['' => $configOrProfiles];
+        } else {
+            $this->profiles = $configOrProfiles;
+            $this->singleProfile = count($this->profiles) === 1 && array_key_first($this->profiles) === '';
+        }
         $this->outputDir = rtrim($outputDir, '/');
         $this->multi = $multi;
         $this->decodeWorkers = $decodeWorkers;
@@ -99,7 +119,7 @@ class PurePhpHlsGenerator
         foreach ($this->profiles as $name => $profile) {
             $this->encoders[$name] = new H264Encoder();
             $this->encoders[$name]->motionWorkers = max(1, (int)($profile['motionWorkers'] ?? 8));
-            $dir = "{$this->outputDir}/{$name}/";
+            $dir = $this->profileDir($name) . '/';
             if (!is_dir($dir)) mkdir($dir, 0777, true);
 
             $this->segmentWriters[$name] = ['sequence' => 0, 'handle' => null, 'startTime' => 0, 'endTime' => 0];
@@ -123,6 +143,12 @@ class PurePhpHlsGenerator
 
         /** 初始化空m3u8 */
         $this->ensureInitialPlaylist();
+    }
+
+    /** 单路模式文件直接落在输出目录根部；多码率模式落在 {outputDir}/{profile}/ 子目录 */
+    private function profileDir(string $profile): string
+    {
+        return $this->singleProfile ? $this->outputDir : "{$this->outputDir}/{$profile}";
     }
 
     /**
@@ -271,7 +297,7 @@ class PurePhpHlsGenerator
         }
 
         $this->closeAllSegments();
-        $this->generateMasterPlaylist();
+        if (count($this->profiles) > 1) $this->generateMasterPlaylist();
         echo "Done! Processed {$frameCount} frames\n";
     }
 
@@ -933,7 +959,7 @@ class PurePhpHlsGenerator
         $writer = &$this->segmentWriters[$profile];
         $writer['sequence']++;
         $this->continuityCounters[$profile] = [];
-        $filePath = "{$this->outputDir}/{$profile}/segment_{$writer['sequence']}.ts";
+        $filePath = $this->profileDir($profile) . "/segment_{$writer['sequence']}.ts";
         $writer['handle'] = fopen($filePath, 'wb');
         // 分片头部写入PAT/PMT，兼容播放器
         $this->writePAT($profile);
@@ -996,7 +1022,7 @@ class PurePhpHlsGenerator
     private function ensureInitialPlaylist(): void
     {
         foreach ($this->profiles as $name => $_) {
-            $m3u8Path = "{$this->outputDir}/{$name}/index.m3u8";
+            $m3u8Path = $this->profileDir($name) . '/index.m3u8';
             if (!file_exists($m3u8Path)) {
                 $lines = [
                     '#EXTM3U',
@@ -1031,7 +1057,7 @@ class PurePhpHlsGenerator
             $lines[] = "segment_{$i}.ts";
         }
         $content = implode("\n", $lines) . "\n";
-        $path = "{$this->outputDir}/{$profile}/index.m3u8";
+        $path = $this->profileDir($profile) . '/index.m3u8';
         $tmp = $path . '.tmp';
         file_put_contents($tmp, $content);
         rename($tmp, $path);
@@ -1042,7 +1068,7 @@ class PurePhpHlsGenerator
      */
     private function addEndList(string $profile): void
     {
-        $path = "{$this->outputDir}/{$profile}/index.m3u8";
+        $path = $this->profileDir($profile) . '/index.m3u8';
         if (!file_exists($path)) return;
         $buf = rtrim(file_get_contents($path)) . "\n";
         if (strpos($buf, '#EXT-X-ENDLIST') === false) {

@@ -48,6 +48,7 @@ final class HlsScaleWorkerServer
         $finished = [];
         $ended = false;
         $endSequence = 0;
+        $finishSent = false; // FINISHED 回执只能发一次：decoder 收到即关闭连接，重复发送会触发对端关闭写错误
         try {
             while (true) {
                 $read = [];
@@ -90,9 +91,15 @@ final class HlsScaleWorkerServer
 
                 foreach ($upstreams as $id => $socket) {
                     if (!in_array($socket, $write, true)) continue;
+                    // 收尾判定已成立（所有 output FINISHED），上行只剩 FINISHED 回执；
+                    // 部分 decoder 可能已先行退出导致连接关闭，此时回执无人接收，丢弃即可
+                    $drainingFinished = $ended && count($finished) === count($downstreams);
                     while ($upstreamOutputs[$id] !== '') {
                         $n = @fwrite($socket, substr($upstreamOutputs[$id], 0, 262144));
-                        if ($n === false || ($n === 0 && feof($socket))) throw new RuntimeException('无法发送缩放进程响应');
+                        if ($n === false || ($n === 0 && feof($socket))) {
+                            if ($drainingFinished) { $upstreamOutputs[$id] = ''; break; }
+                            throw new RuntimeException('无法发送缩放进程响应');
+                        }
                         if ($n === 0) break;
                         $upstreamOutputs[$id] = substr($upstreamOutputs[$id], $n);
                         if ($n < 262144) break;
@@ -119,9 +126,12 @@ final class HlsScaleWorkerServer
                     }
                 }
                 if ($ended && count($finished) === count($downstreams)) {
-                    (new PurePhpHlsGenerator($this->profiles, $this->outputDir, false))->finishPipelineOutput();
-                    $frame = HlsPipelineProtocol::frame(HlsPipelineProtocol::FINISHED, $endSequence);
-                    for ($i = 0; $i < $workers; $i++) $upstreamOutputs[$i] .= $frame;
+                    if (!$finishSent) {
+                        $finishSent = true;
+                        (new PurePhpHlsGenerator($this->profiles, $this->outputDir, false))->finishPipelineOutput();
+                        $frame = HlsPipelineProtocol::frame(HlsPipelineProtocol::FINISHED, $endSequence);
+                        for ($i = 0; $i < $workers; $i++) $upstreamOutputs[$i] .= $frame;
+                    }
                     $allDrained = true;
                     foreach ($upstreamOutputs as $buffer) if ($buffer !== '') { $allDrained = false; break; }
                     if ($allDrained) return;
