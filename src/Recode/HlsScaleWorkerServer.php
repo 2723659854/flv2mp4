@@ -57,7 +57,7 @@ final class HlsScaleWorkerServer
                 foreach ($upstreamOutputs as $id => $buffer) if ($buffer !== '') $write[] = $upstreams[$id];
                 foreach ($downstreams as $name => $socket) if ($outputs[$name] !== '') $write[] = $socket;
                 $except = null;
-                @stream_select($read, $write, $except, 0, 1);
+                @stream_select($read, $write, $except, 0, 2000);
 
                 foreach ($upstreams as $id => $socket) {
                     if (!in_array($socket, $read, true)) continue;
@@ -90,15 +90,23 @@ final class HlsScaleWorkerServer
 
                 foreach ($upstreams as $id => $socket) {
                     if (!in_array($socket, $write, true)) continue;
-                    $n = @fwrite($socket, substr($upstreamOutputs[$id], 0, 65536));
-                    if ($n === false || ($n === 0 && feof($socket))) throw new RuntimeException('无法发送缩放进程响应');
-                    if ($n > 0) $upstreamOutputs[$id] = substr($upstreamOutputs[$id], $n);
+                    while ($upstreamOutputs[$id] !== '') {
+                        $n = @fwrite($socket, substr($upstreamOutputs[$id], 0, 262144));
+                        if ($n === false || ($n === 0 && feof($socket))) throw new RuntimeException('无法发送缩放进程响应');
+                        if ($n === 0) break;
+                        $upstreamOutputs[$id] = substr($upstreamOutputs[$id], $n);
+                        if ($n < 262144) break;
+                    }
                 }
                 foreach ($downstreams as $name => $socket) {
                     if (in_array($socket, $write, true)) {
-                        $n = @fwrite($socket, substr($outputs[$name], 0, 65536));
-                        if ($n === false || ($n === 0 && feof($socket))) throw new RuntimeException("profile {$name} 输出连接意外关闭");
-                        if ($n > 0) $outputs[$name] = substr($outputs[$name], $n);
+                        while ($outputs[$name] !== '') {
+                            $n = @fwrite($socket, substr($outputs[$name], 0, 262144));
+                            if ($n === false || ($n === 0 && feof($socket))) throw new RuntimeException("profile {$name} 输出连接意外关闭");
+                            if ($n === 0) break;
+                            $outputs[$name] = substr($outputs[$name], $n);
+                            if ($n < 262144) break;
+                        }
                     }
                     if (in_array($socket, $read, true)) {
                         $chunk = @fread($socket, 65536);

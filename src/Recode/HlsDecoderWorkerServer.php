@@ -49,17 +49,23 @@ final class HlsDecoderWorkerServer
                 $write = $output === '' ? [] : [$downstream];
                 if ($upOutput !== '') $write[] = $upstream;
                 $except = null;
-                @stream_select($read, $write, $except, 0, 1);
+                @stream_select($read, $write, $except, 0, 2000);
                 if (in_array($upstream, $read, true)) {
-                    $chunk = @fread($upstream, 65536);
-                    if ($chunk === false || ($chunk === '' && feof($upstream))) throw new RuntimeException('主进程媒体连接意外关闭');
-                    $input .= $chunk;
-                    if (strlen($input) > HlsPipelineProtocol::MAX_BUFFER_LENGTH) throw new RuntimeException('解码进程输入缓冲超限');
+                    while (true) {
+                        $chunk = @fread($upstream, 65536);
+                        if ($chunk === false || ($chunk === '' && feof($upstream))) throw new RuntimeException('主进程媒体连接意外关闭');
+                        if ($chunk === '') break;
+                        $input .= $chunk;
+                        if (strlen($input) > HlsPipelineProtocol::MAX_BUFFER_LENGTH) throw new RuntimeException('解码进程输入缓冲超限');
+                        if (strlen($chunk) < 65536) break;
+                    }
                 }
-                $events = strlen($output) < HlsPipelineProtocol::HIGH_WATERMARK
-                    ? HlsPipelineProtocol::take($input, 1)
-                    : [];
-                foreach ($events as $event) {
+                // 单次 select 唤醒（Windows 下粒度约 10~15ms）批量解码全部已缓冲事件，
+                // 下游输出积压到高水位时停止，让反压继续向下游传播，避免长文件下缓冲超限
+                while (strlen($output) < HlsPipelineProtocol::HIGH_WATERMARK) {
+                    $events = HlsPipelineProtocol::take($input, 1);
+                    if ($events === []) break;
+                    $event = $events[0];
                     if ($event['type'] === HlsPipelineProtocol::CONTROL) {
                         $cmd = $event['metadata']['cmd'] ?? '';
                         if ($cmd === 'config') $this->parseConfiguration(substr($event['payload'], 5));
@@ -76,13 +82,22 @@ final class HlsDecoderWorkerServer
                     if (strlen($output) > HlsPipelineProtocol::MAX_BUFFER_LENGTH) throw new RuntimeException('解码进程下游缓冲超限');
                 }
                 if (in_array($downstream, $write, true)) {
-                    $written = @fwrite($downstream, substr($output, 0, 65536));
-                    if ($written === false || ($written === 0 && feof($downstream))) throw new RuntimeException('编码进程媒体连接意外关闭');
-                    if ($written > 0) $output = substr($output, $written);
+                    while ($output !== '') {
+                        $written = @fwrite($downstream, substr($output, 0, 262144));
+                        if ($written === false || ($written === 0 && feof($downstream))) throw new RuntimeException('编码进程媒体连接意外关闭');
+                        if ($written === 0) break;
+                        $output = substr($output, $written);
+                        if ($written < 262144) break;
+                    }
                 }
                 if (in_array($upstream, $write, true) && $upOutput !== '') {
-                    $written = @fwrite($upstream, substr($upOutput, 0, 65536));
-                    if ($written > 0) $upOutput = substr($upOutput, $written);
+                    while ($upOutput !== '') {
+                        $written = @fwrite($upstream, substr($upOutput, 0, 262144));
+                        if ($written === false || ($written === 0 && feof($upstream))) break;
+                        if ($written === 0) break;
+                        $upOutput = substr($upOutput, $written);
+                        if ($written < 262144) break;
+                    }
                 }
                 if (in_array($downstream, $read, true)) {
                     $chunk = @fread($downstream, 65536);

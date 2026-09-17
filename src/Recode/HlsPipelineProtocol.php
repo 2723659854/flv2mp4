@@ -21,6 +21,8 @@ final class HlsPipelineProtocol
     public const MAX_FRAME_LENGTH = 67108864;
     public const HIGH_WATERMARK = 50331648;
     public const MAX_BUFFER_LENGTH = 67108868;
+    /** 输出进程乱序重排队列软上限（按负载字节计）：超过则停止读解码进程，形成端到端反压 */
+    public const PENDING_SOFT_LIMIT = 50331648;
 
     public static function frame(int $type, int $sequence, array $metadata = [], string $payload = ''): string
     {

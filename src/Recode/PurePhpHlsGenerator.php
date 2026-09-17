@@ -86,7 +86,7 @@ class PurePhpHlsGenerator
      * @param bool $multi 是否开启多进程
      * @param int $decodeWorkers 多进程解码worker数（按GOP并行，实际数收敛为min(配置值,GOP数)）
      */
-    public function __construct(array $profiles, string $outputDir,bool $multi = false, int $decodeWorkers = 4)
+    public function __construct(array $profiles, string $outputDir,bool $multi = false, int $decodeWorkers = 6)
     {
         $this->profiles = $profiles;
         $this->outputDir = rtrim($outputDir, '/');

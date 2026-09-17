@@ -33,22 +33,35 @@ final class Mp4DecoderWorkerServer
         $input = ''; $output = ''; $response = ''; $ended = false;
         try {
             while (true) {
-                $read = [$downstream]; if (!$ended && strlen($input) < HlsPipelineProtocol::HIGH_WATERMARK) $read[] = $upstream;
-                $write = $output === '' ? [] : [$downstream]; $except = null; @stream_select($read, $write, $except, 0, 1);
+                $read = [$downstream]; if (!$ended && strlen($input) < HlsPipelineProtocol::HIGH_WATERMARK && strlen($output) < HlsPipelineProtocol::HIGH_WATERMARK) $read[] = $upstream;
+                $write = $output === '' ? [] : [$downstream]; $except = null; @stream_select($read, $write, $except, 0, 2000);
                 if (in_array($upstream, $read, true)) {
-                    $chunk = @fread($upstream, 65536);
-                    if ($chunk === false || ($chunk === '' && feof($upstream))) throw new RuntimeException('主进程媒体连接意外关闭');
-                    $input .= $chunk; if (strlen($input) > HlsPipelineProtocol::MAX_BUFFER_LENGTH) throw new RuntimeException('解码进程输入缓冲超限');
+                    while (true) {
+                        $chunk = @fread($upstream, 65536);
+                        if ($chunk === false || ($chunk === '' && feof($upstream))) throw new RuntimeException('主进程媒体连接意外关闭');
+                        if ($chunk === '') break;
+                        $input .= $chunk; if (strlen($input) > HlsPipelineProtocol::MAX_BUFFER_LENGTH) throw new RuntimeException('解码进程输入缓冲超限');
+                        if (strlen($chunk) < 65536) break;
+                    }
                 }
-                foreach (HlsPipelineProtocol::take($input, 1) as $event) {
+                // 单次 select 唤醒（Windows 下粒度约 10~15ms）批量解码全部已缓冲事件，
+                // 下游输出积压到高水位时停止，让反压继续向上游传播，避免长文件下缓冲超限
+                while (strlen($output) < HlsPipelineProtocol::HIGH_WATERMARK) {
+                    $events = HlsPipelineProtocol::take($input, 1);
+                    if ($events === []) break;
+                    $event = $events[0];
                     if ($event['type'] === HlsPipelineProtocol::END) { $output .= HlsPipelineProtocol::frame(HlsPipelineProtocol::END, $event['sequence']); $ended = true; }
                     else $output .= $this->transform($event);
                     if (strlen($output) > HlsPipelineProtocol::MAX_BUFFER_LENGTH) throw new RuntimeException('解码进程下游缓冲超限');
                 }
                 if (in_array($downstream, $write, true)) {
-                    $n = @fwrite($downstream, substr($output, 0, 65536));
-                    if ($n === false || ($n === 0 && feof($downstream))) throw new RuntimeException('输出进程媒体连接意外关闭');
-                    if ($n > 0) $output = substr($output, $n);
+                    while ($output !== '') {
+                        $n = @fwrite($downstream, substr($output, 0, 262144));
+                        if ($n === false || ($n === 0 && feof($downstream))) throw new RuntimeException('输出进程媒体连接意外关闭');
+                        if ($n === 0) break;
+                        $output = substr($output, $n);
+                        if ($n < 262144) break;
+                    }
                 }
                 if (in_array($downstream, $read, true)) {
                     $chunk = @fread($downstream, 65536);

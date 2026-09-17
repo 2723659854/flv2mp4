@@ -20,6 +20,7 @@ try {
             'tcp://127.0.0.1:' . (int)$options['output-port']
         );
     } elseif ($mode === 'scale') {
+        if (ini_set('memory_limit', '512M') === false) throw new RuntimeException('无法设置缩放 worker 内存上限');
         if (!isset($options['output'], $options['output-ports'])) throw new RuntimeException('缩放 worker 参数不完整');
         $outputPorts = json_decode(base64_decode($options['output-ports'], true), true, 32, JSON_THROW_ON_ERROR);
         $outputAddresses = [];
@@ -30,6 +31,7 @@ try {
             $workers
         );
     } elseif ($mode === 'output') {
+        if (ini_set('memory_limit', '512M') === false) throw new RuntimeException('无法设置输出 worker 内存上限');
         if (!isset($options['output'])) throw new RuntimeException('输出 worker 缺少 output');
         (new \Xiaosongshu\Flv2mp4\Recode\HlsOutputWorkerServer($profiles, $options['output']))->run(
             'tcp://127.0.0.1:' . (int)$options['port'],

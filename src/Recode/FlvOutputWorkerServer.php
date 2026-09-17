@@ -32,17 +32,34 @@ final class FlvOutputWorkerServer
         $inputs = array_fill(0, $workers, '');
         $outputs = array_fill(0, $workers, '');
         $pending = [];
+        $pendingBytes = 0;
         $expected = 0;
         $finished = false;
+        $lastSeq = array_fill(0, $workers, -1);
         try {
             $recoder->beginPipelineOutput($this->outputFile);
             while (true) {
-                $read = $finished ? [] : $sockets;
+                // 反压：乱序重排队列达软上限后，连续序号已在队列中则本轮不读（整轮消费会迅速释放积压）；
+                // 缺连续序号 N 时，N 只可能来自"最后见到的序号仍小于 N"的落后连接（每路序号严格递增），
+                // 故只读这些连接，绝不把超前连接的未来帧吸进重排队列，避免长 GOP 下内存成倍膨胀；
+                // 未达上限时读尽全部就绪连接，按唤醒周期批量推进（Windows select 唤醒粒度约 10~15ms）
+                $gated = !$finished && $pendingBytes >= HlsPipelineProtocol::PENDING_SOFT_LIMIT;
+                if ($finished) $read = [];
+                elseif (!$gated) $read = $sockets;
+                elseif (isset($pending[$expected])) $read = [];
+                else {
+                    $read = [];
+                    foreach ($sockets as $id => $socket) if ($lastSeq[$id] < $expected) $read[] = $socket;
+                }
                 $write = [];
                 foreach ($outputs as $id => $buffer) if ($buffer !== '') $write[] = $sockets[$id];
-                if ($read === [] && $write === []) return;
+                if ($read === [] && $write === []) {
+                    if ($finished) return;
+                    usleep(2000);
+                    continue;
+                }
                 $except = null;
-                if (@stream_select($read, $write, $except, 0, 1) === false) continue;
+                if (@stream_select($read, $write, $except, 0, 2000) === false) continue;
                 foreach ($sockets as $id => $socket) {
                     if (!in_array($socket, $read, true)) continue;
                     $chunk = @fread($socket, 65536);
@@ -55,12 +72,16 @@ final class FlvOutputWorkerServer
                         $seq = $event['sequence'];
                         if ($seq < $expected) continue;
                         if (isset($pending[$seq])) throw new RuntimeException("媒体事件 sequence 重复: {$seq}");
-                        $pending[$seq] = $event;
+                        $eventBytes = strlen($event['payload']) + 256;
+                        $pending[$seq] = [$event, $eventBytes];
+                        $pendingBytes += $eventBytes;
+                        $lastSeq[$id] = $seq;
                     }
                 }
                 while (isset($pending[$expected])) {
-                    $event = $pending[$expected];
+                    [$event, $eventBytes] = $pending[$expected];
                     unset($pending[$expected]);
+                    $pendingBytes -= $eventBytes;
                     if ($event['type'] === HlsPipelineProtocol::END) {
                         $recoder->finishPipelineOutput($this->outputFile);
                         $frame = HlsPipelineProtocol::frame(HlsPipelineProtocol::FINISHED, $event['sequence']);
