@@ -77,6 +77,11 @@ class PurePhpHlsGenerator
     private ?array $pipelineVariants = null;
     private string $pipelineYuvPayload = '';
 
+    // 帧级双缓冲：一个已 startFrame（所有 profile）的视频帧延后到下一帧到达后再 finish
+    private ?array $pendingVideoJob = null;
+    /** @var array<int,object> 在途视频帧之后到达的音频 tag，待该帧写出后按原顺序回放 */
+    private array $queuedAudioTags = [];
+
     const VIDEO_FRAME_TYPE_KEY_FRAME = 1;
     const AVC_PACKET_TYPE_SEQUENCE_HEADER = 0;
     const AVC_PACKET_TYPE_NALU = 1;
@@ -296,6 +301,8 @@ class PurePhpHlsGenerator
             }
         }
 
+        // 冲刷双缓冲中最后一帧及排队音频，保证分片完整后再关闭
+        $this->flushPendingVideo();
         $this->closeAllSegments();
         if (count($this->profiles) > 1) $this->generateMasterPlaylist();
         echo "Done! Processed {$frameCount} frames\n";
@@ -336,6 +343,8 @@ class PurePhpHlsGenerator
 
     public function finishPipelineOutput(bool $generateMasterPlaylist = true): void
     {
+        // 冲刷双缓冲中最后一帧及排队音频，保证分片完整后再关闭
+        $this->flushPendingVideo();
         $this->closeAllSegments();
         if ($generateMasterPlaylist) $this->generateMasterPlaylist();
     }
@@ -376,31 +385,47 @@ class PurePhpHlsGenerator
             }
         }
 
-        $relativeTime = $timestamp - $this->baseTimestamp;
+        $job = $this->prepareVideoJob($avc['data'], $isKeyFrame, $timestamp - $this->baseTimestamp, $avc['compositionTime'] ?? 0);
+        if ($job === null) return;
 
-        // 切片切分逻辑
-        foreach ($this->profiles as $name => $profile) {
-            /** 只在关键帧并且满足切片时间的时候才开始新的切片 */
-            if ($isKeyFrame && ($relativeTime - $this->segmentStartTimes[$name]) >= ($this->segmentDuration * 1000)) {
-                /** 关闭当前的切片 */
-                $this->closeSegment($name, $relativeTime);
-                $this->audioFrameCounts[$name] = 0;
-                $this->audioBasePts[$name] = (int)($relativeTime * 90);
-                $this->lastDts[$name] = -1;
-                $this->segmentStartTimes[$name] = $relativeTime;
-                $this->segmentFirstFrame[$name] = true;
-               /** 开启新切片 */
-                $this->startSegment($name);
-                // 切换分片清空帧缓存
-                $this->decodedFrameCache = [];
-            }
-            $this->currentSegmentLastTimes[$name] = $relativeTime;
-            $this->segmentWriters[$name]['endTime'] = $relativeTime;
+        // 关键顺序：新帧各 profile 已 startFrame（worker 在途）→ 此时 finish 上一帧，
+        // 主进程串行 CAVLC 与 worker 对新帧的运动估计重叠执行
+        if ($this->pendingVideoJob !== null) {
+            $this->emitPendingVideoFrame($this->pendingVideoJob);
+        }
+        $this->replayQueuedAudio();
+
+        // 上一帧与期间音频都已写入旧分片，此刻再为新帧切换分片
+        foreach ($job['segmentSwitches'] as $name => $switch) {
+            if (!$switch) continue;
+            $this->closeSegment($name, $job['relativeTime']);
+            $this->audioFrameCounts[$name] = 0;
+            $this->audioBasePts[$name] = (int)($job['relativeTime'] * 90);
+            $this->lastDts[$name] = -1;
+            $this->segmentStartTimes[$name] = $job['relativeTime'];
+            $this->segmentFirstFrame[$name] = true;
+            $this->startSegment($name);
+        }
+        if (in_array(true, $job['segmentSwitches'], true)) {
+            // 切换分片清空帧缓存（原实现语义：边界处释放）
+            $this->decodedFrameCache = [];
         }
 
-        $cts = $avc['compositionTime'] ?? 0;
+        $this->pendingVideoJob = $job;
+    }
+
+    /**
+     * 每帧预处理：解码/缩放/水印 + 各 profile startFrame，并计算分片切换决策（不执行切换）。
+     */
+    private function prepareVideoJob(string $avcData, bool $isKeyFrame, int $relativeTime, int $cts): ?array
+    {
         if ($cts & 0x800000) $cts -= 0x1000000;
-        $avcData = $avc['data'];
+
+        $segmentSwitches = [];
+        foreach ($this->profiles as $name => $profile) {
+            $segmentSwitches[$name] = $isKeyFrame
+                && ($relativeTime - $this->segmentStartTimes[$name]) >= ($this->segmentDuration * 1000);
+        }
 
         $cacheKey = md5($avcData);
         if (!isset($this->frameCacheKey) || $this->frameCacheKey !== $cacheKey) {
@@ -408,19 +433,18 @@ class PurePhpHlsGenerator
             $this->frameCacheKey = $cacheKey;
         }
 
+        $dts = (int)($relativeTime * 90);
+        $pts = (int)(($relativeTime + $cts) * 90);
+        if ($pts < $dts) $pts = $dts;
+
+        $profileJobs = [];
         foreach ($this->profiles as $name => $profile) {
             $writer = &$this->segmentWriters[$name];
-            if (!is_resource($writer['handle'])) continue;
+            if (!is_resource($writer['handle'])) {
+                $profileJobs[$name] = ['transcode' => false, 'skip' => true];
+                continue;
+            }
 
-            $dts = (int)($relativeTime * 90);
-            $pts = (int)(($relativeTime + $cts) * 90);
-            if ($pts < $dts) $pts = $dts;
-
-            $outputData = $avcData;
-            $outputSpsPps = $this->spsPpsData[$name];
-            $isTranscoded = false;
-
-            // 转码逻辑
             $targetW = $profile['width'] > 0 ? $profile['width'] : $this->srcWidth;
             $targetH = $profile['height'] > 0 ? $profile['height'] : $this->srcHeight;
             $needTranscode = $this->srcInitialized && (
@@ -429,68 +453,92 @@ class PurePhpHlsGenerator
                 ($profile['height'] > 0 && $this->srcHeight !== $profile['height']) ||
                 $this->profileWatermark[$name] !== null
             );
-            if ($needTranscode) {
-                $cacheKey = "{$targetW}_{$targetH}";
-                if ($this->pipelineVariants !== null && isset($this->pipelineVariants[$name])) {
-                    $variant = $this->pipelineVariants[$name];
-                    $this->decodedFrameCache[$cacheKey] = substr($this->pipelineYuvPayload, $variant['offset'], $variant['length']);
-                } elseif (!isset($this->decodedFrameCache[$cacheKey])) {
-                    /** 解码h264为yuv */
-                    $rawYuv = $this->decodeNaluToYuv($avcData);
-                    if ($rawYuv !== null) {
-                        if ($targetW !== $this->srcWidth || $targetH !== $this->srcHeight) {
-                            /** 缩放尺寸 */
-                            $scaledYuv = $this->scaler->scaleYUV420P($rawYuv, $this->srcWidth, $this->srcHeight, $targetW, $targetH);
-                        } else {
-                            $scaledYuv = $rawYuv;
-                        }
-                        $this->decodedFrameCache[$cacheKey] = $scaledYuv;
-                    }
-                }
 
-                if (isset($this->decodedFrameCache[$cacheKey])) {
-                    /** 取出被缩放的yuv */
-                    $scaledYuv = $this->decodedFrameCache[$cacheKey];
+            if (!$needTranscode) {
+                $profileJobs[$name] = ['transcode' => false, 'skip' => false];
+                continue;
+            }
 
-                    if ($this->pipelineVariants === null && $this->profileWatermark[$name] !== null) {
-                        $scaledYuv = $this->applyWatermarkToFrame($scaledYuv, $targetW, $targetH, $this->profileWatermark[$name]);
-                    }
-
-                    /** 使用该profile专属的编码器，避免多码率间参考帧污染 */
-                    $encoder = $this->encoders[$name];
-                    $encoder->setResolution($targetW, $targetH);
-                    $encoder->setBitrate($profile['bitrate']);
-                    $encoder->setFps($profile['fps']);
-                    $encoder->setQp($profile['qp'] ?? 26);
-                    /** 将被缩放后的yuv重新编码为h264 */
-                    $encodedNals = $encoder->encodeFrame($scaledYuv, $isKeyFrame);
-                    $outputData = '';
-                    $outputSpsPps = '';
-                    foreach ($encodedNals as $nal) {
-                        /** 查找nal中是否存在header */
-                        $nalHeaderPos = $this->findNalHeaderPos($nal);
-                        if ($nalHeaderPos < 0) continue;
-                        $nalType = ord($nal[$nalHeaderPos]) & 0x1F;
-                        if ($nalType === 7 || $nalType === 8) {
-                            $outputSpsPps .= $nal;
-                        } else {
-                            $outputData .= $nal;
-                        }
-                    }
-                    if ($outputSpsPps !== '') {
-                        $this->spsPpsData[$name] = $outputSpsPps;
-                    }
-                    $isTranscoded = true;
+            $resolutionKey = "{$targetW}_{$targetH}";
+            if ($this->pipelineVariants !== null && isset($this->pipelineVariants[$name])) {
+                $variant = $this->pipelineVariants[$name];
+                $this->decodedFrameCache[$resolutionKey] = substr($this->pipelineYuvPayload, $variant['offset'], $variant['length']);
+            } elseif (!isset($this->decodedFrameCache[$resolutionKey])) {
+                $rawYuv = $this->decodeNaluToYuv($avcData);
+                if ($rawYuv !== null) {
+                    $scaledYuv = ($targetW !== $this->srcWidth || $targetH !== $this->srcHeight)
+                        ? $this->scaler->scaleYUV420P($rawYuv, $this->srcWidth, $this->srcHeight, $targetW, $targetH)
+                        : $rawYuv;
+                    $this->decodedFrameCache[$resolutionKey] = $scaledYuv;
                 }
             }
 
-            // 拼接AnnexB
-            if ($isTranscoded) {
-                $annexb = $outputData;
-            } else {
-                /** 没有缩放的数据需要重新编码 */
-                $annexb = $this->avccToAnnexB($outputData);
+            if (!isset($this->decodedFrameCache[$resolutionKey])) {
+                // 解码失败：退化为直通（与原实现 isset 分支一致）
+                $profileJobs[$name] = ['transcode' => false, 'skip' => false];
+                continue;
             }
+
+            $scaledYuv = $this->decodedFrameCache[$resolutionKey];
+            if ($this->pipelineVariants === null && $this->profileWatermark[$name] !== null) {
+                $scaledYuv = $this->applyWatermarkToFrame($scaledYuv, $targetW, $targetH, $this->profileWatermark[$name]);
+            }
+
+            $encoder = $this->encoders[$name];
+            $encoder->setResolution($targetW, $targetH);
+            $encoder->setBitrate($profile['bitrate']);
+            $encoder->setFps($profile['fps']);
+            $encoder->setQp($profile['qp'] ?? 26);
+            // 异步开始编码：worker 运动估计与上一帧的主进程 CAVLC 重叠
+            $encoder->startFrame($scaledYuv, $isKeyFrame);
+
+            $profileJobs[$name] = ['transcode' => true, 'skip' => false];
+        }
+        unset($writer);
+
+        return [
+            'relativeTime' => $relativeTime,
+            'isKeyFrame' => $isKeyFrame,
+            'avcData' => $avcData,
+            'dts' => $dts,
+            'pts' => $pts,
+            'segmentSwitches' => $segmentSwitches,
+            'profiles' => $profileJobs,
+        ];
+    }
+
+    /** finishFrame 取出各 profile 在途编码结果并写 TS（其 CAVLC 与下一帧 worker 计算重叠） */
+    private function emitPendingVideoFrame(array $job): void
+    {
+        foreach ($this->profiles as $name => $profile) {
+            $pjob = $job['profiles'][$name] ?? null;
+            if ($pjob === null || !empty($pjob['skip'])) continue;
+
+            $outputData = $job['avcData'];
+            $outputSpsPps = $this->spsPpsData[$name];
+            $isTranscoded = false;
+
+            if (!empty($pjob['transcode'])) {
+                $encodedNals = $this->encoders[$name]->finishFrame();
+                $outputData = '';
+                $outputSpsPps = '';
+                foreach ($encodedNals as $nal) {
+                    $nalHeaderPos = $this->findNalHeaderPos($nal);
+                    if ($nalHeaderPos < 0) continue;
+                    $nalType = ord($nal[$nalHeaderPos]) & 0x1F;
+                    if ($nalType === 7 || $nalType === 8) {
+                        $outputSpsPps .= $nal;
+                    } else {
+                        $outputData .= $nal;
+                    }
+                }
+                if ($outputSpsPps !== '') {
+                    $this->spsPpsData[$name] = $outputSpsPps;
+                }
+                $isTranscoded = true;
+            }
+
+            $annexb = $isTranscoded ? $outputData : $this->avccToAnnexB($outputData);
             // 只在每个分片的第一帧前置SPS/PPS，避免重复导致FFmpeg解码错误
             if ($this->segmentFirstFrame[$name]) {
                 $prefixNal = $outputSpsPps ?: $this->spsPpsData[$name];
@@ -500,10 +548,32 @@ class PurePhpHlsGenerator
                 $this->segmentFirstFrame[$name] = false;
             }
 
-            $pes = $this->createPES(0xE0, $annexb, $pts, ($pts !== $dts) ? $dts : null);
+            $pes = $this->createPES(0xE0, $annexb, $job['pts'], ($job['pts'] !== $job['dts']) ? $job['dts'] : null);
             // 视频首包携带PCR同步播放器
-            $this->writeTSPackets($name, $this->videoPid, $pes, true, $dts);
+            $this->writeTSPackets($name, $this->videoPid, $pes, true, $job['dts']);
+
+            $this->currentSegmentLastTimes[$name] = $job['relativeTime'];
+            $this->segmentWriters[$name]['endTime'] = $job['relativeTime'];
         }
+    }
+
+    private function replayQueuedAudio(): void
+    {
+        foreach ($this->queuedAudioTags as $queuedTag) {
+            $this->handleAudioFrame($queuedTag);
+        }
+        $this->queuedAudioTags = [];
+    }
+
+    /** 冲刷最后一帧的延迟编码及排队音频（closeAllSegments 前必须调用） */
+    public function flushPendingVideo(): void
+    {
+        if ($this->pendingVideoJob !== null) {
+            $job = $this->pendingVideoJob;
+            $this->pendingVideoJob = null;
+            $this->emitPendingVideoFrame($job);
+        }
+        $this->replayQueuedAudio();
     }
 
     /**
@@ -552,6 +622,12 @@ class PurePhpHlsGenerator
      */
     private function handleAudioFrame($tag): void
     {
+        // 有在途视频帧时音频排队，随该帧 finish 后按原 tag 顺序回放，维持 TS 音视频交错
+        if ($this->pendingVideoJob !== null) {
+            $this->queuedAudioTags[] = $tag;
+            return;
+        }
+
         $raw = $tag->body ?? null;
         if ($raw === null || strlen($raw) < 2) return;
 

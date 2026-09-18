@@ -86,6 +86,11 @@ class FlvRecoder
     private ?array $pipelineEncoded = null;
     private bool $pipelineForcedIdr = false;
 
+    // 帧级双缓冲：一个已 startFrame 的转码帧延后到下一帧到达后再 finish
+    private ?array $pendingVideoJob = null;
+    /** @var FlvTag[] 在途视频帧之后到达的音频 tag，待该帧写出后按原顺序回放 */
+    private array $queuedAudioTags = [];
+
     public function __construct(array $config = [], bool $multi = false)
     {
         $this->multi = $multi;
@@ -241,6 +246,8 @@ class FlvRecoder
         $this->lastAudioOutputTimestamp = null;
         $this->positiveVideoDtsDeltaTotal = 0;
         $this->positiveVideoDtsDeltaCount = 0;
+        $this->pendingVideoJob = null;
+        $this->queuedAudioTags = [];
     }
 
     private function detectSourceFps(array $tags): void
@@ -397,6 +404,9 @@ class FlvRecoder
 
     private function finishOutput(string $outputFile): void
     {
+        // 冲刷双缓冲中最后一帧及排队音频，时长/帧数统计才完整
+        $this->flushPendingVideo();
+
         $actualHasVideo = $this->outputVideoFrameCount > 0;
         $actualHasAudio = $this->outputAudioFrameCount > 0;
         $fallbackFps = ($this->effectiveTargetFps !== null && $this->effectiveTargetFps > 0)
@@ -520,11 +530,6 @@ class FlvRecoder
         $isKeyFrame = ($videoData['frameType'] === self::VIDEO_FRAME_TYPE_KEY_FRAME);
         $timestamp = $tag->getTime();
 
-        $relativeTime = 0;
-        if ($this->baseTimestamp !== null) {
-            $relativeTime = $timestamp - $this->baseTimestamp;
-        }
-
         $cts = $avc['compositionTime'] ?? 0;
         if ($cts & 0x800000) $cts -= 0x1000000;
         $avcData = $avc['data'];
@@ -537,73 +542,137 @@ class FlvRecoder
             $this->watermarkEnabled
         );
 
-        if ($needTranscode) {
-            // 多进程模式中所有输入 sample 已由 decoder worker 解码；单进程仍在此维持参考链。
-            $yuvData = $this->pipelineYuv ?? $this->decodeNaluToYuv($avcData);
-            if ($yuvData === null) return;
-
+        if (!$needTranscode) {
+            // 直通帧不经过编码器：先冲刷在途转码帧与排队音频
+            $this->flushPendingVideo();
+            $relativeTime = 0;
             if ($this->baseTimestamp === null) {
                 if (!$isKeyFrame) return;
                 $this->baseTimestamp = $timestamp;
                 $relativeTime = 0;
+                $this->writeFlvHeader(true, true);
+                $this->writeSequenceHeaderTag();
             } else {
                 $relativeTime = $timestamp - $this->baseTimestamp;
             }
-
-            // 相对首关键帧时间轴选择，无浮点累积误差；首个输出固定为关键帧。
-            $shouldOutput = !$this->dropFrames
-                || $this->outputVideoFrameCount === 0
-                || $relativeTime * $this->effectiveTargetFps >= $this->outputVideoFrameCount * 1000;
-            if (!$shouldOutput) return;
-
-            $targetW = $this->outputVideoWidth;
-            $targetH = $this->outputVideoHeight;
-            if ($this->pipelineYuv === null) {
-                if ($targetW !== $this->srcWidth || $targetH !== $this->srcHeight) {
-                    $yuvData = $this->scaler->scaleYUV420P(
-                        $yuvData,
-                        $this->srcWidth, $this->srcHeight,
-                        $targetW, $targetH
-                    );
-                }
-                if ($this->watermarkEnabled) {
-                    $yuvData = $this->applyWatermark($yuvData, $targetW, $targetH);
-                }
-            }
-
-            $this->encoder->setResolution($targetW, $targetH);
-            if ($this->targetBitrate > 0) {
-                $this->encoder->setBitrate($this->targetBitrate);
-            } else {
-                $this->encoder->setQp($this->targetQp);
-            }
-            $encoderFps = $this->effectiveTargetFps ?? $this->sourceFps;
-            if ($encoderFps !== null && $encoderFps > 0) {
-                $this->encoder->setFps(max(1, (int)round($encoderFps)));
-            }
-
-            $encodedNals = $this->pipelineEncoded ?? $this->encoder->encodeFrame($yuvData, $this->outputVideoFrameCount === 0 || $isKeyFrame);
-            $isKeyFrame = $this->pipelineForcedIdr || $isKeyFrame;
-            $this->videoFrameCount++;
-
-            if ($this->outputVideoFrameCount === 0) {
-                $this->extractSpsPpsFromNals($encodedNals);
-                $this->writeFlvHeader(true, true);
-                $this->writeSequenceHeaderTag();
-            }
-
-            // 重编码器不生成 B 帧，CTS 必须为0；DTS保留选中输入帧的相对时间。
-            $this->writeEncodedVideoFrame($encodedNals, $this->outputVideoFrameCount === 0 || $isKeyFrame, $relativeTime, 0);
-        } else {
-            if ($this->baseTimestamp === null) {
-                if (!$isKeyFrame) return;
-                $this->baseTimestamp = $timestamp;
-                $relativeTime = 0;
-                $this->writeFlvHeader(true, true);
-                $this->writeSequenceHeaderTag();
-            }
             $this->writeVideoTag($avcData, $isKeyFrame, $relativeTime, $cts);
+            return;
         }
+
+        $job = $this->prepareTranscodeVideoFrame($tag, $avcData, $isKeyFrame, $timestamp, (bool)$this->pipelineEncoded);
+        if ($job === null) return; // 首帧非关键帧 / 抽帧丢弃
+
+        // 关键顺序：新帧已 startFrame（worker 在途）→ 此时 finish 上一帧，
+        // 主进程串行 CAVLC 与 worker 对新帧的运动估计重叠执行
+        if ($this->pendingVideoJob !== null) {
+            $this->emitPendingVideoFrame($this->pendingVideoJob);
+        }
+        $this->replayQueuedAudio();
+        $this->pendingVideoJob = $job;
+    }
+
+    /**
+     * 解码/缩放/抽帧判定并 startFrame（预编码 GOP 样本直接挂 job）。
+     * 返回待写出任务；null 表示该帧不输出。
+     */
+    private function prepareTranscodeVideoFrame(FlvTag $tag, string $avcData, bool $isKeyFrame, int $timestamp, bool $hasPipelineEncoded): ?array
+    {
+        // 多进程模式中所有输入 sample 已由 decoder worker 解码；单进程仍在此维持参考链。
+        $yuvData = $this->pipelineYuv ?? $this->decodeNaluToYuv($avcData);
+        if ($yuvData === null) return null;
+
+        if ($this->baseTimestamp === null) {
+            if (!$isKeyFrame) return null;
+            $this->baseTimestamp = $timestamp;
+            $relativeTime = 0;
+        } else {
+            $relativeTime = $timestamp - $this->baseTimestamp;
+        }
+
+        // 在途帧虽未写出，但输出槽位已保留
+        $reservedCount = $this->outputVideoFrameCount + ($this->pendingVideoJob !== null ? 1 : 0);
+        // 相对首关键帧时间轴选择，无浮点累积误差；首个输出固定为关键帧。
+        $shouldOutput = !$this->dropFrames
+            || $reservedCount === 0
+            || $relativeTime * $this->effectiveTargetFps >= $reservedCount * 1000;
+        if (!$shouldOutput) return null;
+
+        $job = [
+            'relativeTime' => $relativeTime,
+            'isKey' => $isKeyFrame,
+            'forcedIdr' => $this->pipelineForcedIdr,
+            'pipelineEncoded' => $this->pipelineEncoded,
+        ];
+
+        if ($hasPipelineEncoded) {
+            return $job;
+        }
+
+        $targetW = $this->outputVideoWidth;
+        $targetH = $this->outputVideoHeight;
+        if ($this->pipelineYuv === null) {
+            if ($targetW !== $this->srcWidth || $targetH !== $this->srcHeight) {
+                $yuvData = $this->scaler->scaleYUV420P(
+                    $yuvData,
+                    $this->srcWidth, $this->srcHeight,
+                    $targetW, $targetH
+                );
+            }
+            if ($this->watermarkEnabled) {
+                $yuvData = $this->applyWatermark($yuvData, $targetW, $targetH);
+            }
+        }
+
+        $this->encoder->setResolution($targetW, $targetH);
+        if ($this->targetBitrate > 0) {
+            $this->encoder->setBitrate($this->targetBitrate);
+        } else {
+            $this->encoder->setQp($this->targetQp);
+        }
+        $encoderFps = $this->effectiveTargetFps ?? $this->sourceFps;
+        if ($encoderFps !== null && $encoderFps > 0) {
+            $this->encoder->setFps(max(1, (int)round($encoderFps)));
+        }
+
+        $this->encoder->startFrame($yuvData, $reservedCount === 0 || $isKeyFrame);
+        $this->videoFrameCount++;
+
+        return $job;
+    }
+
+    /** finishFrame 取出在途编码结果并写出（其 CAVLC 与下一帧 worker 计算重叠） */
+    private function emitPendingVideoFrame(array $job): void
+    {
+        $encodedNals = $job['pipelineEncoded'] ?? $this->encoder->finishFrame();
+        $isKeyFrame = $job['forcedIdr'] || $job['isKey'];
+
+        if ($this->outputVideoFrameCount === 0) {
+            $this->extractSpsPpsFromNals($encodedNals);
+            $this->writeFlvHeader(true, true);
+            $this->writeSequenceHeaderTag();
+        }
+
+        // 重编码器不生成 B 帧，CTS 必须为0；DTS保留选中输入帧的相对时间。
+        $this->writeEncodedVideoFrame($encodedNals, $this->outputVideoFrameCount === 0 || $isKeyFrame, $job['relativeTime'], 0);
+    }
+
+    private function replayQueuedAudio(): void
+    {
+        foreach ($this->queuedAudioTags as $queuedTag) {
+            $this->handleAudioFrame($queuedTag);
+        }
+        $this->queuedAudioTags = [];
+    }
+
+    /** 冲刷最后一帧的延迟编码及排队音频（EOF/分片结束前调用） */
+    public function flushPendingVideo(): void
+    {
+        if ($this->pendingVideoJob !== null) {
+            $job = $this->pendingVideoJob;
+            $this->pendingVideoJob = null;
+            $this->emitPendingVideoFrame($job);
+        }
+        $this->replayQueuedAudio();
     }
 
     private function extractSpsPpsFromNals(array $nals): void
@@ -646,6 +715,12 @@ class FlvRecoder
 
     private function handleAudioFrame(FlvTag $tag): void
     {
+        // 有在途视频帧时音频排队，随该帧 finish 后按原 tag 顺序回放，维持 FLV 交错时序
+        if ($this->pendingVideoJob !== null) {
+            $this->queuedAudioTags[] = $tag;
+            return;
+        }
+
         $raw = $tag->body ?? null;
         if ($raw === null || strlen($raw) < 2) return;
 

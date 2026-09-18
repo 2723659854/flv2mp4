@@ -430,25 +430,7 @@ class H264Encoder
         $this->qp = max(18, min(38, $this->qp));
     }
 
-    public function encodeFrame(string $yuvData, bool $isKeyframe = false): array
-    {
-        $nalUnits = [];
-        if ($isKeyframe) {
-            // I帧：重置参考帧和计数器
-            $this->refYPlane = null;
-            $this->refUPlane = null;
-            $this->refVPlane = null;
-            $this->frameNum = 0;
-            $this->idrPicId++;
-            $this->poc = 0;
-
-            $nalUnits[] = $this->generateSPS();
-            $nalUnits[] = $this->generatePPS();
-        }
-        $sliceData = $this->encodeSlice($yuvData, $isKeyframe);
-        $nalUnits[] = $sliceData;
-        return $nalUnits;
-    }
+    // 帧编码入口（encodeFrame / startFrame / finishFrame）见 SliceEncodeTrait
 
     private static $ueCache = [];
 

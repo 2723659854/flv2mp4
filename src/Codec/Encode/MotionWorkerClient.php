@@ -18,6 +18,8 @@ final class MotionWorkerClient
     private array $workerPorts = [];
     private int $id = 1;
     private int $refSeq = 0;
+    /** 当前在途批次：['ids'=>worker=>requestId, 'total'=>job 总数]，collect 后清空 */
+    private ?array $pending = null;
 
     public function __construct(private int $port = 0, private int $workers = 0)
     {
@@ -27,8 +29,28 @@ final class MotionWorkerClient
         }
     }
 
-    public function batch(int $width, int $height, int $aw, int $ah, int $qp, string $refY, string $refU, string $refV, array $blocks): array
-    {
+    /**
+     * 异步派发一帧：仅写入 socket（非阻塞尽力刷新），不等结果。
+     * 帧级双缓冲时主进程随后执行上一帧的 CAVLC，worker 并行计算本帧。
+     * 必须先 collect() 上一帧后才能再次 dispatch()。
+     *
+     * @param array $jobs 光栅顺序连续键 0..mbWidth*mbHeight-1 => [x, y, range]
+     */
+    public function dispatch(
+        int $width,
+        int $height,
+        int $aw,
+        int $ah,
+        int $qp,
+        string $refY,
+        string $refU,
+        string $refV,
+        string $curY,
+        int $mbWidth,
+        int $mbHeight,
+        array $jobs
+    ): void {
+        if ($this->pending !== null) throw new RuntimeException('Motion worker batch already in flight');
         $this->connectAll();
         // 参考帧按内容分配单调序号：内容不变（如纯静态画面）则复用同一序号，
         // worker 端已持有该参考帧时跳过整帧重传；字符串 === 先比长度再 memcmp，
@@ -42,12 +64,25 @@ final class MotionWorkerClient
             $seq = ++$this->refSeq;
             $this->lastReference = [$refY, $refU, $refV];
         }
-        $chunks = array_fill(0, $this->workers, []);
-        foreach ($blocks as $key => $block) $chunks[$key % $this->workers][$key] = $block;
+
+        $total = count($jobs);
+        if ($total !== $mbWidth * $mbHeight) throw new RuntimeException('Motion worker jobs must cover every macroblock');
         $ids = [];
         $referenceFrame = null;
-        foreach ($chunks as $worker => $chunk) {
-            if ($chunk === []) continue;
+        // 按宏块行连续分片：worker w 取连续键区间（=连续宏块行），
+        // 每 worker 只发送自己行区间的条带，整帧条带恰好发送一次。
+        for ($worker = 0; $worker < $this->workers; $worker++) {
+            $kStart = (int)floor($total * $worker / $this->workers);
+            $kEnd = (int)floor($total * ($worker + 1) / $this->workers);
+            if ($kStart === $kEnd) continue;
+            $chunk = [];
+            for ($k = $kStart; $k < $kEnd; $k++) $chunk[$k] = $jobs[$k];
+            $firstY = intdiv($kStart, $mbWidth);
+            $lastY = intdiv($kEnd - 1, $mbWidth);
+            $stripOffset = $firstY;
+            $stripCount = $lastY - $firstY + 1;
+            $strips = substr($curY, $stripOffset * 16 * $aw, $stripCount * 16 * $aw);
+
             $id = $this->id++;
             $ids[$worker] = $id;
             if (($this->workerSeq[$worker] ?? null) !== $seq) {
@@ -55,9 +90,23 @@ final class MotionWorkerClient
                 $this->outputs[$worker] .= $referenceFrame;
                 $this->workerSeq[$worker] = $seq;
             }
-            $this->outputs[$worker] .= MotionWorkerProtocol::batch($id, $seq, $qp, $chunk);
+            $this->outputs[$worker] .= MotionWorkerProtocol::batch($id, $seq, $qp, $chunk, $strips, $stripOffset, $stripCount, $aw);
         }
+        $this->pending = ['ids' => $ids, 'total' => $total];
+        // 尽力立即把请求刷出去，剩余部分由 collect 的 event loop 排空
+        foreach (array_keys($ids) as $worker) {
+            if ($this->outputs[$worker] !== '') $this->writeSocket($worker);
+        }
+    }
 
+    /**
+     * 等待并合并在途批次结果（阻塞至全部 worker 响应）。
+     */
+    public function collect(): array
+    {
+        if ($this->pending === null) throw new RuntimeException('No motion worker batch in flight');
+        $ids = $this->pending['ids'];
+        $total = $this->pending['total'];
         $result = [];
         $deadline = microtime(true) + 30;
         while ($ids !== []) {
@@ -85,9 +134,29 @@ final class MotionWorkerClient
                 }
             }
         }
-        if (count($result) !== count($blocks)) throw new RuntimeException('Incomplete motion worker batch');
+        $this->pending = null;
+        if (count($result) !== $total) throw new RuntimeException('Incomplete motion worker batch');
         ksort($result);
         return $result;
+    }
+
+    /** 同步兼容封装：派发并立即收齐。 */
+    public function batch(
+        int $width,
+        int $height,
+        int $aw,
+        int $ah,
+        int $qp,
+        string $refY,
+        string $refU,
+        string $refV,
+        string $curY,
+        int $mbWidth,
+        int $mbHeight,
+        array $jobs
+    ): array {
+        $this->dispatch($width, $height, $aw, $ah, $qp, $refY, $refU, $refV, $curY, $mbWidth, $mbHeight, $jobs);
+        return $this->collect();
     }
 
     private function allocatePort(): int

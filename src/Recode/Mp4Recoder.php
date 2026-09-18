@@ -66,6 +66,11 @@ class Mp4Recoder
     private int $videoFrameCount = 0;
     private ?int $maxFrames = null;
 
+    // 帧级双缓冲：一个已 startFrame 的转码帧延后到下一帧到达后再 finish
+    private ?array $pendingVideoJob = null;
+    /** @var array<int,array{data:string,timestamp:int}> */
+    private array $queuedAudioSamples = [];
+
     private int $outputVideoWidth = 0;
     private int $outputVideoHeight = 0;
     private ?float $sourceFps = null;
@@ -221,6 +226,8 @@ class Mp4Recoder
         $this->encPpsAnnexB = '';
         $this->encAvccHeader = '';
         $this->videoFrameCount = 0;
+        $this->pendingVideoJob = null;
+        $this->queuedAudioSamples = [];
         $this->outputVideoWidth = 0;
         $this->outputVideoHeight = 0;
         $this->sourceFps = null;
@@ -603,13 +610,13 @@ class Mp4Recoder
     public function processPipelineSample(array $metadata, string $payload): void
     {
         if (($metadata['sampleType'] ?? '') === 'audio') {
-            $this->storePipelineSample($this->audioSamples, $payload, [
-                'timestamp' => (int)$metadata['dtsMs'],
-            ]);
+            $this->intakeAudioPayload($payload, (int)$metadata['dtsMs']);
             return;
         }
         if (!empty($metadata['drop'])) return;
         if (!empty($metadata['gopEncoded']['profiles']['default'])) {
+            // 预编码 GOP 样本与逐帧流水线编码互斥：先冲刷在途帧与排队音频保序
+            $this->flushPendingVideo();
             $this->appendPipelineEncodedSample($metadata, $metadata['gopEncoded']['profiles']['default']);
             return;
         }
@@ -621,7 +628,7 @@ class Mp4Recoder
         } else {
             $avcData = $payload;
         }
-        $this->transcodeVideoSample([
+        $this->intakeVideoSample([
             'data' => $avcData, 'dtsMs' => (int)$metadata['dtsMs'],
             'ctsMs' => (int)$metadata['ctsMs'], 'keyframe' => (bool)$metadata['keyframe'],
         ]);
@@ -645,6 +652,8 @@ class Mp4Recoder
 
     public function finishPipelineOutput(string $outputFile): void
     {
+        // 冲刷最后一帧的延迟编码及排队音频，保证样本完整后再封装
+        $this->flushPendingVideo();
         if (!$this->videoTrack && !$this->audioTrack) throw new \RuntimeException('未找到有效的视频或音频轨道');
         $this->buildPipelineMp4($outputFile);
     }
@@ -694,7 +703,7 @@ class Mp4Recoder
         $videoCount = 0;
         foreach ($allSamples as $sample) {
             if ($sample['type'] === 'video') {
-                $this->transcodeVideoSample($sample);
+                $this->intakeVideoSample($sample);
                 $videoCount++;
                 if ($this->maxFrames !== null && $videoCount >= $this->maxFrames) {
                     echo "Reached max frames limit ({$this->maxFrames})\n";
@@ -705,12 +714,11 @@ class Mp4Recoder
                 }
             } else {
                 if ($this->maxFrames !== null && $videoCount >= $this->maxFrames) continue;
-                $this->audioSamples[] = [
-                    'data' => $sample['data'],
-                    'timestamp' => $sample['dtsMs'],
-                ];
+                $this->intakeAudioPayload($sample['data'], (int)$sample['dtsMs']);
             }
         }
+        // 冲刷双缓冲中最后一帧
+        $this->flushPendingVideo();
     }
 
     private function extractVideoSamples(): array
@@ -885,15 +893,48 @@ class Mp4Recoder
         return $samples;
     }
 
-    private function transcodeVideoSample(array $sample): void
+    private function intakeAudioPayload(string $data, int $dtsMs): void
+    {
+        // 有在途视频帧时音频排队，待该帧 finish 后按原时间戳顺序落盘
+        if ($this->pendingVideoJob !== null) {
+            $this->queuedAudioSamples[] = ['data' => $data, 'timestamp' => $dtsMs];
+            return;
+        }
+        if (is_resource($this->pipelineMediaHandle)) {
+            $this->storePipelineSample($this->audioSamples, $data, ['timestamp' => $dtsMs]);
+        } else {
+            $this->audioSamples[] = ['data' => $data, 'timestamp' => $dtsMs];
+        }
+    }
+
+    private function flushQueuedAudio(): void
+    {
+        foreach ($this->queuedAudioSamples as $queued) {
+            if (is_resource($this->pipelineMediaHandle)) {
+                $this->storePipelineSample($this->audioSamples, $queued['data'], ['timestamp' => $queued['timestamp']]);
+            } else {
+                $this->audioSamples[] = $queued;
+            }
+        }
+        $this->queuedAudioSamples = [];
+    }
+
+    private function flushPendingVideo(): void
+    {
+        if ($this->pendingVideoJob !== null) {
+            $job = $this->pendingVideoJob;
+            $this->pendingVideoJob = null;
+            $this->emitTranscodeVideoSample($job);
+        }
+        $this->flushQueuedAudio();
+    }
+
+    private function intakeVideoSample(array $sample): void
     {
         $avcData = $sample['data'];
         $isKeyFrame = $sample['keyframe'];
         $dtsMs = $sample['dtsMs'];
         $ctsMs = $sample['ctsMs'];
-
-        $targetW = $this->outputVideoWidth;
-        $targetH = $this->outputVideoHeight;
 
         $needTranscode = $this->srcInitialized && (
             $this->targetWidth > 0 && $this->srcWidth !== $this->targetWidth ||
@@ -903,75 +944,9 @@ class Mp4Recoder
             $this->watermarkEnabled
         );
 
-        if ($needTranscode) {
-            // 多进程模式中所有输入 sample 已由 decoder worker 解码；单进程仍在此维持参考链。
-            $yuvData = $this->pipelineYuv ?? $this->decodeNaluToYuv($avcData);
-            if ($yuvData === null) return;
-
-            $outputCount = count($this->videoSamples);
-            if ($this->firstVideoDtsMs === null) {
-                if (!$isKeyFrame) return;
-                $this->firstVideoDtsMs = $dtsMs;
-            }
-            $relativeTime = $dtsMs - $this->firstVideoDtsMs;
-            $shouldOutput = !$this->dropFrames
-                || $outputCount === 0
-                || $relativeTime * $this->effectiveTargetFps >= $outputCount * 1000;
-            if (!$shouldOutput) {
-                return;
-            }
-
-            if ($this->pipelineYuv === null) {
-                if ($targetW !== $this->srcWidth || $targetH !== $this->srcHeight) {
-                    $yuvData = $this->scaler->scaleYUV420P(
-                        $yuvData,
-                        $this->srcWidth, $this->srcHeight,
-                        $targetW, $targetH
-                    );
-                }
-
-                if ($this->watermarkEnabled) {
-                    $yuvData = $this->applyWatermark($yuvData, $targetW, $targetH);
-                }
-            }
-
-            $this->encoder->setResolution($targetW, $targetH);
-            if ($this->targetBitrate > 0) {
-                $this->encoder->setBitrate($this->targetBitrate);
-            } else {
-                $this->encoder->setQp($this->targetQp);
-            }
-            $encoderFps = $this->effectiveTargetFps ?? $this->sourceFps;
-            if ($encoderFps !== null && $encoderFps > 0) {
-                $this->encoder->setFps(max(1, (int)round($encoderFps)));
-            }
-
-            $encodedNals = $this->encoder->encodeFrame($yuvData, $outputCount === 0 || $isKeyFrame);
-            $this->videoFrameCount++;
-
-            if (empty($this->videoSamples)) {
-                $this->extractSpsPpsFromNals($encodedNals);
-                $this->buildEncAvccHeader();
-                $this->outputVideoWidth = $targetW;
-                $this->outputVideoHeight = $targetH;
-            }
-
-            $videoAvcc = $this->extractVideoAvccFromNals($encodedNals);
-            if ($videoAvcc === '') return;
-
-            $frameIndex = count($this->videoSamples);
-            $transcodeTimestamp = $this->dropFrames
-                ? (int)round($frameIndex * 1000 / $this->effectiveTargetFps)
-                : $dtsMs;
-
-            $sampleMetadata = [
-                'timestamp' => $transcodeTimestamp,
-                'cts' => 0,
-                'keyframe' => $frameIndex === 0 || $isKeyFrame,
-            ];
-            if (is_resource($this->pipelineMediaHandle)) $this->storePipelineSample($this->videoSamples, $videoAvcc, $sampleMetadata);
-            else $this->videoSamples[] = ['data' => $videoAvcc] + $sampleMetadata;
-        } else {
+        if (!$needTranscode) {
+            // 直通帧不经过编码器：先冲刷在途转码帧与排队音频
+            $this->flushPendingVideo();
             if (empty($this->videoSamples)) {
                 $this->outputVideoWidth = $this->srcWidth;
                 $this->outputVideoHeight = $this->srcHeight;
@@ -984,7 +959,121 @@ class Mp4Recoder
             ];
             if (is_resource($this->pipelineMediaHandle)) $this->storePipelineSample($this->videoSamples, $avcData, $sampleMetadata);
             else $this->videoSamples[] = ['data' => $avcData] + $sampleMetadata;
+            return;
         }
+
+        $job = $this->prepareTranscodeVideoSample($sample);
+        if ($job === null) return; // 首帧非关键帧 / 抽帧丢弃
+
+        // 关键顺序：新帧已 startFrame（worker 在途）→ 此时 finish 上一帧，
+        // 主进程串行 CAVLC 与 worker 对新帧的运动估计重叠执行
+        if ($this->pendingVideoJob !== null) {
+            $this->emitTranscodeVideoSample($this->pendingVideoJob);
+        }
+        $this->flushQueuedAudio();
+        $this->pendingVideoJob = $job;
+    }
+
+    /**
+     * 完成解码/缩放/抽帧判定并 startFrame；保留输出槽位计数。
+     * 返回待 finish 的任务，null 表示该帧不输出。
+     */
+    private function prepareTranscodeVideoSample(array $sample): ?array
+    {
+        $avcData = $sample['data'];
+        $isKeyFrame = $sample['keyframe'];
+        $dtsMs = $sample['dtsMs'];
+
+        $targetW = $this->outputVideoWidth;
+        $targetH = $this->outputVideoHeight;
+
+        // 多进程模式中所有输入 sample 已由 decoder worker 解码；单进程仍在此维持参考链。
+        $yuvData = $this->pipelineYuv ?? $this->decodeNaluToYuv($avcData);
+        if ($yuvData === null) return null;
+
+        // 上一帧虽未 finish 落盘，但输出槽位已被保留
+        $outputCount = count($this->videoSamples) + ($this->pendingVideoJob !== null ? 1 : 0);
+        if ($this->firstVideoDtsMs === null) {
+            if (!$isKeyFrame) return null;
+            $this->firstVideoDtsMs = $dtsMs;
+        }
+        $relativeTime = $dtsMs - $this->firstVideoDtsMs;
+        $shouldOutput = !$this->dropFrames
+            || $outputCount === 0
+            || $relativeTime * $this->effectiveTargetFps >= $outputCount * 1000;
+        if (!$shouldOutput) {
+            return null;
+        }
+
+        if ($this->pipelineYuv === null) {
+            if ($targetW !== $this->srcWidth || $targetH !== $this->srcHeight) {
+                $yuvData = $this->scaler->scaleYUV420P(
+                    $yuvData,
+                    $this->srcWidth, $this->srcHeight,
+                    $targetW, $targetH
+                );
+            }
+
+            if ($this->watermarkEnabled) {
+                $yuvData = $this->applyWatermark($yuvData, $targetW, $targetH);
+            }
+        }
+
+        $this->encoder->setResolution($targetW, $targetH);
+        if ($this->targetBitrate > 0) {
+            $this->encoder->setBitrate($this->targetBitrate);
+        } else {
+            $this->encoder->setQp($this->targetQp);
+        }
+        $encoderFps = $this->effectiveTargetFps ?? $this->sourceFps;
+        if ($encoderFps !== null && $encoderFps > 0) {
+            $this->encoder->setFps(max(1, (int)round($encoderFps)));
+        }
+
+        $isOutputKey = $outputCount === 0 || $isKeyFrame;
+        $this->encoder->startFrame($yuvData, $isOutputKey);
+        $this->videoFrameCount++;
+
+        return [
+            'dtsMs' => $dtsMs,
+            'isKey' => $isKeyFrame,
+        ];
+    }
+
+    /**
+     * finishFrame 取出在途编码结果并落盘（其 CAVLC 与下一帧 worker 计算重叠）。
+     */
+    private function emitTranscodeVideoSample(array $job): void
+    {
+        $dtsMs = $job['dtsMs'];
+        $isKeyFrame = $job['isKey'];
+        $targetW = $this->outputVideoWidth;
+        $targetH = $this->outputVideoHeight;
+
+        $encodedNals = $this->encoder->finishFrame();
+
+        if (empty($this->videoSamples)) {
+            $this->extractSpsPpsFromNals($encodedNals);
+            $this->buildEncAvccHeader();
+            $this->outputVideoWidth = $targetW;
+            $this->outputVideoHeight = $targetH;
+        }
+
+        $videoAvcc = $this->extractVideoAvccFromNals($encodedNals);
+        if ($videoAvcc === '') return;
+
+        $frameIndex = count($this->videoSamples);
+        $transcodeTimestamp = $this->dropFrames
+            ? (int)round($frameIndex * 1000 / $this->effectiveTargetFps)
+            : $dtsMs;
+
+        $sampleMetadata = [
+            'timestamp' => $transcodeTimestamp,
+            'cts' => 0,
+            'keyframe' => $frameIndex === 0 || $isKeyFrame,
+        ];
+        if (is_resource($this->pipelineMediaHandle)) $this->storePipelineSample($this->videoSamples, $videoAvcc, $sampleMetadata);
+        else $this->videoSamples[] = ['data' => $videoAvcc] + $sampleMetadata;
     }
 
     private function decodeNaluToYuv(string $avcData): ?string

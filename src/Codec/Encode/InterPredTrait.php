@@ -191,14 +191,17 @@ trait InterPredTrait
             // 保存MV供后续宏块预测（MV=skipMVP, refIdx=0）
             $this->saveMv16x16($mbX, $skipMvpX, $skipMvpY, 0);
 
-            for ($y = 0; $y < 16; $y++) {
-                $offset = ($mbY * 16 + $y) * $reconStride + $mbX * 16;
-                $this->reconYPlane = substr_replace($this->reconYPlane, substr($workerReconY, $y * 16, 16), $offset, 16);
-            }
-            for ($y = 0; $y < 8; $y++) {
-                $offset = ($mbY * 8 + $y) * $chromaW + $mbX * 8;
-                $this->reconUPlane = substr_replace($this->reconUPlane, substr($workerReconU, $y * 8, 8), $offset, 8);
-                $this->reconVPlane = substr_replace($this->reconVPlane, substr($workerReconV, $y * 8, 8), $offset, 8);
+            // 帧流水线：整帧 recon 已在派发下一帧前由 worker 结果预拼，无需逐 MB 拷贝
+            if (!$this->reconPreassembled) {
+                for ($y = 0; $y < 16; $y++) {
+                    $offset = ($mbY * 16 + $y) * $reconStride + $mbX * 16;
+                    $this->reconYPlane = substr_replace($this->reconYPlane, substr($workerReconY, $y * 16, 16), $offset, 16);
+                }
+                for ($y = 0; $y < 8; $y++) {
+                    $offset = ($mbY * 8 + $y) * $chromaW + $mbX * 8;
+                    $this->reconUPlane = substr_replace($this->reconUPlane, substr($workerReconU, $y * 8, 8), $offset, 8);
+                    $this->reconVPlane = substr_replace($this->reconVPlane, substr($workerReconV, $y * 8, 8), $offset, 8);
+                }
             }
 
             return '';
@@ -276,14 +279,16 @@ trait InterPredTrait
         // 保存当前MV供后续宏块预测（与解码器saveMvForPrediction一致）
         $this->saveMv16x16($mbX, $mvX, $mvY, $refIdx);
 
-        for ($y = 0; $y < 16; $y++) {
-            $offset = ($mbY * 16 + $y) * $reconStride + $mbX * 16;
-            $this->reconYPlane = substr_replace($this->reconYPlane, substr($workerReconY, $y * 16, 16), $offset, 16);
-        }
-        for ($y = 0; $y < 8; $y++) {
-            $offset = ($mbY * 8 + $y) * $chromaW + $mbX * 8;
-            $this->reconUPlane = substr_replace($this->reconUPlane, substr($workerReconU, $y * 8, 8), $offset, 8);
-            $this->reconVPlane = substr_replace($this->reconVPlane, substr($workerReconV, $y * 8, 8), $offset, 8);
+        if (!$this->reconPreassembled) {
+            for ($y = 0; $y < 16; $y++) {
+                $offset = ($mbY * 16 + $y) * $reconStride + $mbX * 16;
+                $this->reconYPlane = substr_replace($this->reconYPlane, substr($workerReconY, $y * 16, 16), $offset, 16);
+            }
+            for ($y = 0; $y < 8; $y++) {
+                $offset = ($mbY * 8 + $y) * $chromaW + $mbX * 8;
+                $this->reconUPlane = substr_replace($this->reconUPlane, substr($workerReconU, $y * 8, 8), $offset, 8);
+                $this->reconVPlane = substr_replace($this->reconVPlane, substr($workerReconV, $y * 8, 8), $offset, 8);
+            }
         }
 
         return $bits;
