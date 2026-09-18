@@ -565,7 +565,11 @@ class FlvRecoder
         // 关键顺序：新帧已 startFrame（worker 在途）→ 此时 finish 上一帧，
         // 主进程串行 CAVLC 与 worker 对新帧的运动估计重叠执行
         if ($this->pendingVideoJob !== null) {
-            $this->emitPendingVideoFrame($this->pendingVideoJob);
+            $pendingJob = $this->pendingVideoJob;
+            // 必须先清空在途标记：replayQueuedAudio 依赖它判断音频可直接写出，
+            // 否则排队音频会被 handleAudioFrame 重新入队后清空，导致帧间音频全部丢失
+            $this->pendingVideoJob = null;
+            $this->emitPendingVideoFrame($pendingJob);
         }
         $this->replayQueuedAudio();
         $this->pendingVideoJob = $job;
