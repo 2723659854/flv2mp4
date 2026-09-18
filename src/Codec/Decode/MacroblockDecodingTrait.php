@@ -990,7 +990,7 @@ trait MacroblockDecodingTrait
     private function updateInterMbIntraModes(int $mbX): void
     {
         // 非 Intra_4x4 宏块邻居预测模式固定为 DC_PRED(2)；常量数组 COW 共享，避免逐 MB 分配
-        $this->intra4x4LeftModes = self::INTER_DC_MODES;
+        $this->intra4x4LeftModes = self::$interDcModes;
         $baseLuma = $mbX * 4;
         $this->intra4x4TopModes[$baseLuma + 0] = 2;
         $this->intra4x4TopModes[$baseLuma + 1] = 2;
@@ -998,10 +998,11 @@ trait MacroblockDecodingTrait
         $this->intra4x4TopModes[$baseLuma + 3] = 2;
     }
 
-    private const INTER_DC_MODES = [2, 2, 2, 2];
+    // 注意：本包适配 PHP 8.1，trait 常量需 PHP 8.2+，故用 private static 属性（数组 COW 共享）
+    private static array $interDcModes = [2, 2, 2, 2];
 
-    private const LEFT_8X16_BLOCKS = [0, 1, 4, 5, 8, 9, 12, 13];
-    private const RIGHT_8X16_BLOCKS = [2, 3, 6, 7, 10, 11, 14, 15];
+    private static array $left8x16Blocks = [0, 1, 4, 5, 8, 9, 12, 13];
+    private static array $right8x16Blocks = [2, 3, 6, 7, 10, 11, 14, 15];
 
     /**
      * P_L0_16x16 宏块解码
@@ -1141,11 +1142,11 @@ trait MacroblockDecodingTrait
 
         $mbWidth = $this->picWidthInMbs;
         $mbIdx = $mbY * $mbWidth + $mbX;
-        foreach (self::LEFT_8X16_BLOCKS as $i) {
+        foreach (self::$left8x16Blocks as $i) {
             $this->mbMvForDeblock[$mbIdx][$i] = [$mv0X, $mv0Y];
             $this->mbRefForDeblock[$mbIdx][$i] = $refIdx0;
         }
-        foreach (self::RIGHT_8X16_BLOCKS as $i) {
+        foreach (self::$right8x16Blocks as $i) {
             $this->mbMvForDeblock[$mbIdx][$i] = [$mv1X, $mv1Y];
             $this->mbRefForDeblock[$mbIdx][$i] = $refIdx1;
         }

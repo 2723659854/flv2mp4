@@ -175,7 +175,7 @@ trait MotionCompensationTrait
             $chr = self::mcChrTable();
             // interior：x 不夹边、y 窗口（sy-2..sy+3）全程不夹边时，按列滑动递推，
             // 每像素只需读 1 个新 tap 点（原路径 6 个），与直接卷积整数严格等价
-            $interiorY = $intY - 2 >= 0 && $intY + $blockH + 2 <= $refHeight;
+            $interiorY = $intY >= 2 && $intY + $blockH + 2 <= $maxY;
             if ($interiorX && $interiorY) {
                 for ($i = 0; $i < $blockW; $i++) {
                     $sx = $intX + $i;
@@ -196,9 +196,11 @@ trait MotionCompensationTrait
                             $val = ($refBytes[$srcRow] + $val + 1) >> 1;
                         }
                         $dstPlane[$dstOff] = $chr[$val];
-                        $tn = $refBytes[$off + 6 * $refStride];
-                        $s = $s + $tn - $t0 + 6 * ($t1 - $t5) + 25 * ($t4 - $t2);
-                        $t0 = $t1; $t1 = $t2; $t2 = $t3; $t3 = $t4; $t4 = $t5; $t5 = $tn;
+                        if ($j + 1 < $blockH) {
+                            $tn = $refBytes[$off + 6 * $refStride];
+                            $s = $s + $tn - $t0 + 6 * ($t1 - $t5) + 25 * ($t4 - $t2);
+                            $t0 = $t1; $t1 = $t2; $t2 = $t3; $t3 = $t4; $t4 = $t5; $t5 = $tn;
+                        }
                         $off += $refStride;
                         $dstOff += $dstStride;
                         $srcRow += $refStride;
