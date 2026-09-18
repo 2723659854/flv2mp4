@@ -547,7 +547,7 @@ if ($result && file_exists($outputFile1)) {
 | **Linux Docker 部署**            | 23 秒    | 24 秒      | 31 秒      | Linux + PHP 8.1.24，未开启 OPcache            |
 | **GOP 分布式多进程解码**               | 22 秒    | 22 秒      | 22 秒      | 未开启 OPcache；Windows平台                     |
 | **GOP 分布式多进程解码**               | 17 秒    | 17 秒      | 17 秒      | 未开启 OPcache；Linux平台                       |
-| **去除参考帧重复 SHA256 + 静止块 ME 早退** | **16 秒** | **16 秒** | **17 秒** | 移除每帧对参考帧的重复哈希计算；对静止/近静止块跳过完整运动估计搜索 | 
+| **去除参考帧重复 SHA256 + 静止块 ME 早退** | **16 秒** | **16 秒** | **17 秒** | OPcache已无收益                               | 
 **说明：**
 - 测试素材：`test.flv`，3.02 秒，720×742，30fps；输出规格：360×360，10fps。
 - 编码配置：H.264 Constrained Baseline，AAC 128kbps。
