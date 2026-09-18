@@ -552,17 +552,16 @@ if ($result && file_exists($outputFile1)) {
 ### Cross-Platform Performance Comparison
 
 | Output Format | Windows Time | Linux (Docker) Time | Performance Gain |
-| :--- | :--- | :--- | :--- |
-| **FLV Re-encoding** | 22 s | **17 s** | **↓ 22.7%** |
-| **MP4 Re-encoding** | 22 s | **17 s** | **↓ 22.7%** |
-| **HLS (mpegts + m3u8)** | 22 s | **17 s** | **↓ 22.7%** |
+| :--- |:-------------|:--------------------|:-----------------|
+| **FLV Re-encoding** | 21 s         | **16 s**            | **↓ 23.8%**      |
+| **MP4 Re-encoding** | 21 s         | **16 s**            | **↓ 23.8%**      |
+| **HLS (mpegts + m3u8)** | 22 s         | **17 s**            | **↓ 22.7%**      |
 
 ---
 
 ### Optimization History
-
 | Optimization Stage | FLV Re-encoding | MP4 Re-encoding | HLS Pipeline | Notes |
-| :--- | :--- | :--- | :--- | :--- |
+|:---|:---|:---|:---|:---|
 | **Initial Version** | ~91 s | ~60 s (old) | **135 s** | Serial, no optimization |
 | **Algorithm-Level Optimization** | 60 s | — | 97 s | DCT butterfly unrolling, string slicing, reduced array_fill, quantization + Zigzag merged |
 | **Multi-Process Motion Estimation (4 processes)** | 51 s | — | 73 s | First introduction of distributed parallelism |
@@ -576,15 +575,15 @@ if ($result && file_exists($outputFile1)) {
 | **Linux Docker Deployment** | 23 s | 24 s | 31 s | Linux + PHP 8.1.24, OPcache disabled |
 | **GOP Distributed Multi-Process Decoding** | 22 s | 22 s | 22 s | OPcache disabled; Windows platform |
 | **GOP Distributed Multi-Process Decoding** | 17 s | 17 s | 17 s | OPcache disabled; Linux platform |
+| **Removed Repeated SHA256 for Reference Frames + Static Block ME Early Exit** | **16 s** | **16 s** | **17 s** | Removed repeated hash calculation per frame for reference frames; skipped full motion estimation search for static/near-static blocks |
 
 **Notes:**
 - Test clip: `test.flv`, 3.02 s, 720×742, 30 fps; Output specs: 360×360, 10 fps.
 - Encoding settings: H.264 Constrained Baseline, AAC 128 kbps.
-- Best stable value taken from multiple test runs.
+- Best stable values taken from multiple test runs.
 - “—” indicates the format was not separately tested at this stage.
 - GOP distributed multi-process decoding is the latest optimization, achieving significant improvements on both Windows and Linux.
-- GOP-based multi-process parallel processing splits the serial encoding workload of long videos into multiple independent tasks that are executed concurrently, thereby reducing the cumulative processing time caused by frame-by-frame serial processing. In a test using another 7-minute video, the re-encoding process took 13 minutes.
-
+- GOP-based multi-process parallel processing divides the serial encoding workload of long videos into multiple independent tasks and executes them concurrently, reducing the cumulative processing time of frame-by-frame serial processing. Another video with a duration of 425 seconds was tested, and re-encoding took 701 seconds.
 
 ---
 
