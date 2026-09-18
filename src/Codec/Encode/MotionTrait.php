@@ -219,6 +219,12 @@ trait MotionTrait
         // 整数 MV 的 MC 像素与整数 SAD 候选完全等价，复用已计算结果。
         $bestSAD = $candidateSads[$bestDX . ',' . $bestDY];
 
+        // Tier2 early-skip：整数最优停在 (0,0) 且 SAD 落入量化死区量级时，
+        // 跳过 6 抽头插值缓冲与半/四像素精搜（DCT 仍照常，结果合法）。
+        if ($this->earlySkip && $bestDX === 0 && $bestDY === 0 && $bestSAD <= self::subpelSkipSad($this->qp)) {
+            return [0, 0, $bestSAD];
+        }
+
         [$bestMVx, $bestMVy, $bestSAD] = $this->refineSubpelShared(
             $curFlat, $origX, $origY, $bestDX, $bestDY, $bestSAD, $blockW, $blockH,
             $minDx, $maxDx, $minDy, $maxDy
@@ -531,6 +537,57 @@ trait MotionTrait
             }
         }
         return $sad;
+    }
+
+    /**
+     * Tier1 阈值：单个 4x4 残差块的 SAD 上限。
+     * 块 SAD ≤ 返回值时，经 4x4 整数变换 + Inter 量化后 16 个系数必定全部为 0（数学保证）。
+     * 推导：本次整数变换各输出系数对输入块 SAD 的 l1 放大上限为 norm[k]*norm[l]，
+     * norm = [1,6,4,6]；量化为 0 的充要条件为 (FF+|coeff|)*MF ≤ 65535。
+     * 取 16 个系数位置的最小值，故与 DCT 实际结果严格一致，无画质风险。
+     */
+    public static function zeroResidualBlockSad(int $qp): int
+    {
+        static $cache = [];
+        $qp = max(0, min(51, $qp));
+        if (isset($cache[$qp])) return $cache[$qp];
+        $mf = \Xiaosongshu\Flv2mp4\Codec\H264Encoder::QUANT_MF[$qp];
+        $ff = \Xiaosongshu\Flv2mp4\Codec\H264Encoder::QUANT_INTER_FF[$qp];
+        $zeroCoeff = [];
+        for ($j = 0; $j < 8; $j++) $zeroCoeff[$j] = intdiv(65535, $mf[$j]) - $ff[$j];
+        $norm = [1, 6, 4, 6];
+        $limit = PHP_INT_MAX;
+        for ($k = 0; $k < 4; $k++) {
+            for ($l = 0; $l < 4; $l++) {
+                $j = ($k * 4 + $l) & 7;
+                $bound = $norm[$k] * $norm[$l];
+                $t = intdiv($zeroCoeff[$j], $bound);
+                if ($t < $limit) $limit = $t;
+            }
+        }
+        return $cache[$qp] = max(0, $limit);
+    }
+
+    /**
+     * Tier2 阈值：16x16 宏块整数 (0,0) SAD 上限。
+     * 低于该值时跳过昂贵的 6 抽头半/四像素插值精搜（整数 MV=(0,0) 的残差已落入
+     * 量化死区量级，亚像素收益可忽略）。DCT/量化仍照常执行，仅影响压缩效率、不影响正确性。
+     * 基础量级取 4 个 4x4 块 DC 系数的死区容量，系数可用 FLV2MP4_SUBPEL_SAD_MUL 调整（默认 4；
+     * 静态画面为主的监控/会议/桌面场景可上调到 12，进一步跳过亚像素精搜）。
+     */
+    public static function subpelSkipSad(int $qp): int
+    {
+        static $cache = [];
+        $qp = max(0, min(51, $qp));
+        if (isset($cache[$qp])) return $cache[$qp];
+        $mf = \Xiaosongshu\Flv2mp4\Codec\H264Encoder::QUANT_MF[$qp];
+        $ff = \Xiaosongshu\Flv2mp4\Codec\H264Encoder::QUANT_INTER_FF[$qp];
+        static $mul = null;
+        if ($mul === null) {
+            $env = getenv('FLV2MP4_SUBPEL_SAD_MUL');
+            $mul = is_string($env) && $env !== '' && (float)$env > 0 ? (float)$env : 4.0;
+        }
+        return $cache[$qp] = (int)round(max(0, intdiv(65535, $mf[0]) - $ff[0]) * $mul);
     }
 
     /**

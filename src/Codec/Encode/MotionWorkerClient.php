@@ -13,9 +13,11 @@ final class MotionWorkerClient
     private array $inputs = [];
     private array $outputs = [];
     private array $processes = [];
-    private array $references = [];
+    private array $lastReference = [];
+    private array $workerSeq = [];
     private array $workerPorts = [];
     private int $id = 1;
+    private int $refSeq = 0;
 
     public function __construct(private int $port = 0, private int $workers = 0)
     {
@@ -28,7 +30,18 @@ final class MotionWorkerClient
     public function batch(int $width, int $height, int $aw, int $ah, int $qp, string $refY, string $refU, string $refV, array $blocks): array
     {
         $this->connectAll();
-        $frameId = MotionWorkerProtocol::referenceId($width, $height, $aw, $ah, $refY, $refU, $refV);
+        // 参考帧按内容分配单调序号：内容不变（如纯静态画面）则复用同一序号，
+        // worker 端已持有该参考帧时跳过整帧重传；字符串 === 先比长度再 memcmp，
+        // 不同内容通常首字节即返回，比每帧 SHA256 便宜且无碰撞风险。
+        if ($this->lastReference !== []
+            && $this->lastReference[0] === $refY
+            && $this->lastReference[1] === $refU
+            && $this->lastReference[2] === $refV) {
+            $seq = $this->refSeq;
+        } else {
+            $seq = ++$this->refSeq;
+            $this->lastReference = [$refY, $refU, $refV];
+        }
         $chunks = array_fill(0, $this->workers, []);
         foreach ($blocks as $key => $block) $chunks[$key % $this->workers][$key] = $block;
         $ids = [];
@@ -37,13 +50,12 @@ final class MotionWorkerClient
             if ($chunk === []) continue;
             $id = $this->id++;
             $ids[$worker] = $id;
-            $frameKey = bin2hex($frameId);
-            if (($this->references[$worker] ?? null) !== $frameKey) {
-                $referenceFrame ??= MotionWorkerProtocol::loadReference($frameId, $width, $height, $aw, $ah, $refY, $refU, $refV);
+            if (($this->workerSeq[$worker] ?? null) !== $seq) {
+                $referenceFrame ??= MotionWorkerProtocol::loadReference($seq, $width, $height, $aw, $ah, $refY, $refU, $refV);
                 $this->outputs[$worker] .= $referenceFrame;
-                $this->references[$worker] = $frameKey;
+                $this->workerSeq[$worker] = $seq;
             }
-            $this->outputs[$worker] .= MotionWorkerProtocol::batch($id, $frameId, $qp, $chunk);
+            $this->outputs[$worker] .= MotionWorkerProtocol::batch($id, $seq, $qp, $chunk);
         }
 
         $result = [];
@@ -117,7 +129,7 @@ final class MotionWorkerClient
                 $this->sockets[$worker] = $socket;
                 $this->inputs[$worker] = '';
                 $this->outputs[$worker] = '';
-                unset($this->references[$worker]);
+                unset($this->workerSeq[$worker]);
             }
         }
 
@@ -132,7 +144,7 @@ final class MotionWorkerClient
                 $this->sockets[$worker] = $socket;
                 $this->inputs[$worker] = '';
                 $this->outputs[$worker] = '';
-                unset($this->references[$worker], $pending[$worker]);
+                unset($this->workerSeq[$worker], $pending[$worker]);
             }
             if ($pending !== []) usleep(50000);
         }

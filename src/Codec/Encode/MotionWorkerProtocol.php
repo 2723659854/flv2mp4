@@ -13,9 +13,9 @@ final class MotionWorkerProtocol
     public const MAX_BODY_LENGTH = 16777216;
     public const LOAD_REFERENCE = 1;
     public const JOB_BATCH = 2;
-    private const REQUEST_MAGIC = 'MWR2';
+    private const REQUEST_MAGIC = 'MWR3';
     private const RESPONSE_MAGIC = 'MWS1';
-    private const FRAME_ID_LENGTH = 32;
+    private const SEQ_LENGTH = 4;
     private const JOB_LENGTH = 272;
     private const RESULT_LENGTH = 1452;
 
@@ -39,25 +39,20 @@ final class MotionWorkerProtocol
         return $frames;
     }
 
-    public static function referenceId(int $width, int $height, int $alignedWidth, int $alignedHeight, string $refY, string $refU, string $refV): string
+    public static function loadReference(int $seq, int $width, int $height, int $alignedWidth, int $alignedHeight, string $refY, string $refU, string $refV): string
     {
-        return hash('sha256', pack('N4', $width, $height, $alignedWidth, $alignedHeight) . $refY . $refU . $refV, true);
-    }
-
-    public static function loadReference(string $frameId, int $width, int $height, int $alignedWidth, int $alignedHeight, string $refY, string $refU, string $refV): string
-    {
-        self::validateFrameId($frameId);
+        self::validateSeq($seq);
         $chromaLength = intdiv($alignedWidth, 2) * intdiv($alignedHeight, 2);
         if (strlen($refY) !== $alignedWidth * $alignedHeight || strlen($refU) !== $chromaLength || strlen($refV) !== $chromaLength) {
             throw new InvalidArgumentException('Invalid motion worker reference planes');
         }
-        return self::frame(self::REQUEST_MAGIC . chr(self::LOAD_REFERENCE) . "\0\0\0" . $frameId . pack('N4', $width, $height, $alignedWidth, $alignedHeight) . $refY . $refU . $refV);
+        return self::frame(self::REQUEST_MAGIC . chr(self::LOAD_REFERENCE) . "\0\0\0" . pack('N', $seq) . pack('N4', $width, $height, $alignedWidth, $alignedHeight) . $refY . $refU . $refV);
     }
 
-    public static function batch(int $id, string $frameId, int $qp, array $blocks): string
+    public static function batch(int $id, int $seq, int $qp, array $blocks): string
     {
-        self::validateFrameId($frameId);
-        $body = self::REQUEST_MAGIC . chr(self::JOB_BATCH) . "\0\0\0" . $frameId . pack('N3', $id, $qp, count($blocks));
+        self::validateSeq($seq);
+        $body = self::REQUEST_MAGIC . chr(self::JOB_BATCH) . "\0\0\0" . pack('N', $seq) . pack('N3', $id, $qp, count($blocks));
         foreach ($blocks as $index => $job) {
             if (strlen($job[2]) !== 256) throw new InvalidArgumentException('Invalid motion worker luma block');
             $body .= pack('N4', $index, $job[0], $job[1], $job[3]) . $job[2];
@@ -67,36 +62,33 @@ final class MotionWorkerProtocol
 
     public static function decodeRequest(string $body): array
     {
-        if (strlen($body) < 40 || substr($body, 0, 4) !== self::REQUEST_MAGIC) throw new UnexpectedValueException('Invalid motion worker request');
+        if (strlen($body) < 12 || substr($body, 0, 4) !== self::REQUEST_MAGIC) throw new UnexpectedValueException('Invalid motion worker request');
         $type = ord($body[4]);
-        $frameId = substr($body, 8, self::FRAME_ID_LENGTH);
+        $seq = unpack('N', substr($body, 8, self::SEQ_LENGTH))[1];
         if ($type === self::LOAD_REFERENCE) {
-            if (strlen($body) < 56) throw new UnexpectedValueException('Invalid motion worker reference');
-            $header = unpack('Nwidth/Nheight/Naw/Nah', substr($body, 40, 16));
+            if (strlen($body) < 28) throw new UnexpectedValueException('Invalid motion worker reference');
+            $header = unpack('Nwidth/Nheight/Naw/Nah', substr($body, 12, 16));
             $chromaLength = intdiv($header['aw'], 2) * intdiv($header['ah'], 2);
             $referenceLength = $header['aw'] * $header['ah'] + 2 * $chromaLength;
-            if (strlen($body) !== 56 + $referenceLength) throw new UnexpectedValueException('Invalid motion worker reference length');
-            $offset = 56;
+            if (strlen($body) !== 28 + $referenceLength) throw new UnexpectedValueException('Invalid motion worker reference length');
+            $offset = 28;
             $refY = substr($body, $offset, $header['aw'] * $header['ah']);
             $offset += $header['aw'] * $header['ah'];
             $refU = substr($body, $offset, $chromaLength);
             $refV = substr($body, $offset + $chromaLength, $chromaLength);
-            if (!hash_equals($frameId, self::referenceId($header['width'], $header['height'], $header['aw'], $header['ah'], $refY, $refU, $refV))) {
-                throw new UnexpectedValueException('Motion worker frame id mismatch');
-            }
-            return [$type, $frameId, $header['width'], $header['height'], $header['aw'], $header['ah'], $refY, $refU, $refV];
+            return [$type, $seq, $header['width'], $header['height'], $header['aw'], $header['ah'], $refY, $refU, $refV];
         }
-        if ($type !== self::JOB_BATCH || strlen($body) < 52) throw new UnexpectedValueException('Invalid motion worker request type');
-        $header = unpack('Nid/Nqp/Ncount', substr($body, 40, 12));
-        if (strlen($body) !== 52 + $header['count'] * self::JOB_LENGTH) throw new UnexpectedValueException('Invalid motion worker batch length');
+        if ($type !== self::JOB_BATCH || strlen($body) < 24) throw new UnexpectedValueException('Invalid motion worker request type');
+        $header = unpack('Nid/Nqp/Ncount', substr($body, 12, 12));
+        if (strlen($body) !== 24 + $header['count'] * self::JOB_LENGTH) throw new UnexpectedValueException('Invalid motion worker batch length');
         $blocks = [];
-        $offset = 52;
+        $offset = 24;
         for ($i = 0; $i < $header['count']; $i++) {
             $job = unpack('Nindex/Nx/Ny/Nrange', substr($body, $offset, 16));
             $blocks[$job['index']] = [$job['x'], $job['y'], substr($body, $offset + 16, 256), $job['range']];
             $offset += self::JOB_LENGTH;
         }
-        return [$type, $frameId, $header['id'], $header['qp'], $blocks];
+        return [$type, $seq, $header['id'], $header['qp'], $blocks];
     }
 
     public static function response(int $id, array $results): string
@@ -157,9 +149,9 @@ final class MotionWorkerProtocol
         return [$header['id'], true, $results];
     }
 
-    private static function validateFrameId(string $frameId): void
+    private static function validateSeq(int $seq): void
     {
-        if (strlen($frameId) !== self::FRAME_ID_LENGTH) throw new InvalidArgumentException('Invalid motion worker frame id');
+        if ($seq < 1 || $seq > 0xFFFFFFFF) throw new InvalidArgumentException('Invalid motion worker reference seq');
     }
 
     private static function signed(int $value): int

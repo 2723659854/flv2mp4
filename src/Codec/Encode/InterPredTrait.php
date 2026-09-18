@@ -19,6 +19,58 @@ trait InterPredTrait
     ): array {
         $curFlat = array_values(unpack('C*', $luma));
 
+        // === Tier1 early-skip（数学保证，零画质风险）===
+        // 单次遍历计算 16 个 4x4 块在整数 (0,0) 的 SAD；全部 ≤ QP 死区阈值时，
+        // 残差经 DCT+Inter 量化必定全为 0（见 MotionTrait::zeroResidualBlockSad）。
+        // 此时直接产出 MV=(0,0)、cbp=0、与 (0,0) 运动补偿完全一致的重建帧，
+        // 跳过整/半/四像素运动搜索与全部 DCT/量化。主进程仍按 skipMVP 决定 P_Skip，
+        // 故与"完整搜索恰好得到同结果"位级等价。
+        if ($this->earlySkip) {
+            $zeroT = $this->zeroResidualBlockSad($this->qp);
+            $stride = $this->mbAlignedWidth;
+            $ox = $mbX * 16;
+            $oy = $mbY * 16;
+            $blockSads = array_fill(0, 16, 0);
+            $alive = 16;
+            $totalSad = 0;
+            for ($y = 0; $y < 16; $y++) {
+                $rowBase = ($oy + $y) * $stride + $ox;
+                $biBase = ($y >> 2) * 4;
+                for ($x = 0; $x < 16; $x++) {
+                    $diff = $curFlat[$y * 16 + $x] - ord($refYPlane[$rowBase + $x]);
+                    if ($diff < 0) $diff = -$diff;
+                    $totalSad += $diff;
+                    $bi = $biBase + ($x >> 2);
+                    if ($blockSads[$bi] <= $zeroT) {
+                        $blockSads[$bi] += $diff;
+                        if ($blockSads[$bi] > $zeroT) --$alive;
+                    }
+                }
+                if ($alive === 0) break;
+            }
+            if ($alive === 16) {
+                $reconY = '';
+                for ($y = 0; $y < 16; $y++) {
+                    $reconY .= substr($refYPlane, ($oy + $y) * $stride + $ox, 16);
+                }
+                $chromaW = intdiv($stride, 2);
+                $cx = $mbX * 8;
+                $cy = $mbY * 8;
+                $reconU = '';
+                $reconV = '';
+                for ($y = 0; $y < 8; $y++) {
+                    $reconU .= substr($refUPlane, ($cy + $y) * $chromaW + $cx, 8);
+                    $reconV .= substr($refVPlane, ($cy + $y) * $chromaW + $cx, 8);
+                }
+                return [
+                    0, 0, $totalSad, 0,
+                    array_fill(0, 24, 0),
+                    array_fill(0, 16, array_fill(0, 16, 0)),
+                    $reconY, $reconU, $reconV,
+                ];
+            }
+        }
+
         [$mvX, $mvY, $sad] = $this->motionEstimate16x16($curFlat, $refYPlane, $mbX, $mbY, $motionRange);
         $refX = $mbX * 64 + $mvX;
         $refY = $mbY * 64 + $mvY;
