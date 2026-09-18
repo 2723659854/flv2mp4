@@ -355,9 +355,10 @@ class H264Decoder
                         'y' => $this->yPlane,
                         'u' => $this->uPlane,
                         'v' => $this->vPlane,
-                        'yBytes' => array_values(unpack('C*', $this->yPlane)),
-                        'uBytes' => array_values(unpack('C*', $this->uPlane)),
-                        'vBytes' => array_values(unpack('C*', $this->vPlane)),
+                        // 整帧 unpack 极慢且占内存，改为子像素运动补偿时按需懒加载（见 ensureRefBytes）
+                        'yBytes' => null,
+                        'uBytes' => null,
+                        'vBytes' => null,
                         'strideY' => $mbAlignedWidth,
                         'strideUv' => (int)($mbAlignedWidth / 2),
                         'widthY' => $mbAlignedWidth,

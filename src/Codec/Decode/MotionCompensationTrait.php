@@ -9,6 +9,22 @@ namespace Xiaosongshu\Flv2mp4\Codec\Decode;
  */
 trait MotionCompensationTrait
 {
+    /** @var array<int,string>|null 256 个单字节字符查找表，替代 MC 输出热路径中的 chr()。 */
+    private static ?array $mcChrTable = null;
+
+    /** @return array<int,string> */
+    private static function mcChrTable(): array
+    {
+        if (self::$mcChrTable === null) {
+            $t = [];
+            for ($i = 0; $i < 256; $i++) {
+                $t[$i] = chr($i);
+            }
+            self::$mcChrTable = $t;
+        }
+        return self::$mcChrTable;
+    }
+
     public function mcLuma(string $refPlane, int $refStride, int $refWidth, int $refHeight, int $x, int $y, int $blockW, int $blockH): array
     {
         $buffer = str_repeat("\0", $blockW * $blockH);
@@ -83,6 +99,47 @@ trait MotionCompensationTrait
         if ($fracY === 0) {
             $srcOffX = $fracX === 3 ? 1 : 0;
             $interiorX = $intX >= 2 && $intX + $blockW + 2 <= $maxX;
+            $chr = self::mcChrTable();
+            if ($interiorX) {
+                // interior：6 抽头滑动窗口递推（与直接卷积整数严格等价）：
+                // S' = S + x_new - x_drop + 6*(t1 - t5) + 25*(t4 - t2)
+                for ($j = 0; $j < $blockH; $j++) {
+                    $sy = $intY + $j;
+                    $sy = $sy < 0 ? 0 : ($sy > $maxY ? $maxY : $sy);
+                    $srcBase = $sy * $refStride + $intX;
+                    $dstBase = ($dstY + $j) * $dstStride + $dstX;
+
+                    $t0 = $refBytes[$srcBase - 2];
+                    $t1 = $refBytes[$srcBase - 1];
+                    $t2 = $refBytes[$srcBase];
+                    $t3 = $refBytes[$srcBase + 1];
+                    $t4 = $refBytes[$srcBase + 2];
+                    $t5 = $refBytes[$srcBase + 3];
+                    $sum = ($t0 + $t5) + 20 * ($t2 + $t3) - 5 * ($t1 + $t4);
+
+                    for ($i = 0; $i < $blockW; $i++) {
+                        $val = ($sum + 16) >> 5;
+                        $val = $val < 0 ? 0 : ($val > 255 ? 255 : $val);
+                        if ($fracX !== 2) {
+                            $val = ($refBytes[$srcBase + $i + $srcOffX] + $val + 1) >> 1;
+                        }
+                        $dstPlane[$dstBase + $i] = $chr[$val];
+
+                        if ($i + 1 < $blockW) {
+                            $tn = $refBytes[$srcBase + $i + 4];
+                            $sum = $sum + $tn - $t0 + 6 * ($t1 - $t5) + 25 * ($t4 - $t2);
+                            $t0 = $t1;
+                            $t1 = $t2;
+                            $t2 = $t3;
+                            $t3 = $t4;
+                            $t4 = $t5;
+                            $t5 = $tn;
+                        }
+                    }
+                }
+                return;
+            }
+
             for ($j = 0; $j < $blockH; $j++) {
                 $sy = $intY + $j;
                 $sy = $sy < 0 ? 0 : ($sy > $maxY ? $maxY : $sy);
@@ -90,31 +147,23 @@ trait MotionCompensationTrait
                 $dstBase = ($dstY + $j) * $dstStride + $dstX;
                 for ($i = 0; $i < $blockW; $i++) {
                     $sx = $intX + $i;
-                    if ($interiorX) {
-                        $val = $refBytes[$srcBase + $sx - 2] - 5 * $refBytes[$srcBase + $sx - 1]
-                            + 20 * $refBytes[$srcBase + $sx] + 20 * $refBytes[$srcBase + $sx + 1]
-                            - 5 * $refBytes[$srcBase + $sx + 2] + $refBytes[$srcBase + $sx + 3];
-                    } else {
-                        $x0 = $sx - 2 < 0 ? 0 : ($sx - 2 > $maxX ? $maxX : $sx - 2);
-                        $x1 = $sx - 1 < 0 ? 0 : ($sx - 1 > $maxX ? $maxX : $sx - 1);
-                        $x2 = $sx < 0 ? 0 : ($sx > $maxX ? $maxX : $sx);
-                        $x3 = $sx + 1 < 0 ? 0 : ($sx + 1 > $maxX ? $maxX : $sx + 1);
-                        $x4 = $sx + 2 < 0 ? 0 : ($sx + 2 > $maxX ? $maxX : $sx + 2);
-                        $x5 = $sx + 3 < 0 ? 0 : ($sx + 3 > $maxX ? $maxX : $sx + 3);
-                        $val = $refBytes[$srcBase + $x0] - 5 * $refBytes[$srcBase + $x1]
-                            + 20 * $refBytes[$srcBase + $x2] + 20 * $refBytes[$srcBase + $x3]
-                            - 5 * $refBytes[$srcBase + $x4] + $refBytes[$srcBase + $x5];
-                    }
+                    $x0 = $sx - 2 < 0 ? 0 : ($sx - 2 > $maxX ? $maxX : $sx - 2);
+                    $x1 = $sx - 1 < 0 ? 0 : ($sx - 1 > $maxX ? $maxX : $sx - 1);
+                    $x2 = $sx < 0 ? 0 : ($sx > $maxX ? $maxX : $sx);
+                    $x3 = $sx + 1 < 0 ? 0 : ($sx + 1 > $maxX ? $maxX : $sx + 1);
+                    $x4 = $sx + 2 < 0 ? 0 : ($sx + 2 > $maxX ? $maxX : $sx + 2);
+                    $x5 = $sx + 3 < 0 ? 0 : ($sx + 3 > $maxX ? $maxX : $sx + 3);
+                    $val = ($refBytes[$srcBase + $x0] + $refBytes[$srcBase + $x5])
+                        + 20 * ($refBytes[$srcBase + $x2] + $refBytes[$srcBase + $x3])
+                        - 5 * ($refBytes[$srcBase + $x1] + $refBytes[$srcBase + $x4]);
                     $val = ($val + 16) >> 5;
                     $val = $val < 0 ? 0 : ($val > 255 ? 255 : $val);
                     if ($fracX !== 2) {
                         $sx += $srcOffX;
-                        if (!$interiorX) {
-                            $sx = $sx < 0 ? 0 : ($sx > $maxX ? $maxX : $sx);
-                        }
+                        $sx = $sx < 0 ? 0 : ($sx > $maxX ? $maxX : $sx);
                         $val = ($refBytes[$srcBase + $sx] + $val + 1) >> 1;
                     }
-                    $dstPlane[$dstBase + $i] = chr($val);
+                    $dstPlane[$dstBase + $i] = $chr[$val];
                 }
             }
             return;
@@ -123,6 +172,40 @@ trait MotionCompensationTrait
         if ($fracX === 0) {
             $srcOffY = $fracY === 3 ? 1 : 0;
             $interiorX = $intX >= 0 && $intX + $blockW <= $refWidth;
+            $chr = self::mcChrTable();
+            // interior：x 不夹边、y 窗口（sy-2..sy+3）全程不夹边时，按列滑动递推，
+            // 每像素只需读 1 个新 tap 点（原路径 6 个），与直接卷积整数严格等价
+            $interiorY = $intY - 2 >= 0 && $intY + $blockH + 2 <= $refHeight;
+            if ($interiorX && $interiorY) {
+                for ($i = 0; $i < $blockW; $i++) {
+                    $sx = $intX + $i;
+                    $off = ($intY - 2) * $refStride + $sx;
+                    $t0 = $refBytes[$off];
+                    $t1 = $refBytes[$off + $refStride];
+                    $t2 = $refBytes[$off + 2 * $refStride];
+                    $t3 = $refBytes[$off + 3 * $refStride];
+                    $t4 = $refBytes[$off + 4 * $refStride];
+                    $t5 = $refBytes[$off + 5 * $refStride];
+                    $s = ($t0 + $t5) + 20 * ($t2 + $t3) - 5 * ($t1 + $t4);
+                    $dstOff = $dstY * $dstStride + $dstX + $i;
+                    $srcRow = ($intY + $srcOffY) * $refStride + $sx;
+                    for ($j = 0; $j < $blockH; $j++) {
+                        $val = ($s + 16) >> 5;
+                        $val = $val < 0 ? 0 : ($val > 255 ? 255 : $val);
+                        if ($fracY !== 2) {
+                            $val = ($refBytes[$srcRow] + $val + 1) >> 1;
+                        }
+                        $dstPlane[$dstOff] = $chr[$val];
+                        $tn = $refBytes[$off + 6 * $refStride];
+                        $s = $s + $tn - $t0 + 6 * ($t1 - $t5) + 25 * ($t4 - $t2);
+                        $t0 = $t1; $t1 = $t2; $t2 = $t3; $t3 = $t4; $t4 = $t5; $t5 = $tn;
+                        $off += $refStride;
+                        $dstOff += $dstStride;
+                        $srcRow += $refStride;
+                    }
+                }
+                return;
+            }
             for ($j = 0; $j < $blockH; $j++) {
                 $sy = $intY + $j;
                 $y0 = $sy - 2 < 0 ? 0 : ($sy - 2 > $maxY ? $maxY : $sy - 2);
@@ -146,15 +229,15 @@ trait MotionCompensationTrait
                     if (!$interiorX) {
                         $sx = $sx < 0 ? 0 : ($sx > $maxX ? $maxX : $sx);
                     }
-                    $val = $refBytes[$row0 + $sx] - 5 * $refBytes[$row1 + $sx]
-                        + 20 * $refBytes[$row2 + $sx] + 20 * $refBytes[$row3 + $sx]
-                        - 5 * $refBytes[$row4 + $sx] + $refBytes[$row5 + $sx];
+                    $val = ($refBytes[$row0 + $sx] + $refBytes[$row5 + $sx])
+                        + 20 * ($refBytes[$row2 + $sx] + $refBytes[$row3 + $sx])
+                        - 5 * ($refBytes[$row1 + $sx] + $refBytes[$row4 + $sx]);
                     $val = ($val + 16) >> 5;
                     $val = $val < 0 ? 0 : ($val > 255 ? 255 : $val);
                     if ($fracY !== 2) {
                         $val = ($refBytes[$srcBase + $sx] + $val + 1) >> 1;
                     }
-                    $dstPlane[$dstBase + $i] = chr($val);
+                    $dstPlane[$dstBase + $i] = $chr[$val];
                 }
             }
             return;
@@ -179,6 +262,68 @@ trait MotionCompensationTrait
             $verticalX = $intX + ($fracX === 3 ? 1 : 0);
             $interiorHorizontalX = $intX >= 2 && $intX + $blockW + 2 <= $maxX;
             $interiorVerticalX = $verticalX >= 0 && $verticalX + $blockW <= $refWidth;
+            $chr = self::mcChrTable();
+
+            if ($interiorHorizontalX) {
+                for ($j = 0; $j < $blockH; $j++) {
+                    $horizontalSrcY = $horizontalY + $j;
+                    $horizontalSrcY = $horizontalSrcY < 0 ? 0 : ($horizontalSrcY > $maxY ? $maxY : $horizontalSrcY);
+                    $hr = $horizontalSrcY * $refStride + $intX;
+
+                    $verticalSrcY = $intY + $j;
+                    $y0 = $verticalSrcY - 2 < 0 ? 0 : ($verticalSrcY - 2 > $maxY ? $maxY : $verticalSrcY - 2);
+                    $y1 = $verticalSrcY - 1 < 0 ? 0 : ($verticalSrcY - 1 > $maxY ? $maxY : $verticalSrcY - 1);
+                    $y2 = $verticalSrcY < 0 ? 0 : ($verticalSrcY > $maxY ? $maxY : $verticalSrcY);
+                    $y3 = $verticalSrcY + 1 < 0 ? 0 : ($verticalSrcY + 1 > $maxY ? $maxY : $verticalSrcY + 1);
+                    $y4 = $verticalSrcY + 2 < 0 ? 0 : ($verticalSrcY + 2 > $maxY ? $maxY : $verticalSrcY + 2);
+                    $y5 = $verticalSrcY + 3 < 0 ? 0 : ($verticalSrcY + 3 > $maxY ? $maxY : $verticalSrcY + 3);
+                    $row0 = $y0 * $refStride;
+                    $row1 = $y1 * $refStride;
+                    $row2 = $y2 * $refStride;
+                    $row3 = $y3 * $refStride;
+                    $row4 = $y4 * $refStride;
+                    $row5 = $y5 * $refStride;
+                    $dstBase = ($dstY + $j) * $dstStride + $dstX;
+
+                    $t0 = $refBytes[$hr - 2];
+                    $t1 = $refBytes[$hr - 1];
+                    $t2 = $refBytes[$hr];
+                    $t3 = $refBytes[$hr + 1];
+                    $t4 = $refBytes[$hr + 2];
+                    $t5 = $refBytes[$hr + 3];
+                    $hsum = ($t0 + $t5) + 20 * ($t2 + $t3) - 5 * ($t1 + $t4);
+
+                    for ($i = 0; $i < $blockW; $i++) {
+                        $horizontal = ($hsum + 16) >> 5;
+                        $horizontal = $horizontal < 0 ? 0 : ($horizontal > 255 ? 255 : $horizontal);
+
+                        $verticalSrcX = $verticalX + $i;
+                        if (!$interiorVerticalX) {
+                            $verticalSrcX = $verticalSrcX < 0 ? 0 : ($verticalSrcX > $maxX ? $maxX : $verticalSrcX);
+                        }
+                        $vertical = ($refBytes[$row0 + $verticalSrcX] + $refBytes[$row5 + $verticalSrcX])
+                            + 20 * ($refBytes[$row2 + $verticalSrcX] + $refBytes[$row3 + $verticalSrcX])
+                            - 5 * ($refBytes[$row1 + $verticalSrcX] + $refBytes[$row4 + $verticalSrcX]);
+                        $vertical = ($vertical + 16) >> 5;
+                        $vertical = $vertical < 0 ? 0 : ($vertical > 255 ? 255 : $vertical);
+
+                        $dstPlane[$dstBase + $i] = $chr[($horizontal + $vertical + 1) >> 1];
+
+                        if ($i + 1 < $blockW) {
+                            $tn = $refBytes[$hr + $i + 4];
+                            $hsum = $hsum + $tn - $t0 + 6 * ($t1 - $t5) + 25 * ($t4 - $t2);
+                            $t0 = $t1;
+                            $t1 = $t2;
+                            $t2 = $t3;
+                            $t3 = $t4;
+                            $t4 = $t5;
+                            $t5 = $tn;
+                        }
+                    }
+                }
+                return;
+            }
+
             for ($j = 0; $j < $blockH; $j++) {
                 $horizontalSrcY = $horizontalY + $j;
                 $horizontalSrcY = $horizontalSrcY < 0 ? 0 : ($horizontalSrcY > $maxY ? $maxY : $horizontalSrcY);
@@ -201,21 +346,15 @@ trait MotionCompensationTrait
 
                 for ($i = 0; $i < $blockW; $i++) {
                     $horizontalSrcX = $intX + $i;
-                    if ($interiorHorizontalX) {
-                        $horizontal = $refBytes[$horizontalRow + $horizontalSrcX - 2] - 5 * $refBytes[$horizontalRow + $horizontalSrcX - 1]
-                            + 20 * $refBytes[$horizontalRow + $horizontalSrcX] + 20 * $refBytes[$horizontalRow + $horizontalSrcX + 1]
-                            - 5 * $refBytes[$horizontalRow + $horizontalSrcX + 2] + $refBytes[$horizontalRow + $horizontalSrcX + 3];
-                    } else {
-                        $x0 = $horizontalSrcX - 2 < 0 ? 0 : ($horizontalSrcX - 2 > $maxX ? $maxX : $horizontalSrcX - 2);
-                        $x1 = $horizontalSrcX - 1 < 0 ? 0 : ($horizontalSrcX - 1 > $maxX ? $maxX : $horizontalSrcX - 1);
-                        $x2 = $horizontalSrcX < 0 ? 0 : ($horizontalSrcX > $maxX ? $maxX : $horizontalSrcX);
-                        $x3 = $horizontalSrcX + 1 < 0 ? 0 : ($horizontalSrcX + 1 > $maxX ? $maxX : $horizontalSrcX + 1);
-                        $x4 = $horizontalSrcX + 2 < 0 ? 0 : ($horizontalSrcX + 2 > $maxX ? $maxX : $horizontalSrcX + 2);
-                        $x5 = $horizontalSrcX + 3 < 0 ? 0 : ($horizontalSrcX + 3 > $maxX ? $maxX : $horizontalSrcX + 3);
-                        $horizontal = $refBytes[$horizontalRow + $x0] - 5 * $refBytes[$horizontalRow + $x1]
-                            + 20 * $refBytes[$horizontalRow + $x2] + 20 * $refBytes[$horizontalRow + $x3]
-                            - 5 * $refBytes[$horizontalRow + $x4] + $refBytes[$horizontalRow + $x5];
-                    }
+                    $x0 = $horizontalSrcX - 2 < 0 ? 0 : ($horizontalSrcX - 2 > $maxX ? $maxX : $horizontalSrcX - 2);
+                    $x1 = $horizontalSrcX - 1 < 0 ? 0 : ($horizontalSrcX - 1 > $maxX ? $maxX : $horizontalSrcX - 1);
+                    $x2 = $horizontalSrcX < 0 ? 0 : ($horizontalSrcX > $maxX ? $maxX : $horizontalSrcX);
+                    $x3 = $horizontalSrcX + 1 < 0 ? 0 : ($horizontalSrcX + 1 > $maxX ? $maxX : $horizontalSrcX + 1);
+                    $x4 = $horizontalSrcX + 2 < 0 ? 0 : ($horizontalSrcX + 2 > $maxX ? $maxX : $horizontalSrcX + 2);
+                    $x5 = $horizontalSrcX + 3 < 0 ? 0 : ($horizontalSrcX + 3 > $maxX ? $maxX : $horizontalSrcX + 3);
+                    $horizontal = ($refBytes[$horizontalRow + $x0] + $refBytes[$horizontalRow + $x5])
+                        + 20 * ($refBytes[$horizontalRow + $x2] + $refBytes[$horizontalRow + $x3])
+                        - 5 * ($refBytes[$horizontalRow + $x1] + $refBytes[$horizontalRow + $x4]);
                     $horizontal = ($horizontal + 16) >> 5;
                     $horizontal = $horizontal < 0 ? 0 : ($horizontal > 255 ? 255 : $horizontal);
 
@@ -223,18 +362,19 @@ trait MotionCompensationTrait
                     if (!$interiorVerticalX) {
                         $verticalSrcX = $verticalSrcX < 0 ? 0 : ($verticalSrcX > $maxX ? $maxX : $verticalSrcX);
                     }
-                    $vertical = $refBytes[$row0 + $verticalSrcX] - 5 * $refBytes[$row1 + $verticalSrcX]
-                        + 20 * $refBytes[$row2 + $verticalSrcX] + 20 * $refBytes[$row3 + $verticalSrcX]
-                        - 5 * $refBytes[$row4 + $verticalSrcX] + $refBytes[$row5 + $verticalSrcX];
+                    $vertical = ($refBytes[$row0 + $verticalSrcX] + $refBytes[$row5 + $verticalSrcX])
+                        + 20 * ($refBytes[$row2 + $verticalSrcX] + $refBytes[$row3 + $verticalSrcX])
+                        - 5 * ($refBytes[$row1 + $verticalSrcX] + $refBytes[$row4 + $verticalSrcX]);
                     $vertical = ($vertical + 16) >> 5;
                     $vertical = $vertical < 0 ? 0 : ($vertical > 255 ? 255 : $vertical);
 
-                    $dstPlane[$dstBase + $i] = chr(($horizontal + $vertical + 1) >> 1);
+                    $dstPlane[$dstBase + $i] = $chr[($horizontal + $vertical + 1) >> 1];
                 }
             }
             return;
         }
 
+        $chr = self::mcChrTable();
         for ($j = 0; $j < $blockH; $j++) {
             $base = $j * $blockW;
             $dstBase = ($dstY + $j) * $dstStride + $dstX;
@@ -243,7 +383,7 @@ trait MotionCompensationTrait
                 if ($second !== null) {
                     $val = ($val + $second[$base + $secondOffset + $i] + 1) >> 1;
                 }
-                $dstPlane[$dstBase + $i] = chr($val);
+                $dstPlane[$dstBase + $i] = $chr[$val];
             }
         }
     }
@@ -258,12 +398,28 @@ trait MotionCompensationTrait
                 $sy = $srcY + $j;
                 $sy = $sy < 0 ? 0 : ($sy > $maxY ? $maxY : $sy);
                 $row = $sy * $stride + $srcX;
+
+                $t0 = $refBytes[$row - 2];
+                $t1 = $refBytes[$row - 1];
+                $t2 = $refBytes[$row];
+                $t3 = $refBytes[$row + 1];
+                $t4 = $refBytes[$row + 2];
+                $t5 = $refBytes[$row + 3];
+                $sum = ($t0 + $t5) + 20 * ($t2 + $t3) - 5 * ($t1 + $t4);
+
                 for ($i = 0; $i < $w; $i++) {
-                    $val = $refBytes[$row + $i - 2] - 5 * $refBytes[$row + $i - 1]
-                        + 20 * $refBytes[$row + $i] + 20 * $refBytes[$row + $i + 1]
-                        - 5 * $refBytes[$row + $i + 2] + $refBytes[$row + $i + 3];
-                    $val = ($val + 16) >> 5;
+                    $val = ($sum + 16) >> 5;
                     $out[] = $val < 0 ? 0 : ($val > 255 ? 255 : $val);
+                    if ($i + 1 < $w) {
+                        $tn = $refBytes[$row + $i + 4];
+                        $sum = $sum + $tn - $t0 + 6 * ($t1 - $t5) + 25 * ($t4 - $t2);
+                        $t0 = $t1;
+                        $t1 = $t2;
+                        $t2 = $t3;
+                        $t3 = $t4;
+                        $t4 = $t5;
+                        $t5 = $tn;
+                    }
                 }
             }
             return $out;
@@ -281,9 +437,9 @@ trait MotionCompensationTrait
                 $x3 = $sx + 1 < 0 ? 0 : ($sx + 1 > $maxX ? $maxX : $sx + 1);
                 $x4 = $sx + 2 < 0 ? 0 : ($sx + 2 > $maxX ? $maxX : $sx + 2);
                 $x5 = $sx + 3 < 0 ? 0 : ($sx + 3 > $maxX ? $maxX : $sx + 3);
-                $val = $refBytes[$row + $x0] - 5 * $refBytes[$row + $x1]
-                    + 20 * $refBytes[$row + $x2] + 20 * $refBytes[$row + $x3]
-                    - 5 * $refBytes[$row + $x4] + $refBytes[$row + $x5];
+                $val = ($refBytes[$row + $x0] + $refBytes[$row + $x5])
+                    + 20 * ($refBytes[$row + $x2] + $refBytes[$row + $x3])
+                    - 5 * ($refBytes[$row + $x1] + $refBytes[$row + $x4]);
                 $val = ($val + 16) >> 5;
                 $out[] = $val < 0 ? 0 : ($val > 255 ? 255 : $val);
             }
@@ -316,9 +472,9 @@ trait MotionCompensationTrait
                 if (!$interiorX) {
                     $sx = $sx < 0 ? 0 : ($sx > $maxX ? $maxX : $sx);
                 }
-                $val = $refBytes[$row0 + $sx] - 5 * $refBytes[$row1 + $sx]
-                    + 20 * $refBytes[$row2 + $sx] + 20 * $refBytes[$row3 + $sx]
-                    - 5 * $refBytes[$row4 + $sx] + $refBytes[$row5 + $sx];
+                $val = ($refBytes[$row0 + $sx] + $refBytes[$row5 + $sx])
+                    + 20 * ($refBytes[$row2 + $sx] + $refBytes[$row3 + $sx])
+                    - 5 * ($refBytes[$row1 + $sx] + $refBytes[$row4 + $sx]);
                 $val = ($val + 16) >> 5;
                 $out[] = $val < 0 ? 0 : ($val > 255 ? 255 : $val);
             }
@@ -333,37 +489,62 @@ trait MotionCompensationTrait
         $tmpH = $h + 5;
         $tmp = [];
         $interiorX = $srcX >= 2 && $srcX + $w + 2 <= $maxX;
-        for ($j = 0; $j < $tmpH; $j++) {
-            $sy = $srcY - 2 + $j;
-            $sy = $sy < 0 ? 0 : ($sy > $maxY ? $maxY : $sy);
-            $row = $sy * $stride;
-            for ($i = 0; $i < $w; $i++) {
-                $sx = $srcX + $i;
-                if ($interiorX) {
-                    $val = $refBytes[$row + $sx - 2] - 5 * $refBytes[$row + $sx - 1]
-                        + 20 * $refBytes[$row + $sx] + 20 * $refBytes[$row + $sx + 1]
-                        - 5 * $refBytes[$row + $sx + 2] + $refBytes[$row + $sx + 3];
-                } else {
+        if ($interiorX) {
+            for ($j = 0; $j < $tmpH; $j++) {
+                $sy = $srcY - 2 + $j;
+                $sy = $sy < 0 ? 0 : ($sy > $maxY ? $maxY : $sy);
+                $hr = $sy * $stride + $srcX;
+
+                $t0 = $refBytes[$hr - 2];
+                $t1 = $refBytes[$hr - 1];
+                $t2 = $refBytes[$hr];
+                $t3 = $refBytes[$hr + 1];
+                $t4 = $refBytes[$hr + 2];
+                $t5 = $refBytes[$hr + 3];
+                // 中间值保存未取整的卷积和（供第二阶段合并归一化）
+                $sum = ($t0 + $t5) + 20 * ($t2 + $t3) - 5 * ($t1 + $t4);
+
+                for ($i = 0; $i < $w; $i++) {
+                    $tmp[] = $sum;
+                    if ($i + 1 < $w) {
+                        $tn = $refBytes[$hr + $i + 4];
+                        $sum = $sum + $tn - $t0 + 6 * ($t1 - $t5) + 25 * ($t4 - $t2);
+                        $t0 = $t1;
+                        $t1 = $t2;
+                        $t2 = $t3;
+                        $t3 = $t4;
+                        $t4 = $t5;
+                        $t5 = $tn;
+                    }
+                }
+            }
+        } else {
+            for ($j = 0; $j < $tmpH; $j++) {
+                $sy = $srcY - 2 + $j;
+                $sy = $sy < 0 ? 0 : ($sy > $maxY ? $maxY : $sy);
+                $row = $sy * $stride;
+                for ($i = 0; $i < $w; $i++) {
+                    $sx = $srcX + $i;
                     $x0 = $sx - 2 < 0 ? 0 : ($sx - 2 > $maxX ? $maxX : $sx - 2);
                     $x1 = $sx - 1 < 0 ? 0 : ($sx - 1 > $maxX ? $maxX : $sx - 1);
                     $x2 = $sx < 0 ? 0 : ($sx > $maxX ? $maxX : $sx);
                     $x3 = $sx + 1 < 0 ? 0 : ($sx + 1 > $maxX ? $maxX : $sx + 1);
                     $x4 = $sx + 2 < 0 ? 0 : ($sx + 2 > $maxX ? $maxX : $sx + 2);
                     $x5 = $sx + 3 < 0 ? 0 : ($sx + 3 > $maxX ? $maxX : $sx + 3);
-                    $val = $refBytes[$row + $x0] - 5 * $refBytes[$row + $x1]
-                        + 20 * $refBytes[$row + $x2] + 20 * $refBytes[$row + $x3]
-                        - 5 * $refBytes[$row + $x4] + $refBytes[$row + $x5];
+                    $val = ($refBytes[$row + $x0] + $refBytes[$row + $x5])
+                        + 20 * ($refBytes[$row + $x2] + $refBytes[$row + $x3])
+                        - 5 * ($refBytes[$row + $x1] + $refBytes[$row + $x4]);
+                    $tmp[] = $val;
                 }
-                $tmp[] = $val;
             }
         }
         $out = [];
         for ($j = 0; $j < $h; $j++) {
             $base = $j * $w;
             for ($i = 0; $i < $w; $i++) {
-                $val = $tmp[$base + $i] - 5 * $tmp[$base + $w + $i]
-                    + 20 * $tmp[$base + 2 * $w + $i] + 20 * $tmp[$base + 3 * $w + $i]
-                    - 5 * $tmp[$base + 4 * $w + $i] + $tmp[$base + 5 * $w + $i];
+                $val = ($tmp[$base + $i] + $tmp[$base + 5 * $w + $i])
+                    + 20 * ($tmp[$base + 2 * $w + $i] + $tmp[$base + 3 * $w + $i])
+                    - 5 * ($tmp[$base + $w + $i] + $tmp[$base + 4 * $w + $i]);
                 $val = ($val + 512) >> 10;
                 $out[] = $val < 0 ? 0 : ($val > 255 ? 255 : $val);
             }
@@ -395,6 +576,7 @@ trait MotionCompensationTrait
         $intY = $y >> 3;
         $maxX = $width - 1;
         $maxY = $height - 1;
+        $chr = self::mcChrTable();
 
         if ($fracX === 0 && $fracY === 0 && $intX >= 0 && $intY >= 0 && $intX + $blockW <= $width && $intY + $blockH <= $height) {
             for ($j = 0; $j < $blockH; $j++) {
@@ -421,32 +603,71 @@ trait MotionCompensationTrait
                 && $intX + $blockW + ($fracX !== 0 ? 1 : 0) <= $width
                 && $intY + $blockH + ($fracY !== 0 ? 1 : 0) <= $height
             ) {
-                if ($fracX !== 0 && $fracY !== 0) {
+                if ($fracY === 0) {
+                    // 纯水平双线性：相邻像素共享 b 点，寄存器轮转每像素每平面只读 1 个新点
+                    for ($j = 0; $j < $blockH; $j++) {
+                        $row0 = ($intY + $j) * $stride + $intX;
+                        $dstBase = ($dstY + $j) * $dstStride + $dstX;
+                        $ua = $uBytes[$row0];
+                        $va = $vBytes[$row0];
+                        for ($i = 0; $i < $blockW; $i++) {
+                            $ub = $uBytes[$row0 + $i + 1];
+                            $vb = $vBytes[$row0 + $i + 1];
+                            $uVal = ($wx0 * $ua + $fracX * $ub + 4) >> 3;
+                            $vVal = ($wx0 * $va + $fracX * $vb + 4) >> 3;
+                            $dstU[$dstBase + $i] = $chr[$uVal];
+                            $dstV[$dstBase + $i] = $chr[$vVal];
+                            $ua = $ub;
+                            $va = $vb;
+                        }
+                    }
+                } elseif ($fracX === 0) {
+                    // 纯垂直双线性：列间无共享，保持逐点
+                    for ($j = 0; $j < $blockH; $j++) {
+                        $row0 = ($intY + $j) * $stride + $intX;
+                        $row1 = $row0 + $stride;
+                        $dstBase = ($dstY + $j) * $dstStride + $dstX;
+                        for ($i = 0; $i < $blockW; $i++) {
+                            $uVal = ($wy0 * $uBytes[$row0 + $i] + $fracY * $uBytes[$row1 + $i] + 4) >> 3;
+                            $vVal = ($wy0 * $vBytes[$row0 + $i] + $fracY * $vBytes[$row1 + $i] + 4) >> 3;
+                            $dstU[$dstBase + $i] = $chr[$uVal];
+                            $dstV[$dstBase + $i] = $chr[$vVal];
+                        }
+                    }
+                } else {
                     $w00 = $wx0 * $wy0;
                     $w10 = $fracX * $wy0;
                     $w01 = $wx0 * $fracY;
                     $w11 = $fracX * $fracY;
-                }
-                for ($j = 0; $j < $blockH; $j++) {
-                    $row0 = ($intY + $j) * $stride + $intX;
-                    $row1 = $row0 + $stride;
-                    $dstBase = ($dstY + $j) * $dstStride + $dstX;
-                    for ($i = 0; $i < $blockW; $i++) {
-                        $src = $row0 + $i;
-                        if ($fracY === 0) {
-                            $uVal = ($wx0 * $uBytes[$src] + $fracX * $uBytes[$src + 1] + 4) >> 3;
-                            $vVal = ($wx0 * $vBytes[$src] + $fracX * $vBytes[$src + 1] + 4) >> 3;
-                        } elseif ($fracX === 0) {
-                            $uVal = ($wy0 * $uBytes[$src] + $fracY * $uBytes[$row1 + $i] + 4) >> 3;
-                            $vVal = ($wy0 * $vBytes[$src] + $fracY * $vBytes[$row1 + $i] + 4) >> 3;
-                        } else {
-                            $uVal = ($w00 * $uBytes[$src] + $w10 * $uBytes[$src + 1]
-                                + $w01 * $uBytes[$row1 + $i] + $w11 * $uBytes[$row1 + $i + 1] + 32) >> 6;
-                            $vVal = ($w00 * $vBytes[$src] + $w10 * $vBytes[$src + 1]
-                                + $w01 * $vBytes[$row1 + $i] + $w11 * $vBytes[$row1 + $i + 1] + 32) >> 6;
+                    // 双向双线性：相邻像素共享右列 b/d，寄存器轮转每像素每平面只读 2 个新点
+                    for ($j = 0; $j < $blockH; $j++) {
+                        $row0 = ($intY + $j) * $stride + $intX;
+                        $row1 = $row0 + $stride;
+                        $dstBase = ($dstY + $j) * $dstStride + $dstX;
+                        $ua = $uBytes[$row0];
+                        $ub = $uBytes[$row0 + 1];
+                        $uc = $uBytes[$row1];
+                        $ud = $uBytes[$row1 + 1];
+                        $va = $vBytes[$row0];
+                        $vb = $vBytes[$row0 + 1];
+                        $vc = $vBytes[$row1];
+                        $vd = $vBytes[$row1 + 1];
+                        for ($i = 0; $i < $blockW; $i++) {
+                            $uVal = ($w00 * $ua + $w10 * $ub + $w01 * $uc + $w11 * $ud + 32) >> 6;
+                            $vVal = ($w00 * $va + $w10 * $vb + $w01 * $vc + $w11 * $vd + 32) >> 6;
+                            $dstU[$dstBase + $i] = $chr[$uVal];
+                            $dstV[$dstBase + $i] = $chr[$vVal];
+                            if ($i + 1 < $blockW) {
+                                $ua = $ub;
+                                $uc = $ud;
+                                $va = $vb;
+                                $vc = $vd;
+                                $ub = $uBytes[$row0 + $i + 2];
+                                $ud = $uBytes[$row1 + $i + 2];
+                                $vb = $vBytes[$row0 + $i + 2];
+                                $vd = $vBytes[$row1 + $i + 2];
+                            }
                         }
-                        $dstU[$dstBase + $i] = chr($uVal);
-                        $dstV[$dstBase + $i] = chr($vVal);
                     }
                 }
                 return;
@@ -491,8 +712,8 @@ trait MotionCompensationTrait
                     + $w10 * $vBytes[$row0 + $x1[$i]]
                     + $w01 * $vBytes[$row1 + $x0[$i]]
                     + $w11 * $vBytes[$row1 + $x1[$i]] + 32) >> 6;
-                $dstU[$dstBase + $i] = chr($uVal < 0 ? 0 : ($uVal > 255 ? 255 : $uVal));
-                $dstV[$dstBase + $i] = chr($vVal < 0 ? 0 : ($vVal > 255 ? 255 : $vVal));
+                $dstU[$dstBase + $i] = $chr[$uVal < 0 ? 0 : ($uVal > 255 ? 255 : $uVal)];
+                $dstV[$dstBase + $i] = $chr[$vVal < 0 ? 0 : ($vVal > 255 ? 255 : $vVal)];
             }
         }
     }

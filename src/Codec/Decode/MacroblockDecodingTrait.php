@@ -2,6 +2,8 @@
 
 namespace Xiaosongshu\Flv2mp4\Codec\Decode;
 
+use Xiaosongshu\Flv2mp4\Codec\H264Decoder;
+
 /**
  * @purpose 宏块解码器
  * @author yanglong
@@ -9,6 +11,14 @@ namespace Xiaosongshu\Flv2mp4\Codec\Decode;
  */
 trait MacroblockDecodingTrait
 {
+    /** @var array<int,string>|null 0..255 单字节字符查找表（进程内惰性构建一次） */
+    private static ?array $residChrTable = null;
+
+    private static function residChrTable(): array
+    {
+        return self::$residChrTable ??= array_map('chr', range(0, 255));
+    }
+
     private function readRefIdxL0(): int
     {
         $numRef = $this->numRefIdxL0Active;
@@ -939,10 +949,10 @@ trait MacroblockDecodingTrait
 
         $mbWidth = $this->picWidthInMbs;
         $mbIdx = $mbY * $mbWidth + $mbX;
-        for ($i = 0; $i < 16; $i++) {
-            $this->mbMvForDeblock[$mbIdx][$i] = [$mvX, $mvY];
-            $this->mbRefForDeblock[$mbIdx][$i] = $refIdx;
-        }
+        // 16 个 4x4 块 MV/参考索引全同：array_fill 一次构建（子数组共享同一 COW 引用，
+        // 去块滤波端只读），避免逐块小数组分配
+        $this->mbMvForDeblock[$mbIdx] = array_fill(0, 16, [$mvX, $mvY]);
+        $this->mbRefForDeblock[$mbIdx] = array_fill(0, 16, $refIdx);
 
         return 0;
     }
@@ -979,13 +989,19 @@ trait MacroblockDecodingTrait
      */
     private function updateInterMbIntraModes(int $mbX): void
     {
-        $this->intra4x4LeftModes = [2, 2, 2, 2];
+        // 非 Intra_4x4 宏块邻居预测模式固定为 DC_PRED(2)；常量数组 COW 共享，避免逐 MB 分配
+        $this->intra4x4LeftModes = self::INTER_DC_MODES;
         $baseLuma = $mbX * 4;
         $this->intra4x4TopModes[$baseLuma + 0] = 2;
         $this->intra4x4TopModes[$baseLuma + 1] = 2;
         $this->intra4x4TopModes[$baseLuma + 2] = 2;
         $this->intra4x4TopModes[$baseLuma + 3] = 2;
     }
+
+    private const INTER_DC_MODES = [2, 2, 2, 2];
+
+    private const LEFT_8X16_BLOCKS = [0, 1, 4, 5, 8, 9, 12, 13];
+    private const RIGHT_8X16_BLOCKS = [2, 3, 6, 7, 10, 11, 14, 15];
 
     /**
      * P_L0_16x16 宏块解码
@@ -1018,10 +1034,8 @@ trait MacroblockDecodingTrait
         $this->updateInterMbIntraModes($mbX);
         $mbWidth = $this->picWidthInMbs;
         $mbIdx = $mbY * $mbWidth + $mbX;
-        for ($i = 0; $i < 16; $i++) {
-            $this->mbMvForDeblock[$mbIdx][$i] = [$mvX, $mvY];
-            $this->mbRefForDeblock[$mbIdx][$i] = $refIdx;
-        }
+        $this->mbMvForDeblock[$mbIdx] = array_fill(0, 16, [$mvX, $mvY]);
+        $this->mbRefForDeblock[$mbIdx] = array_fill(0, 16, $refIdx);
         return $mbQpDelta;
     }
 
@@ -1070,14 +1084,14 @@ trait MacroblockDecodingTrait
 
         $mbWidth = $this->picWidthInMbs;
         $mbIdx = $mbY * $mbWidth + $mbX;
-        for ($i = 0; $i < 8; $i++) {
-            $this->mbMvForDeblock[$mbIdx][$i] = [$mv0X, $mv0Y];
-            $this->mbRefForDeblock[$mbIdx][$i] = $refIdx0;
-        }
-        for ($i = 8; $i < 16; $i++) {
-            $this->mbMvForDeblock[$mbIdx][$i] = [$mv1X, $mv1Y];
-            $this->mbRefForDeblock[$mbIdx][$i] = $refIdx1;
-        }
+        $this->mbMvForDeblock[$mbIdx] = array_merge(
+            array_fill(0, 8, [$mv0X, $mv0Y]),
+            array_fill(0, 8, [$mv1X, $mv1Y])
+        );
+        $this->mbRefForDeblock[$mbIdx] = array_merge(
+            array_fill(0, 8, $refIdx0),
+            array_fill(0, 8, $refIdx1)
+        );
 
         return $mbQpDelta;
     }
@@ -1127,13 +1141,11 @@ trait MacroblockDecodingTrait
 
         $mbWidth = $this->picWidthInMbs;
         $mbIdx = $mbY * $mbWidth + $mbX;
-        $leftBlocks = [0, 1, 4, 5, 8, 9, 12, 13];
-        $rightBlocks = [2, 3, 6, 7, 10, 11, 14, 15];
-        foreach ($leftBlocks as $i) {
+        foreach (self::LEFT_8X16_BLOCKS as $i) {
             $this->mbMvForDeblock[$mbIdx][$i] = [$mv0X, $mv0Y];
             $this->mbRefForDeblock[$mbIdx][$i] = $refIdx0;
         }
-        foreach ($rightBlocks as $i) {
+        foreach (self::RIGHT_8X16_BLOCKS as $i) {
             $this->mbMvForDeblock[$mbIdx][$i] = [$mv1X, $mv1Y];
             $this->mbRefForDeblock[$mbIdx][$i] = $refIdx1;
         }
@@ -1487,12 +1499,54 @@ trait MacroblockDecodingTrait
         ];
     }
 
+    /**
+     * 子像素运动补偿前按需把参考平面展开为字节数组（每参考帧每片最多一次），
+     * 避免整像素场景下每帧 3 次整帧 unpack 的纯浪费。写回 refPicList0 供同片后续宏块复用。
+     */
+    private function ensureRefBytes(int $refIdx, bool $needLuma, bool $needChroma): void
+    {
+        if (!isset($this->refPicList0[$refIdx])) return;
+        // 本片列表已缓存（同片后续宏块），直接复用
+        $listEntry = $this->refPicList0[$refIdx];
+        if ((!$needLuma || $listEntry['yBytes'] !== null) && (!$needChroma || ($listEntry['uBytes'] !== null && $listEntry['vBytes'] !== null))) return;
+        // 写回 dpb 才能跨 slice 复用（refPicList0 每片重建）；maxNumRefFrames=1，dpb 通常仅 1 条
+        foreach ($this->dpb as $k => $entry) {
+            if ($entry['frameNum'] !== $listEntry['frameNum'] || $entry['isLongTerm'] !== $listEntry['isLongTerm']) continue;
+            if ($needLuma && $entry['yBytes'] === null) {
+                $entry['yBytes'] = array_values(unpack('C*', $entry['y']));
+            }
+            if ($needChroma && $entry['uBytes'] === null) {
+                $entry['uBytes'] = array_values(unpack('C*', $entry['u']));
+            }
+            if ($needChroma && $entry['vBytes'] === null) {
+                $entry['vBytes'] = array_values(unpack('C*', $entry['v']));
+            }
+            $this->dpb[$k] = $entry;
+            $this->refPicList0[$refIdx] = $entry;
+            return;
+        }
+        // 兜底：参考帧不在 dpb（异常流）时直接填充本片列表副本
+        $entry = &$this->refPicList0[$refIdx];
+        if ($needLuma && $entry['yBytes'] === null) $entry['yBytes'] = array_values(unpack('C*', $entry['y']));
+        if ($needChroma) {
+            if ($entry['uBytes'] === null) $entry['uBytes'] = array_values(unpack('C*', $entry['u']));
+            if ($entry['vBytes'] === null) $entry['vBytes'] = array_values(unpack('C*', $entry['v']));
+        }
+        unset($entry);
+    }
+
     private function executeMergedMcTasks(int $mbX, int $mbY, array $tasks): void
     {
         $refCache = [];
+        $needBytes = [];
         $grid = array_fill(0, 4, array_fill(0, 4, null));
         foreach ($tasks as $task) {
             [$x, $y, $w, $h, $mvX, $mvY, $refIdx] = $task;
+            $refX4 = ($mbX * 16 + $x) * 4 + $mvX;
+            $refY4 = ($mbY * 16 + $y) * 4 + $mvY;
+            if (!isset($needBytes[$refIdx])) $needBytes[$refIdx] = [false, false];
+            if (($refX4 & 3) !== 0 || ($refY4 & 3) !== 0) $needBytes[$refIdx][0] = true;
+            if (($refX4 & 7) !== 0 || ($refY4 & 7) !== 0) $needBytes[$refIdx][1] = true;
             for ($blockY = intdiv($y, 4); $blockY < intdiv($y + $h, 4); $blockY++) {
                 for ($blockX = intdiv($x, 4); $blockX < intdiv($x + $w, 4); $blockX++) {
                     $grid[$blockY][$blockX] = [$mvX, $mvY, $refIdx];
@@ -1528,6 +1582,7 @@ trait MacroblockDecodingTrait
                 }
 
                 if (!isset($refCache[$mv[2]])) {
+                    $this->ensureRefBytes($mv[2], $needBytes[$mv[2]][0], $needBytes[$mv[2]][1]);
                     $refCache[$mv[2]] = $this->getRefPlanes($mv[2]);
                 }
                 $this->performMotionCompensationBlock(
@@ -1541,11 +1596,14 @@ trait MacroblockDecodingTrait
     private function performMotionCompensationBlock(int $dstX, int $dstY, int $blockW, int $blockH, int $mvX, int $mvY, int|array $ref): void
     {
         if ($this->refFrameY === null) return;
-        if (is_int($ref)) {
-            $ref = $this->getRefPlanes($ref);
-        }
         $lumaRefX = $dstX * 4 + $mvX;
         $lumaRefY = $dstY * 4 + $mvY;
+        $needLuma = ($lumaRefX & 3) !== 0 || ($lumaRefY & 3) !== 0;
+        $needChroma = ($lumaRefX & 7) !== 0 || ($lumaRefY & 7) !== 0;
+        if (is_int($ref)) {
+            $this->ensureRefBytes($ref, $needLuma, $needChroma);
+            $ref = $this->getRefPlanes($ref);
+        }
         $this->mcLumaTo(
             $ref['y'], $ref['strideY'], $ref['widthY'], $ref['heightY'],
             $lumaRefX, $lumaRefY, $blockW, $blockH,
@@ -1890,95 +1948,124 @@ trait MacroblockDecodingTrait
             for ($x = 0; $x < 2; $x++) $topNz[$mbWidth * 4 + $mbWidth * 2 + $mbX * 2 + $x] = $this->nzTopRowChroma[$mbWidth * 2 + $mbX * 2 + $x];
         }
 
-        $yCoeffs = array_fill(0, 16, array_fill(0, 16, 0));
-        $scanToRaster = [0, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15];
+        // 亮度4x4残差 - lumaCbp==0 时全部 16 块均无残差：nzCache 已全 0，无需填充/扫描
+        $yCoeffs = [];
+        if ($lumaCbp !== 0) {
+            $yCoeffs = array_fill(0, 16, array_fill(0, 16, 0));
+            $scanToRaster = [0, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15];
 
-        // 亮度4x4残差 - Inter帧每个块有16个系数（DC+AC一起）
-        // 按zigzag扫描顺序解码，每个块计算nC（与Intra4x4相同）
-        for ($i8x8 = 0; $i8x8 < 4; $i8x8++) {
-            if (($lumaCbp & (1 << $i8x8)) !== 0) {
-                for ($i4x4 = 0; $i4x4 < 4; $i4x4++) {
-                    $scanIdx = $i8x8 * 4 + $i4x4;
-                    $rasterIdx = $scanToRaster[$scanIdx];
-                    $nc = $this->computeNc($rasterIdx, $mbX, $mbY, $nzCache, $leftNz, $topNz, $leftAvailable, $topAvailable);
-                    $coeffs = $this->decodeResidualBlock(16, $nc);
-                    for ($i = 0; $i < 16; $i++) $yCoeffs[$rasterIdx][$i] = $coeffs[$i];
-                    $yCoeffs[$rasterIdx] = $this->zigzagToRaster($yCoeffs[$rasterIdx]);
-                    $yCoeffs[$rasterIdx] = $this->dequantize4x4($yCoeffs[$rasterIdx], 3, $qp);
-                    $nzCount = 0;
-                    for ($i = 0; $i < 16; $i++) if ($coeffs[$i] != 0) $nzCount++;
-                    $nzCache[$rasterIdx] = $nzCount;
-                }
-            } else {
-                for ($i4x4 = 0; $i4x4 < 4; $i4x4++) {
-                    $scanIdx = $i8x8 * 4 + $i4x4;
-                    $rasterIdx = $scanToRaster[$scanIdx];
-                    $nzCache[$rasterIdx] = 0;
+            // 亮度4x4残差 - Inter帧每个块有16个系数（DC+AC一起）
+            // 按zigzag扫描顺序解码，每个块计算nC（与Intra4x4相同）
+            for ($i8x8 = 0; $i8x8 < 4; $i8x8++) {
+                if (($lumaCbp & (1 << $i8x8)) !== 0) {
+                    for ($i4x4 = 0; $i4x4 < 4; $i4x4++) {
+                        $scanIdx = $i8x8 * 4 + $i4x4;
+                        $rasterIdx = $scanToRaster[$scanIdx];
+                        $nc = $this->computeNc($rasterIdx, $mbX, $mbY, $nzCache, $leftNz, $topNz, $leftAvailable, $topAvailable);
+                        $coeffs = $this->decodeResidualBlock(16, $nc);
+                        for ($i = 0; $i < 16; $i++) $yCoeffs[$rasterIdx][$i] = $coeffs[$i];
+                        $yCoeffs[$rasterIdx] = $this->zigzagToRaster($yCoeffs[$rasterIdx]);
+                        $yCoeffs[$rasterIdx] = $this->dequantize4x4($yCoeffs[$rasterIdx], 3, $qp);
+                        $nzCount = 0;
+                        for ($i = 0; $i < 16; $i++) if ($coeffs[$i] != 0) $nzCount++;
+                        $nzCache[$rasterIdx] = $nzCount;
+                    }
                 }
             }
         }
 
-        // 色度
-        $chromaQpIndex = max(0, min(51, $qp + $this->chromaQpIndexOffset));
-        $chromaQp = self::CHROMA_QP_TABLE[$chromaQpIndex];
+        // 色度（chromaCbp==0 表示色度无任何残差，DC/AC 解码与像素加回全部跳过：
+        // nzCache 色度项保持 0，与尾部非零缓存更新语义一致）
+        $cbDcResult = [0, 0, 0, 0];
+        $crDcResult = [0, 0, 0, 0];
+        $cbAcCoeffs = [];
+        $crAcCoeffs = [];
+        if ($chromaCbp !== 0) {
+            $chromaQpIndex = max(0, min(51, $qp + $this->chromaQpIndexOffset));
+            $chromaQp = self::CHROMA_QP_TABLE[$chromaQpIndex];
 
-        $cbDc = array_fill(0, 4, 0);
-        $crDc = array_fill(0, 4, 0);
-        $cbAcCoeffs = array_fill(0, 4, array_fill(0, 16, 0));
-        $crAcCoeffs = array_fill(0, 4, array_fill(0, 16, 0));
+            $cbDc = array_fill(0, 4, 0);
+            $crDc = array_fill(0, 4, 0);
+            $cbAcCoeffs = array_fill(0, 4, array_fill(0, 16, 0));
+            $crAcCoeffs = array_fill(0, 4, array_fill(0, 16, 0));
 
-        if ($chromaCbp >= 1) {
             $cbDc = $this->decodeResidualBlock(4, -1);
             $crDc = $this->decodeResidualBlock(4, -1);
-        }
 
-        $cbQmul = $this->dequant4Table[5][$chromaQp][0];
-        $crQmul = $this->dequant4Table[4][$chromaQp][0];
-        $cbDcResult = $this->chromaDcDequantIdct($cbDc, $cbQmul);
-        $crDcResult = $this->chromaDcDequantIdct($crDc, $crQmul);
+            $cbQmul = $this->dequant4Table[5][$chromaQp][0];
+            $crQmul = $this->dequant4Table[4][$chromaQp][0];
+            $cbDcResult = $this->chromaDcDequantIdct($cbDc, $cbQmul);
+            $crDcResult = $this->chromaDcDequantIdct($crDc, $crQmul);
 
-        if ($chromaCbp === 2 || $chromaCbp === 3) {
-            $cbScanOrder = [16, 17, 18, 19];
-            foreach ($cbScanOrder as $blockIdx) {
-                $blk = $blockIdx - 16;
-                $nc = $this->computeNc($blockIdx, $mbX, $mbY, $nzCache, $leftNz, $topNz, $leftAvailable, $topAvailable);
-                $ac = $this->decodeResidualBlock(15, $nc);
-                $nzCnt = 0; for ($i = 0; $i < 15; $i++) if ($ac[$i] != 0) $nzCnt++;
-                for ($i = 1; $i < 16; $i++) $cbAcCoeffs[$blk][$i] = $ac[$i - 1];
-                $cbAcCoeffs[$blk] = $this->zigzagToRaster($cbAcCoeffs[$blk]);
-                $cbAcCoeffs[$blk] = $this->dequantize4x4($cbAcCoeffs[$blk], 5, $chromaQp);
-                $nzCache[$blockIdx] = $nzCnt;
-            }
-            $crScanOrder = [20, 21, 22, 23];
-            foreach ($crScanOrder as $blockIdx) {
-                $blk = $blockIdx - 20;
-                $nc = $this->computeNc($blockIdx, $mbX, $mbY, $nzCache, $leftNz, $topNz, $leftAvailable, $topAvailable);
-                $ac = $this->decodeResidualBlock(15, $nc);
+            if ($chromaCbp === 2 || $chromaCbp === 3) {
+                $cbScanOrder = [16, 17, 18, 19];
+                foreach ($cbScanOrder as $blockIdx) {
+                    $blk = $blockIdx - 16;
+                    $nc = $this->computeNc($blockIdx, $mbX, $mbY, $nzCache, $leftNz, $topNz, $leftAvailable, $topAvailable);
+                    $ac = $this->decodeResidualBlock(15, $nc);
+                    $nzCnt = 0; for ($i = 0; $i < 15; $i++) if ($ac[$i] != 0) $nzCnt++;
+                    for ($i = 1; $i < 16; $i++) $cbAcCoeffs[$blk][$i] = $ac[$i - 1];
+                    $cbAcCoeffs[$blk] = $this->zigzagToRaster($cbAcCoeffs[$blk]);
+                    $cbAcCoeffs[$blk] = $this->dequantize4x4($cbAcCoeffs[$blk], 5, $chromaQp);
+                    $nzCache[$blockIdx] = $nzCnt;
+                }
+                $crScanOrder = [20, 21, 22, 23];
+                foreach ($crScanOrder as $blockIdx) {
+                    $blk = $blockIdx - 20;
+                    $nc = $this->computeNc($blockIdx, $mbX, $mbY, $nzCache, $leftNz, $topNz, $leftAvailable, $topAvailable);
+                    $ac = $this->decodeResidualBlock(15, $nc);
 
-                $nzCnt = 0; for ($i = 0; $i < 15; $i++) if ($ac[$i] != 0) $nzCnt++;
-                for ($i = 1; $i < 16; $i++) $crAcCoeffs[$blk][$i] = $ac[$i - 1];
-                $crAcCoeffs[$blk] = $this->zigzagToRaster($crAcCoeffs[$blk]);
-                $crAcCoeffs[$blk] = $this->dequantize4x4($crAcCoeffs[$blk], 4, $chromaQp);
-                $nzCache[$blockIdx] = $nzCnt;
+                    $nzCnt = 0; for ($i = 0; $i < 15; $i++) if ($ac[$i] != 0) $nzCnt++;
+                    for ($i = 1; $i < 16; $i++) $crAcCoeffs[$blk][$i] = $ac[$i - 1];
+                    $crAcCoeffs[$blk] = $this->zigzagToRaster($crAcCoeffs[$blk]);
+                    $crAcCoeffs[$blk] = $this->dequantize4x4($crAcCoeffs[$blk], 4, $chromaQp);
+                    $nzCache[$blockIdx] = $nzCnt;
+                }
             }
         }
 
         // 亮度残差+IDCT 并加到像素上（Inter帧：每个4x4块完整16系数）
-        for ($blkY = 0; $blkY < 4; $blkY++) {
-            for ($blkX = 0; $blkX < 4; $blkX++) {
-                $blk = $blkY * 4 + $blkX;
-                $i8x8 = (int)($blkY / 2) * 2 + (int)($blkX / 2);
-                if (($lumaCbp & (1 << $i8x8)) !== 0) {
-                    $idct = $this->idct4x4Flat($yCoeffs[$blk]);
+        // 整个 16x16 MB 在画面内时，16 个 4x4 块均无需逐像素边界检查
+        $lumaFull = (($mbX + 1) * 16 <= $this->width) && (($mbY + 1) * 16 <= $this->height);
+        $lumaW = $this->width;
+        if ($lumaFull) {
+            $chr = self::residChrTable();
+            for ($blkY = 0; $blkY < 4; $blkY++) {
+                for ($blkX = 0; $blkX < 4; $blkX++) {
+                    $blk = $blkY * 4 + $blkX;
+                    $i8x8 = (int)($blkY / 2) * 2 + (int)($blkX / 2);
+                    if (($lumaCbp & (1 << $i8x8)) !== 0) {
+                        $idct = $this->idct4x4Flat($yCoeffs[$blk]);
+                        $idx = ($mbY * 16 + $blkY * 4) * $lumaW + $mbX * 16 + $blkX * 4;
+                        for ($y = 0; $y < 4; $y++) {
+                            $row = $y * 4;
+                            $this->yPlane[$idx]     = $chr[max(0, min(255, ord($this->yPlane[$idx]) + $idct[$row]))];
+                            $this->yPlane[$idx + 1] = $chr[max(0, min(255, ord($this->yPlane[$idx + 1]) + $idct[$row + 1]))];
+                            $this->yPlane[$idx + 2] = $chr[max(0, min(255, ord($this->yPlane[$idx + 2]) + $idct[$row + 2]))];
+                            $this->yPlane[$idx + 3] = $chr[max(0, min(255, ord($this->yPlane[$idx + 3]) + $idct[$row + 3]))];
+                            $idx += $lumaW;
+                        }
+                    }
+                }
+            }
+        } else {
+            for ($blkY = 0; $blkY < 4; $blkY++) {
+                for ($blkX = 0; $blkX < 4; $blkX++) {
+                    $blk = $blkY * 4 + $blkX;
+                    $i8x8 = (int)($blkY / 2) * 2 + (int)($blkX / 2);
+                    if (($lumaCbp & (1 << $i8x8)) !== 0) {
+                        $idct = $this->idct4x4Flat($yCoeffs[$blk]);
+                        $chr = self::residChrTable();
 
-                    for ($y = 0; $y < 4; $y++) {
-                        for ($x = 0; $x < 4; $x++) {
-                            $py = $mbY * 16 + $blkY * 4 + $y;
-                            $px = $mbX * 16 + $blkX * 4 + $x;
-                            if ($py < $this->height && $px < $this->width) {
-                                $idx = $py * $this->width + $px;
-                                $val = ord($this->yPlane[$idx]) + $idct[$y * 4 + $x];
-                                $this->yPlane[$idx] = chr(max(0, min(255, $val)));
+                        for ($y = 0; $y < 4; $y++) {
+                            for ($x = 0; $x < 4; $x++) {
+                                $py = $mbY * 16 + $blkY * 4 + $y;
+                                $px = $mbX * 16 + $blkX * 4 + $x;
+                                if ($py < $this->height && $px < $this->width) {
+                                    $idx = $py * $this->width + $px;
+                                    $val = ord($this->yPlane[$idx]) + $idct[$y * 4 + $x];
+                                    $this->yPlane[$idx] = $chr[max(0, min(255, $val))];
+                                }
                             }
                         }
                     }
@@ -1986,72 +2073,133 @@ trait MacroblockDecodingTrait
             }
         }
 
-        // 色度残差+IDCT 并加到像素上
-        $cw = (int)($this->width / 2);
-        $ch = (int)($this->height / 2);
-        for ($blkY = 0; $blkY < 2; $blkY++) {
-            for ($blkX = 0; $blkX < 2; $blkX++) {
-                $blk = $blkY * 2 + $blkX;
-                $dcCb = $cbDcResult[$blk];
-                $dcCr = $crDcResult[$blk];
+        // 色度残差+IDCT 并加到像素上（chromaCbp==0 无色度残差，整段跳过）
+        if ($chromaCbp !== 0) {
+            $cw = (int)($this->width / 2);
+            $ch = (int)($this->height / 2);
+            // 整个 8x8 色度 MB 在画面内时，4 个 4x4 块均无需逐像素边界检查
+            $chrFull = (($mbX + 1) * 8 <= $cw) && (($mbY + 1) * 8 <= $ch);
+            $chr = self::residChrTable();
+            for ($blkY = 0; $blkY < 2; $blkY++) {
+                for ($blkX = 0; $blkX < 2; $blkX++) {
+                    $blk = $blkY * 2 + $blkX;
+                    $dcCb = $cbDcResult[$blk];
+                    $dcCr = $crDcResult[$blk];
+                    $baseX = $mbX * 8 + $blkX * 4;
+                    $baseY = $mbY * 8 + $blkY * 4;
 
-                // Cb 处理
-                if ($chromaCbp >= 2) {
-                    $acBlockCb = $cbAcCoeffs[$blk];
-                    $acBlockCb[0] = $dcCb;
-                    $acIdctCb = $this->idct4x4Flat($acBlockCb);
-                    for ($y = 0; $y < 4; $y++) {
-                        for ($x = 0; $x < 4; $x++) {
-                            $py = $mbY * 8 + $blkY * 4 + $y;
-                            $px = $mbX * 8 + $blkX * 4 + $x;
-                            if ($py < $ch && $px < $cw) {
-                                $idx = $py * $cw + $px;
-                                $val = ord($this->uPlane[$idx]) + $acIdctCb[$y * 4 + $x];
-                                $this->uPlane[$idx] = chr(max(0, min(255, $val)));
+                    // Cb 处理
+                    if ($chromaCbp >= 2) {
+                        $acBlockCb = $cbAcCoeffs[$blk];
+                        $acBlockCb[0] = $dcCb;
+                        $acIdctCb = $this->idct4x4Flat($acBlockCb);
+                        if ($chrFull) {
+                            $idx = $baseY * $cw + $baseX;
+                            for ($y = 0; $y < 4; $y++) {
+                                $row = $y * 4;
+                                $this->uPlane[$idx]     = $chr[max(0, min(255, ord($this->uPlane[$idx]) + $acIdctCb[$row]))];
+                                $this->uPlane[$idx + 1] = $chr[max(0, min(255, ord($this->uPlane[$idx + 1]) + $acIdctCb[$row + 1]))];
+                                $this->uPlane[$idx + 2] = $chr[max(0, min(255, ord($this->uPlane[$idx + 2]) + $acIdctCb[$row + 2]))];
+                                $this->uPlane[$idx + 3] = $chr[max(0, min(255, ord($this->uPlane[$idx + 3]) + $acIdctCb[$row + 3]))];
+                                $idx += $cw;
+                            }
+                        } else {
+                            for ($y = 0; $y < 4; $y++) {
+                                for ($x = 0; $x < 4; $x++) {
+                                    $py = $baseY + $y;
+                                    $px = $baseX + $x;
+                                    if ($py < $ch && $px < $cw) {
+                                        $idx = $py * $cw + $px;
+                                        $val = ord($this->uPlane[$idx]) + $acIdctCb[$y * 4 + $x];
+                                        $this->uPlane[$idx] = $chr[max(0, min(255, $val))];
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        $dcAddCb = ($dcCb + 32) >> 6;
+                        if ($chrFull) {
+                            $idx = $baseY * $cw + $baseX;
+                            for ($y = 0; $y < 4; $y++) {
+                                $v0 = max(0, min(255, ord($this->uPlane[$idx]) + $dcAddCb));
+                                $v1 = max(0, min(255, ord($this->uPlane[$idx + 1]) + $dcAddCb));
+                                $v2 = max(0, min(255, ord($this->uPlane[$idx + 2]) + $dcAddCb));
+                                $v3 = max(0, min(255, ord($this->uPlane[$idx + 3]) + $dcAddCb));
+                                $this->uPlane[$idx] = $chr[$v0];
+                                $this->uPlane[$idx + 1] = $chr[$v1];
+                                $this->uPlane[$idx + 2] = $chr[$v2];
+                                $this->uPlane[$idx + 3] = $chr[$v3];
+                                $idx += $cw;
+                            }
+                        } else {
+                            for ($y = 0; $y < 4; $y++) {
+                                for ($x = 0; $x < 4; $x++) {
+                                    $py = $baseY + $y;
+                                    $px = $baseX + $x;
+                                    if ($py < $ch && $px < $cw) {
+                                        $idx = $py * $cw + $px;
+                                        $val = ord($this->uPlane[$idx]) + $dcAddCb;
+                                        $this->uPlane[$idx] = $chr[max(0, min(255, $val))];
+                                    }
+                                }
                             }
                         }
                     }
-                } else {
-                    $dcAddCb = ($dcCb + 32) >> 6;
-                    for ($y = 0; $y < 4; $y++) {
-                        for ($x = 0; $x < 4; $x++) {
-                            $py = $mbY * 8 + $blkY * 4 + $y;
-                            $px = $mbX * 8 + $blkX * 4 + $x;
-                            if ($py < $ch && $px < $cw) {
-                                $idx = $py * $cw + $px;
-                                $val = ord($this->uPlane[$idx]) + $dcAddCb;
-                                $this->uPlane[$idx] = chr(max(0, min(255, $val)));
-                            }
-                        }
-                    }
-                }
 
-                // Cr 处理
-                if ($chromaCbp >= 2) {
-                    $acBlockCr = $crAcCoeffs[$blk];
-                    $acBlockCr[0] = $dcCr;
-                    $acIdctCr = $this->idct4x4Flat($acBlockCr);
-                    for ($y = 0; $y < 4; $y++) {
-                        for ($x = 0; $x < 4; $x++) {
-                            $py = $mbY * 8 + $blkY * 4 + $y;
-                            $px = $mbX * 8 + $blkX * 4 + $x;
-                            if ($py < $ch && $px < $cw) {
-                                $idx = $py * $cw + $px;
-                                $val = ord($this->vPlane[$idx]) + $acIdctCr[$y * 4 + $x];
-                                $this->vPlane[$idx] = chr(max(0, min(255, $val)));
+                    // Cr 处理
+                    if ($chromaCbp >= 2) {
+                        $acBlockCr = $crAcCoeffs[$blk];
+                        $acBlockCr[0] = $dcCr;
+                        $acIdctCr = $this->idct4x4Flat($acBlockCr);
+                        if ($chrFull) {
+                            $idx = $baseY * $cw + $baseX;
+                            for ($y = 0; $y < 4; $y++) {
+                                $row = $y * 4;
+                                $this->vPlane[$idx]     = $chr[max(0, min(255, ord($this->vPlane[$idx]) + $acIdctCr[$row]))];
+                                $this->vPlane[$idx + 1] = $chr[max(0, min(255, ord($this->vPlane[$idx + 1]) + $acIdctCr[$row + 1]))];
+                                $this->vPlane[$idx + 2] = $chr[max(0, min(255, ord($this->vPlane[$idx + 2]) + $acIdctCr[$row + 2]))];
+                                $this->vPlane[$idx + 3] = $chr[max(0, min(255, ord($this->vPlane[$idx + 3]) + $acIdctCr[$row + 3]))];
+                                $idx += $cw;
+                            }
+                        } else {
+                            for ($y = 0; $y < 4; $y++) {
+                                for ($x = 0; $x < 4; $x++) {
+                                    $py = $baseY + $y;
+                                    $px = $baseX + $x;
+                                    if ($py < $ch && $px < $cw) {
+                                        $idx = $py * $cw + $px;
+                                        $val = ord($this->vPlane[$idx]) + $acIdctCr[$y * 4 + $x];
+                                        $this->vPlane[$idx] = $chr[max(0, min(255, $val))];
+                                    }
+                                }
                             }
                         }
-                    }
-                } else {
-                    $dcAddCr = ($dcCr + 32) >> 6;
-                    for ($y = 0; $y < 4; $y++) {
-                        for ($x = 0; $x < 4; $x++) {
-                            $py = $mbY * 8 + $blkY * 4 + $y;
-                            $px = $mbX * 8 + $blkX * 4 + $x;
-                            if ($py < $ch && $px < $cw) {
-                                $idx = $py * $cw + $px;
-                                $val = ord($this->vPlane[$idx]) + $dcAddCr;
-                                $this->vPlane[$idx] = chr(max(0, min(255, $val)));
+                    } else {
+                        $dcAddCr = ($dcCr + 32) >> 6;
+                        if ($chrFull) {
+                            $idx = $baseY * $cw + $baseX;
+                            for ($y = 0; $y < 4; $y++) {
+                                $v0 = max(0, min(255, ord($this->vPlane[$idx]) + $dcAddCr));
+                                $v1 = max(0, min(255, ord($this->vPlane[$idx + 1]) + $dcAddCr));
+                                $v2 = max(0, min(255, ord($this->vPlane[$idx + 2]) + $dcAddCr));
+                                $v3 = max(0, min(255, ord($this->vPlane[$idx + 3]) + $dcAddCr));
+                                $this->vPlane[$idx] = $chr[$v0];
+                                $this->vPlane[$idx + 1] = $chr[$v1];
+                                $this->vPlane[$idx + 2] = $chr[$v2];
+                                $this->vPlane[$idx + 3] = $chr[$v3];
+                                $idx += $cw;
+                            }
+                        } else {
+                            for ($y = 0; $y < 4; $y++) {
+                                for ($x = 0; $x < 4; $x++) {
+                                    $py = $baseY + $y;
+                                    $px = $baseX + $x;
+                                    if ($py < $ch && $px < $cw) {
+                                        $idx = $py * $cw + $px;
+                                        $val = ord($this->vPlane[$idx]) + $dcAddCr;
+                                        $this->vPlane[$idx] = $chr[max(0, min(255, $val))];
+                                    }
+                                }
                             }
                         }
                     }

@@ -25,6 +25,9 @@ trait DeblockingFilterTrait
     private array $deblockTc0Cache = [];
     private array $deblockChromaQpCache = [];
 
+    /** @var array<int,string> 256 个单字节字符查找表，替代热路径中的 chr() 调用。 */
+    private array $deblockChrTable = [];
+
     private function clip3(int $lo, int $hi, int $x): int
     {
         if ($x < $lo) return $lo;
@@ -152,6 +155,7 @@ trait DeblockingFilterTrait
         $stride = $this->deblockYStride;
         $plane = &$this->yPlane;
         $base = ($mbY * 16) * $stride + ($mbX * 16) + $edge * 4;
+        $chr = $this->deblockChrTable;
 
         for ($i = 0; $i < 4; $i++) {
             $curBs = $bs[$i];
@@ -178,23 +182,35 @@ trait DeblockingFilterTrait
 
                         if (abs($p2 - $p0) < $beta) {
                             if ($tc0 !== 0) {
-                                $newP1 = $p1 + $this->clip3(-$tc0, $tc0, ((($p2 + $p0q0) >> 1) - $p1));
+                                $__v = (($p2 + $p0q0) >> 1) - $p1;
+                                $newP1 = $p1 + ($__v < -$tc0 ? -$tc0 : ($__v > $tc0 ? $tc0 : $__v));
                             }
                             $tc++;
                         }
 
                         if (abs($q2 - $q0) < $beta) {
                             if ($tc0 !== 0) {
-                                $newQ1 = $q1 + $this->clip3(-$tc0, $tc0, ((($q2 + $p0q0) >> 1) - $q1));
+                                $__v = (($q2 + $p0q0) >> 1) - $q1;
+                                $newQ1 = $q1 + ($__v < -$tc0 ? -$tc0 : ($__v > $tc0 ? $tc0 : $__v));
                             }
                             $tc++;
                         }
 
-                        $delta = $this->clip3(-$tc, $tc, ((($q0 - $p0) * 4 + ($p1 - $q1) + 4) >> 3));
-                        $plane[$off - 1] = chr($this->clipPixel($p0 + $delta));
-                        $plane[$off - 2] = chr($newP1);
-                        $plane[$off] = chr($this->clipPixel($q0 - $delta));
-                        $plane[$off + 1] = chr($newQ1);
+                        $__v = (($q0 - $p0) * 4 + ($p1 - $q1) + 4) >> 3;
+                        $delta = $__v < -$tc ? -$tc : ($__v > $tc ? $tc : $__v);
+                        // delta==0 时 p0/q0 不变（约三成像素），省两次字符串写
+                        if ($delta !== 0) {
+                            $__v = $p0 + $delta;
+                            $plane[$off - 1] = $chr[$__v < 0 ? 0 : ($__v > 255 ? 255 : $__v)];
+                            $__v = $q0 - $delta;
+                            $plane[$off] = $chr[$__v < 0 ? 0 : ($__v > 255 ? 255 : $__v)];
+                        }
+                        if ($newP1 !== $p1) {
+                            $plane[$off - 2] = $chr[$newP1];
+                        }
+                        if ($newQ1 !== $q1) {
+                            $plane[$off + 1] = $chr[$newQ1];
+                        }
                     }
                 } else {
                     $p3 = ord($plane[$off - 4]);
@@ -203,12 +219,12 @@ trait DeblockingFilterTrait
                         $p0, $p1, $p2, $p3, $q0, $q1, $q2, $q3, $alpha, $beta,
                         $newP0, $newP1, $newP2, $newQ0, $newQ1, $newQ2
                     )) {
-                        $plane[$off - 1] = chr($newP0);
-                        $plane[$off - 2] = chr($newP1);
-                        $plane[$off - 3] = chr($newP2);
-                        $plane[$off] = chr($newQ0);
-                        $plane[$off + 1] = chr($newQ1);
-                        $plane[$off + 2] = chr($newQ2);
+                        $plane[$off - 1] = $chr[$newP0];
+                        $plane[$off - 2] = $chr[$newP1];
+                        $plane[$off - 3] = $chr[$newP2];
+                        $plane[$off] = $chr[$newQ0];
+                        $plane[$off + 1] = $chr[$newQ1];
+                        $plane[$off + 2] = $chr[$newQ2];
                     }
                 }
             }
@@ -226,6 +242,7 @@ trait DeblockingFilterTrait
         $stride = $this->deblockYStride;
         $plane = &$this->yPlane;
         $base = ($mbY * 16 + $edge * 4) * $stride + ($mbX * 16);
+        $chr = $this->deblockChrTable;
 
         for ($i = 0; $i < 4; $i++) {
             $curBs = $bs[$i];
@@ -252,23 +269,34 @@ trait DeblockingFilterTrait
 
                         if (abs($p2 - $p0) < $beta) {
                             if ($tc0 !== 0) {
-                                $newP1 = $p1 + $this->clip3(-$tc0, $tc0, ((($p2 + $p0q0) >> 1) - $p1));
+                                $__v = (($p2 + $p0q0) >> 1) - $p1;
+                                $newP1 = $p1 + ($__v < -$tc0 ? -$tc0 : ($__v > $tc0 ? $tc0 : $__v));
                             }
                             $tc++;
                         }
 
                         if (abs($q2 - $q0) < $beta) {
                             if ($tc0 !== 0) {
-                                $newQ1 = $q1 + $this->clip3(-$tc0, $tc0, ((($q2 + $p0q0) >> 1) - $q1));
+                                $__v = (($q2 + $p0q0) >> 1) - $q1;
+                                $newQ1 = $q1 + ($__v < -$tc0 ? -$tc0 : ($__v > $tc0 ? $tc0 : $__v));
                             }
                             $tc++;
                         }
 
-                        $delta = $this->clip3(-$tc, $tc, ((($q0 - $p0) * 4 + ($p1 - $q1) + 4) >> 3));
-                        $plane[$off - $stride] = chr($this->clipPixel($p0 + $delta));
-                        $plane[$off - 2 * $stride] = chr($newP1);
-                        $plane[$off] = chr($this->clipPixel($q0 - $delta));
-                        $plane[$off + $stride] = chr($newQ1);
+                        $__v = (($q0 - $p0) * 4 + ($p1 - $q1) + 4) >> 3;
+                        $delta = $__v < -$tc ? -$tc : ($__v > $tc ? $tc : $__v);
+                        if ($delta !== 0) {
+                            $__v = $p0 + $delta;
+                            $plane[$off - $stride] = $chr[$__v < 0 ? 0 : ($__v > 255 ? 255 : $__v)];
+                            $__v = $q0 - $delta;
+                            $plane[$off] = $chr[$__v < 0 ? 0 : ($__v > 255 ? 255 : $__v)];
+                        }
+                        if ($newP1 !== $p1) {
+                            $plane[$off - 2 * $stride] = $chr[$newP1];
+                        }
+                        if ($newQ1 !== $q1) {
+                            $plane[$off + $stride] = $chr[$newQ1];
+                        }
                     }
                 } else {
                     $p3 = ord($plane[$off - 4 * $stride]);
@@ -277,12 +305,12 @@ trait DeblockingFilterTrait
                         $p0, $p1, $p2, $p3, $q0, $q1, $q2, $q3, $alpha, $beta,
                         $newP0, $newP1, $newP2, $newQ0, $newQ1, $newQ2
                     )) {
-                        $plane[$off - $stride] = chr($newP0);
-                        $plane[$off - 2 * $stride] = chr($newP1);
-                        $plane[$off - 3 * $stride] = chr($newP2);
-                        $plane[$off] = chr($newQ0);
-                        $plane[$off + $stride] = chr($newQ1);
-                        $plane[$off + 2 * $stride] = chr($newQ2);
+                        $plane[$off - $stride] = $chr[$newP0];
+                        $plane[$off - 2 * $stride] = $chr[$newP1];
+                        $plane[$off - 3 * $stride] = $chr[$newP2];
+                        $plane[$off] = $chr[$newQ0];
+                        $plane[$off + $stride] = $chr[$newQ1];
+                        $plane[$off + 2 * $stride] = $chr[$newQ2];
                     }
                 }
             }
@@ -299,6 +327,7 @@ trait DeblockingFilterTrait
 
         $stride = $this->deblockUvStride;
         $base = ($mbY * 8) * $stride + ($mbX * 8) + $edge * 4;
+        $chr = $this->deblockChrTable;
 
         foreach (['uPlane', 'vPlane'] as $planeName) {
             $plane = &$this->$planeName;
@@ -318,15 +347,20 @@ trait DeblockingFilterTrait
 
                     if ($curBs < 4) {
                         if (abs($p0 - $q0) < $alpha && abs($p1 - $p0) < $beta && abs($q1 - $q0) < $beta) {
-                            $delta = $this->clip3(-$tc, $tc, ((($q0 - $p0) * 4 + ($p1 - $q1) + 4) >> 3));
-                            $plane[$off - 1] = chr($this->clipPixel($p0 + $delta));
-                            $plane[$off] = chr($this->clipPixel($q0 - $delta));
+                            $__v = (($q0 - $p0) * 4 + ($p1 - $q1) + 4) >> 3;
+                            $delta = $__v < -$tc ? -$tc : ($__v > $tc ? $tc : $__v);
+                            if ($delta !== 0) {
+                                $__v = $p0 + $delta;
+                                $plane[$off - 1] = $chr[$__v < 0 ? 0 : ($__v > 255 ? 255 : $__v)];
+                                $__v = $q0 - $delta;
+                                $plane[$off] = $chr[$__v < 0 ? 0 : ($__v > 255 ? 255 : $__v)];
+                            }
                         }
                     } elseif ($this->filterStrongChroma(
                         $p0, $p1, $q0, $q1, $alpha, $beta, $newP0, $newQ0
                     )) {
-                        $plane[$off - 1] = chr($newP0);
-                        $plane[$off] = chr($newQ0);
+                        $plane[$off - 1] = $chr[$newP0];
+                        $plane[$off] = $chr[$newQ0];
                     }
                 }
             }
@@ -344,6 +378,7 @@ trait DeblockingFilterTrait
 
         $stride = $this->deblockUvStride;
         $base = ($mbY * 8 + $edge * 4) * $stride + ($mbX * 8);
+        $chr = $this->deblockChrTable;
 
         foreach (['uPlane', 'vPlane'] as $planeName) {
             $plane = &$this->$planeName;
@@ -363,15 +398,20 @@ trait DeblockingFilterTrait
 
                     if ($curBs < 4) {
                         if (abs($p0 - $q0) < $alpha && abs($p1 - $p0) < $beta && abs($q1 - $q0) < $beta) {
-                            $delta = $this->clip3(-$tc, $tc, ((($q0 - $p0) * 4 + ($p1 - $q1) + 4) >> 3));
-                            $plane[$off - $stride] = chr($this->clipPixel($p0 + $delta));
-                            $plane[$off] = chr($this->clipPixel($q0 - $delta));
+                            $__v = (($q0 - $p0) * 4 + ($p1 - $q1) + 4) >> 3;
+                            $delta = $__v < -$tc ? -$tc : ($__v > $tc ? $tc : $__v);
+                            if ($delta !== 0) {
+                                $__v = $p0 + $delta;
+                                $plane[$off - $stride] = $chr[$__v < 0 ? 0 : ($__v > 255 ? 255 : $__v)];
+                                $__v = $q0 - $delta;
+                                $plane[$off] = $chr[$__v < 0 ? 0 : ($__v > 255 ? 255 : $__v)];
+                            }
                         }
                     } elseif ($this->filterStrongChroma(
                         $p0, $p1, $q0, $q1, $alpha, $beta, $newP0, $newQ0
                     )) {
-                        $plane[$off - $stride] = chr($newP0);
-                        $plane[$off] = chr($newQ0);
+                        $plane[$off - $stride] = $chr[$newP0];
+                        $plane[$off] = $chr[$newQ0];
                     }
                 }
             }
@@ -423,6 +463,105 @@ trait DeblockingFilterTrait
                 ? ($topType >= 0 && $topType <= 24)
                 : ($isPslice && $topType >= 5 && $topType <= 29);
             $topIpcm = ($isIslice && $topType === 25) || ($isPslice && $topType === 30);
+        }
+
+        // 快速路径（与规范判定逐位等价的充分条件）：当前 MB 及左/上邻块均为
+        // 非 intra / 非 I_PCM，参与 BS 判定的 luma 4x4 块 nnz 全为 0，且当前 MB
+        // 全部 16 块与左/上边界块的 MV 全等、参考索引相同 → 32 个边界强度均为 0。
+        // 命中条件不满足时落回原逐对判定，结果完全一致。
+        if (!$curIntra && !$curIpcm
+            && ($mbX === 0 || (!$leftIntra && !$leftIpcm))
+            && ($mbY === 0 || (!$topIntra && !$topIpcm))
+        ) {
+            $allZero = true;
+            for ($k = 0; $k < 16; $k++) {
+                if (($curNnz[$k] ?? 0) != 0) {
+                    $allZero = false;
+                    break;
+                }
+            }
+            if ($allZero && $mbX > 0) {
+                foreach ([3, 7, 11, 15] as $k) {
+                    if (($leftNnz[$k] ?? 0) != 0) {
+                        $allZero = false;
+                        break;
+                    }
+                }
+            }
+            if ($allZero && $mbY > 0) {
+                foreach ([12, 13, 14, 15] as $k) {
+                    if (($topNnz[$k] ?? 0) != 0) {
+                        $allZero = false;
+                        break;
+                    }
+                }
+            }
+
+            if ($allZero) {
+                $zeroMv = $curMv[0] ?? $this->deblockZeroMv;
+                $minX = $maxX = $zeroMv[0];
+                $minY = $maxY = $zeroMv[1];
+                $zeroRef = $curRef[0] ?? 0;
+                $uniform = true;
+
+                // cur 内部 24 对相邻边：16 个块参考索引全等、且 MV 分量极差 <= 3
+                // （任意相邻块分量差 <= 全局极差 < 4，与规范 bs=0 的 |Δmv| < 4 等价）。
+                for ($k = 1; $k < 16; $k++) {
+                    if (($curRef[$k] ?? 0) != $zeroRef) {
+                        $uniform = false;
+                        break;
+                    }
+                    $m = $curMv[$k] ?? $this->deblockZeroMv;
+                    $x = $m[0];
+                    $y = $m[1];
+                    if ($x < $minX) {
+                        $minX = $x;
+                    } elseif ($x > $maxX) {
+                        $maxX = $x;
+                    }
+                    if ($y < $minY) {
+                        $minY = $y;
+                    } elseif ($y > $maxY) {
+                        $maxY = $y;
+                    }
+                }
+                if ($uniform && ($maxX - $minX > 3 || $maxY - $minY > 3)) {
+                    $uniform = false;
+                }
+                // 垂直跨 MB 边：left(3,7,11,15) 配对 cur(0,4,8,12)
+                if ($uniform && $mbX > 0) {
+                    foreach ([3, 7, 11, 15] as $i => $k) {
+                        $qk = $i << 2;
+                        $pM = $leftMv[$k] ?? $this->deblockZeroMv;
+                        $qM = $curMv[$qk] ?? $this->deblockZeroMv;
+                        if (($leftRef[$k] ?? 0) != ($curRef[$qk] ?? 0)
+                            || abs($pM[0] - $qM[0]) >= 4
+                            || abs($pM[1] - $qM[1]) >= 4) {
+                            $uniform = false;
+                            break;
+                        }
+                    }
+                }
+                // 水平跨 MB 边：top(12..15) 配对 cur(0..3)
+                if ($uniform && $mbY > 0) {
+                    foreach ([12, 13, 14, 15] as $i => $k) {
+                        $pM = $topMv[$k] ?? $this->deblockZeroMv;
+                        $qM = $curMv[$i] ?? $this->deblockZeroMv;
+                        if (($topRef[$k] ?? 0) != ($curRef[$i] ?? 0)
+                            || abs($pM[0] - $qM[0]) >= 4
+                            || abs($pM[1] - $qM[1]) >= 4) {
+                            $uniform = false;
+                            break;
+                        }
+                    }
+                }
+
+                if ($uniform) {
+                    $bsVertical = [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
+                    $bsHorizontal = [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
+                    return;
+                }
+            }
         }
 
         for ($edge = 0; $edge < 4; $edge++) {
@@ -490,6 +629,11 @@ trait DeblockingFilterTrait
         $this->deblockThresholdCache = [];
         $this->deblockTc0Cache = [];
         $this->deblockChromaQpCache = [];
+        if (!$this->deblockChrTable) {
+            for ($i = 0; $i < 256; $i++) {
+                $this->deblockChrTable[$i] = chr($i);
+            }
+        }
 
         $mbWidth = $this->picWidthInMbs;
         $mbHeight = $this->picHeightInMbs;
