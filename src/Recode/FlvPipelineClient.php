@@ -222,19 +222,81 @@ final class FlvPipelineClient
     }
 
     /**
-     * 预扫描（复用同一次全文件遍历）：统计源帧率与 IDR/GOP 数量。
+     * 预扫描（稀疏）：仅按大块（256KB）顺序读一次文件并在缓冲内解析 tag header，
+     * 不把 tag body 读入内存、不做 NAL 遍历——统计帧率只需 header 内的时间戳，
+     * 统计关键帧只需 body 前 2 字节（FLV FrameType 高4位 + AVCPacketType）。
+     * 关键帧按 FrameType=1 粗判（标准 AVC FLV 中与 IDR 一致），该值仅用于 worker 数上限。
      * @return array{fps: ?float, gopCount: int}
      */
     private function scanSource(string $file): array
     {
-        $first = null; $last = null; $count = 0; $gopCount = 0;
-        foreach ($this->readFlvTags($file) as $tag) {
-            if ($tag['tagType'] !== 9 || strlen($tag['body']) < 2 || ord($tag['body'][1]) !== 1) continue;
-            $first ??= $tag['timestamp']; $last = $tag['timestamp']; $count++;
-            if ((ord($tag['body'][0]) >> 4) === 1 && $this->containsIdrNal($tag['body'])) $gopCount++;
+        $handle = @fopen($file, 'rb');
+        if ($handle === false) throw new RuntimeException("无法打开 FLV 文件: {$file}");
+        try {
+            $header = fread($handle, 9);
+            if ($header === false || strlen($header) < 9 || substr($header, 0, 3) !== 'FLV') {
+                throw new RuntimeException('不是有效的 FLV 文件');
+            }
+            $dataOffset = unpack('N', substr($header, 5, 4))[1];
+            if ($dataOffset < 9) throw new RuntimeException('FLV Header 长度无效');
+            $skip = ($dataOffset - 9) + 4; // 扩展头 + PreviousTagSize0
+            while ($skip > 0) {
+                $chunk = fread($handle, $skip);
+                if ($chunk === false || $chunk === '') throw new RuntimeException('FLV 文件数据不完整');
+                $skip -= strlen($chunk);
+            }
+
+            $first = null; $last = null; $count = 0; $gopCount = 0;
+            $buffer = '';
+            $pos = 0;
+            $eof = false;
+            $chunkSize = 262144;
+            while ($this->scanEnsure($handle, $buffer, $pos, $eof, 11, $chunkSize)) {
+                $dataSize = (ord($buffer[$pos + 1]) << 16) | (ord($buffer[$pos + 2]) << 8) | ord($buffer[$pos + 3]);
+                if ($dataSize > HlsPipelineProtocol::MAX_FRAME_LENGTH) break; // 残包/损坏文件，停止扫描
+                $tagType = ord($buffer[$pos]);
+                $timestamp = unpack('N', $buffer[$pos + 7] . substr($buffer, $pos + 4, 3))[1];
+
+                // 视频包额外需要 body 前 2 字节（11B header 之后），其余 body 一律按长度跳过
+                if ($tagType === 9 && $dataSize >= 2 && $this->scanEnsure($handle, $buffer, $pos, $eof, 13, $chunkSize)) {
+                    $packetType = ord($buffer[$pos + 12]);
+                    if ($packetType === 1) {
+                        $first ??= $timestamp; $last = $timestamp; $count++;
+                        if ((ord($buffer[$pos + 11]) >> 4) === 1) $gopCount++;
+                    }
+                }
+                $pos += 11 + $dataSize + 4; // tag header + body + PreviousTagSize
+            }
+            $fps = $count >= 2 && $last > $first ? ($count - 1) * 1000 / ($last - $first) : null;
+            return ['fps' => $fps, 'gopCount' => $gopCount];
+        } finally {
+            fclose($handle);
         }
-        $fps = $count >= 2 && $last > $first ? ($count - 1) * 1000 / ($last - $first) : null;
-        return ['fps' => $fps, 'gopCount' => $gopCount];
+    }
+
+    /**
+     * 保证 $buffer 从 $pos 起至少有 $need 个未消费字节；不足则丢弃已消费部分并补读一块。
+     * 整个扫描只有这一处发生大块读取，系统调用次数为 O(文件大小/块大小)。
+     */
+    private function scanEnsure($handle, string &$buffer, int &$pos, bool &$eof, int $need, int $chunkSize): bool
+    {
+        while (!$eof && strlen($buffer) - $pos < $need) {
+            if ($pos >= strlen($buffer)) {
+                // 逻辑跳过点越过当前块尾（大 tag 跨块）：句柄必须 fseek 越过差额，
+                // 否则下一块会从块尾续读、漏掉块尾到目标位置间的字节，造成后续 tag 全部错位
+                $over = $pos - strlen($buffer);
+                if ($over > 0 && fseek($handle, $over, SEEK_CUR) !== 0) { $eof = true; break; }
+                $buffer = '';
+                $pos = 0;
+            } elseif ($pos > 0) {
+                $buffer = substr($buffer, $pos);
+                $pos = 0;
+            }
+            $chunk = fread($handle, $chunkSize);
+            if ($chunk === false || $chunk === '') { $eof = true; break; }
+            $buffer .= $chunk;
+        }
+        return strlen($buffer) - $pos >= $need;
     }
 
     private function readFlvTags(string $file): Generator
