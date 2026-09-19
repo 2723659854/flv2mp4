@@ -552,30 +552,34 @@ if ($result && file_exists($outputFile1)) {
 ### Cross-Platform Performance Comparison
 
 | Output Format | Windows Time | Linux (Docker) Time | Performance Gain |
-| :--- |:-------------|:--------------------|:-----------------|
-| **FLV Re-encoding** | 21 s         | **16 s**            | **↓ 23.8%**      |
-| **MP4 Re-encoding** | 21 s         | **16 s**            | **↓ 23.8%**      |
-| **HLS (mpegts + m3u8)** | 22 s         | **17 s**            | **↓ 22.7%**      |
+| :--- | :--- | :--- | :--- |
+| **FLV Re-encoding** | 18 s | **14 s** | **↓ 22.2%** |
+| **MP4 Re-encoding** | 18 s | **14 s** | **↓ 22.2%** |
+| **HLS (mpegts + m3u8)** | 19 s | **15 s** | **↓ 21.1%** |
 
 ---
 
 ### Optimization History
-| Optimization Stage | FLV Re-encoding | MP4 Re-encoding | HLS Pipeline | Notes                                                                                     |
-|:---|:---|:---|:---|:------------------------------------------------------------------------------------------|
-| **Initial Version** | ~91 s | ~60 s (old) | **135 s** | Serial, no optimization                                                                   |
+
+| Optimization Stage | FLV Re-encoding | MP4 Re-encoding | HLS Pipeline | Notes |
+| :--- | :--- | :--- | :--- | :--- |
+| **Initial Version** | ~91 s | ~60 s (old) | **135 s** | Serial, no optimization |
 | **Algorithm-Level Optimization** | 60 s | — | 97 s | DCT butterfly unrolling, string slicing, reduced array_fill, quantization + Zigzag merged |
-| **Multi-Process Motion Estimation (4 processes)** | 51 s | — | 73 s | First introduction of distributed parallelism                                             |
-| **HLS Muxing I/O Optimization** | — | — | 69 s | Batch writes, fewer file operations                                                       |
-| **Encoding Core Optimization** | 44 s | 44 s | 67 s | All-zero block skip, I/P frame QP strategy                                                |
-| **Decoding Cache Optimization** | 41 s | 42 s | 64 s | Reuse of repeated calculations                                                            |
-| **OPcache + JIT Enabled** | 39 s | 39 s | 60 s | Runtime environment acceleration                                                          |
-| **Multi-Process Model Optimization (select, etc.)** | 33 s | — | — | Event-driven, process communication optimization                                          |
-| **Further Fine-Tuning** | 32 s | — | — | Specific method not specified                                                             |
-| **Extreme Optimization (Windows)** | 28 s | 29 s | 37 s | Windows + PHP 8.4.3 + JIT                                                                 |
-| **Linux Docker Deployment** | 23 s | 24 s | 31 s | Linux + PHP 8.1.24, OPcache disabled                                                      |
-| **GOP Distributed Multi-Process Decoding** | 22 s | 22 s | 22 s | OPcache disabled; Windows platform                                                        |
-| **GOP Distributed Multi-Process Decoding** | 17 s | 17 s | 17 s | OPcache disabled; Linux platform                                                          |
-| **Removed Repeated SHA256 for Reference Frames + Static Block ME Early Exit** | **16 s** | **16 s** | **17 s** | OPcache no longer provides any benefit                                                    |
+| **Multi-Process Motion Estimation (4 processes)** | 51 s | — | 73 s | First introduction of distributed parallelism |
+| **HLS Muxing I/O Optimization** | — | — | 69 s | Batch writes, fewer file operations |
+| **Encoding Core Optimization** | 44 s | 44 s | 67 s | All-zero block skip, I/P frame QP strategy |
+| **Decoding Cache Optimization** | 41 s | 42 s | 64 s | Reuse of repeated calculations |
+| **OPcache + JIT Enabled** | 39 s | 39 s | 60 s | Runtime environment acceleration |
+| **Multi-Process Model Optimization (select, etc.)** | 33 s | — | — | Event-driven, process communication optimization |
+| **Further Fine-Tuning** | 32 s | — | — | Specific method not specified |
+| **Extreme Optimization (Windows)** | 28 s | 29 s | 37 s | Windows + PHP 8.4.3 + JIT |
+| **Linux Docker Deployment** | 23 s | 24 s | 31 s | Linux + PHP 8.1.24, OPcache disabled |
+| **GOP Distributed Multi-Process Decoding** | 22 s | 22 s | 22 s | OPcache disabled; Windows platform |
+| **GOP Distributed Multi-Process Decoding** | 17 s | 17 s | 17 s | OPcache disabled; Linux platform |
+| **Removed Repeated SHA256 for Reference Frames + Static Block ME Early Exit** | **19 s** | **19 s** | **20 s** | Windows platform |
+| **Removed Repeated SHA256 for Reference Frames + Static Block ME Early Exit** | **16 s** | **16 s** | **17 s** | Linux platform |
+| **Zero-Region Skip + Deep Decoding/Filtering Optimization (Windows)** | **18 s** | **18 s** | **19 s** | 6-tap sliding recursion, Bs all-zero fast skip, skip memory write when filter result unchanged, CBP=0 whole-block skip, DPB lazy loading, `chr()` table lookup, on-demand unpack + cache |
+| **Zero-Region Skip + Deep Decoding/Filtering Optimization (Linux)** | **14 s** | **14 s** | **15 s** | Same as above; current best results |
 
 **Notes:**
 - Test clip: `test.flv`, 3.02 s, 720×742, 30 fps; Output specs: 360×360, 10 fps.
@@ -583,8 +587,7 @@ if ($result && file_exists($outputFile1)) {
 - Best stable values taken from multiple test runs.
 - “—” indicates the format was not separately tested at this stage.
 - GOP distributed multi-process decoding is the latest optimization, achieving significant improvements on both Windows and Linux.
-- GOP-based multi-process parallel processing divides the serial encoding workload of long videos into multiple independent tasks and executes them concurrently, reducing the cumulative processing time of frame-by-frame serial processing. Another video with a duration of 425 seconds was tested, and re-encoding took 701 seconds.
-
+- GOP-based multi-process parallel processing divides the serial encoding workload of long videos into multiple independent tasks and executes them concurrently, reducing the cumulative processing time of frame-by-frame serial processing. Another video with a duration of 425 seconds was tested, and re-encoding took 501 seconds.
 ---
 
 ## Encoding/Decoding for AAC-MP3-OPUS-WAV

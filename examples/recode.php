@@ -37,16 +37,16 @@ echo "cost {$cost}s\n";
 
 
 /** 重编码flv文件 */
-$start1 = time();
 $recoder = new \Xiaosongshu\Flv2mp4\Recode\FlvRecoder($config, true);
+$start1 = time();
 $recoder->processFlv($flvFile, __DIR__.'/output.flv');
 $end1 = time();
 $cost1 = $end1 - $start1;
 echo "flv重编码完成,耗时{$cost1}s\r\n";
 
 /** 重编码mp4文件 */
-$start2 = time();
 $recoder = new \Xiaosongshu\Flv2mp4\Recode\Mp4Recoder($config, true);
+$start2 = time();
 $recoder->processMp4($mp4File, __DIR__ . '/output.mp4');
 $end2 = time();
 $cost2 = $end2 - $start2;
