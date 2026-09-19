@@ -656,8 +656,15 @@ class FlvRecoder
             $this->writeSequenceHeaderTag();
         }
 
-        // 重编码器不生成 B 帧，CTS 必须为0；DTS保留选中输入帧的相对时间。
-        $this->writeEncodedVideoFrame($encodedNals, $this->outputVideoFrameCount === 0 || $isKeyFrame, $job['relativeTime'], 0);
+        // 重编码器不生成 B 帧，CTS 必须为0。
+        // 抽帧输出按目标帧率生成 CFR 时间轴（帧序号 × 帧时长）：选中帧虽落在对应
+        // 网格点附近，但保留源 DTS 会使帧间隔随源帧率抖动，下游按 avg_frame_rate
+        // 时基（如 1/10）量化时相邻帧会撞相同整数 DTS。与 Mp4Recoder 保持一致。
+        // 不抽帧（直通/无 fps 变换）时保留源 DTS。
+        $outputDts = $this->dropFrames && $this->effectiveTargetFps !== null && $this->effectiveTargetFps > 0
+            ? (int)round($this->outputVideoFrameCount * 1000 / $this->effectiveTargetFps)
+            : $job['relativeTime'];
+        $this->writeEncodedVideoFrame($encodedNals, $this->outputVideoFrameCount === 0 || $isKeyFrame, $outputDts, 0);
     }
 
     private function replayQueuedAudio(): void
@@ -977,12 +984,13 @@ class FlvRecoder
 
     private function getSoundRateValue(): int
     {
+        // FLV SoundRate 只有 2 bit（0-3）：0=5.5k 1=11k 2=22k 3=44k 档，
+        // 不存在 48k 档位；AAC 的真实采样率由 AudioSpecificConfig 携带，
+        // 48k 及任何更高/未知频率必须归到 3，否则 4<<2 进位污染 SoundFormat 字段
         switch ($this->audioSampleRate) {
             case 5512:  return 0;
             case 11025: return 1;
             case 22050: return 2;
-            case 44100: return 3;
-            case 48000: return 4;
             default:    return 3;
         }
     }
