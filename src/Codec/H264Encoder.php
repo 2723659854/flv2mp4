@@ -458,6 +458,16 @@ class H264Encoder
     public $motionWorkerClient = null;
     public int $motionWorkers = 4;
     public array $motionWorkerResults = [];
+    /** 下发 motion 子进程的编码选项（early_skip/subpel_sad_mul/mvp_seed/adaptive_skip） */
+    public array $motionOptions = [];
+    /** 运动估计时间 MVP 种子总开关（由入口 config mvp_seed 注入） */
+    public bool $mvpSeed = false;
+    /** 静态场景自适应 Tier1 放宽开关（由入口 config adaptive_skip 注入） */
+    public bool $adaptiveSkip = false;
+    /** 上一 P 帧自然 skip 占比达到该值才放宽当前帧（config adaptive_hit_ratio） */
+    public float $adaptiveHitRatio = 0.9;
+    /** Tier1 经验绝对 SAD 限额（每 4x4 块；config adaptive_block_sad，0=按 qp 自动） */
+    public int $adaptiveBlockSad = 0;
 
     /**
      * 预热运动估计子进程：在首批 P 帧到来之前完成 PHP 冷启动与建链，
@@ -466,7 +476,7 @@ class H264Encoder
     public function warmupMotionWorkers(): void
     {
         if ($this->enableInter) {
-            ($this->motionWorkerClient ??= new \Xiaosongshu\Flv2mp4\Codec\Encode\MotionWorkerClient(workers: $this->motionWorkers))->connectAll();
+            ($this->motionWorkerClient ??= new \Xiaosongshu\Flv2mp4\Codec\Encode\MotionWorkerClient(0, $this->motionWorkers, $this->motionOptions))->connectAll();
         }
     }
 

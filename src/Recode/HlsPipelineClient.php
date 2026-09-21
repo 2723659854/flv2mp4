@@ -18,7 +18,7 @@ final class HlsPipelineClient
     /** 每个解码worker待写入主进程缓冲区的软上限 */
     private const PER_WORKER_SOFT_LIMIT = 8388608;
 
-    public function __construct(private array $profiles, private string $outputDir, private ?int $maxFrames, private int $decodeWorkers = 4)
+    public function __construct(private array $profiles, private string $outputDir, private ?int $maxFrames, private int $decodeWorkers = 4, private bool $wavefront = false)
     {
     }
 
@@ -27,7 +27,12 @@ final class HlsPipelineClient
         $workerCount = max(1, min(8, $this->decodeWorkers));
         $sourceInfo = $this->scanSource($flvFile);
         $gopCount = $sourceInfo['gopCount'];
-        if ($gopCount > 0) $workerCount = max(1, min($workerCount, $gopCount));
+        // 波前模式可在单个 GOP 内再切区间，不再受源 GOP 数限制
+        if (!$this->wavefront && $gopCount > 0) $workerCount = max(1, min($workerCount, $gopCount));
+        // 波前区间规划（源 GOP 内按帧均分，后段靠前段检查点接续）
+        $wf = $this->wavefront
+            ? WavefrontDispatch::begin((int)$sourceInfo['videoFrames'], $sourceInfo['gopStarts'], $workerCount)
+            : null;
         // 抽帧目标帧率：各 profile fps>0 的最小值（多 profile 共享一路解码，只能按最低帧率抽一次）；
         // fps=0 表示该 profile 保持源帧率；仅当目标帧率低于源帧率时才抽帧（不升帧）
         $targetFps = 0.0;
@@ -73,6 +78,8 @@ final class HlsPipelineClient
             $currentWorker = 0;
             $frameCount = 0;
             $videoCount = 0;
+            $videoSampleIdx = 0; // 波前用：AVCC 视频帧（packetType=1）序号
+            $audioSeq = 0;       // 波前用：音频 tag 轮转 worker
             // 抽帧状态：首个输出 IDR 的源时间戳基准；已保留帧计数（含首 IDR）
             $baseVideoTimestamp = -1;
             $selectedFrames = 0;
@@ -83,42 +90,21 @@ final class HlsPipelineClient
             $exhausted = false;
             $stopReading = false;
             $endEnqueued = false;
+            $wfDeadline = null; // 源读完后等待检查点回传的看门狗
             $finishedCount = 0;
-            // GOP 窗口分发：默认全量并行派发（实测整体最快）；
-            // 可用环境变量 HLS_WINDOW 限制在途 GOP 数（特殊机型调优），"dyn" 表示首 GOP 完成后全量扇出
-            $envWindow = getenv('HLS_WINDOW');
-            if ($envWindow === 'dyn') { $window = 2; $dynamicWindow = true; }
-            else { $window = $envWindow !== false ? max(1, (int)$envWindow) : 1000000; $dynamicWindow = false; }
-            $gopBuffer = []; // gop => [[worker, frame], ...] 已读取但未放行
-            $gopDone = [];   // gop => true 该 GOP 已解码完成
-            $gopWatermark = 0; // 连续完成的 GOP 数（g < watermark 均已解码完）
-
-            // 按窗口放行已缓冲的 GOP（升序，保证全局 sequence 顺序）
-            $flushGops = function () use (&$gopBuffer, &$gopWatermark, &$window, &$outbound) {
-                if ($gopBuffer === []) return;
-                ksort($gopBuffer);
-                foreach ($gopBuffer as $g => $items) {
-                    if ($g >= $gopWatermark + $window) break;
-                    foreach ($items as [$worker, $frame]) $outbound[$worker] .= $frame;
-                    unset($gopBuffer[$g]);
-                }
-            };
-            $gated = false;
-            $enqueue = function (int $worker, string $frame, int $gop) use (&$outbound, &$gopBuffer, &$gopWatermark, &$window, &$gated) {
-                if ($gop < $gopWatermark + $window) { $outbound[$worker] .= $frame; return; }
-                $gopBuffer[$gop][] = [$worker, $frame];
-                $gated = true;
-            };
+            // GOP 全量并行派发（实测整体最快；旧环境变量窗口调优开关已移除，
+            // 全量扇出为默认且唯一调度方式，进程数由 decode_workers 按核数自适应收敛）
 
             while (true) {
-                $gated = false;
                 if (!$stopReading && !$exhausted) {
-                    while ($this->bufferedBytes($outbound) < $workerCount * self::PER_WORKER_SOFT_LIMIT) {
+                    $pendingBytes = $wf !== null ? WavefrontDispatch::pendingBytes($wf) : 0;
+                    while ($this->bufferedBytes($outbound) + $pendingBytes < $workerCount * self::PER_WORKER_SOFT_LIMIT) {
                         if (!$tags->valid()) { $exhausted = true; break; }
                         $tag = $tags->current(); $tags->next();
                         $frameCount++;
                         if ($tag['tagType'] === 8) {
-                            $enqueue($currentWorker, HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $sequence++, ['tagType' => 8, 'timestamp' => $tag['timestamp']], $tag['body']), max(0, $gopSeq - 1));
+                            $audioWorker = $wf !== null ? ($audioSeq++ % $workerCount) : $currentWorker;
+                            $outbound[$audioWorker] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $sequence++, ['tagType' => 8, 'timestamp' => $tag['timestamp']], $tag['body']);
                         } elseif ($tag['tagType'] === 9) {
                             $videoCount++;
                             $body = $tag['body'];
@@ -128,18 +114,23 @@ final class HlsPipelineClient
                                 $outbound[0] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $sequence++, ['tagType' => 9, 'timestamp' => $tag['timestamp']], $body);
                                 $control = HlsPipelineProtocol::frame(HlsPipelineProtocol::CONTROL, 0, ['cmd' => 'config'], $body);
                                 for ($i = 0; $i < $workerCount; $i++) $outbound[$i] .= $control;
+                            } elseif ($packetType !== 1) {
+                                // AVC end-of-sequence（packetType=2）等非 NALU 视频 tag：透传，不计入视频帧序号（扫描也不计）
+                                $outbound[0] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $sequence++, ['tagType' => 9, 'timestamp' => $tag['timestamp']], $body);
                             } else {
                                 $isKey = (ord($body[0]) >> 4) === 1 && $this->containsIdrNal($body);
-                                // 每个 IDR 开启一个独立 GOP，轮询分配给解码 worker
-                                if ($isKey) {
-                                    $newGop = $gopSeq;
-                                    if ($newGop > 0) {
-                                        // 上一 GOP 所有帧之后插入边界标记：worker 处理到此处即代表该 GOP 已解码完
-                                        $prevGop = $newGop - 1;
-                                        $enqueue($prevGop % $workerCount, HlsPipelineProtocol::frame(HlsPipelineProtocol::CONTROL, 0, ['cmd' => 'gopEnd', 'gop' => $prevGop]), $prevGop);
+                                if ($wf === null) {
+                                    // 每个 IDR 开启一个独立 GOP，轮询分配给解码 worker
+                                    if ($isKey) {
+                                        $newGop = $gopSeq;
+                                        if ($newGop > 0) {
+                                            // 上一 GOP 所有帧之后插入边界标记：worker 处理到此处即代表该 GOP 已解码完
+                                            $prevGop = $newGop - 1;
+                                            $outbound[$prevGop % $workerCount] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::CONTROL, 0, ['cmd' => 'gopEnd', 'gop' => $prevGop]);
+                                        }
+                                        $currentWorker = $newGop % $workerCount;
+                                        $gopSeq++;
                                     }
-                                    $currentWorker = $newGop % $workerCount;
-                                    $gopSeq++;
                                 }
                                 // 抽帧选帧（保持播放时长不变：保留帧时间戳重映射到目标帧率均匀网格，
                                 // 音频沿用源时间轴，两轴同源同刻度故仍同步）：
@@ -166,7 +157,18 @@ final class HlsPipelineClient
                                         $selectedFrames++;
                                     }
                                 }
-                                $enqueue($currentWorker, HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $sequence++, $videoMeta, $body), max(0, $gopSeq - 1));
+                                $wire = null;
+                                if ($wf !== null) {
+                                    // 波前：按帧区间路由；后段区间帧缓冲至前段检查点到达
+                                    $route = WavefrontDispatch::routeVideo($wf, $videoSampleIdx, $videoMeta);
+                                    $wire = HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $sequence++, $videoMeta, $body);
+                                    if ($route['hold']) $wf['ranges'][$route['rid']]['buffer'] .= $wire;
+                                    else $outbound[$route['w']] .= $wire;
+                                    $pendingBytes = WavefrontDispatch::pendingBytes($wf);
+                                } else {
+                                    $outbound[$currentWorker] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $sequence++, $videoMeta, $body);
+                                }
+                                $videoSampleIdx++;
                                 if ($this->maxFrames !== null && $videoCount >= $this->maxFrames) {
                                     echo "Reached max frames limit ({$this->maxFrames}), stopping...\n";
                                     $stopReading = true;
@@ -174,20 +176,10 @@ final class HlsPipelineClient
                                 }
                             }
                         }
-                        if ($gated) break; // 超出窗口，等待解码进度回报后再继续读取
                         if ($frameCount % 50 === 0) echo "Processed {$frameCount} frames ({$videoCount} video)\n";
                     }
                 }
-                // maxFrames 截断时不再有后续边界回报，缓冲帧全部放行
-                if ($stopReading && $gopBuffer !== []) {
-                    ksort($gopBuffer);
-                    foreach ($gopBuffer as $items) foreach ($items as [$worker, $frame]) $outbound[$worker] .= $frame;
-                    $gopBuffer = [];
-                }
-                if (($exhausted || $stopReading) && !$endEnqueued && $gopBuffer === []) {
-                    $outbound[0] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::END, $sequence++);
-                    $endEnqueued = true;
-                }
+                // END 在本轮 inbound（含末段检查点回传）处理后再入队，见循环后部
 
                 $read = [];
                 foreach ($alive as $id => $isAlive) if ($isAlive) $read[] = $sockets[$id];
@@ -224,16 +216,30 @@ final class HlsPipelineClient
                     foreach (HlsPipelineProtocol::take($inbound[$id], PHP_INT_MAX) as $event) {
                         if ($event['type'] === HlsPipelineProtocol::ERROR) throw new RuntimeException($event['metadata']['message'] ?? '流水线失败');
                         if ($event['type'] === HlsPipelineProtocol::FINISHED) { $finishedCount++; continue; }
-                        if ($event['type'] === HlsPipelineProtocol::PROGRESS) {
-                            $g = (int)($event['metadata']['gop'] ?? -1);
-                            if ($g >= 0) $gopDone[$g] = true;
-                            while (isset($gopDone[$gopWatermark])) $gopWatermark++;
-                            // 首 GOP 解码完成后，后续 GOP 立即全量放行并行追赶
-                            if ($dynamicWindow && $gopWatermark >= 1 && $window < 1000000) $window = 1000000;
-                            $flushGops();
+                        if ($event['type'] === HlsPipelineProtocol::CONTROL && ($event['metadata']['cmd'] ?? '') === 'checkpoint') {
+                            // 波前检查点回传：释放对应后段区间（控制帧 + 缓冲帧序列追加给归属 worker）
+                            if ($wf === null) throw new RuntimeException('收到波前检查点但调度未启用波前');
+                            $rel = WavefrontDispatch::release($wf, (int)$event['metadata']['range'], $event['payload']);
+                            $outbound[$rel['w']] .= $rel['wire'];
+                            $wfDeadline = null; // 有检查点进展：重置无进展看门狗
                         }
+                        // PROGRESS（GOP 解码边界回报）主进程无需跟踪
                     }
                     if (strlen($inbound[$id]) > HlsPipelineProtocol::MAX_BUFFER_LENGTH) throw new RuntimeException('主进程响应缓冲超限');
+                }
+                // 源 tag 已读完且本轮 inbound 处理完毕。
+                // 自然读完：必须等全部检查点回传（源读取远快于解码，看门狗按"无检查点进展"计时，
+                // 每收到一个检查点即重置，60s 无进展才判失败）；maxFrames 截断直接结束；worker 崩溃由 socket EOF 覆盖
+                if (!$endEnqueued && ($exhausted || $stopReading)) {
+                    $canEnd = $stopReading || $wf === null || WavefrontDispatch::allReleased($wf);
+                    if (!$canEnd) {
+                        $wfDeadline ??= microtime(true) + 60.0;
+                        if (microtime(true) >= $wfDeadline) WavefrontDispatch::assertComplete($wf);
+                    } else {
+                        if ($exhausted && $wf !== null) WavefrontDispatch::assertComplete($wf);
+                        $outbound[0] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::END, $sequence++);
+                        $endEnqueued = true;
+                    }
                 }
                 if ($finishedCount >= $workerCount) break;
                 if ($endEnqueued && !in_array(true, $alive, true)) throw new RuntimeException('解码进程未返回 FINISHED');
@@ -267,22 +273,25 @@ final class HlsPipelineClient
     }
 
     /**
-     * 预扫描（单次遍历）：统计源帧率与 IDR/GOP 数量。
-     * IDR 数即可并行 GOP 数（用于收敛 worker 数量避免空转）；帧率用于抽帧判定。
-     * @return array{fps: ?float, gopCount: int}
+     * 预扫描（单次遍历）：统计源帧率、IDR/GOP 数量与 IDR 视频帧序号。
+     * IDR 数即可并行 GOP 数（用于收敛 worker 数量避免空转）；帧率用于抽帧判定；
+     * gopStarts/videoFrames 供波前区间规划。
+     * @return array{fps: ?float, gopCount: int, gopStarts: int[], videoFrames: int}
      */
     private function scanSource(string $flvFile): array
     {
         $first = null; $last = null; $count = 0; $gopCount = 0;
+        $gopStarts = [];
         foreach ($this->readFlvTags($flvFile) as $tag) {
             if ($tag['tagType'] !== 9) continue;
             $body = $tag['body'];
             if (strlen($body) < 2 || ord($body[1]) !== 1) continue;
-            $first ??= $tag['timestamp']; $last = $tag['timestamp']; $count++;
-            if ($this->containsIdrNal($body)) $gopCount++;
+            $first ??= $tag['timestamp']; $last = $tag['timestamp'];
+            if ($this->containsIdrNal($body)) { $gopCount++; $gopStarts[] = $count; }
+            $count++;
         }
         $fps = $count >= 2 && $last > $first ? ($count - 1) * 1000 / ($last - $first) : null;
-        return ['fps' => $fps, 'gopCount' => $gopCount];
+        return ['fps' => $fps, 'gopCount' => $gopCount, 'gopStarts' => $gopStarts, 'videoFrames' => $count];
     }
 
     private function bufferedBytes(array $buffers): int

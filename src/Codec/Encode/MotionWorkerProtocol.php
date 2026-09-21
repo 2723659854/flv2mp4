@@ -5,7 +5,9 @@ use InvalidArgumentException;
 use UnexpectedValueException;
 
 /**
- * @purpose 运动模块分布式计算-协议（v4：请求条带化 + 响应 cbp0 瘦身）
+ * @purpose 运动模块分布式计算-协议（v7：v5 条带化 + MV 种子地图基础上，JOB_BATCH
+ *           增加本帧 Tier1 经验绝对 SAD 限额（u16），响应 flags 增加 Tier1 命中回传位。
+ *           v6 的"严格解析死区百分数乘子"因 qp≤15 时基数为 0 已废弃）
  * @author yanglong
  */
 final class MotionWorkerProtocol
@@ -13,11 +15,15 @@ final class MotionWorkerProtocol
     public const MAX_BODY_LENGTH = 16777216;
     public const LOAD_REFERENCE = 1;
     public const JOB_BATCH = 2;
-    private const REQUEST_MAGIC = 'MWR4';
-    private const RESPONSE_MAGIC = 'MWS2';
+    private const REQUEST_MAGIC = 'MWR7';
+    private const RESPONSE_MAGIC = 'MWS5';
     private const SEQ_LENGTH = 4;
     private const JOB_META_LENGTH = 16;
+    private const BATCH_HEADER_LENGTH = 46;
     private const FLAG_HAS_RESIDUAL = 0x01;
+    private const FLAG_TIER1_HIT = 0x02;
+    /** 单个 4x4 块理论最大 SAD（16 像素 ×255） */
+    public const MAX_BLOCK_SAD = 4080;
 
     public static function frame(string $body): string
     {
@@ -50,7 +56,26 @@ final class MotionWorkerProtocol
     }
 
     /**
-     * BATCH 请求（v4 条带化）：
+     * 打包前一帧 MV 种子地图（v5）。
+     * 每宏块 2 个有符号 16 位（1/4 像素单位），按 mbWidth×mbHeight 光栅连续排列；
+     * 无地图（IDR 后首 P 帧、关闭 mvp_seed）时返回空串。
+     *
+     * @param array $mvs 光栅顺序（键 0..w*h-1）的 [mvX, mvY] 列表（1/4 像素）
+     */
+    public static function encodeMvMap(int $mbWidth, int $mbHeight, array $mvs): string
+    {
+        if ($mbWidth <= 0 || $mbHeight <= 0) throw new InvalidArgumentException('Invalid motion worker mv map size');
+        if (count($mvs) !== $mbWidth * $mbHeight) throw new InvalidArgumentException('Motion worker mv map must cover every macroblock');
+        $flat = [];
+        foreach ($mvs as [$mvX, $mvY]) {
+            $flat[] = max(-32768, min(32767, (int)$mvX));
+            $flat[] = max(-32768, min(32767, (int)$mvY));
+        }
+        return pack('s*', ...$flat);
+    }
+
+    /**
+     * BATCH 请求（v5 条带化 + 可选 MV 种子地图）：
      * 当前帧亮度不再逐宏块切 256B 追加，而是按宏块行发送连续的 16 行条带。
      * 主进程按宏块行连续分片（每 worker 负责连续若干整行），故每 worker 只收自己
      * 行区间的条带：整帧条带在所有 worker 间恰好发送一次（总字节数与旧协议相同），
@@ -61,15 +86,30 @@ final class MotionWorkerProtocol
      * @param int    $stripOffset 首条带对应的绝对宏块行
      * @param int    $stripCount  条带数
      * @param int    $aw          宏块对齐宽度（条带跨距）
+     * @param string $seedMap     前一帧 MV 地图（encodeMvMap 产物），空串=无种子（行为同 v4）
+     * @param int    $seedW       地图宏块宽（0=无地图）
+     * @param int    $seedH       地图宏块高（0=无地图）
+     * @param int    $tier1BlockSad v7：本帧 Tier1 经验绝对 SAD 限额（每个 4x4 块）；
+     *                              0=不放宽（仅用严格解析死区），否则取 1..4080，
+     *                              worker 实际阈值 = max(严格死区, 本限额)
      */
-    public static function batch(int $id, int $seq, int $qp, array $jobs, string $strips, int $stripOffset, int $stripCount, int $aw): string
+    public static function batch(int $id, int $seq, int $qp, array $jobs, string $strips, int $stripOffset, int $stripCount, int $aw, string $seedMap = '', int $seedW = 0, int $seedH = 0, int $tier1BlockSad = 0): string
     {
         self::validateSeq($seq);
         if ($stripCount < 0 || $stripOffset < 0 || $aw <= 0 || strlen($strips) !== $stripCount * 16 * $aw) {
             throw new InvalidArgumentException('Invalid motion worker strips');
         }
+        $hasSeed = $seedW > 0 && $seedH > 0;
+        if ($hasSeed !== ($seedMap !== '') || ($hasSeed && strlen($seedMap) !== $seedW * $seedH * 4)) {
+            throw new InvalidArgumentException('Invalid motion worker mv seed map');
+        }
+        if ($tier1BlockSad < 0 || $tier1BlockSad > self::MAX_BLOCK_SAD) {
+            throw new InvalidArgumentException('Invalid motion worker tier1 block sad');
+        }
         $body = self::REQUEST_MAGIC . chr(self::JOB_BATCH) . "\0\0\0" . pack('N', $seq)
-            . pack('N6', $id, $qp, count($jobs), $stripOffset, $stripCount, $aw) . $strips;
+            . pack('N8', $id, $qp, count($jobs), $stripOffset, $stripCount, $aw, $seedW, $seedH)
+            . pack('n', $tier1BlockSad)
+            . $strips . $seedMap;
         // job 元数据批量打包（index,x,y,range），避免每 job 一次 pack 调用
         $flat = [];
         foreach ($jobs as $index => $job) {
@@ -101,21 +141,40 @@ final class MotionWorkerProtocol
             $refV = substr($body, $offset + $chromaLength, $chromaLength);
             return [$type, $seq, $header['width'], $header['height'], $header['aw'], $header['ah'], $refY, $refU, $refV];
         }
-        if ($type !== self::JOB_BATCH || strlen($body) < 36) throw new UnexpectedValueException('Invalid motion worker request type');
-        $header = unpack('Nid/Nqp/Ncount/NstripOffset/NstripCount/Naw', substr($body, 12, 24));
+        if ($type !== self::JOB_BATCH || strlen($body) < self::BATCH_HEADER_LENGTH) throw new UnexpectedValueException('Invalid motion worker request type');
+        $header = unpack('Nid/Nqp/Ncount/NstripOffset/NstripCount/Naw/NseedW/NseedH', substr($body, 12, 32));
         $count = $header['count'];
         $stripOffset = $header['stripOffset'];
         $stripCount = $header['stripCount'];
         $aw = $header['aw'];
-        if ($count < 0 || $stripCount < 0 || $stripOffset < 0 || $aw <= 0) throw new UnexpectedValueException('Invalid motion worker batch header');
+        $seedW = $header['seedW'];
+        $seedH = $header['seedH'];
+        // v7：头末尾 u16 Tier1 经验绝对 SAD 限额（0=不放宽，1..4080）
+        $tier1BlockSad = unpack('n', substr($body, 44, 2))[1];
+        if ($count < 0 || $stripCount < 0 || $stripOffset < 0 || $aw <= 0 || $seedW < 0 || $seedH < 0
+            || $tier1BlockSad > self::MAX_BLOCK_SAD) {
+            throw new UnexpectedValueException('Invalid motion worker batch header');
+        }
         $stripsLength = $stripCount * 16 * $aw;
-        if (strlen($body) !== 36 + $stripsLength + $count * self::JOB_META_LENGTH) {
+        $seedLength = $seedW * $seedH * 4;
+        if (($seedW > 0) !== ($seedH > 0) || strlen($body) !== self::BATCH_HEADER_LENGTH + $stripsLength + $seedLength + $count * self::JOB_META_LENGTH) {
             throw new UnexpectedValueException('Invalid motion worker batch length');
         }
+        $payloadOffset = self::BATCH_HEADER_LENGTH;
         // 条带只保留引用（零拷贝），块提取按 job 所在宏块行惰性切片
-        $strips = $stripCount > 0 ? substr($body, 36, $stripsLength) : '';
+        $strips = $stripCount > 0 ? substr($body, $payloadOffset, $stripsLength) : '';
+        // v5：前一帧 MV 种子地图（无地图时 null，运动估计路径与 v4 完全一致）
+        $seedMap = null;
+        if ($seedLength > 0) {
+            $raw = unpack('s*', substr($body, $payloadOffset + $stripsLength, $seedLength));
+            $mvs = [];
+            for ($i = 1, $n = $seedW * $seedH; $i <= $n; $i++) {
+                $mvs[] = [$raw[2 * $i - 1], $raw[2 * $i]];
+            }
+            $seedMap = ['w' => $seedW, 'h' => $seedH, 'mvs' => $mvs];
+        }
         $blocks = [];
-        $offset = 36 + $stripsLength;
+        $offset = $payloadOffset + $stripsLength + $seedLength;
         $stripRows = $stripCount > 0 ? [] : null;
         for ($i = 0; $i < $count; $i++) {
             $job = unpack('Nindex/Nx/Ny/Nrange', substr($body, $offset, 16));
@@ -129,19 +188,24 @@ final class MotionWorkerProtocol
             $blocks[$job['index']] = [$job['x'], $job['y'], $luma, $job['range']];
             $offset += self::JOB_META_LENGTH;
         }
-        return [$type, $seq, $header['id'], $header['qp'], $blocks];
+        return [$type, $seq, $header['id'], $header['qp'], $blocks, $seedMap, $tier1BlockSad];
     }
 
     public static function response(int $id, array $results): string
     {
         $body = self::RESPONSE_MAGIC . pack('NCx3N', $id, 1, count($results));
         foreach ($results as $index => $result) {
-            [$mvX, $mvY, $sad, $cbpLuma, $nzCache, $quantResidual, $reconY, $reconU, $reconV] = $result;
+            [$mvX, $mvY, $sad, $cbpLuma, $nzCache, $quantResidual, $reconY, $reconU, $reconV, $tier1Hit] = $result;
             if (count($nzCache) !== 24 || strlen($reconY) !== 256 || strlen($reconU) !== 64 || strlen($reconV) !== 64) throw new InvalidArgumentException('Invalid motion worker result');
-            $body .= pack('N5', $index, $mvX, $mvY, $sad, $cbpLuma);
+            $flags = $tier1Hit ? self::FLAG_TIER1_HIT : 0;
             if ($cbpLuma > 0) {
-                // 非零宏块：flags + nz(24B) + 量化残差(256*4B)
-                $body .= pack('Cx3', self::FLAG_HAS_RESIDUAL);
+                // 非零宏块：flags(bit0=残差/bit1=Tier1命中) + nz(24B) + 量化残差(256*4B)
+                $flags |= self::FLAG_HAS_RESIDUAL;
+            }
+            // cbp=0：残差必全 0 且主进程不会读取，省掉 1048 字节/宏块的打包、传输与解包
+            $body .= pack('N5', $index, $mvX, $mvY, $sad, $cbpLuma);
+            $body .= pack('Cx3', $flags);
+            if ($cbpLuma > 0) {
                 $body .= pack('C24', ...array_values($nzCache));
                 $flat = [];
                 for ($block = 0; $block < 16; $block++) {
@@ -149,9 +213,6 @@ final class MotionWorkerProtocol
                     foreach ($quantResidual[$block] as $value) $flat[] = $value;
                 }
                 $body .= pack('N256', ...$flat);
-            } else {
-                // cbp=0：残差必全 0 且主进程不会读取，省掉 1048 字节/宏块的打包、传输与解包
-                $body .= "\0\0\0\0";
             }
             $body .= $reconY . $reconU . $reconV;
         }
@@ -201,7 +262,9 @@ final class MotionWorkerProtocol
             $mvY = $packed['h3']; if ($mvY >= 0x80000000) $mvY -= 0x100000000;
             $sad = $packed['h4']; if ($sad >= 0x80000000) $sad -= 0x100000000;
             $cbp = $packed['h5']; if ($cbp >= 0x80000000) $cbp -= 0x100000000;
-            $results[$index] = [$mvX, $mvY, $sad, $cbp, $nzCache, $quantResidual, $reconY, $reconU, $reconV];
+            // v6：flags bit1 回传该 MB 是否走了 Tier1（含放宽阈值）命中
+            $tier1Hit = ($packed['flags'] & self::FLAG_TIER1_HIT) !== 0 ? 1 : 0;
+            $results[$index] = [$mvX, $mvY, $sad, $cbp, $nzCache, $quantResidual, $reconY, $reconU, $reconV, $tier1Hit];
         }
         if ($offset !== strlen($body)) throw new UnexpectedValueException('Invalid motion worker response trailer');
         return [$header['id'], true, $results];

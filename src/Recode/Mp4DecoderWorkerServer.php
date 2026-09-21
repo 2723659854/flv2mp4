@@ -15,6 +15,8 @@ final class Mp4DecoderWorkerServer
 {
     private H264Decoder $decoder;
     private VideoScaler $scaler;
+    /** @var string 待发回主进程的上行控制帧（波前检查点），每轮事件循环清空 */
+    private string $upFrame = '';
 
     public function __construct(private array $config)
     {
@@ -30,11 +32,12 @@ final class Mp4DecoderWorkerServer
         $upstream = @stream_socket_accept($server, 15); fclose($server);
         if ($upstream === false) throw new RuntimeException('解码进程等待主进程连接超时');
         stream_set_blocking($upstream, false); stream_set_blocking($downstream, false);
-        $input = ''; $output = ''; $response = ''; $ended = false;
+        $input = ''; $output = ''; $response = ''; $upOutput = ''; $ended = false;
         try {
             while (true) {
                 $read = [$downstream]; if (!$ended && strlen($input) < HlsPipelineProtocol::HIGH_WATERMARK && strlen($output) < HlsPipelineProtocol::HIGH_WATERMARK) $read[] = $upstream;
-                $write = $output === '' ? [] : [$downstream]; $except = null; @stream_select($read, $write, $except, 0, 2000);
+                $write = $output === '' ? [] : [$downstream]; if ($upOutput !== '') $write[] = $upstream;
+                $except = null; @stream_select($read, $write, $except, 0, 2000);
                 if (in_array($upstream, $read, true)) {
                     while (true) {
                         $chunk = @fread($upstream, 65536);
@@ -50,8 +53,20 @@ final class Mp4DecoderWorkerServer
                     $events = HlsPipelineProtocol::take($input, 1);
                     if ($events === []) break;
                     $event = $events[0];
-                    if ($event['type'] === HlsPipelineProtocol::END) { $output .= HlsPipelineProtocol::frame(HlsPipelineProtocol::END, $event['sequence']); $ended = true; }
-                    else $output .= $this->transform($event);
+                    if ($event['type'] === HlsPipelineProtocol::CONTROL) {
+                        $cmd = $event['metadata']['cmd'] ?? '';
+                        if ($cmd === 'checkpoint') {
+                            // 波前后段区间起点：注入前段 DPB 后再解后续帧
+                            $cp = unserialize($event['payload']);
+                            if (!is_array($cp)) throw new RuntimeException('收到无效的解码检查点');
+                            $this->decoder->importCheckpoint($cp);
+                        }
+                    } elseif ($event['type'] === HlsPipelineProtocol::END) { $output .= HlsPipelineProtocol::frame(HlsPipelineProtocol::END, $event['sequence']); $ended = true; }
+                    else {
+                        $this->upFrame = '';
+                        $output .= $this->transform($event);
+                        if ($this->upFrame !== '') { $upOutput .= $this->upFrame; $this->upFrame = ''; }
+                    }
                     if (strlen($output) > HlsPipelineProtocol::MAX_BUFFER_LENGTH) throw new RuntimeException('解码进程下游缓冲超限');
                 }
                 if (in_array($downstream, $write, true)) {
@@ -60,6 +75,15 @@ final class Mp4DecoderWorkerServer
                         if ($n === false || ($n === 0 && feof($downstream))) throw new RuntimeException('输出进程媒体连接意外关闭');
                         if ($n === 0) break;
                         $output = substr($output, $n);
+                        if ($n < 262144) break;
+                    }
+                }
+                if (in_array($upstream, $write, true) && $upOutput !== '') {
+                    while ($upOutput !== '') {
+                        $n = @fwrite($upstream, substr($upOutput, 0, 262144));
+                        if ($n === false || ($n === 0 && feof($upstream))) break;
+                        if ($n === 0) break;
+                        $upOutput = substr($upOutput, $n);
                         if ($n < 262144) break;
                     }
                 }
@@ -80,10 +104,89 @@ final class Mp4DecoderWorkerServer
         } finally { if (is_resource($upstream)) @fclose($upstream); if (is_resource($downstream)) @fclose($downstream); }
     }
 
+    /**
+     * Task 6 段池模式：解码 worker 只与协调进程通信（无下游输出进程）。
+     * transform 结果（含 decoded YUV）全部上行回协调进程；END -> 直接回 FINISHED。
+     */
+    public function runUpstream(string $listenAddress): void
+    {
+        $server = @stream_socket_server($listenAddress, $errno, $error);
+        if ($server === false) throw new RuntimeException("解码进程监听失败: {$error} ({$errno})");
+        $upstream = @stream_socket_accept($server, 15); fclose($server);
+        if ($upstream === false) throw new RuntimeException('解码进程等待协调进程连接超时');
+        stream_set_blocking($upstream, false);
+        $input = ''; $output = '';
+        try {
+            while (true) {
+                $read = []; $write = []; $except = null;
+                if (strlen($input) < HlsPipelineProtocol::HIGH_WATERMARK && strlen($output) < HlsPipelineProtocol::HIGH_WATERMARK) $read[] = $upstream;
+                if ($output !== '') $write[] = $upstream;
+                if ($read === [] && $write === []) {
+                    @stream_select($r, $w, $except, 0, 20000);
+                } else {
+                    @stream_select($read, $write, $except, 0, 20000);
+                }
+                if (in_array($upstream, $read, true)) {
+                    while (true) {
+                        $chunk = @fread($upstream, 65536);
+                        if ($chunk === false || ($chunk === '' && feof($upstream))) throw new RuntimeException('协调进程媒体连接意外关闭');
+                        if ($chunk === '') break;
+                        $input .= $chunk;
+                        if (strlen($input) > HlsPipelineProtocol::MAX_BUFFER_LENGTH) throw new RuntimeException('解码进程输入缓冲超限');
+                        if (strlen($chunk) < 65536) break;
+                    }
+                }
+                while (strlen($output) < HlsPipelineProtocol::HIGH_WATERMARK) {
+                    $events = HlsPipelineProtocol::take($input, 1);
+                    if ($events === []) break;
+                    $event = $events[0];
+                    if ($event['type'] === HlsPipelineProtocol::CONTROL) {
+                        $cmd = $event['metadata']['cmd'] ?? '';
+                        if ($cmd === 'checkpoint') {
+                            $cp = unserialize($event['payload']);
+                            if (!is_array($cp)) throw new RuntimeException('收到无效的解码检查点');
+                            $this->decoder->importCheckpoint($cp);
+                        } else {
+                            throw new RuntimeException("解码进程收到未知控制命令: {$cmd}");
+                        }
+                        continue;
+                    }
+                    if ($event['type'] === HlsPipelineProtocol::END) {
+                        stream_set_blocking($upstream, true);
+                        $output .= HlsPipelineProtocol::frame(HlsPipelineProtocol::FINISHED, $event['sequence']);
+                        while ($output !== '') {
+                            $n = @fwrite($upstream, substr($output, 0, 262144));
+                            if ($n === false || $n === 0) break;
+                            $output = substr($output, $n);
+                        }
+                        return;
+                    }
+                    $this->upFrame = '';
+                    $output .= $this->transform($event);
+                    if ($this->upFrame !== '') { $output .= $this->upFrame; $this->upFrame = ''; }
+                    if (strlen($output) > HlsPipelineProtocol::MAX_BUFFER_LENGTH) throw new RuntimeException('解码进程上行缓冲超限');
+                }
+                if (in_array($upstream, $write, true) && $output !== '') {
+                    $n = @fwrite($upstream, substr($output, 0, 262144));
+                    if ($n === false || ($n === 0 && feof($upstream))) throw new RuntimeException('协调进程媒体连接写失败');
+                    if ($n > 0) $output = substr($output, $n);
+                }
+            }
+        } catch (\Throwable $e) {
+            if (is_resource($upstream)) {
+                try { $this->writeAll($upstream, HlsPipelineProtocol::frame(HlsPipelineProtocol::ERROR, 0, ['message' => $e->getMessage()])); } catch (\Throwable) {}
+            }
+            throw $e;
+        } finally { if (is_resource($upstream)) @fclose($upstream); }
+    }
+
     private function transform(array $event): string
     {
         if ($event['type'] !== HlsPipelineProtocol::EVENT) throw new RuntimeException('解码进程收到未知事件');
         $meta = $event['metadata']; $payload = $event['payload'];
+        // 波前边界标记：本帧解码后回传检查点，不应透传到下游
+        $cpAfter = isset($meta['cpAfter']) ? (int)$meta['cpAfter'] : null;
+        unset($meta['cpAfter']);
         if (($meta['sampleType'] ?? '') !== 'video') return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, $payload);
         $pipeline = $this->config['pipeline'];
         $needTranscode = ((int)($this->config['width'] ?? 0) > 0 && (int)$pipeline['srcWidth'] !== (int)$pipeline['outputWidth'])
@@ -98,6 +201,13 @@ final class Mp4DecoderWorkerServer
         $dropFrame = !empty($meta['drop']);
         // 被丢弃的帧仍需完整解码以维持本GOP参考链，但它的YUV不会进入后续流水线，跳过裁剪输出
         $frame = $this->decoder->decode($nals, false, !$dropFrame);
+        // 波前：边界帧（含被抽帧丢弃帧——已完整解码入 DPB）导出检查点回传主进程
+        if ($cpAfter !== null && $frame) {
+            $cp = $this->decoder->exportCheckpoint($sps !== '' ? $sps : null, $pps !== '' ? $pps : null);
+            $this->upFrame = HlsPipelineProtocol::frame(
+                HlsPipelineProtocol::CONTROL, 0, ['cmd' => 'checkpoint', 'range' => $cpAfter], serialize($cp)
+            );
+        }
         // 抽帧决策由主进程统一下发
         if ($dropFrame) return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, $payload);
         if (!$frame || empty($frame['data'])) { unset($meta['drop']); return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, $payload); }

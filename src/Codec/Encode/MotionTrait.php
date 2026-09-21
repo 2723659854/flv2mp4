@@ -8,6 +8,10 @@ namespace Xiaosongshu\Flv2mp4\Codec\Encode;
  */
 trait MotionTrait
 {
+    /** Tier1/Tier2 快速跳过总开关（由入口 config early_skip 经编码器/motion 子进程注入） */
+    public bool $earlySkip = true;
+    /** Tier2 亚像素跳过阈值倍数（由入口 config subpel_sad_mul 注入，默认 4.0） */
+    public float $subpelSadMul = 4.0;
 
     /**
      * 获取参考帧中指定位置的像素值（带边界处理）
@@ -129,10 +133,12 @@ trait MotionTrait
 
     /**
      * 运动估计：整数像素搜索，菱形搜索
-     * @param array $curFlat 当前宏块亮度像素（0基、长度256）
+     * @param array      $curFlat 当前宏块亮度像素（0基、长度256）
+     * @param array|null $seedMv 时间 MVP 种子 [mvX,mvY]（1/4 像素，来自前一帧同位置 MB），
+     *                           null=无种子（IDR 后首 P 帧/关闭 mvp_seed）
      * @return array [mvX, mvY, sad] 运动向量和SAD值（mvX/mvY为1/4像素单位）
      */
-    public function motionEstimate16x16(array $curFlat, string $refPlane, int $mbX, int $mbY, int $searchRange = 16): array
+    public function motionEstimate16x16(array $curFlat, string $refPlane, int $mbX, int $mbY, int $searchRange = 16, ?array $seedMv = null): array
     {
         if (!isset($this->refInts) || $this->refInts === null) {
             $this->refInts = unpack('C*', $refPlane);
@@ -161,6 +167,28 @@ trait MotionTrait
         $bestDY = 0;
         $bestSAD = $this->computeSADFast($curFlat, $origX, $origY, 0, 0, $blockW, $blockH, $refStride, PHP_INT_MAX);
         $candidateSads = ['0,0' => $bestSAD];
+
+        // === 时间 MVP 种子（mvp_seed）===
+        // 取前一帧同位置 MV 的整数像素点，与 (0,0) 各评一次整数 SAD，优者作为
+        // LDSP 菱形搜索的起点。Tier1 已在调用前最先判定；此处仅改变搜索起点，
+        // LDSP→SDSP→亚像素流程与合法边界校验完全不变，结果恒为合法 MV。
+        if ($seedMv !== null) {
+            $seedDX = intdiv((int)$seedMv[0], 4);
+            $seedDY = intdiv((int)$seedMv[1], 4);
+            $seedDX = max($minDx, min($maxDx, $seedDX));
+            $seedDY = max($minDy, min($maxDy, $seedDY));
+            if ($seedDX !== 0 || $seedDY !== 0) {
+                $seedKey = $seedDX . ',' . $seedDY;
+                $seedSad = $candidateSads[$seedKey] ??= $this->computeSADFast(
+                    $curFlat, $origX, $origY, $seedDX, $seedDY, $blockW, $blockH, $refStride, $bestSAD
+                );
+                if ($seedSad < $bestSAD) {
+                    $bestSAD = $seedSad;
+                    $bestDX = $seedDX;
+                    $bestDY = $seedDY;
+                }
+            }
+        }
 
         for ($iter = 0; $iter < 10; $iter++) {
             $foundBetter = false;
@@ -219,10 +247,11 @@ trait MotionTrait
         // 整数 MV 的 MC 像素与整数 SAD 候选完全等价，复用已计算结果。
         $bestSAD = $candidateSads[$bestDX . ',' . $bestDY];
 
-        // Tier2 early-skip：整数最优停在 (0,0) 且 SAD 落入量化死区量级时，
+        // Tier2 early-skip：整数最优点 (0,0) 的 SAD 落入量化死区量级时，
         // 跳过 6 抽头插值缓冲与半/四像素精搜（DCT 仍照常，结果合法）。
-        if ($this->earlySkip && $bestDX === 0 && $bestDY === 0 && $bestSAD <= self::subpelSkipSad($this->qp)) {
-            return [0, 0, $bestSAD];
+        // 该判定与 mvp_seed 是否开启无关，保持与原串行路径完全一致的行为。
+        if ($this->earlySkip && $bestDX === 0 && $bestDY === 0 && $bestSAD <= $this->subpelSkipSad($this->qp)) {
+            return [$bestDX * 4, $bestDY * 4, $bestSAD];
         }
 
         [$bestMVx, $bestMVy, $bestSAD] = $this->refineSubpelShared(
@@ -572,22 +601,19 @@ trait MotionTrait
      * Tier2 阈值：16x16 宏块整数 (0,0) SAD 上限。
      * 低于该值时跳过昂贵的 6 抽头半/四像素插值精搜（整数 MV=(0,0) 的残差已落入
      * 量化死区量级，亚像素收益可忽略）。DCT/量化仍照常执行，仅影响压缩效率、不影响正确性。
-     * 基础量级取 4 个 4x4 块 DC 系数的死区容量，系数可用 FLV2MP4_SUBPEL_SAD_MUL 调整（默认 4；
+     * 基础量级取 4 个 4x4 块 DC 系数的死区容量，倍数由 config subpel_sad_mul 调整（默认 4；
      * 静态画面为主的监控/会议/桌面场景可上调到 12，进一步跳过亚像素精搜）。
      */
-    public static function subpelSkipSad(int $qp): int
+    public function subpelSkipSad(int $qp): int
     {
         static $cache = [];
         $qp = max(0, min(51, $qp));
-        if (isset($cache[$qp])) return $cache[$qp];
+        // 缓存键包含倍数，避免同进程内不同配置实例串值
+        $key = $qp . ':' . $this->subpelSadMul;
+        if (isset($cache[$key])) return $cache[$key];
         $mf = \Xiaosongshu\Flv2mp4\Codec\H264Encoder::QUANT_MF[$qp];
         $ff = \Xiaosongshu\Flv2mp4\Codec\H264Encoder::QUANT_INTER_FF[$qp];
-        static $mul = null;
-        if ($mul === null) {
-            $env = getenv('FLV2MP4_SUBPEL_SAD_MUL');
-            $mul = is_string($env) && $env !== '' && (float)$env > 0 ? (float)$env : 4.0;
-        }
-        return $cache[$qp] = (int)round(max(0, intdiv(65535, $mf[0]) - $ff[0]) * $mul);
+        return $cache[$key] = (int)round(max(0, intdiv(65535, $mf[0]) - $ff[0]) * $this->subpelSadMul);
     }
 
     /**

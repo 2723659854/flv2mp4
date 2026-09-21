@@ -13,11 +13,16 @@ try {
     $config = json_decode(base64_decode($options['config'], true), true, 32, JSON_THROW_ON_ERROR);
     if ($mode === 'decoder') {
         if (ini_set('memory_limit', '512M') === false) throw new RuntimeException('无法设置解码 worker 内存上限');
-        if (empty($options['output-port'])) throw new RuntimeException('解码 worker 缺少 output-port');
-        (new \Xiaosongshu\Flv2mp4\Recode\FlvDecoderWorkerServer($config))->run(
-            'tcp://127.0.0.1:' . (int)$options['port'],
-            'tcp://127.0.0.1:' . (int)$options['output-port']
-        );
+        $server = new \Xiaosongshu\Flv2mp4\Recode\FlvDecoderWorkerServer($config);
+        if (empty($options['output-port'])) {
+            // Task 6 段池模式：无 output-port 表示结果直接上行回协调进程
+            $server->runUpstream('tcp://127.0.0.1:' . (int)$options['port']);
+        } else {
+            $server->run(
+                'tcp://127.0.0.1:' . (int)$options['port'],
+                'tcp://127.0.0.1:' . (int)$options['output-port']
+            );
+        }
     } elseif ($mode === 'output') {
         ini_set('memory_limit', '1024M');
         if (!isset($options['output'])) throw new RuntimeException('输出 worker 缺少 output');

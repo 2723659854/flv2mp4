@@ -21,12 +21,37 @@ trait SliceEncodeTrait
     private bool $reconPreassembled = false;
     /** 当前待编码帧的 recon 是否已由 installReconFromResults 预拼（区别于非流水线 P 帧） */
     private bool $reconPrefetched = false;
+    /**
+     * 上一 P 帧的 MV 地图（mvp_seed 时间种子）：['w'=>mbWidth,'h'=>mbHeight,'mvs'=>[[mvX,mvY],...]]
+     * 光栅顺序；IDR 后/帧尺寸变化时置 null（下一 P 帧自动从 (0,0) 起搜）。
+     */
+    private ?array $prevFrameMvs = null;
+    /**
+     * 上一已 settle P 帧的 skip 统计（v7 自适应）：
+     * ['w'=>mbWidth,'h'=>mbHeight,'nat'=>自然 skip MB 数,'forced'=>Tier1 强制命中数,'total'=>MB 总数]；
+     * 自然 skip = 完整搜索/DCT 后 cbp=0 且 MV=0 且非 Tier1 命中（nat 必为"完整路径 MB"子集）。
+     * 武装/保持信号 = nat / max(1, total-forced)：只在真正走过完整路径的 MB 上评估，
+     *   未武装帧 forced≈严格死区命中（≈0），等价于整帧自然 skip 率（≥ratio 才首次武装）；
+     * * 已武装静态帧大部分 MB 被强制命中，剩余 MB 仍全部自然 skip → 比值 100%，持续武装（不振荡）；
+     * * 场景突变时完整路径 MB 普遍带残差，比值骤降 → 下一帧立即解除。
+     * IDR 后/序列起始为 null（下一 P 帧必须使用严格死区）。
+     * 跨 worker 进程确定性考虑：放宽判定依据"上一整帧"的全局占比，
+     * 而非 worker 本地的帧内前缀计数，故输出与 motionWorkers 数量无关。
+     */
+    private ?array $prevFrameTier1 = null;
 
-    /** 帧流水线总开关（FLV2MP4_FRAME_PIPELINE=0 关闭，用于 A/B 与灰度回退） */
+    /** 帧流水线开关（由入口 config frame_pipeline 注入，默认开启；置 false 退化同步编码） */
+    public bool $framePipeline = true;
+    /** 静态场景自适应 Tier1 放宽开关（由入口 config adaptive_skip 注入，默认关） */
+    public bool $adaptiveSkip = false;
+    /** 上一 P 帧自然 skip 占比达到该值才放宽当前帧（config adaptive_hit_ratio，默认 0.9） */
+    public float $adaptiveHitRatio = 0.9;
+    /** Tier1 经验绝对 SAD 限额（每 4x4 块，config adaptive_block_sad；0=按 qp 自动） */
+    public int $adaptiveBlockSad = 0;
+
     private function framePipelineEnabled(): bool
     {
-        static $enabled = null;
-        return $enabled ??= getenv('FLV2MP4_FRAME_PIPELINE') !== '0';
+        return $this->framePipeline;
     }
 
     /**
@@ -67,6 +92,8 @@ trait SliceEncodeTrait
             $resultsA = $this->motionWorkerClient->collect();
             // 立即用 worker recon 拼出 A 的重建帧作为 B 的参考（与 CAVLC 后逐 MB 拷贝逐字节相同）
             $this->installReconFromResults($ctxA, $resultsA);
+            // 提取 A 的 MV 地图，紧接的 dispatchSlice(B) 即用作时间种子
+            $this->captureFrameMvs($ctxA, $resultsA);
             $ctxA['results'] = $resultsA;
             $this->pipePending = ['ctx' => $ctxA, 'cachedNals' => null];
         } else {
@@ -77,7 +104,9 @@ trait SliceEncodeTrait
 
         // 准备并异步派发 B（主进程紧接着在 finishFrame 中 CAVLC A，与 worker 并行）
         $ctxB = $this->prepareSliceContext($yuvData, $isKeyframe);
-        if ($ctxB['sliceType'] === 0) $this->dispatchSlice($ctxB);
+        if ($ctxB['sliceType'] === 0) {
+            $this->dispatchSlice($ctxB);
+        }
         $this->pipeFlight = $ctxB;
     }
 
@@ -99,7 +128,10 @@ trait SliceEncodeTrait
             return $this->encodeFrameInline($ctx['inlineTodo'][0], $ctx['inlineTodo'][1]);
         }
         $results = null;
-        if ($ctx['sliceType'] === 0) $results = $this->motionWorkerClient->collect();
+        if ($ctx['sliceType'] === 0) {
+            $results = $this->motionWorkerClient->collect();
+            $this->captureFrameMvs($ctx, $results);
+        }
         return $this->encodeSliceBody($ctx, $results);
     }
 
@@ -120,6 +152,7 @@ trait SliceEncodeTrait
         if ($ctx['sliceType'] === 0) {
             $this->dispatchSlice($ctx);
             $results = $this->motionWorkerClient->collect();
+            $this->captureFrameMvs($ctx, $results);
         }
         return $this->encodeSliceBody($ctx, $results);
     }
@@ -198,7 +231,33 @@ trait SliceEncodeTrait
                 $jobs[$y * $mbWidth + $x] = [$x, $y, 32];
             }
         }
-        $client = $this->motionWorkerClient ??= new MotionWorkerClient(workers: $this->motionWorkers);
+        $client = $this->motionWorkerClient ??= new MotionWorkerClient(0, $this->motionWorkers, $this->motionOptions);
+        // v5：mvp_seed 开启且上一帧为同网格 P 帧时，随批次下发前一帧 MV 种子地图；
+        // IDR 后首 P 帧或尺寸不一致时 prevFrameMvs=null，负载为空、搜索从 (0,0) 起。
+        $seedMap = '';
+        $seedW = $seedH = 0;
+        if ($this->mvpSeed && $this->prevFrameMvs !== null
+            && $this->prevFrameMvs['w'] === $mbWidth && $this->prevFrameMvs['h'] === $mbHeight) {
+            $seedMap = MotionWorkerProtocol::encodeMvMap($mbWidth, $mbHeight, $this->prevFrameMvs['mvs']);
+            $seedW = $mbWidth;
+            $seedH = $mbHeight;
+        }
+        // v7：上一 P 帧（同网格）完整路径 MB 的自然 skip 占比达标 → 本帧整帧下发经验绝对 SAD 限额；
+        // IDR 后首 P 帧（prevFrameTier1=null）、尺寸不一致、未达标或开关关闭时 0（严格死区）。
+        $tier1BlockSad = 0;
+        if ($this->adaptiveSkip && $this->prevFrameTier1 !== null
+            && $this->prevFrameTier1['w'] === $mbWidth && $this->prevFrameTier1['h'] === $mbHeight
+            && $this->prevFrameTier1['total'] > 0) {
+            $evaluated = $this->prevFrameTier1['total'] - $this->prevFrameTier1['forced'];
+            // 全部 MB 均被强制（evaluated=0）时无反证，维持武装；否则以完整路径 MB 自然 skip 率判定
+            $ratioOk = $evaluated <= 0
+                || $this->prevFrameTier1['nat'] / $evaluated >= $this->adaptiveHitRatio;
+            if ($ratioOk) {
+                $tier1BlockSad = $this->adaptiveBlockSad > 0
+                    ? $this->adaptiveBlockSad
+                    : $this->adaptiveBlockSadAuto($this->qp);
+            }
+        }
         $client->dispatch(
             $this->width,
             $this->height,
@@ -211,8 +270,56 @@ trait SliceEncodeTrait
             $ctx['yPlane'],
             $mbWidth,
             $mbHeight,
-            $jobs
+            $jobs,
+            $seedMap,
+            $seedW,
+            $seedH,
+            $tier1BlockSad
         );
+    }
+
+    /**
+     * 经验绝对 SAD 限额的 qp 自动值（adaptive_block_sad=0 时）。
+     * 基准 96@qp10 由 TR-3 实验标定（纯静态素材对源 PSNR 损失 0.01dB、
+     * 对 seed 路径 PSNR 60dB/min58dB；噪声突变 1 帧解除）；
+     * 量化步长每 +6qp 翻倍，允许的像素差/SAD 同比例放大。
+     */
+    private function adaptiveBlockSadAuto(int $qp): int
+    {
+        $base = 96; // qp=10 基准（每 4x4 块 SAD，实验标定）
+        $scale = 2 ** (($qp - 10) / 6);
+        return max(1, min(MotionWorkerProtocol::MAX_BLOCK_SAD, (int)round($base * $scale)));
+    }
+
+    /** 收齐 P 帧 worker 结果后：统计本帧自然 skip 占比（供下帧自适应），并提取整帧 MV 作时间 MVP 种子 */
+    private function captureFrameMvs(array $ctx, array $results): void
+    {
+        // v7：自然 skip = 完整搜索/DCT 后 cbp=0 且 MV=0 且非 Tier1 命中（result[9]）。
+        // 强制命中 MB 单列：武装保持率只在完整路径 MB 上评估（dispatchSlice），
+        // 场景突变时完整路径 MB 的自然 skip 数骤降，下一帧立即解除武装。
+        $nat = 0;
+        $forced = 0;
+        foreach ($results as $result) {
+            $isForced = !empty($result[9]);
+            if ($isForced) {
+                $forced++;
+            } elseif ($result[3] === 0 && $result[0] === 0 && $result[1] === 0) {
+                // 自然 skip 只在完整路径 MB 中计数：强制命中 MB 不参与武装保持率分母，
+                // 场景突变时它们不提供反证，反证全部来自完整路径 MB（见 dispatchSlice）。
+                $nat++;
+            }
+        }
+        $this->prevFrameTier1 = [
+            'w' => $ctx['mbWidth'], 'h' => $ctx['mbHeight'],
+            'nat' => $nat, 'forced' => $forced, 'total' => count($results),
+        ];
+        if (!$this->mvpSeed) {
+            $this->prevFrameMvs = null;
+            return;
+        }
+        $mvs = [];
+        foreach ($results as $result) $mvs[] = [$result[0], $result[1]];
+        $this->prevFrameMvs = ['w' => $ctx['mbWidth'], 'h' => $ctx['mbHeight'], 'mvs' => $mvs];
     }
 
     /**
@@ -282,6 +389,9 @@ trait SliceEncodeTrait
             $this->refYPlane = null;
             $this->refUPlane = null;
             $this->refVPlane = null;
+            // IDR 后参考链断裂：下一 P 帧无时间 MVP 种子、Tier1 命中率统计也清空（严格死区起算）
+            $this->prevFrameMvs = null;
+            $this->prevFrameTier1 = null;
             $this->frameNum = 0;
             $this->idrPicId++;
             $this->poc = 0;

@@ -91,27 +91,40 @@ class FlvRecoder
     /** @var FlvTag[] 在途视频帧之后到达的音频 tag，待该帧写出后按原顺序回放 */
     private array $queuedAudioTags = [];
 
+    /**
+     * @param array $config 转码配置（细粒度快速项见 TranscodeOptions）
+     * @param bool $multi 快速重编码总开关：true=多进程快速路径，false=原始串行路径（默认）
+     */
     public function __construct(array $config = [], bool $multi = false)
     {
         $this->multi = $multi;
-        $this->config = $config;
-        $this->targetWidth = $config['width'] ?? 0;
-        $this->targetHeight = $config['height'] ?? 0;
-        $this->targetBitrate = $config['bitrate'] ?? 0;
-        $this->targetFps = $config['fps'] ?? 0;
-        $this->targetQp = $config['qp'] ?? 26;
+        // 幂等归一化：worker 子进程以 false 再次构造时，父进程下发的已填键不会被覆盖
+        $this->config = TranscodeOptions::normalize($config, $multi);
+        $this->targetWidth = $this->config['width'] ?? 0;
+        $this->targetHeight = $this->config['height'] ?? 0;
+        $this->targetBitrate = $this->config['bitrate'] ?? 0;
+        $this->targetFps = $this->config['fps'] ?? 0;
+        $this->targetQp = $this->config['qp'] ?? 26;
         $this->validateConfig();
 
-        if (!empty($config['watermark']) && !empty($config['watermark_file'])) {
+        if (!empty($this->config['watermark']) && !empty($this->config['watermark_file'])) {
             $this->watermarkEnabled = true;
-            $this->watermarkFile = $config['watermark_file'];
+            $this->watermarkFile = $this->config['watermark_file'];
             $this->loadWatermark();
         }
 
         $this->decoder = new H264Decoder();
-        $this->encoder = new H264Encoder();
-        $this->encoder->motionWorkers = max(1, (int)($config['motionWorkers'] ?? 8));
+        $this->encoder = $this->createEncoder();
         $this->scaler = new VideoScaler();
+    }
+
+    /** 按归一化配置创建编码器（构造与 resetProcessState 共用，保证选项一致） */
+    private function createEncoder(): H264Encoder
+    {
+        $encoder = new H264Encoder();
+        $encoder->motionWorkers = max(1, (int)$this->config['motionWorkers']);
+        TranscodeOptions::applyEncoder($encoder, $this->config);
+        return $encoder;
     }
 
     private function validateConfig(): void
@@ -214,8 +227,7 @@ class FlvRecoder
     private function resetProcessState(): void
     {
         $this->decoder = new H264Decoder();
-        $this->encoder = new H264Encoder();
-        $this->encoder->motionWorkers = max(1, (int)($this->config['motionWorkers'] ?? 8));
+        $this->encoder = $this->createEncoder();
         $this->srcWidth = 0;
         $this->srcHeight = 0;
         $this->srcInitialized = false;
@@ -356,7 +368,18 @@ class FlvRecoder
         if ($tag->tagType === 9) {
             if (!empty($metadata['drop'])) return;
             $this->pipelineYuv = null;
-            $this->pipelineEncoded = $metadata['gopEncoded']['profiles']['default'] ?? null;
+            $encodedNals = $metadata['gopEncoded']['profiles']['default'] ?? null;
+            // 跨进程 JSON 通道：段池 NAL 为 base64，消费时解码为裸 NAL
+            if (is_array($encodedNals)) {
+                $decodedNals = [];
+                foreach ($encodedNals as $b64) {
+                    $raw = base64_decode((string)$b64, true);
+                    if ($raw === false || $raw === '') throw new RuntimeException('流水线编码帧 NAL base64 非法');
+                    $decodedNals[] = $raw;
+                }
+                $encodedNals = $decodedNals;
+            }
+            $this->pipelineEncoded = $encodedNals;
             $this->pipelineForcedIdr = !empty($metadata['forcedIdr']);
             if (!empty($metadata['decoded'])) {
                 $bodyLength = unpack('N', substr($payload, 0, 4))[1];

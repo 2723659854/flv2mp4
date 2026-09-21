@@ -37,6 +37,14 @@ try {
             'tcp://127.0.0.1:' . (int)$options['port'],
             $workers
         );
+    } elseif ($mode === 'segment') {
+        if (ini_set('memory_limit', '512M') === false) throw new RuntimeException('无法设置片 worker 内存上限');
+        // 片任务链式派发时空闲可能超过默认 60s（Task7 检查点链接），禁掉 socket 空闲超时
+        ini_set('default_socket_timeout', '-1');
+        if (!isset($options['output'])) throw new RuntimeException('片 worker 缺少 output');
+        (new \Xiaosongshu\Flv2mp4\Recode\HlsSegmentWorkerServer($profiles, $options['output']))->run(
+            'tcp://127.0.0.1:' . (int)$options['port']
+        );
     } else throw new RuntimeException('未知 HLS worker 模式');
 } catch (Throwable $e) {
     fwrite(STDERR, $e->getMessage() . "\n");

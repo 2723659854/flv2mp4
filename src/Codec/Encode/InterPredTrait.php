@@ -8,6 +8,14 @@ namespace Xiaosongshu\Flv2mp4\Codec\Encode;
  */
 trait InterPredTrait
 {
+    /**
+     * Tier1 经验绝对 SAD 限额（v7，由帧协议按帧下发：上一 P 帧自然 skip 占比≥阈值时下发）。
+     * 0=不放宽（仅用严格数学死区，位级等价）；>0 时每 4x4 块 SAD≤max(严格死区, 本限额)
+     * 即直接产出 cbp=0/MV=0 的合法 skip（编解码重建均为 (0,0) MC，不失配，仅相对源失真），
+     * 故仅允许在静态场景帧由上层显式开启。
+     */
+    public int $tier1BlockSad = 0;
+
     public function preparePMacroblock(
         int $mbX,
         int $mbY,
@@ -15,18 +23,21 @@ trait InterPredTrait
         string $refYPlane,
         string $refUPlane,
         string $refVPlane,
-        int $motionRange = 32
+        int $motionRange = 32,
+        ?array $seedMv = null
     ): array {
         $curFlat = array_values(unpack('C*', $luma));
 
-        // === Tier1 early-skip（数学保证，零画质风险）===
-        // 单次遍历计算 16 个 4x4 块在整数 (0,0) 的 SAD；全部 ≤ QP 死区阈值时，
-        // 残差经 DCT+Inter 量化必定全为 0（见 MotionTrait::zeroResidualBlockSad）。
-        // 此时直接产出 MV=(0,0)、cbp=0、与 (0,0) 运动补偿完全一致的重建帧，
-        // 跳过整/半/四像素运动搜索与全部 DCT/量化。主进程仍按 skipMVP 决定 P_Skip，
-        // 故与"完整搜索恰好得到同结果"位级等价。
+        // === Tier1 early-skip ===
+        // 单次遍历计算 16 个 4x4 块在整数 (0,0) 的 SAD；全部 ≤ 死区阈值时，
+        // 直接产出 MV=(0,0)、cbp=0、与 (0,0) 运动补偿完全一致的重建帧，
+        // 跳过整/半/四像素运动搜索与全部 DCT/量化。
+        //  - tier1BlockSad=0：阈值为严格数学死区（MotionTrait::zeroResidualBlockSad），
+        //    残差量化必为 0，位级等价零风险（qp≤15 时该解析界为 0，即要求逐字节相等）。
+        //  - tier1BlockSad>0（自适应静态场景，按帧下发，≤4080）：阈值取经验绝对 SAD 限额；
+        //    cbp=0/MV=0 仍是合法编码（编解码两侧重建同为 (0,0) MC，不会失配），仅引入失真。
         if ($this->earlySkip) {
-            $zeroT = $this->zeroResidualBlockSad($this->qp);
+            $zeroT = max($this->zeroResidualBlockSad($this->qp), $this->tier1BlockSad);
             $stride = $this->mbAlignedWidth;
             $ox = $mbX * 16;
             $oy = $mbY * 16;
@@ -67,11 +78,12 @@ trait InterPredTrait
                     array_fill(0, 24, 0),
                     array_fill(0, 16, array_fill(0, 16, 0)),
                     $reconY, $reconU, $reconV,
+                    1, // v6：Tier1 命中（严格或放宽阈值），回传主进程做帧级命中率统计
                 ];
             }
         }
 
-        [$mvX, $mvY, $sad] = $this->motionEstimate16x16($curFlat, $refYPlane, $mbX, $mbY, $motionRange);
+        [$mvX, $mvY, $sad] = $this->motionEstimate16x16($curFlat, $refYPlane, $mbX, $mbY, $motionRange, $seedMv);
         $refX = $mbX * 64 + $mvX;
         $refY = $mbY * 64 + $mvY;
         $predBlock = $this->mcLumaBlock($refYPlane, $refX, $refY, $this->mbAlignedWidth, $this->mbAlignedHeight);
@@ -131,7 +143,7 @@ trait InterPredTrait
             $reconV[$y * 8 + $x] = chr($crPred[$y * 8 + $x]);
         }
 
-        return [$mvX, $mvY, $sad, $cbpLuma, $nzCache, $quantResidual, $reconY, $reconU, $reconV];
+        return [$mvX, $mvY, $sad, $cbpLuma, $nzCache, $quantResidual, $reconY, $reconU, $reconV, 0];
     }
 
     /**

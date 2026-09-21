@@ -2,6 +2,7 @@
 namespace Xiaosongshu\Flv2mp4\Codec\Encode;
 
 use RuntimeException;
+use Xiaosongshu\Flv2mp4\Recode\CpuInfo;
 
 /**
  * @purpose 运动模块分布式计算-客户端
@@ -21,9 +22,15 @@ final class MotionWorkerClient
     /** 当前在途批次：['ids'=>worker=>requestId, 'total'=>job 总数]，collect 后清空 */
     private ?array $pending = null;
 
-    public function __construct(private int $port = 0, private int $workers = 0)
+    /**
+     * @param int $port 固定端口基址（0=自动分配）
+     * @param int $workers motion 子进程数（0=按 CPU 核数自适应，最多 4）
+     * @param array $motionOptions 下发 motion 子进程的编码选项
+     *        （early_skip/subpel_sad_mul/mvp_seed/adaptive_skip），禁止子进程读环境变量
+     */
+    public function __construct(private int $port = 0, private int $workers = 0, private array $motionOptions = [])
     {
-        $this->workers = $workers > 0 ? $workers : max(1, min(4, (int)(getenv('NUMBER_OF_PROCESSORS') ?: 2)));
+        $this->workers = $workers > 0 ? $workers : max(1, min(4, CpuInfo::cores()));
         if ($this->port !== 0) {
             for ($worker = 0; $worker < $this->workers; $worker++) $this->workerPorts[$worker] = $this->port + $worker;
         }
@@ -34,7 +41,10 @@ final class MotionWorkerClient
      * 帧级双缓冲时主进程随后执行上一帧的 CAVLC，worker 并行计算本帧。
      * 必须先 collect() 上一帧后才能再次 dispatch()。
      *
-     * @param array $jobs 光栅顺序连续键 0..mbWidth*mbHeight-1 => [x, y, range]
+     * @param array  $jobs 光栅顺序连续键 0..mbWidth*mbHeight-1 => [x, y, range]
+     * @param string $seedMap 前一帧 MV 地图（MotionWorkerProtocol::encodeMvMap 产物），null/空串=无种子
+     * @param int    $seedW 地图宏块宽（0=无地图）
+     * @param int    $seedH 地图宏块高（0=无地图）
      */
     public function dispatch(
         int $width,
@@ -48,7 +58,11 @@ final class MotionWorkerClient
         string $curY,
         int $mbWidth,
         int $mbHeight,
-        array $jobs
+        array $jobs,
+        ?string $seedMap = null,
+        int $seedW = 0,
+        int $seedH = 0,
+        int $tier1BlockSad = 0
     ): void {
         if ($this->pending !== null) throw new RuntimeException('Motion worker batch already in flight');
         $this->connectAll();
@@ -67,6 +81,9 @@ final class MotionWorkerClient
 
         $total = count($jobs);
         if ($total !== $mbWidth * $mbHeight) throw new RuntimeException('Motion worker jobs must cover every macroblock');
+        // v5：种子地图全帧下发（每个分片只取其行区间，地图仅约 4B/宏块，全量重复发送开销可忽略）
+        $seedMap ??= '';
+        if ($seedMap === '') { $seedW = 0; $seedH = 0; }
         $ids = [];
         $referenceFrame = null;
         // 按宏块行连续分片：worker w 取连续键区间（=连续宏块行），
@@ -90,7 +107,7 @@ final class MotionWorkerClient
                 $this->outputs[$worker] .= $referenceFrame;
                 $this->workerSeq[$worker] = $seq;
             }
-            $this->outputs[$worker] .= MotionWorkerProtocol::batch($id, $seq, $qp, $chunk, $strips, $stripOffset, $stripCount, $aw);
+            $this->outputs[$worker] .= MotionWorkerProtocol::batch($id, $seq, $qp, $chunk, $strips, $stripOffset, $stripCount, $aw, $seedMap, $seedW, $seedH, $tier1BlockSad);
         }
         $this->pending = ['ids' => $ids, 'total' => $total];
         // 尽力立即把请求刷出去，剩余部分由 collect 的 event loop 排空
@@ -109,6 +126,11 @@ final class MotionWorkerClient
         $total = $this->pending['total'];
         $result = [];
         $deadline = microtime(true) + 30;
+        // Task8/B1：自适应轮询（与 MotionWorkerServer 同理）。strip 结果是分片到达的，固定
+        // 2ms 超时会让每次"这轮还没到齐"的空等付出 2ms，实测深度并行时父进程大部分时间在睡、
+        // 吞吐反降。空轮 1µs 起指数退避至 1ms，任何就绪立即恢复 1µs；批次间隙快速进入长睡，
+        // 活跃期延迟维持亚毫秒级
+        $waitUs = 1;
         while ($ids !== []) {
             $remaining = $deadline - microtime(true);
             if ($remaining <= 0) throw new RuntimeException('Timed out motion worker batch');
@@ -119,8 +141,10 @@ final class MotionWorkerClient
                 if ($this->outputs[$worker] !== '') $write[] = $this->sockets[$worker];
             }
             $except = null;
-            $ready = @stream_select($read, $write, $except, 0, 1);
+            $ready = @stream_select($read, $write, $except, 0, $waitUs);
             if ($ready === false) throw new RuntimeException('Failed waiting for motion worker');
+            if ($ready > 0) $waitUs = 1;
+            else $waitUs = min(1000, $waitUs * 2);
             foreach ($write as $socket) $this->writeSocket($this->workerFor($socket));
             foreach ($read as $socket) {
                 $worker = $this->workerFor($socket);
@@ -153,9 +177,13 @@ final class MotionWorkerClient
         string $curY,
         int $mbWidth,
         int $mbHeight,
-        array $jobs
+        array $jobs,
+        ?string $seedMap = null,
+        int $seedW = 0,
+        int $seedH = 0,
+        int $tier1BlockSad = 0
     ): array {
-        $this->dispatch($width, $height, $aw, $ah, $qp, $refY, $refU, $refV, $curY, $mbWidth, $mbHeight, $jobs);
+        $this->dispatch($width, $height, $aw, $ah, $qp, $refY, $refU, $refV, $curY, $mbWidth, $mbHeight, $jobs, $seedMap, $seedW, $seedH, $tier1BlockSad);
         return $this->collect();
     }
 
@@ -189,7 +217,15 @@ final class MotionWorkerClient
             $socket = $this->port === 0 ? false : @stream_socket_client("tcp://127.0.0.1:{$port}", $errno, $error, 0.1);
             if ($socket === false) {
                 // 多进程转码时多个 PHP 冷启动并发，2 秒窗口会偶发连接超时；放宽到 15 秒
-                $process = @proc_open([PHP_BINARY, $entry, '--owned', "--port={$port}", "--autoload={$autoload}"], $descriptors, $pipes, null, null, ['bypass_shell' => true]);
+                // 编码选项以启动参数显式下发，motion 子进程内不得读取环境变量
+                $mul = (float)($this->motionOptions['subpel_sad_mul'] ?? 4.0);
+                if ($mul <= 0) $mul = 4.0;
+                $spawnArgs = [
+                    PHP_BINARY, $entry, '--owned', "--port={$port}", "--autoload={$autoload}",
+                    '--early-skip=' . (empty($this->motionOptions['early_skip']) ? '0' : '1'),
+                    '--subpel-mul=' . $mul,
+                ];
+                $process = @proc_open($spawnArgs, $descriptors, $pipes, null, null, ['bypass_shell' => true]);
                 if (!is_resource($process)) throw new RuntimeException('Unable to start motion worker');
                 $this->processes[] = $process;
                 $pending[$worker] = $port;

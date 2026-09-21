@@ -192,6 +192,8 @@ trait SliceDecodingTrait
             $this->sliceAlphaC0Offset = 0;
             $this->sliceBetaOffset = 0;
         }
+        // 强制关去块（快速转码）或码流本身禁用去块时，后续完全不收集去块元数据
+        $this->deblockInfoEnabled = !$this->forceDisableDeblock && $this->disableDeblockingFilterIdc !== 1;
 
         $mbWidth = $this->picWidthInMbs;
         $mbHeight = $this->picHeightInMbs;
@@ -245,16 +247,18 @@ trait SliceDecodingTrait
         $this->mvTopRow = array_fill(0, $mbWidth * 4, null);
         $this->mvLeftCol = array_fill(0, 4, null);
 
-        // 初始化去块滤波所需的宏块信息
-        $this->mbTypeForDeblock = array_fill(0, $totalMbs, -1);
-        $this->mbQpForDeblock = array_fill(0, $totalMbs, $qp);
-        // 每帧必须重置NZ缓存，否则P_Skip宏块会使用前一帧的过期数据导致边界强度计算错误
-        $emptyNz = array_fill(0, 24, 0);
-        $this->mbNnzForDeblock = array_fill(0, $totalMbs, $emptyNz);
-        $emptyMv = array_fill(0, 16, [0, 0]);
-        $this->mbMvForDeblock = array_fill(0, $totalMbs, $emptyMv);
-        $emptyRef = array_fill(0, 16, 0);
-        $this->mbRefForDeblock = array_fill(0, $totalMbs, $emptyRef);
+        // 初始化去块滤波所需的宏块信息（仅在去块启用时分配，避免每帧数千次小数组构建）
+        if ($this->deblockInfoEnabled) {
+            $this->mbTypeForDeblock = array_fill(0, $totalMbs, -1);
+            $this->mbQpForDeblock = array_fill(0, $totalMbs, $qp);
+            // 每帧必须重置NZ缓存，否则P_Skip宏块会使用前一帧的过期数据导致边界强度计算错误
+            $emptyNz = array_fill(0, 24, 0);
+            $this->mbNnzForDeblock = array_fill(0, $totalMbs, $emptyNz);
+            $emptyMv = array_fill(0, 16, [0, 0]);
+            $this->mbMvForDeblock = array_fill(0, $totalMbs, $emptyMv);
+            $emptyRef = array_fill(0, 16, 0);
+            $this->mbRefForDeblock = array_fill(0, $totalMbs, $emptyRef);
+        }
 
         $mbSkipRun = -1;
 

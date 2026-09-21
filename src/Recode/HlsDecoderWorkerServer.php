@@ -20,6 +20,8 @@ final class HlsDecoderWorkerServer
     private string $pps = '';
     private int $width = 0;
     private int $height = 0;
+    /** @var string 待发回主进程的上行控制帧（波前检查点等），每轮事件循环清空 */
+    private string $upFrame = '';
 
     public function __construct(private array $profiles)
     {
@@ -69,6 +71,12 @@ final class HlsDecoderWorkerServer
                     if ($event['type'] === HlsPipelineProtocol::CONTROL) {
                         $cmd = $event['metadata']['cmd'] ?? '';
                         if ($cmd === 'config') $this->parseConfiguration(substr($event['payload'], 5));
+                        elseif ($cmd === 'checkpoint') {
+                            // 波前后段区间起点：注入前段 DPB 后再解后续帧
+                            $cp = unserialize($event['payload']);
+                            if (!is_array($cp)) throw new RuntimeException('收到无效的解码检查点');
+                            $this->decoder->importCheckpoint($cp);
+                        }
                         elseif ($cmd === 'gopEnd') {
                             // 处理到此处时，该 GOP 之前的所有帧均已解码并转发
                             $upOutput .= HlsPipelineProtocol::frame(HlsPipelineProtocol::PROGRESS, 0, ['gop' => (int)($event['metadata']['gop'] ?? -1)]);
@@ -77,7 +85,9 @@ final class HlsDecoderWorkerServer
                         $output .= HlsPipelineProtocol::frame(HlsPipelineProtocol::END, $event['sequence']);
                         $ended = true;
                     } else {
+                        $this->upFrame = '';
                         $output .= $this->transform($event);
+                        if ($this->upFrame !== '') { $upOutput .= $this->upFrame; $this->upFrame = ''; }
                     }
                     if (strlen($output) > HlsPipelineProtocol::MAX_BUFFER_LENGTH) throw new RuntimeException('解码进程下游缓冲超限');
                 }
@@ -127,6 +137,9 @@ final class HlsDecoderWorkerServer
     {
         if ($event['type'] !== HlsPipelineProtocol::EVENT) throw new RuntimeException('解码进程收到未知事件');
         $meta = $event['metadata'];
+        // 波前边界标记：本帧解码后回传检查点，不应透传到下游
+        $cpAfter = isset($meta['cpAfter']) ? (int)$meta['cpAfter'] : null;
+        unset($meta['cpAfter']);
         if (($meta['tagType'] ?? 0) !== 9) return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, $event['payload']);
         $body = $event['payload'];
         if (strlen($body) < 5 || (ord($body[0]) & 0x0f) !== 7) return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, $body);
@@ -143,6 +156,16 @@ final class HlsDecoderWorkerServer
         if ($this->pps !== '') array_unshift($nals, ['type' => 8, 'data' => $this->pps]);
         $frame = $this->decoder->decode($nals);
         if (!$frame || empty($frame['data'])) return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, $body);
+        // 波前：边界帧（含被抽帧丢弃帧——已完整解码入 DPB）导出检查点回传主进程
+        if ($cpAfter !== null) {
+            $cp = $this->decoder->exportCheckpoint(
+                $this->sps !== '' ? $this->sps : null,
+                $this->pps !== '' ? $this->pps : null
+            );
+            $this->upFrame = HlsPipelineProtocol::frame(
+                HlsPipelineProtocol::CONTROL, 0, ['cmd' => 'checkpoint', 'range' => $cpAfter], serialize($cp)
+            );
+        }
         // 抽帧丢弃：解码已完成（维持 GOP 内后续帧的参考链），但不缩放/不附 YUV，
         // meta.drop 原样透传，输出端直接跳过编码
         if (!empty($meta['drop'])) {

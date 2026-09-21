@@ -42,10 +42,12 @@ trait MacroblockDecodingTrait
         $mbWidth = $this->picWidthInMbs;
         $mbIdx = $mbY * $mbWidth + $mbX;
 
-        $this->mbTypeForDeblock[$mbIdx] = $mbType;
-        $this->mbNnzForDeblock[$mbIdx] = array_fill(0, 24, 0);
-        $this->mbMvForDeblock[$mbIdx] = array_fill(0, 16, [0, 0]);
-        $this->mbRefForDeblock[$mbIdx] = array_fill(0, 16, 0);
+        if ($this->deblockInfoEnabled) {
+            $this->mbTypeForDeblock[$mbIdx] = $mbType;
+            $this->mbNnzForDeblock[$mbIdx] = array_fill(0, 24, 0);
+            $this->mbMvForDeblock[$mbIdx] = array_fill(0, 16, [0, 0]);
+            $this->mbRefForDeblock[$mbIdx] = array_fill(0, 16, 0);
+        }
 
         $mbQpDelta = 0;
 
@@ -951,8 +953,10 @@ trait MacroblockDecodingTrait
         $mbIdx = $mbY * $mbWidth + $mbX;
         // 16 个 4x4 块 MV/参考索引全同：array_fill 一次构建（子数组共享同一 COW 引用，
         // 去块滤波端只读），避免逐块小数组分配
-        $this->mbMvForDeblock[$mbIdx] = array_fill(0, 16, [$mvX, $mvY]);
-        $this->mbRefForDeblock[$mbIdx] = array_fill(0, 16, $refIdx);
+        if ($this->deblockInfoEnabled) {
+            $this->mbMvForDeblock[$mbIdx] = array_fill(0, 16, [$mvX, $mvY]);
+            $this->mbRefForDeblock[$mbIdx] = array_fill(0, 16, $refIdx);
+        }
 
         return 0;
     }
@@ -1035,8 +1039,10 @@ trait MacroblockDecodingTrait
         $this->updateInterMbIntraModes($mbX);
         $mbWidth = $this->picWidthInMbs;
         $mbIdx = $mbY * $mbWidth + $mbX;
-        $this->mbMvForDeblock[$mbIdx] = array_fill(0, 16, [$mvX, $mvY]);
-        $this->mbRefForDeblock[$mbIdx] = array_fill(0, 16, $refIdx);
+        if ($this->deblockInfoEnabled) {
+            $this->mbMvForDeblock[$mbIdx] = array_fill(0, 16, [$mvX, $mvY]);
+            $this->mbRefForDeblock[$mbIdx] = array_fill(0, 16, $refIdx);
+        }
         return $mbQpDelta;
     }
 
@@ -1085,14 +1091,16 @@ trait MacroblockDecodingTrait
 
         $mbWidth = $this->picWidthInMbs;
         $mbIdx = $mbY * $mbWidth + $mbX;
-        $this->mbMvForDeblock[$mbIdx] = array_merge(
-            array_fill(0, 8, [$mv0X, $mv0Y]),
-            array_fill(0, 8, [$mv1X, $mv1Y])
-        );
-        $this->mbRefForDeblock[$mbIdx] = array_merge(
-            array_fill(0, 8, $refIdx0),
-            array_fill(0, 8, $refIdx1)
-        );
+        if ($this->deblockInfoEnabled) {
+            $this->mbMvForDeblock[$mbIdx] = array_merge(
+                array_fill(0, 8, [$mv0X, $mv0Y]),
+                array_fill(0, 8, [$mv1X, $mv1Y])
+            );
+            $this->mbRefForDeblock[$mbIdx] = array_merge(
+                array_fill(0, 8, $refIdx0),
+                array_fill(0, 8, $refIdx1)
+            );
+        }
 
         return $mbQpDelta;
     }
@@ -1142,13 +1150,15 @@ trait MacroblockDecodingTrait
 
         $mbWidth = $this->picWidthInMbs;
         $mbIdx = $mbY * $mbWidth + $mbX;
-        foreach (self::$left8x16Blocks as $i) {
-            $this->mbMvForDeblock[$mbIdx][$i] = [$mv0X, $mv0Y];
-            $this->mbRefForDeblock[$mbIdx][$i] = $refIdx0;
-        }
-        foreach (self::$right8x16Blocks as $i) {
-            $this->mbMvForDeblock[$mbIdx][$i] = [$mv1X, $mv1Y];
-            $this->mbRefForDeblock[$mbIdx][$i] = $refIdx1;
+        if ($this->deblockInfoEnabled) {
+            foreach (self::$left8x16Blocks as $i) {
+                $this->mbMvForDeblock[$mbIdx][$i] = [$mv0X, $mv0Y];
+                $this->mbRefForDeblock[$mbIdx][$i] = $refIdx0;
+            }
+            foreach (self::$right8x16Blocks as $i) {
+                $this->mbMvForDeblock[$mbIdx][$i] = [$mv1X, $mv1Y];
+                $this->mbRefForDeblock[$mbIdx][$i] = $refIdx1;
+            }
         }
 
         return $mbQpDelta;
@@ -1466,13 +1476,15 @@ trait MacroblockDecodingTrait
 
         $mbWidth = $this->picWidthInMbs;
         $mbIdx = $mbY * $mbWidth + $mbX;
-        for ($y = 0; $y < 4; $y++) {
-            for ($x = 0; $x < 4; $x++) {
-                $idx = $y * 4 + $x;
-                $mv = $mbMvs[$y][$x];
-                if ($mv !== null) {
-                    $this->mbMvForDeblock[$mbIdx][$idx] = [$mv[0], $mv[1]];
-                    $this->mbRefForDeblock[$mbIdx][$idx] = $mv[2];
+        if ($this->deblockInfoEnabled) {
+            for ($y = 0; $y < 4; $y++) {
+                for ($x = 0; $x < 4; $x++) {
+                    $idx = $y * 4 + $x;
+                    $mv = $mbMvs[$y][$x];
+                    if ($mv !== null) {
+                        $this->mbMvForDeblock[$mbIdx][$idx] = [$mv[0], $mv[1]];
+                        $this->mbRefForDeblock[$mbIdx][$idx] = $mv[2];
+                    }
                 }
             }
         }
@@ -2226,6 +2238,8 @@ trait MacroblockDecodingTrait
         $this->nzLeftColChroma[3] = $nzCache[23];
 
         $mbIdx = $mbY * $this->picWidthInMbs + $mbX;
-        $this->mbNnzForDeblock[$mbIdx] = $nzCache;
+        if ($this->deblockInfoEnabled) {
+            $this->mbNnzForDeblock[$mbIdx] = $nzCache;
+        }
     }
 }

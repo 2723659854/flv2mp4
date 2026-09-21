@@ -22,18 +22,27 @@ final class MotionWorkerHelper
     public int $qp;
     public array $dequant4Table = [];
     public $refInts = null;
-    /** early-skip 总开关（FLV2MP4_EARLY_SKIP=0 关闭，用于 A/B 与灰度回退） */
-    public bool $earlySkip = true;
     private static ?array $sharedDequantTable = null;
 
-    public function __construct(int $width, int $height, int $aw, int $ah, int $qp, private string $refY, private string $refU, private string $refV)
+    /**
+     * @param array      $motionOptions 进程级编码选项（early_skip/subpel_sad_mul），
+     *                                  由 motion-worker 启动参数注入，不读环境变量
+     * @param array|null $seedMap 本批次（当前帧）的前一帧 MV 种子地图
+     *                            （w/h/mvs 光栅列表，1/4 像素），null=无地图
+     * @param int        $tier1BlockSad v7：本帧 Tier1 经验绝对 SAD 限额（每 4x4 块，0=不放宽，≤4080）
+     */
+    public function __construct(int $width, int $height, int $aw, int $ah, int $qp, private string $refY, private string $refU, private string $refV, array $motionOptions = [], private ?array $seedMap = null, int $tier1BlockSad = 0)
     {
         $this->width = $width;
         $this->height = $height;
         $this->mbAlignedWidth = $aw;
         $this->mbAlignedHeight = $ah;
         $this->qp = $qp;
-        $this->earlySkip = getenv('FLV2MP4_EARLY_SKIP') !== '0';
+        $this->earlySkip = (bool)($motionOptions['early_skip'] ?? true);
+        $mul = (float)($motionOptions['subpel_sad_mul'] ?? 4.0);
+        $this->subpelSadMul = $mul > 0 ? $mul : 4.0;
+        // v7：按帧下发的 Tier1 经验绝对 SAD 限额（由主进程依据上一帧自然 skip 占比决定，worker 不自行判定）
+        $this->tier1BlockSad = max(0, min(MotionWorkerProtocol::MAX_BLOCK_SAD, $tier1BlockSad));
         if (self::$sharedDequantTable === null) {
             $positionClass = [0,1,0,1,1,2,1,2,0,1,0,1,1,2,1,2];
             $table = array_fill(0, 6, array_fill(0, 52, array_fill(0, 16, 0)));
@@ -49,6 +58,11 @@ final class MotionWorkerHelper
 
     public function prepare(array $job): array
     {
-        return $this->preparePMacroblock($job[0], $job[1], $job[2], $this->refY, $this->refU, $this->refV, $job[3]);
+        $seed = null;
+        if ($this->seedMap !== null && $job[0] < $this->seedMap['w'] && $job[1] < $this->seedMap['h']) {
+            // 前后帧同分辨率（编码器序列内不变），同网格位置直接取种；网格不匹配则该 MB 弃种
+            $seed = $this->seedMap['mvs'][$job[1] * $this->seedMap['w'] + $job[0]] ?? null;
+        }
+        return $this->preparePMacroblock($job[0], $job[1], $job[2], $this->refY, $this->refU, $this->refV, $job[3], $seed);
     }
 }

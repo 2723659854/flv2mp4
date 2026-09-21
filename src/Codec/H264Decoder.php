@@ -108,6 +108,8 @@ class H264Decoder
     public array $mbRefForDeblock = [];
     public int $currentSliceType = 0;
     public bool $forceDisableDeblock = false;
+    /** 本 slice 是否需要收集去块元数据（强制关去块或码流 idc=1 时跳过，省去每帧数千次数组分配/写入） */
+    public bool $deblockInfoEnabled = true;
 
     // P帧参考帧控制
     public bool $numRefIdxActiveOverrideFlag = false;
@@ -474,5 +476,121 @@ class H264Decoder
 
     public function getHeight(){
         return $this->height;
+    }
+
+    /**
+     * 导出波前解码检查点（Task4）：在 decode() 完成某帧 DPB 入列/淘汰后调用。
+     * 仅含跨帧持久状态（DPB 全条目 + currFrameNum + SPS/PPS RBSP）；
+     * 逐帧工作缓冲（像素平面、nC/MV 邻域、slice 参数）由后续 decodeSlice 自行重建，无需导出。
+     *
+     * @param string|null $spsRbsp 调用方缓存的 SPS RBSP（NAL type=7 的 data），null 则不附带
+     * @param string|null $ppsRbsp 调用方缓存的 PPS RBSP（NAL type=8 的 data）
+     * @return array 检查点（可序列化数组；DPB 内含二进制平面字符串）
+     */
+    public function exportCheckpoint(?string $spsRbsp = null, ?string $ppsRbsp = null): array
+    {
+        $dpb = [];
+        foreach ($this->dpb as $entry) {
+            // yBytes/uBytes/vBytes 是子像素 MC 的懒加载 unpack 缓存，属派生数据；
+            // 导出时丢弃，导入方按需重新懒加载，避免序列化巨型数组
+            $dpb[] = [
+                'frameNum' => (int)$entry['frameNum'],
+                'isLongTerm' => (bool)$entry['isLongTerm'],
+                'y' => $entry['y'],
+                'u' => $entry['u'],
+                'v' => $entry['v'],
+                'yBytes' => null,
+                'uBytes' => null,
+                'vBytes' => null,
+                'strideY' => (int)$entry['strideY'],
+                'strideUv' => (int)$entry['strideUv'],
+                'widthY' => (int)$entry['widthY'],
+                'heightY' => (int)$entry['heightY'],
+                'widthUv' => (int)$entry['widthUv'],
+                'heightUv' => (int)$entry['heightUv'],
+            ];
+        }
+        return [
+            'v' => 1,
+            'sps' => $spsRbsp,
+            'pps' => $ppsRbsp,
+            'currFrameNum' => (int)$this->currFrameNum,
+            'dpb' => $dpb,
+        ];
+    }
+
+    /**
+     * 导入波前解码检查点（Task4）：重放 SPS/PPS 配置解析后注入 DPB/currFrameNum。
+     * 导入后解码器状态等价于"在另一进程内连续解码到检查点帧之后"，可直接 decode() 后续帧。
+     *
+     * @param array $cp exportCheckpoint() 产出的检查点
+     */
+    public function importCheckpoint(array $cp): void
+    {
+        if (($cp['v'] ?? 0) !== 1) {
+            throw new \InvalidArgumentException('invalid decoder checkpoint version');
+        }
+        // 先重放配置 NAL（在全新解码器上还原 width/height/SPS/PPS 全部参数）
+        if (isset($cp['sps']) && $cp['sps'] !== null && $cp['sps'] !== '') {
+            $this->parseSPS($cp['sps']);
+        }
+        if (isset($cp['pps']) && $cp['pps'] !== null && $cp['pps'] !== '') {
+            $this->parsePPS($cp['pps']);
+        }
+        if ($this->width <= 0 || $this->height <= 0) {
+            throw new \InvalidArgumentException('checkpoint missing SPS/PPS and decoder has no prior configuration');
+        }
+
+        $this->dpb = [];
+        foreach ($cp['dpb'] ?? [] as $entry) {
+            if (!isset($entry['y'], $entry['u'], $entry['v'], $entry['frameNum'])) {
+                throw new \InvalidArgumentException('invalid checkpoint DPB entry');
+            }
+            $this->dpb[] = [
+                'frameNum' => (int)$entry['frameNum'],
+                'isLongTerm' => (bool)($entry['isLongTerm'] ?? false),
+                'y' => $entry['y'],
+                'u' => $entry['u'],
+                'v' => $entry['v'],
+                'yBytes' => null,
+                'uBytes' => null,
+                'vBytes' => null,
+                'strideY' => (int)$entry['strideY'],
+                'strideUv' => (int)$entry['strideUv'],
+                'widthY' => (int)$entry['widthY'],
+                'heightY' => (int)$entry['heightY'],
+                'widthUv' => (int)$entry['widthUv'],
+                'heightUv' => (int)$entry['heightUv'],
+            ];
+        }
+        $this->currFrameNum = (int)$cp['currFrameNum'];
+
+        // 重建 refPicList0[0] 的快捷访问（decode() 每帧入列后同样维护）
+        $latest = null;
+        foreach ($this->dpb as $entry) {
+            if ($entry['frameNum'] === $this->currFrameNum) {
+                $latest = $entry;
+                break;
+            }
+            $latest = $entry;
+        }
+        $this->refPicList0 = $latest !== null ? [$latest] : [];
+        if ($latest !== null) {
+            $this->refFrameY = $latest['y'];
+            $this->refFrameU = $latest['u'];
+            $this->refFrameV = $latest['v'];
+            $this->refStrideY = $latest['strideY'];
+            $this->refStrideUv = $latest['strideUv'];
+            $this->refWidthY = $latest['widthY'];
+            $this->refHeightY = $latest['heightY'];
+            $this->refWidthUv = $latest['widthUv'];
+            $this->refHeightUv = $latest['heightUv'];
+        } else {
+            $this->refFrameY = $this->refFrameU = $this->refFrameV = null;
+            $this->refStrideY = $this->refStrideUv = 0;
+            $this->refWidthY = $this->refHeightY = $this->refWidthUv = $this->refHeightUv = 0;
+        }
+        // 当前像素平面无效化，等待下一帧 decode() 初始化
+        $this->yPlane = $this->uPlane = $this->vPlane = '';
     }
 }

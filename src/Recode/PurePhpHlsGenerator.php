@@ -74,6 +74,12 @@ class PurePhpHlsGenerator
     private int $decodeWorkers;
     /** 单 profile 模式（与 recode 同形的一维配置）：分片/索引直接输出到 outputDir 根部，不生成 master.m3u8 */
     private bool $singleProfile = false;
+    /** 片 worker 模式：只写 segment_N.ts.tmp，不碰 m3u8（由片池协调进程顺序发布） */
+    private bool $writePlaylists = true;
+    /** 片任务模式：片边界由协调进程规划，任务内禁止按 3s 阈值自动切换分片 */
+    private bool $segmentTaskMode = false;
+    /** 片任务首帧强制 IDR（Task7/FR-3）：非源关键帧边界靠检查点续解，首输出帧必须强制成 IDR */
+    private bool $segmentForceKey = false;
     private ?array $pipelineVariants = null;
     private string $pipelineYuvPayload = '';
 
@@ -100,17 +106,23 @@ class PurePhpHlsGenerator
      *
      * @param array $configOrProfiles 单路一维配置或多码率 profile map
      * @param string $outputDir 输出目录
-     * @param bool $multi 是否开启多进程
+     * @param bool $multi 快速重编码总开关：true=多进程快速路径，false=原始串行路径（默认）
      * @param int $decodeWorkers 多进程解码worker数（仅多码率形态使用；单路形态取配置中的 decode_workers）
      */
-    public function __construct(array $configOrProfiles, string $outputDir = '', bool $multi = false, int $decodeWorkers = 6)
+    public function __construct(array $configOrProfiles, string $outputDir = '', bool $multi = false, int $decodeWorkers = 6, bool $writePlaylists = true)
     {
+        $this->writePlaylists = $writePlaylists;
         // 一维配置：所有值均为标量；profile map：值均为数组
         if ($configOrProfiles !== [] && count(array_filter($configOrProfiles, 'is_array')) === 0) {
             $this->singleProfile = true;
-            $decodeWorkers = (int)($configOrProfiles['decode_workers'] ?? $decodeWorkers);
+            // 幂等归一化：worker 子进程以 false 再次构造时，已填键不会被覆盖
+            $configOrProfiles = TranscodeOptions::normalize($configOrProfiles, $multi);
+            $decodeWorkers = (int)$configOrProfiles['decode_workers'];
             $this->profiles = ['' => $configOrProfiles];
         } else {
+            foreach ($configOrProfiles as $name => $profile) {
+                $configOrProfiles[$name] = TranscodeOptions::normalize($profile, $multi);
+            }
             $this->profiles = $configOrProfiles;
             $this->singleProfile = count($this->profiles) === 1 && array_key_first($this->profiles) === '';
         }
@@ -123,7 +135,8 @@ class PurePhpHlsGenerator
 
         foreach ($this->profiles as $name => $profile) {
             $this->encoders[$name] = new H264Encoder();
-            $this->encoders[$name]->motionWorkers = max(1, (int)($profile['motionWorkers'] ?? 8));
+            $this->encoders[$name]->motionWorkers = max(1, (int)$profile['motionWorkers']);
+            TranscodeOptions::applyEncoder($this->encoders[$name], $profile);
             $dir = $this->profileDir($name) . '/';
             if (!is_dir($dir)) mkdir($dir, 0777, true);
 
@@ -146,8 +159,8 @@ class PurePhpHlsGenerator
             }
         }
 
-        /** 初始化空m3u8 */
-        $this->ensureInitialPlaylist();
+        /** 初始化空m3u8（片 worker 模式跳过：m3u8 由协调进程顺序发布） */
+        if ($this->writePlaylists) $this->ensureInitialPlaylist();
     }
 
     /** 单路模式文件直接落在输出目录根部；多码率模式落在 {outputDir}/{profile}/ 子目录 */
@@ -276,7 +289,13 @@ class PurePhpHlsGenerator
     {
         if (!file_exists($flvFile)) throw new \Exception("FLV file not found: {$flvFile}");
         if ($this->multi) {
-            (new HlsPipelineClient($this->profiles, $this->outputDir, $this->maxFrames, $this->decodeWorkers))->process($flvFile);
+            $firstProfile = reset($this->profiles);
+            if (!empty($firstProfile['segment_pool'])) {
+                (new HlsSegmentPipelineClient($this->profiles, $this->outputDir, $this->maxFrames))->process($flvFile);
+                return;
+            }
+            $wavefront = (bool)($firstProfile['decode_wavefront'] ?? false);
+            (new HlsPipelineClient($this->profiles, $this->outputDir, $this->maxFrames, $this->decodeWorkers, $wavefront))->process($flvFile);
             return;
         }
 
@@ -346,7 +365,177 @@ class PurePhpHlsGenerator
         // 冲刷双缓冲中最后一帧及排队音频，保证分片完整后再关闭
         $this->flushPendingVideo();
         $this->closeAllSegments();
-        if ($generateMasterPlaylist) $this->generateMasterPlaylist();
+        if ($generateMasterPlaylist && $this->writePlaylists) $this->generateMasterPlaylist();
+    }
+
+    /**
+     * 片 worker 入口：执行单个自包含片任务（片间无参考共享，片首强制 IDR+SPS/PPS）。
+     *
+     * 任务结构：
+     *  - seq：全局片序号（从 1 起）；file：源 FLV 绝对路径
+     *  - asc/avcc：AAC AudioSpecificConfig / AVCDecoderConfigurationRecord 二进制
+     *  - events：按源顺序排列的紧凑事件（worker 按偏移随机读源文件，零扫描歧义；
+     *    isKey/cts 由 worker 从 tag body 自解析，无需随事件下发）
+     *    时间轴为全局连续轴（基点=首 IDR 源时间戳，跨片不归零，与串行路径切片一致）：
+     *    音频 [0, tagOffset, tagLen, relMs]（全局相对源毫秒）
+     *    视频 [1, tagOffset, tagLen, outMs, drop]（全局均匀网格输出毫秒；drop=1 时该值不用）
+     *
+     * 产物：每 profile 写 segment_{seq}.ts.tmp（不更新 m3u8，由协调进程原子改名后顺序发布）。
+     *
+     * @param callable(int,string):void|null $onCheckpoint 末帧解码完成、编码冲刷前回调（参数：seq, base64 cp）；
+     *        片 worker 据此把检查点提前回传协调端（Task8/B1：解码(n+1)∥编码(n) 流水）
+     * @return array{seq:int,endOutMs:int,cp:string} 片末视频帧相对输出时间轴毫秒（协调进程算时长用）
+     */
+    public function runSegmentTask(array $task, ?callable $onCheckpoint = null): array
+    {
+        $this->resetRuntimeState();
+        $this->segmentTaskMode = true;
+        $this->baseTimestamp = 0;
+        if (($task['asc'] ?? '') !== '') {
+            // 与 handleAudioFrame 收到 AAC sequence header 同构：属性+解析同时就位，
+            // 否则后续音频帧会被 audioSpecificConfig==='' 守卫整体丢弃
+            $this->audioSpecificConfig = $task['asc'];
+            $this->parseAudioSpecificConfig($task['asc']);
+        }
+        if (($task['avcc'] ?? '') !== '') $this->parseAVCDecoderConfigurationRecord($task['avcc']);
+
+        // 非片 1：导入上一片末帧的 H264 解码检查点（DPB/frameNum），
+        // 使本片能从非源 IDR 边界帧直接续解（Task7/FR-3，检查点机制复用 Task4 波前成果）
+        $cpB64 = (string)($task['cp'] ?? '');
+        if ($cpB64 !== '') {
+            $cp = @unserialize(base64_decode($cpB64));
+            if (!is_array($cp)) throw new \RuntimeException('片任务解码检查点无效');
+            $this->decoder->importCheckpoint($cp);
+        }
+
+        $seq = (int)$task['seq'];
+        foreach ($this->profiles as $name => $_) {
+            $this->startSegment($name, $seq, '.tmp');
+            $this->segmentStartTimes[$name] = 0;
+        }
+
+        // 本片首个保留帧强制编码为 IDR（不看源 frameType）；SPS/PPS 前置由 segmentFirstFrame 完成
+        $this->segmentForceKey = true;
+
+        $handle = @fopen($task['file'], 'rb');
+        if ($handle === false) throw new \RuntimeException("片 worker 无法打开源文件: {$task['file']}");
+        try {
+            foreach ($task['events'] as $ev) {
+                $isVideo = (int)$ev[0] === 1;
+                fseek($handle, (int)$ev[1]);
+                $raw = $this->readTagRaw($handle, (int)$ev[2]);
+                $dataSize = unpack('N', "\x00" . substr($raw, 1, 3))[1];
+                $body = substr($raw, 11, $dataSize);
+                if ($isVideo) {
+                    // [1, off, len, outRelMs, drop]
+                    $tag = $this->makeSegmentTag(9, $body, (int)$ev[3], 0);
+                    if (!empty($ev[4])) {
+                        // 抽掉的帧仍须本地解码维持参考链，但不缩放/编码/写 TS
+                        $videoData = $this->videoFrameDataRead($body);
+                        if ($videoData) {
+                            $avc = $this->avcPacketRead($videoData['data']);
+                            if ($avc && $avc['avcPacketType'] === self::AVC_PACKET_TYPE_NALU) $this->decodeNaluToYuv($avc['data']);
+                        }
+                    } else {
+                        $this->handleVideoFrame($tag);
+                    }
+                } else {
+                    // [0, off, len, relMs]
+                    $this->handleAudioFrame($this->makeSegmentTag(8, $body, (int)$ev[3], (int)$ev[3]));
+                }
+            }
+        } finally {
+            fclose($handle);
+        }
+
+        // 导出本片末帧【解码后】的检查点（此时所有源帧均已解码，末保留帧尚在双缓冲中待编码；
+        // 检查点只含解码器状态，与编码冲刷无关），供协调进程链接下一片非 IDR 起点
+        $cpOut = '';
+        if ($this->srcInitialized) {
+            $cpOut = base64_encode(serialize($this->decoder->exportCheckpoint(
+                $this->srcSpsData !== '' ? $this->srcSpsData : null,
+                $this->srcPpsData !== '' ? $this->srcPpsData : null
+            )));
+        }
+        // Task8/B1：解码已全部完成、编码冲刷尚未开始——立即把 cp 交回上层（worker 提前回帧），
+        // 下一片可在本片冲刷编码期间并行解码
+        if ($onCheckpoint !== null) $onCheckpoint($seq, $cpOut);
+
+        // 冲刷末帧双缓冲与排队音频，保证片完整
+        $this->flushPendingVideo();
+        $endOutMs = 0;
+        foreach ($this->profiles as $name => $_) {
+            $endOutMs = max($endOutMs, $this->currentSegmentLastTimes[$name]);
+            $this->closeSegment($name, 0, false);
+        }
+        return ['seq' => $seq, 'endOutMs' => (int)$endOutMs, 'cp' => $cpOut];
+    }
+
+    /** 片任务 tag：视频取计划输出时间轴，音频取片内源相对时间轴 */
+    private function makeSegmentTag(int $tagType, string $body, int $videoOutMs, int $audioRelMs): object
+    {
+        return new class($tagType, $body, $videoOutMs, $audioRelMs) {
+            public int $tagType;
+            public string $body;
+            public function __construct(int $tagType, string $body, private int $videoOutMs, private int $audioRelMs)
+            {
+                $this->tagType = $tagType;
+                $this->body = $body;
+            }
+            public function getTime(): int
+            {
+                return $this->tagType === 9 ? $this->videoOutMs : $this->audioRelMs;
+            }
+        };
+    }
+
+    /** 按 FLV 布局读取完整 tag（11B header + body；4B PreviousTagSize 由调用方 len 控制可不读满） */
+    private function readTagRaw($handle, int $tagLen): string
+    {
+        $raw = '';
+        while (strlen($raw) < $tagLen) {
+            $chunk = fread($handle, $tagLen - strlen($raw));
+            if ($chunk === false || $chunk === '') throw new \RuntimeException('片 worker 读取源 FLV tag 失败');
+            $raw .= $chunk;
+        }
+        return $raw;
+    }
+
+    /** 片任务间重置全部运行态（decoder/encoders/scaler 跨片复用，IDR 自然刷新参考链） */
+    private function resetRuntimeState(): void
+    {
+        foreach ($this->profiles as $name => $_) {
+            $this->segmentWriters[$name] = ['sequence' => 0, 'handle' => null, 'startTime' => 0, 'endTime' => 0];
+            $this->segmentDurations[$name] = [];
+            $this->spsPpsData[$name] = '';
+            $this->continuityCounters[$name] = [];
+            $this->segmentStartTimes[$name] = 0;
+            $this->currentSegmentLastTimes[$name] = 0;
+            $this->audioFrameCounts[$name] = 0;
+            $this->audioBasePts[$name] = null;
+            $this->videoFrameCounts[$name] = 0;
+            $this->lastDts[$name] = -1;
+            $this->segmentFirstFrame[$name] = true;
+        }
+        $this->baseTimestamp = null;
+        $this->srcWidth = 0;
+        $this->srcHeight = 0;
+        $this->srcInitialized = false;
+        $this->srcSpsData = '';
+        $this->srcPpsData = '';
+        $this->audioSpecificConfig = '';
+        $this->audioObjectType = 2;
+        $this->samplingFrequencyIndex = 4;
+        $this->channelConfiguration = 2;
+        $this->sbrPresent = false;
+        $this->extensionSamplingIndex = null;
+        $this->decodedFrameCache = [];
+        $this->frameCacheKey = '';
+        $this->segmentForceKey = false;
+        $this->pendingVideoJob = null;
+        $this->queuedAudioTags = [];
+        $this->pipelineVariants = null;
+        $this->pipelineYuvPayload = '';
     }
 
     /**
@@ -373,6 +562,11 @@ class PurePhpHlsGenerator
         if ($avc['avcPacketType'] !== self::AVC_PACKET_TYPE_NALU) return;
 
         $isKeyFrame = ($videoData['frameType'] === self::VIDEO_FRAME_TYPE_KEY_FRAME);
+        if ($this->segmentTaskMode && $this->segmentForceKey) {
+            // Task7/FR-3：非源 IDR 片边界——解码检查点已续上参考链，本片首输出帧强制编码 IDR
+            $isKeyFrame = true;
+            $this->segmentForceKey = false;
+        }
         $timestamp = method_exists($tag, 'getTime') ? $tag->getTime() : 0;
 
         // 首关键帧初始化时间基准
@@ -427,7 +621,9 @@ class PurePhpHlsGenerator
 
         $segmentSwitches = [];
         foreach ($this->profiles as $name => $profile) {
-            $segmentSwitches[$name] = $isKeyFrame
+            // 片任务模式：一个任务恰好一个分片，边界由协调进程按 gop_interval_ms 规划
+            $segmentSwitches[$name] = !$this->segmentTaskMode
+                && $isKeyFrame
                 && ($relativeTime - $this->segmentStartTimes[$name]) >= ($this->segmentDuration * 1000);
         }
 
@@ -1033,25 +1229,27 @@ class PurePhpHlsGenerator
 
     /**
      * 新建TS分片
+     * @param int|null $sequence 片 worker 模式指定全局片序号；null 时自增
+     * @param string $tmpSuffix 片 worker 模式写 ".tmp"，由协调进程完成后原子改名
      */
-    private function startSegment(string $profile): void
+    private function startSegment(string $profile, ?int $sequence = null, string $tmpSuffix = ''): void
     {
         $writer = &$this->segmentWriters[$profile];
-        $writer['sequence']++;
+        $writer['sequence'] = $sequence ?? ($writer['sequence'] + 1);
         $this->continuityCounters[$profile] = [];
-        $filePath = $this->profileDir($profile) . "/segment_{$writer['sequence']}.ts";
+        $filePath = $this->profileDir($profile) . "/segment_{$writer['sequence']}.ts{$tmpSuffix}";
         $writer['handle'] = fopen($filePath, 'wb');
         // 分片头部写入PAT/PMT，兼容播放器
         $this->writePAT($profile);
         $this->writePMT($profile);
-        
+
         $this->audioFrameCounts[$profile] = 0;
     }
 
     /**
-     * 关闭分片并更新m3u8
+     * 关闭分片并更新m3u8（片 worker 模式只关文件，m3u8 由协调进程发布）
      */
-    private function closeSegment(string $profile, int $endTime = 0): void
+    private function closeSegment(string $profile, int $endTime = 0, bool $updatePlaylist = true): void
     {
         $writer = &$this->segmentWriters[$profile];
         if (!is_resource($writer['handle'])) return;
@@ -1062,7 +1260,7 @@ class PurePhpHlsGenerator
         $endTs = $endTime ?: $this->currentSegmentLastTimes[$profile];
         $durSec = max(0.001, round(($endTs - $this->segmentStartTimes[$profile]) / 1000.0, 3));
         $this->segmentDurations[$profile][$writer['sequence']] = $durSec;
-        $this->updatePlaylist($profile);
+        if ($this->writePlaylists && $updatePlaylist) $this->updatePlaylist($profile);
     }
 
     /**
@@ -1075,7 +1273,7 @@ class PurePhpHlsGenerator
             if (is_resource($writer['handle'])) {
                 $this->closeSegment($name, $writer['endTime']);
             }
-            $this->addEndList($name);
+            if ($this->writePlaylists) $this->addEndList($name);
         }
     }
 

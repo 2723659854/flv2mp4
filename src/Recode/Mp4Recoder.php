@@ -84,27 +84,40 @@ class Mp4Recoder
     private ?string $pipelineTempFile = null;
     private int $pipelineMediaSize = 0;
 
+    /**
+     * @param array $config 转码配置（细粒度快速项见 TranscodeOptions）
+     * @param bool $multi 快速重编码总开关：true=多进程快速路径，false=原始串行路径（默认）
+     */
     public function __construct(array $config = [], bool $multi = false)
     {
         $this->multi = $multi;
-        $this->config = $config;
-        $this->targetWidth = $config['width'] ?? 0;
-        $this->targetHeight = $config['height'] ?? 0;
-        $this->targetBitrate = $config['bitrate'] ?? 0;
-        $this->targetFps = $config['fps'] ?? 0;
-        $this->targetQp = $config['qp'] ?? 26;
+        // 幂等归一化：worker 子进程以 false 再次构造时，父进程下发的已填键不会被覆盖
+        $this->config = TranscodeOptions::normalize($config, $multi);
+        $this->targetWidth = $this->config['width'] ?? 0;
+        $this->targetHeight = $this->config['height'] ?? 0;
+        $this->targetBitrate = $this->config['bitrate'] ?? 0;
+        $this->targetFps = $this->config['fps'] ?? 0;
+        $this->targetQp = $this->config['qp'] ?? 26;
         $this->validateConfig();
 
-        if (!empty($config['watermark']) && !empty($config['watermark_file'])) {
+        if (!empty($this->config['watermark']) && !empty($this->config['watermark_file'])) {
             $this->watermarkEnabled = true;
-            $this->watermarkFile = $config['watermark_file'];
+            $this->watermarkFile = $this->config['watermark_file'];
             $this->loadWatermark();
         }
 
         $this->decoder = new H264Decoder();
-        $this->encoder = new H264Encoder();
-        $this->encoder->motionWorkers = max(1, (int)($config['motionWorkers'] ?? 8));
+        $this->encoder = $this->createEncoder();
         $this->scaler = new VideoScaler();
+    }
+
+    /** 按归一化配置创建编码器（构造与 resetProcessState 共用，保证选项一致） */
+    private function createEncoder(): H264Encoder
+    {
+        $encoder = new H264Encoder();
+        $encoder->motionWorkers = max(1, (int)$this->config['motionWorkers']);
+        TranscodeOptions::applyEncoder($encoder, $this->config);
+        return $encoder;
     }
 
     private function validateConfig(): void
@@ -206,8 +219,7 @@ class Mp4Recoder
     private function resetProcessState(): void
     {
         $this->decoder = new H264Decoder();
-        $this->encoder = new H264Encoder();
-        $this->encoder->motionWorkers = max(1, (int)($this->config['motionWorkers'] ?? 8));
+        $this->encoder = $this->createEncoder();
         $this->mp4Data = '';
         $this->boxTree = [];
         $this->videoTrack = null;
@@ -616,8 +628,14 @@ class Mp4Recoder
         if (!empty($metadata['drop'])) return;
         if (!empty($metadata['gopEncoded']['profiles']['default'])) {
             // 预编码 GOP 样本与逐帧流水线编码互斥：先冲刷在途帧与排队音频保序
+            $encodedNals = [];
+            foreach ($metadata['gopEncoded']['profiles']['default'] as $b64) {
+                $raw = base64_decode((string)$b64, true);
+                if ($raw === false || $raw === '') throw new RuntimeException('流水线编码样本 NAL base64 非法');
+                $encodedNals[] = $raw;
+            }
             $this->flushPendingVideo();
-            $this->appendPipelineEncodedSample($metadata, $metadata['gopEncoded']['profiles']['default']);
+            $this->appendPipelineEncodedSample($metadata, $encodedNals);
             return;
         }
         $this->pipelineYuv = null;
