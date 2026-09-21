@@ -9,32 +9,16 @@ namespace Xiaosongshu\Flv2mp4\Codec\Decode;
  */
 trait MotionCompensationTrait
 {
-    /** @var array<int,string>|null 256 个单字节字符查找表，替代 MC 输出热路径中的 chr()。 */
-    private static ?array $mcChrTable = null;
-
-    /** @return array<int,string> */
-    private static function mcChrTable(): array
+    public function mcLuma(array $refPlane, int $refStride, int $refWidth, int $refHeight, int $x, int $y, int $blockW, int $blockH): array
     {
-        if (self::$mcChrTable === null) {
-            $t = [];
-            for ($i = 0; $i < 256; $i++) {
-                $t[$i] = chr($i);
-            }
-            self::$mcChrTable = $t;
-        }
-        return self::$mcChrTable;
-    }
-
-    public function mcLuma(string $refPlane, int $refStride, int $refWidth, int $refHeight, int $x, int $y, int $blockW, int $blockH): array
-    {
-        $buffer = str_repeat("\0", $blockW * $blockH);
+        $buffer = array_fill(0, $blockW * $blockH, 0);
         $this->mcLumaTo($refPlane, $refStride, $refWidth, $refHeight, $x, $y, $blockW, $blockH, $buffer, $blockW, 0, 0);
         $pred = [];
         for ($j = 0; $j < $blockH; $j++) {
             $row = [];
             $base = $j * $blockW;
             for ($i = 0; $i < $blockW; $i++) {
-                $row[$i] = ord($buffer[$base + $i]);
+                $row[$i] = $buffer[$base + $i];
             }
             $pred[$j] = $row;
         }
@@ -42,7 +26,7 @@ trait MotionCompensationTrait
     }
 
     private function mcLumaTo(
-        string $refPlane,
+        array $refPlane,
         int $refStride,
         int $refWidth,
         int $refHeight,
@@ -50,7 +34,7 @@ trait MotionCompensationTrait
         int $y,
         int $blockW,
         int $blockH,
-        string &$dstPlane,
+        array &$dstPlane,
         int $dstStride,
         int $dstX,
         int $dstY,
@@ -93,13 +77,12 @@ trait MotionCompensationTrait
         }
 
         if ($refBytes === null) {
-            $refBytes = array_values(unpack('C*', $refPlane));
+            $refBytes = $refPlane;
         }
 
         if ($fracY === 0) {
             $srcOffX = $fracX === 3 ? 1 : 0;
             $interiorX = $intX >= 2 && $intX + $blockW + 2 <= $maxX;
-            $chr = self::mcChrTable();
             if ($interiorX) {
                 // interior：6 抽头滑动窗口递推（与直接卷积整数严格等价）：
                 // S' = S + x_new - x_drop + 6*(t1 - t5) + 25*(t4 - t2)
@@ -123,7 +106,7 @@ trait MotionCompensationTrait
                         if ($fracX !== 2) {
                             $val = ($refBytes[$srcBase + $i + $srcOffX] + $val + 1) >> 1;
                         }
-                        $dstPlane[$dstBase + $i] = $chr[$val];
+                        $dstPlane[$dstBase + $i] = $val;
 
                         if ($i + 1 < $blockW) {
                             $tn = $refBytes[$srcBase + $i + 4];
@@ -163,7 +146,7 @@ trait MotionCompensationTrait
                         $sx = $sx < 0 ? 0 : ($sx > $maxX ? $maxX : $sx);
                         $val = ($refBytes[$srcBase + $sx] + $val + 1) >> 1;
                     }
-                    $dstPlane[$dstBase + $i] = $chr[$val];
+                    $dstPlane[$dstBase + $i] = $val;
                 }
             }
             return;
@@ -172,7 +155,6 @@ trait MotionCompensationTrait
         if ($fracX === 0) {
             $srcOffY = $fracY === 3 ? 1 : 0;
             $interiorX = $intX >= 0 && $intX + $blockW <= $refWidth;
-            $chr = self::mcChrTable();
             // interior：x 不夹边、y 窗口（sy-2..sy+3）全程不夹边时，按列滑动递推，
             // 每像素只需读 1 个新 tap 点（原路径 6 个），与直接卷积整数严格等价
             $interiorY = $intY >= 2 && $intY + $blockH + 2 <= $maxY;
@@ -195,7 +177,7 @@ trait MotionCompensationTrait
                         if ($fracY !== 2) {
                             $val = ($refBytes[$srcRow] + $val + 1) >> 1;
                         }
-                        $dstPlane[$dstOff] = $chr[$val];
+                        $dstPlane[$dstOff] = $val;
                         if ($j + 1 < $blockH) {
                             $tn = $refBytes[$off + 6 * $refStride];
                             $s = $s + $tn - $t0 + 6 * ($t1 - $t5) + 25 * ($t4 - $t2);
@@ -239,7 +221,7 @@ trait MotionCompensationTrait
                     if ($fracY !== 2) {
                         $val = ($refBytes[$srcBase + $sx] + $val + 1) >> 1;
                     }
-                    $dstPlane[$dstBase + $i] = $chr[$val];
+                    $dstPlane[$dstBase + $i] = $val;
                 }
             }
             return;
@@ -264,7 +246,6 @@ trait MotionCompensationTrait
             $verticalX = $intX + ($fracX === 3 ? 1 : 0);
             $interiorHorizontalX = $intX >= 2 && $intX + $blockW + 2 <= $maxX;
             $interiorVerticalX = $verticalX >= 0 && $verticalX + $blockW <= $refWidth;
-            $chr = self::mcChrTable();
 
             if ($interiorHorizontalX) {
                 for ($j = 0; $j < $blockH; $j++) {
@@ -309,7 +290,7 @@ trait MotionCompensationTrait
                         $vertical = ($vertical + 16) >> 5;
                         $vertical = $vertical < 0 ? 0 : ($vertical > 255 ? 255 : $vertical);
 
-                        $dstPlane[$dstBase + $i] = $chr[($horizontal + $vertical + 1) >> 1];
+                        $dstPlane[$dstBase + $i] = ($horizontal + $vertical + 1) >> 1;
 
                         if ($i + 1 < $blockW) {
                             $tn = $refBytes[$hr + $i + 4];
@@ -370,13 +351,12 @@ trait MotionCompensationTrait
                     $vertical = ($vertical + 16) >> 5;
                     $vertical = $vertical < 0 ? 0 : ($vertical > 255 ? 255 : $vertical);
 
-                    $dstPlane[$dstBase + $i] = $chr[($horizontal + $vertical + 1) >> 1];
+                    $dstPlane[$dstBase + $i] = ($horizontal + $vertical + 1) >> 1;
                 }
             }
             return;
         }
 
-        $chr = self::mcChrTable();
         for ($j = 0; $j < $blockH; $j++) {
             $base = $j * $blockW;
             $dstBase = ($dstY + $j) * $dstStride + $dstX;
@@ -385,7 +365,7 @@ trait MotionCompensationTrait
                 if ($second !== null) {
                     $val = ($val + $second[$base + $secondOffset + $i] + 1) >> 1;
                 }
-                $dstPlane[$dstBase + $i] = $chr[$val];
+                $dstPlane[$dstBase + $i] = $val;
             }
         }
     }
@@ -555,8 +535,8 @@ trait MotionCompensationTrait
     }
 
     private function mcChromaPairTo(
-        string $uPlane,
-        string $vPlane,
+        array $uPlane,
+        array $vPlane,
         int $stride,
         int $width,
         int $height,
@@ -564,8 +544,8 @@ trait MotionCompensationTrait
         int $y,
         int $blockW,
         int $blockH,
-        string &$dstU,
-        string &$dstV,
+        array &$dstU,
+        array &$dstV,
         int $dstStride,
         int $dstX,
         int $dstY,
@@ -578,7 +558,6 @@ trait MotionCompensationTrait
         $intY = $y >> 3;
         $maxX = $width - 1;
         $maxY = $height - 1;
-        $chr = self::mcChrTable();
 
         if ($fracX === 0 && $fracY === 0 && $intX >= 0 && $intY >= 0 && $intX + $blockW <= $width && $intY + $blockH <= $height) {
             for ($j = 0; $j < $blockH; $j++) {
@@ -595,8 +574,8 @@ trait MotionCompensationTrait
         $hasFraction = $fracX !== 0 || $fracY !== 0;
         if ($hasFraction) {
             if ($uBytes === null) {
-                $uBytes = array_values(unpack('C*', $uPlane));
-                $vBytes = array_values(unpack('C*', $vPlane));
+                $uBytes = $uPlane;
+                $vBytes = $vPlane;
             }
             $wx0 = 8 - $fracX;
             $wy0 = 8 - $fracY;
@@ -617,8 +596,8 @@ trait MotionCompensationTrait
                             $vb = $vBytes[$row0 + $i + 1];
                             $uVal = ($wx0 * $ua + $fracX * $ub + 4) >> 3;
                             $vVal = ($wx0 * $va + $fracX * $vb + 4) >> 3;
-                            $dstU[$dstBase + $i] = $chr[$uVal];
-                            $dstV[$dstBase + $i] = $chr[$vVal];
+                            $dstU[$dstBase + $i] = $uVal;
+                            $dstV[$dstBase + $i] = $vVal;
                             $ua = $ub;
                             $va = $vb;
                         }
@@ -632,8 +611,8 @@ trait MotionCompensationTrait
                         for ($i = 0; $i < $blockW; $i++) {
                             $uVal = ($wy0 * $uBytes[$row0 + $i] + $fracY * $uBytes[$row1 + $i] + 4) >> 3;
                             $vVal = ($wy0 * $vBytes[$row0 + $i] + $fracY * $vBytes[$row1 + $i] + 4) >> 3;
-                            $dstU[$dstBase + $i] = $chr[$uVal];
-                            $dstV[$dstBase + $i] = $chr[$vVal];
+                            $dstU[$dstBase + $i] = $uVal;
+                            $dstV[$dstBase + $i] = $vVal;
                         }
                     }
                 } else {
@@ -657,8 +636,8 @@ trait MotionCompensationTrait
                         for ($i = 0; $i < $blockW; $i++) {
                             $uVal = ($w00 * $ua + $w10 * $ub + $w01 * $uc + $w11 * $ud + 32) >> 6;
                             $vVal = ($w00 * $va + $w10 * $vb + $w01 * $vc + $w11 * $vd + 32) >> 6;
-                            $dstU[$dstBase + $i] = $chr[$uVal];
-                            $dstV[$dstBase + $i] = $chr[$vVal];
+                            $dstU[$dstBase + $i] = $uVal;
+                            $dstV[$dstBase + $i] = $vVal;
                             if ($i + 1 < $blockW) {
                                 $ua = $ub;
                                 $uc = $ud;
@@ -714,8 +693,8 @@ trait MotionCompensationTrait
                     + $w10 * $vBytes[$row0 + $x1[$i]]
                     + $w01 * $vBytes[$row1 + $x0[$i]]
                     + $w11 * $vBytes[$row1 + $x1[$i]] + 32) >> 6;
-                $dstU[$dstBase + $i] = $chr[$uVal < 0 ? 0 : ($uVal > 255 ? 255 : $uVal)];
-                $dstV[$dstBase + $i] = $chr[$vVal < 0 ? 0 : ($vVal > 255 ? 255 : $vVal)];
+                $dstU[$dstBase + $i] = $uVal < 0 ? 0 : ($uVal > 255 ? 255 : $uVal);
+                $dstV[$dstBase + $i] = $vVal < 0 ? 0 : ($vVal > 255 ? 255 : $vVal);
             }
         }
     }

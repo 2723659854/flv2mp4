@@ -11,14 +11,6 @@ use Xiaosongshu\Flv2mp4\Codec\H264Decoder;
  */
 trait MacroblockDecodingTrait
 {
-    /** @var array<int,string>|null 0..255 单字节字符查找表（进程内惰性构建一次） */
-    private static ?array $residChrTable = null;
-
-    private static function residChrTable(): array
-    {
-        return self::$residChrTable ??= array_map('chr', range(0, 255));
-    }
-
     private function readRefIdxL0(): int
     {
         $numRef = $this->numRefIdxL0Active;
@@ -42,10 +34,12 @@ trait MacroblockDecodingTrait
         $mbWidth = $this->picWidthInMbs;
         $mbIdx = $mbY * $mbWidth + $mbX;
 
-        $this->mbTypeForDeblock[$mbIdx] = $mbType;
-        $this->mbNnzForDeblock[$mbIdx] = array_fill(0, 24, 0);
-        $this->mbMvForDeblock[$mbIdx] = array_fill(0, 16, [0, 0]);
-        $this->mbRefForDeblock[$mbIdx] = array_fill(0, 16, 0);
+        if ($this->deblockInfoEnabled) {
+            $this->mbTypeForDeblock[$mbIdx] = $mbType;
+            $this->mbNnzForDeblock[$mbIdx] = array_fill(0, 24, 0);
+            $this->mbMvForDeblock[$mbIdx] = array_fill(0, 16, [0, 0]);
+            $this->mbRefForDeblock[$mbIdx] = array_fill(0, 16, 0);
+        }
 
         $mbQpDelta = 0;
 
@@ -311,7 +305,7 @@ trait MacroblockDecodingTrait
                             $val = $predicted[$y][$x] + $yPixels[$blkY * 4 + $y][$blkX * 4 + $x];
                             $val = max(0, min(255, $val));
                             $idx = $py * $this->width + $px;
-                            $this->yPlane[$idx] = chr($val);
+                            $this->yPlane[$idx] = $val;
                         }
                     }
                 }
@@ -380,8 +374,8 @@ trait MacroblockDecodingTrait
                     $valU = max(0, min(255, $valU));
                     $valV = max(0, min(255, $valV));
                     $idx = $py * $chromaWidth + $px;
-                    $this->uPlane[$idx] = chr($valU);
-                    $this->vPlane[$idx] = chr($valV);
+                    $this->uPlane[$idx] = $valU;
+                    $this->vPlane[$idx] = $valV;
                 }
             }
         }
@@ -638,7 +632,7 @@ trait MacroblockDecodingTrait
                                 $val = $lumaPred[$blkY * 4 + $y][$blkX * 4 + $x] + $acIdct[$y * 4 + $x];
                                 $val = max(0, min(255, $val));
                                 $idx = $py * $this->width + $px;
-                                $this->yPlane[$idx] = chr($val);
+                                $this->yPlane[$idx] = $val;
                             }
                         }
                     }
@@ -653,7 +647,7 @@ trait MacroblockDecodingTrait
                                 $val = $lumaPred[$blkY * 4 + $y][$blkX * 4 + $x] + $dcAdd;
                                 $val = max(0, min(255, $val));
                                 $idx = $py * $this->width + $px;
-                                $this->yPlane[$idx] = chr($val);
+                                $this->yPlane[$idx] = $val;
                             }
                         }
                     }
@@ -695,8 +689,8 @@ trait MacroblockDecodingTrait
                                 $vu = $cbPred[$blkY * 4 + $y][$blkX * 4 + $x] + $acIdctCb[$y * 4 + $x];
                                 $vv = $crPred[$blkY * 4 + $y][$blkX * 4 + $x] + $acIdctCr[$y * 4 + $x];
                                 $idx = $py * $cw + $px;
-                                $this->uPlane[$idx] = chr(max(0, min(255, $vu)));
-                                $this->vPlane[$idx] = chr(max(0, min(255, $vv)));
+                                $this->uPlane[$idx] = max(0, min(255, $vu));
+                                $this->vPlane[$idx] = max(0, min(255, $vv));
                             }
                         }
                     }
@@ -712,8 +706,8 @@ trait MacroblockDecodingTrait
                                 $vu = $cbPred[$blkY * 4 + $y][$blkX * 4 + $x] + $cbDcAdd;
                                 $vv = $crPred[$blkY * 4 + $y][$blkX * 4 + $x] + $crDcAdd;
                                 $idx = $py * $cw + $px;
-                                $this->uPlane[$idx] = chr(max(0, min(255, $vu)));
-                                $this->vPlane[$idx] = chr(max(0, min(255, $vv)));
+                                $this->uPlane[$idx] = max(0, min(255, $vu));
+                                $this->vPlane[$idx] = max(0, min(255, $vv));
                             }
                         }
                     }
@@ -725,8 +719,8 @@ trait MacroblockDecodingTrait
                             $px = $mbX * 8 + $blkX * 4 + $x;
                             if ($py < $ch && $px < $cw) {
                                 $idx = $py * $cw + $px;
-                                $this->uPlane[$idx] = chr($cbPred[$blkY * 4 + $y][$blkX * 4 + $x]);
-                                $this->vPlane[$idx] = chr($crPred[$blkY * 4 + $y][$blkX * 4 + $x]);
+                                $this->uPlane[$idx] = $cbPred[$blkY * 4 + $y][$blkX * 4 + $x];
+                                $this->vPlane[$idx] = $crPred[$blkY * 4 + $y][$blkX * 4 + $x];
                             }
                         }
                     }
@@ -810,7 +804,7 @@ trait MacroblockDecodingTrait
             for ($x = 0; $x < 16; $x++) {
                 $px = $px0 + $x;
                 if ($px >= $this->width) break;
-                $this->yPlane[$baseIdx + $px] = "\x80";
+                $this->yPlane[$baseIdx + $px] = 128;
             }
         }
         // 色度8x8
@@ -825,8 +819,8 @@ trait MacroblockDecodingTrait
             for ($x = 0; $x < 8; $x++) {
                 $cx = $cx0 + $x;
                 if ($cx >= $cw) break;
-                $this->uPlane[$baseIdx + $cx] = "\x80";
-                $this->vPlane[$baseIdx + $cx] = "\x80";
+                $this->uPlane[$baseIdx + $cx] = 128;
+                $this->vPlane[$baseIdx + $cx] = 128;
             }
         }
         // 非I帧宏块传递DC_PRED(2)给相邻宏块
@@ -847,7 +841,7 @@ trait MacroblockDecodingTrait
         $py = $mbY * 16 + $y;
         if ($px >= $this->width || $py >= $this->height) return;
         $idx = $py * $this->width + $px;
-        $this->yPlane[$idx] = chr(max(0, min(255, $val)));
+        $this->yPlane[$idx] = max(0, min(255, $val));
     }
 
     /**
@@ -864,9 +858,9 @@ trait MacroblockDecodingTrait
         $idx = $py * $cw + $px;
         $val = max(0, min(255, $val));
         if ($uv === 0) {
-            $this->uPlane[$idx] = chr($val);
+            $this->uPlane[$idx] = $val;
         } else {
-            $this->vPlane[$idx] = chr($val);
+            $this->vPlane[$idx] = $val;
         }
     }
 
@@ -951,8 +945,10 @@ trait MacroblockDecodingTrait
         $mbIdx = $mbY * $mbWidth + $mbX;
         // 16 个 4x4 块 MV/参考索引全同：array_fill 一次构建（子数组共享同一 COW 引用，
         // 去块滤波端只读），避免逐块小数组分配
-        $this->mbMvForDeblock[$mbIdx] = array_fill(0, 16, [$mvX, $mvY]);
-        $this->mbRefForDeblock[$mbIdx] = array_fill(0, 16, $refIdx);
+        if ($this->deblockInfoEnabled) {
+            $this->mbMvForDeblock[$mbIdx] = array_fill(0, 16, [$mvX, $mvY]);
+            $this->mbRefForDeblock[$mbIdx] = array_fill(0, 16, $refIdx);
+        }
 
         return 0;
     }
@@ -1035,8 +1031,10 @@ trait MacroblockDecodingTrait
         $this->updateInterMbIntraModes($mbX);
         $mbWidth = $this->picWidthInMbs;
         $mbIdx = $mbY * $mbWidth + $mbX;
-        $this->mbMvForDeblock[$mbIdx] = array_fill(0, 16, [$mvX, $mvY]);
-        $this->mbRefForDeblock[$mbIdx] = array_fill(0, 16, $refIdx);
+        if ($this->deblockInfoEnabled) {
+            $this->mbMvForDeblock[$mbIdx] = array_fill(0, 16, [$mvX, $mvY]);
+            $this->mbRefForDeblock[$mbIdx] = array_fill(0, 16, $refIdx);
+        }
         return $mbQpDelta;
     }
 
@@ -1085,14 +1083,16 @@ trait MacroblockDecodingTrait
 
         $mbWidth = $this->picWidthInMbs;
         $mbIdx = $mbY * $mbWidth + $mbX;
-        $this->mbMvForDeblock[$mbIdx] = array_merge(
-            array_fill(0, 8, [$mv0X, $mv0Y]),
-            array_fill(0, 8, [$mv1X, $mv1Y])
-        );
-        $this->mbRefForDeblock[$mbIdx] = array_merge(
-            array_fill(0, 8, $refIdx0),
-            array_fill(0, 8, $refIdx1)
-        );
+        if ($this->deblockInfoEnabled) {
+            $this->mbMvForDeblock[$mbIdx] = array_merge(
+                array_fill(0, 8, [$mv0X, $mv0Y]),
+                array_fill(0, 8, [$mv1X, $mv1Y])
+            );
+            $this->mbRefForDeblock[$mbIdx] = array_merge(
+                array_fill(0, 8, $refIdx0),
+                array_fill(0, 8, $refIdx1)
+            );
+        }
 
         return $mbQpDelta;
     }
@@ -1142,13 +1142,15 @@ trait MacroblockDecodingTrait
 
         $mbWidth = $this->picWidthInMbs;
         $mbIdx = $mbY * $mbWidth + $mbX;
-        foreach (self::$left8x16Blocks as $i) {
-            $this->mbMvForDeblock[$mbIdx][$i] = [$mv0X, $mv0Y];
-            $this->mbRefForDeblock[$mbIdx][$i] = $refIdx0;
-        }
-        foreach (self::$right8x16Blocks as $i) {
-            $this->mbMvForDeblock[$mbIdx][$i] = [$mv1X, $mv1Y];
-            $this->mbRefForDeblock[$mbIdx][$i] = $refIdx1;
+        if ($this->deblockInfoEnabled) {
+            foreach (self::$left8x16Blocks as $i) {
+                $this->mbMvForDeblock[$mbIdx][$i] = [$mv0X, $mv0Y];
+                $this->mbRefForDeblock[$mbIdx][$i] = $refIdx0;
+            }
+            foreach (self::$right8x16Blocks as $i) {
+                $this->mbMvForDeblock[$mbIdx][$i] = [$mv1X, $mv1Y];
+                $this->mbRefForDeblock[$mbIdx][$i] = $refIdx1;
+            }
         }
 
         return $mbQpDelta;
@@ -1466,7 +1468,7 @@ trait MacroblockDecodingTrait
 
         $mbWidth = $this->picWidthInMbs;
         $mbIdx = $mbY * $mbWidth + $mbX;
-        for ($y = 0; $y < 4; $y++) {
+        if ($this->deblockInfoEnabled) for ($y = 0; $y < 4; $y++) {
             for ($x = 0; $x < 4; $x++) {
                 $idx = $y * 4 + $x;
                 $mv = $mbMvs[$y][$x];
@@ -1513,14 +1515,16 @@ trait MacroblockDecodingTrait
         // 写回 dpb 才能跨 slice 复用（refPicList0 每片重建）；maxNumRefFrames=1，dpb 通常仅 1 条
         foreach ($this->dpb as $k => $entry) {
             if ($entry['frameNum'] !== $listEntry['frameNum'] || $entry['isLongTerm'] !== $listEntry['isLongTerm']) continue;
+            // 平面本身就是整数数组，正常构造的 entry 中 *Bytes 已共享同一数组；
+            // 此处仅兼容异常流下 *Bytes 缺失的情况（直接别名，无需任何转换）
             if ($needLuma && $entry['yBytes'] === null) {
-                $entry['yBytes'] = array_values(unpack('C*', $entry['y']));
+                $entry['yBytes'] = $entry['y'];
             }
             if ($needChroma && $entry['uBytes'] === null) {
-                $entry['uBytes'] = array_values(unpack('C*', $entry['u']));
+                $entry['uBytes'] = $entry['u'];
             }
             if ($needChroma && $entry['vBytes'] === null) {
-                $entry['vBytes'] = array_values(unpack('C*', $entry['v']));
+                $entry['vBytes'] = $entry['v'];
             }
             $this->dpb[$k] = $entry;
             $this->refPicList0[$refIdx] = $entry;
@@ -1528,10 +1532,10 @@ trait MacroblockDecodingTrait
         }
         // 兜底：参考帧不在 dpb（异常流）时直接填充本片列表副本
         $entry = &$this->refPicList0[$refIdx];
-        if ($needLuma && $entry['yBytes'] === null) $entry['yBytes'] = array_values(unpack('C*', $entry['y']));
+        if ($needLuma && $entry['yBytes'] === null) $entry['yBytes'] = $entry['y'];
         if ($needChroma) {
-            if ($entry['uBytes'] === null) $entry['uBytes'] = array_values(unpack('C*', $entry['u']));
-            if ($entry['vBytes'] === null) $entry['vBytes'] = array_values(unpack('C*', $entry['v']));
+            if ($entry['uBytes'] === null) $entry['uBytes'] = $entry['u'];
+            if ($entry['vBytes'] === null) $entry['vBytes'] = $entry['v'];
         }
         unset($entry);
     }
@@ -2030,7 +2034,6 @@ trait MacroblockDecodingTrait
         $lumaFull = (($mbX + 1) * 16 <= $this->width) && (($mbY + 1) * 16 <= $this->height);
         $lumaW = $this->width;
         if ($lumaFull) {
-            $chr = self::residChrTable();
             for ($blkY = 0; $blkY < 4; $blkY++) {
                 for ($blkX = 0; $blkX < 4; $blkX++) {
                     $blk = $blkY * 4 + $blkX;
@@ -2040,10 +2043,10 @@ trait MacroblockDecodingTrait
                         $idx = ($mbY * 16 + $blkY * 4) * $lumaW + $mbX * 16 + $blkX * 4;
                         for ($y = 0; $y < 4; $y++) {
                             $row = $y * 4;
-                            $this->yPlane[$idx]     = $chr[max(0, min(255, ord($this->yPlane[$idx]) + $idct[$row]))];
-                            $this->yPlane[$idx + 1] = $chr[max(0, min(255, ord($this->yPlane[$idx + 1]) + $idct[$row + 1]))];
-                            $this->yPlane[$idx + 2] = $chr[max(0, min(255, ord($this->yPlane[$idx + 2]) + $idct[$row + 2]))];
-                            $this->yPlane[$idx + 3] = $chr[max(0, min(255, ord($this->yPlane[$idx + 3]) + $idct[$row + 3]))];
+                            $this->yPlane[$idx]     = max(0, min(255, $this->yPlane[$idx] + $idct[$row]));
+                            $this->yPlane[$idx + 1] = max(0, min(255, $this->yPlane[$idx + 1] + $idct[$row + 1]));
+                            $this->yPlane[$idx + 2] = max(0, min(255, $this->yPlane[$idx + 2] + $idct[$row + 2]));
+                            $this->yPlane[$idx + 3] = max(0, min(255, $this->yPlane[$idx + 3] + $idct[$row + 3]));
                             $idx += $lumaW;
                         }
                     }
@@ -2056,7 +2059,6 @@ trait MacroblockDecodingTrait
                     $i8x8 = (int)($blkY / 2) * 2 + (int)($blkX / 2);
                     if (($lumaCbp & (1 << $i8x8)) !== 0) {
                         $idct = $this->idct4x4Flat($yCoeffs[$blk]);
-                        $chr = self::residChrTable();
 
                         for ($y = 0; $y < 4; $y++) {
                             for ($x = 0; $x < 4; $x++) {
@@ -2064,8 +2066,8 @@ trait MacroblockDecodingTrait
                                 $px = $mbX * 16 + $blkX * 4 + $x;
                                 if ($py < $this->height && $px < $this->width) {
                                     $idx = $py * $this->width + $px;
-                                    $val = ord($this->yPlane[$idx]) + $idct[$y * 4 + $x];
-                                    $this->yPlane[$idx] = $chr[max(0, min(255, $val))];
+                                    $val = $this->yPlane[$idx] + $idct[$y * 4 + $x];
+                                    $this->yPlane[$idx] = max(0, min(255, $val));
                                 }
                             }
                         }
@@ -2080,7 +2082,6 @@ trait MacroblockDecodingTrait
             $ch = (int)($this->height / 2);
             // 整个 8x8 色度 MB 在画面内时，4 个 4x4 块均无需逐像素边界检查
             $chrFull = (($mbX + 1) * 8 <= $cw) && (($mbY + 1) * 8 <= $ch);
-            $chr = self::residChrTable();
             for ($blkY = 0; $blkY < 2; $blkY++) {
                 for ($blkX = 0; $blkX < 2; $blkX++) {
                     $blk = $blkY * 2 + $blkX;
@@ -2098,10 +2099,10 @@ trait MacroblockDecodingTrait
                             $idx = $baseY * $cw + $baseX;
                             for ($y = 0; $y < 4; $y++) {
                                 $row = $y * 4;
-                                $this->uPlane[$idx]     = $chr[max(0, min(255, ord($this->uPlane[$idx]) + $acIdctCb[$row]))];
-                                $this->uPlane[$idx + 1] = $chr[max(0, min(255, ord($this->uPlane[$idx + 1]) + $acIdctCb[$row + 1]))];
-                                $this->uPlane[$idx + 2] = $chr[max(0, min(255, ord($this->uPlane[$idx + 2]) + $acIdctCb[$row + 2]))];
-                                $this->uPlane[$idx + 3] = $chr[max(0, min(255, ord($this->uPlane[$idx + 3]) + $acIdctCb[$row + 3]))];
+                                $this->uPlane[$idx]     = max(0, min(255, $this->uPlane[$idx] + $acIdctCb[$row]));
+                                $this->uPlane[$idx + 1] = max(0, min(255, $this->uPlane[$idx + 1] + $acIdctCb[$row + 1]));
+                                $this->uPlane[$idx + 2] = max(0, min(255, $this->uPlane[$idx + 2] + $acIdctCb[$row + 2]));
+                                $this->uPlane[$idx + 3] = max(0, min(255, $this->uPlane[$idx + 3] + $acIdctCb[$row + 3]));
                                 $idx += $cw;
                             }
                         } else {
@@ -2111,8 +2112,8 @@ trait MacroblockDecodingTrait
                                     $px = $baseX + $x;
                                     if ($py < $ch && $px < $cw) {
                                         $idx = $py * $cw + $px;
-                                        $val = ord($this->uPlane[$idx]) + $acIdctCb[$y * 4 + $x];
-                                        $this->uPlane[$idx] = $chr[max(0, min(255, $val))];
+                                        $val = $this->uPlane[$idx] + $acIdctCb[$y * 4 + $x];
+                                        $this->uPlane[$idx] = max(0, min(255, $val));
                                     }
                                 }
                             }
@@ -2122,14 +2123,14 @@ trait MacroblockDecodingTrait
                         if ($chrFull) {
                             $idx = $baseY * $cw + $baseX;
                             for ($y = 0; $y < 4; $y++) {
-                                $v0 = max(0, min(255, ord($this->uPlane[$idx]) + $dcAddCb));
-                                $v1 = max(0, min(255, ord($this->uPlane[$idx + 1]) + $dcAddCb));
-                                $v2 = max(0, min(255, ord($this->uPlane[$idx + 2]) + $dcAddCb));
-                                $v3 = max(0, min(255, ord($this->uPlane[$idx + 3]) + $dcAddCb));
-                                $this->uPlane[$idx] = $chr[$v0];
-                                $this->uPlane[$idx + 1] = $chr[$v1];
-                                $this->uPlane[$idx + 2] = $chr[$v2];
-                                $this->uPlane[$idx + 3] = $chr[$v3];
+                                $v0 = max(0, min(255, $this->uPlane[$idx] + $dcAddCb));
+                                $v1 = max(0, min(255, $this->uPlane[$idx + 1] + $dcAddCb));
+                                $v2 = max(0, min(255, $this->uPlane[$idx + 2] + $dcAddCb));
+                                $v3 = max(0, min(255, $this->uPlane[$idx + 3] + $dcAddCb));
+                                $this->uPlane[$idx] = $v0;
+                                $this->uPlane[$idx + 1] = $v1;
+                                $this->uPlane[$idx + 2] = $v2;
+                                $this->uPlane[$idx + 3] = $v3;
                                 $idx += $cw;
                             }
                         } else {
@@ -2139,8 +2140,8 @@ trait MacroblockDecodingTrait
                                     $px = $baseX + $x;
                                     if ($py < $ch && $px < $cw) {
                                         $idx = $py * $cw + $px;
-                                        $val = ord($this->uPlane[$idx]) + $dcAddCb;
-                                        $this->uPlane[$idx] = $chr[max(0, min(255, $val))];
+                                        $val = $this->uPlane[$idx] + $dcAddCb;
+                                        $this->uPlane[$idx] = max(0, min(255, $val));
                                     }
                                 }
                             }
@@ -2156,10 +2157,10 @@ trait MacroblockDecodingTrait
                             $idx = $baseY * $cw + $baseX;
                             for ($y = 0; $y < 4; $y++) {
                                 $row = $y * 4;
-                                $this->vPlane[$idx]     = $chr[max(0, min(255, ord($this->vPlane[$idx]) + $acIdctCr[$row]))];
-                                $this->vPlane[$idx + 1] = $chr[max(0, min(255, ord($this->vPlane[$idx + 1]) + $acIdctCr[$row + 1]))];
-                                $this->vPlane[$idx + 2] = $chr[max(0, min(255, ord($this->vPlane[$idx + 2]) + $acIdctCr[$row + 2]))];
-                                $this->vPlane[$idx + 3] = $chr[max(0, min(255, ord($this->vPlane[$idx + 3]) + $acIdctCr[$row + 3]))];
+                                $this->vPlane[$idx]     = max(0, min(255, $this->vPlane[$idx] + $acIdctCr[$row]));
+                                $this->vPlane[$idx + 1] = max(0, min(255, $this->vPlane[$idx + 1] + $acIdctCr[$row + 1]));
+                                $this->vPlane[$idx + 2] = max(0, min(255, $this->vPlane[$idx + 2] + $acIdctCr[$row + 2]));
+                                $this->vPlane[$idx + 3] = max(0, min(255, $this->vPlane[$idx + 3] + $acIdctCr[$row + 3]));
                                 $idx += $cw;
                             }
                         } else {
@@ -2169,8 +2170,8 @@ trait MacroblockDecodingTrait
                                     $px = $baseX + $x;
                                     if ($py < $ch && $px < $cw) {
                                         $idx = $py * $cw + $px;
-                                        $val = ord($this->vPlane[$idx]) + $acIdctCr[$y * 4 + $x];
-                                        $this->vPlane[$idx] = $chr[max(0, min(255, $val))];
+                                        $val = $this->vPlane[$idx] + $acIdctCr[$y * 4 + $x];
+                                        $this->vPlane[$idx] = max(0, min(255, $val));
                                     }
                                 }
                             }
@@ -2180,14 +2181,14 @@ trait MacroblockDecodingTrait
                         if ($chrFull) {
                             $idx = $baseY * $cw + $baseX;
                             for ($y = 0; $y < 4; $y++) {
-                                $v0 = max(0, min(255, ord($this->vPlane[$idx]) + $dcAddCr));
-                                $v1 = max(0, min(255, ord($this->vPlane[$idx + 1]) + $dcAddCr));
-                                $v2 = max(0, min(255, ord($this->vPlane[$idx + 2]) + $dcAddCr));
-                                $v3 = max(0, min(255, ord($this->vPlane[$idx + 3]) + $dcAddCr));
-                                $this->vPlane[$idx] = $chr[$v0];
-                                $this->vPlane[$idx + 1] = $chr[$v1];
-                                $this->vPlane[$idx + 2] = $chr[$v2];
-                                $this->vPlane[$idx + 3] = $chr[$v3];
+                                $v0 = max(0, min(255, $this->vPlane[$idx] + $dcAddCr));
+                                $v1 = max(0, min(255, $this->vPlane[$idx + 1] + $dcAddCr));
+                                $v2 = max(0, min(255, $this->vPlane[$idx + 2] + $dcAddCr));
+                                $v3 = max(0, min(255, $this->vPlane[$idx + 3] + $dcAddCr));
+                                $this->vPlane[$idx] = $v0;
+                                $this->vPlane[$idx + 1] = $v1;
+                                $this->vPlane[$idx + 2] = $v2;
+                                $this->vPlane[$idx + 3] = $v3;
                                 $idx += $cw;
                             }
                         } else {
@@ -2197,8 +2198,8 @@ trait MacroblockDecodingTrait
                                     $px = $baseX + $x;
                                     if ($py < $ch && $px < $cw) {
                                         $idx = $py * $cw + $px;
-                                        $val = ord($this->vPlane[$idx]) + $dcAddCr;
-                                        $this->vPlane[$idx] = $chr[max(0, min(255, $val))];
+                                        $val = $this->vPlane[$idx] + $dcAddCr;
+                                        $this->vPlane[$idx] = max(0, min(255, $val));
                                     }
                                 }
                             }
@@ -2226,6 +2227,6 @@ trait MacroblockDecodingTrait
         $this->nzLeftColChroma[3] = $nzCache[23];
 
         $mbIdx = $mbY * $this->picWidthInMbs + $mbX;
-        $this->mbNnzForDeblock[$mbIdx] = $nzCache;
+        if ($this->deblockInfoEnabled) $this->mbNnzForDeblock[$mbIdx] = $nzCache;
     }
 }

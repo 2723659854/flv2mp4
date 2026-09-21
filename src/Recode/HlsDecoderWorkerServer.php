@@ -141,13 +141,16 @@ final class HlsDecoderWorkerServer
         $nals = $this->extractNals(substr($body, 5));
         if ($this->sps !== '') array_unshift($nals, ['type' => 7, 'data' => $this->sps]);
         if ($this->pps !== '') array_unshift($nals, ['type' => 8, 'data' => $this->pps]);
-        $frame = $this->decoder->decode($nals);
-        if (!$frame || empty($frame['data'])) return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, $body);
+        $dropFrame = !empty($meta['drop']);
+        // 抽帧丢弃的帧仅维持P链参考：开启 FLV2MP4_DROP_NODEBLOCK 时不裁剪输出、不去块滤波
+        $skipDeblock = $dropFrame && getenv('FLV2MP4_DROP_NODEBLOCK') !== false;
+        $frame = $this->decoder->decode($nals, false, !$skipDeblock, $skipDeblock);
         // 抽帧丢弃：解码已完成（维持 GOP 内后续帧的参考链），但不缩放/不附 YUV，
         // meta.drop 原样透传，输出端直接跳过编码
-        if (!empty($meta['drop'])) {
+        if ($dropFrame) {
             return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, $body);
         }
+        if (!$frame || empty($frame['data'])) return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, $body);
         $meta['decoded'] = true;
         $meta['sourceWidth'] = $this->width;
         $meta['sourceHeight'] = $this->height;

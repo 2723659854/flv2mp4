@@ -102,10 +102,13 @@ final class FlvDecoderWorkerServer
         $nals = $this->extractNals(substr($body, 5));
         if ($this->sps !== '') array_unshift($nals, ['type' => 7, 'data' => $this->sps]);
         if ($this->pps !== '') array_unshift($nals, ['type' => 8, 'data' => $this->pps]);
-        $frame = $this->decoder->decode($nals);
-        if (!$frame || empty($frame['data'])) { unset($meta['drop']); return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, $body); }
+        $dropFrame = !empty($meta['drop']);
+        // 抽帧丢弃的帧仅维持P链参考：开启 FLV2MP4_DROP_NODEBLOCK 时不裁剪输出、不去块滤波
+        $skipDeblock = $dropFrame && getenv('FLV2MP4_DROP_NODEBLOCK') !== false;
+        $frame = $this->decoder->decode($nals, false, !$skipDeblock, $skipDeblock);
         // 丢帧仍需解码以维持本进程参考链，但输出侧会直接丢弃：不缩放、不附 YUV，避免无效负载占满流水线
-        if (!empty($meta['drop'])) return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, $body);
+        if ($dropFrame) return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, $body);
+        if (!$frame || empty($frame['data'])) { unset($meta['drop']); return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, $body); }
         $w = ($this->config['width'] ?? 0) > 0 ? (int)$this->config['width'] : $this->width;
         $h = ($this->config['height'] ?? 0) > 0 ? (int)$this->config['height'] : $this->height;
         $yuv = ($w === $this->width && $h === $this->height) ? $frame['data'] : $this->scaler->scaleYUV420P($frame['data'], $this->width, $this->height, $w, $h);

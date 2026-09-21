@@ -80,10 +80,11 @@ class H264Decoder
     public array $quantMatrix = [];
     public array $dequant4Table = [];
 
-    // 宏块对齐的 YUV420p 二进制像素缓冲区
-    public string $yPlane = '';
-    public string $uPlane = '';
-    public string $vPlane = '';
+    // 宏块对齐的 YUV420p 像素缓冲区（0-based packed 整数数组，0..255；
+    // 重建直接写整数数组，参考帧被下一帧直接复用，省掉整帧 unpack/pack 转换）
+    public array $yPlane = [];
+    public array $uPlane = [];
+    public array $vPlane = [];
 
     // 宏块间非零系数计数（用于nC计算）
     public array $nzTopRowLuma = [];  // 上边行：每列1个，共 picWidthInMbs * 4
@@ -106,6 +107,12 @@ class H264Decoder
     public array $mbNnzForDeblock = [];
     public array $mbMvForDeblock = [];
     public array $mbRefForDeblock = [];
+
+    /**
+     * 当前帧是否需要为去块滤波收集宏块簿记（类型/QP/NZ/MV/参考索引）。
+     * 被抽帧丢弃的帧仅作P链参考、不输出，调用方可跳过去块滤波及其全部簿记。
+     */
+    public bool $deblockInfoEnabled = true;
     public int $currentSliceType = 0;
     public bool $forceDisableDeblock = false;
 
@@ -120,9 +127,9 @@ class H264Decoder
     public int $currFrameNum = 0;
 
     // 参考帧管理 - 保留兼容，现在作为refPicList0[0]的快捷访问
-    public ?string $refFrameY = null;
-    public ?string $refFrameU = null;
-    public ?string $refFrameV = null;
+    public ?array $refFrameY = null;
+    public ?array $refFrameU = null;
+    public ?array $refFrameV = null;
     public int $refStrideY = 0;
     public int $refStrideUv = 0;
     public int $refWidthY = 0;
@@ -279,16 +286,16 @@ class H264Decoder
      * @param bool $parseOnly 是否只解析SPS/PPS获取宽高，不解码帧
      * @return array|null ['data' => 二进制流, 'width', 'height', 'pix_fmt']
      */
-    public function decode(array $nalUnits, bool $parseOnly = false, bool $buildOutput = true): ?array
+    public function decode(array $nalUnits, bool $parseOnly = false, bool $buildOutput = true, bool $skipDeblock = false): ?array
     {
         // 记录之前的分辨率（用于判断是否需要重初始化）
         $prevWidth = $this->width;
         $prevHeight = $this->height;
 
         // 重置像素平面（但保留 SPS/PPS 解析结果）
-        $this->yPlane = '';
-        $this->uPlane = '';
-        $this->vPlane = '';
+        $this->yPlane = [];
+        $this->uPlane = [];
+        $this->vPlane = [];
 
         // 第一轮：解析SPS/PPS获取分辨率
         foreach ($nalUnits as $nal) {
@@ -335,10 +342,10 @@ class H264Decoder
                 $nalRefIdc = ($nalHeader >> 5) & 0x03;
                 //$sliceCount++;
                 $this->frameNum++;
-                // 每帧重新初始化像素平面
-                $this->yPlane = str_repeat("\x80", $ySize);
-                $this->uPlane = str_repeat("\x80", $uvSize);
-                $this->vPlane = str_repeat("\x80", $uvSize);
+                // 每帧重新初始化像素平面（128 = H.264 规定的帧内预测默认值）
+                $this->yPlane = array_fill(0, $ySize, 128);
+                $this->uPlane = array_fill(0, $uvSize, 128);
+                $this->vPlane = array_fill(0, $uvSize, 128);
 
                 // 保存实际图像尺寸，临时使用宏块对齐的尺寸进行解码
                 $origWidth = $this->width;
@@ -346,19 +353,21 @@ class H264Decoder
                 $this->width = $mbAlignedWidth;
                 $this->height = $mbAlignedHeight;
 
-                $this->decodeSlice($nal['data'], $nalType === 5, $nalRefIdc);
+                // IDR关键帧永不跳滤波（参考链重置点，且通常都保留输出）
+                $this->decodeSlice($nal['data'], $nalType === 5, $nalRefIdc, $skipDeblock && $nalType !== 5);
                 // 更新参考帧（用于P帧运动补偿）- 在恢复尺寸之前进行
                 if ($nalRefIdc !== 0 || $nalType === 5) {
                     $dpbEntry = [
                         'frameNum' => $this->currFrameNum,
                         'isLongTerm' => false,
+                        // 平面本身即 0-based 整数数组，*Bytes 与平面共享同一 COW 副本
+                        // （参考帧只读不写，不会发生写时分离），ensureRefBytes 因此变为空操作
                         'y' => $this->yPlane,
                         'u' => $this->uPlane,
                         'v' => $this->vPlane,
-                        // 整帧 unpack 极慢且占内存，改为子像素运动补偿时按需懒加载（见 ensureRefBytes）
-                        'yBytes' => null,
-                        'uBytes' => null,
-                        'vBytes' => null,
+                        'yBytes' => $this->yPlane,
+                        'uBytes' => $this->uPlane,
+                        'vBytes' => $this->vPlane,
                         'strideY' => $mbAlignedWidth,
                         'strideUv' => (int)($mbAlignedWidth / 2),
                         'widthY' => $mbAlignedWidth,
@@ -418,17 +427,17 @@ class H264Decoder
                 // 将本帧转为二进制并追加到输出（裁剪到实际图像尺寸）
                 if ($buildOutput) {
                     $yBin = '';
-                    for ($y = 0; $y < $this->height; $y++) {
-                        $yBin .= substr($this->yPlane, $y * $mbAlignedWidth, $this->width);
+                    for ($yy = 0; $yy < $this->height; $yy++) {
+                        $yBin .= pack('C*', ...array_slice($this->yPlane, $yy * $mbAlignedWidth, $this->width));
                     }
                     $uvMbAlignedWidth = (int)($mbAlignedWidth / 2);
                     $uvWidth = (int)($this->width / 2);
                     $uvHeight = (int)($this->height / 2);
                     $uBin = '';
                     $vBin = '';
-                    for ($y = 0; $y < $uvHeight; $y++) {
-                        $uBin .= substr($this->uPlane, $y * $uvMbAlignedWidth, $uvWidth);
-                        $vBin .= substr($this->vPlane, $y * $uvMbAlignedWidth, $uvWidth);
+                    for ($yy = 0; $yy < $uvHeight; $yy++) {
+                        $uBin .= pack('C*', ...array_slice($this->uPlane, $yy * $uvMbAlignedWidth, $uvWidth));
+                        $vBin .= pack('C*', ...array_slice($this->vPlane, $yy * $uvMbAlignedWidth, $uvWidth));
                     }
                     $outputData .= $yBin . $uBin . $vBin;
                 }

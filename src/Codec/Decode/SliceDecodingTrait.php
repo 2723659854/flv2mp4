@@ -12,8 +12,10 @@ trait SliceDecodingTrait
     /**
      * 解码Slice层
      */
-    public function decodeSlice(string $rbsp, bool $isIDR, int $nalRefIdc): void
+    public function decodeSlice(string $rbsp, bool $isIDR, int $nalRefIdc, bool $skipDeblock = false): void
     {
+        // 被抽帧丢弃的帧：不输出、仅维持P链参考，跳过去块滤波及其宏块簿记
+        $this->deblockInfoEnabled = !$skipDeblock;
         $this->reader = new BitReader($rbsp);
         $firstMbInSlice = $this->reader->readUe();
         $sliceTypeRaw = $this->reader->readUe();
@@ -245,16 +247,18 @@ trait SliceDecodingTrait
         $this->mvTopRow = array_fill(0, $mbWidth * 4, null);
         $this->mvLeftCol = array_fill(0, 4, null);
 
-        // 初始化去块滤波所需的宏块信息
-        $this->mbTypeForDeblock = array_fill(0, $totalMbs, -1);
-        $this->mbQpForDeblock = array_fill(0, $totalMbs, $qp);
-        // 每帧必须重置NZ缓存，否则P_Skip宏块会使用前一帧的过期数据导致边界强度计算错误
-        $emptyNz = array_fill(0, 24, 0);
-        $this->mbNnzForDeblock = array_fill(0, $totalMbs, $emptyNz);
-        $emptyMv = array_fill(0, 16, [0, 0]);
-        $this->mbMvForDeblock = array_fill(0, $totalMbs, $emptyMv);
-        $emptyRef = array_fill(0, 16, 0);
-        $this->mbRefForDeblock = array_fill(0, $totalMbs, $emptyRef);
+        if ($this->deblockInfoEnabled) {
+            // 初始化去块滤波所需的宏块信息
+            $this->mbTypeForDeblock = array_fill(0, $totalMbs, -1);
+            $this->mbQpForDeblock = array_fill(0, $totalMbs, $qp);
+            // 每帧必须重置NZ缓存，否则P_Skip宏块会使用前一帧的过期数据导致边界强度计算错误
+            $emptyNz = array_fill(0, 24, 0);
+            $this->mbNnzForDeblock = array_fill(0, $totalMbs, $emptyNz);
+            $emptyMv = array_fill(0, 16, [0, 0]);
+            $this->mbMvForDeblock = array_fill(0, $totalMbs, $emptyMv);
+            $emptyRef = array_fill(0, 16, 0);
+            $this->mbRefForDeblock = array_fill(0, $totalMbs, $emptyRef);
+        }
 
         $mbSkipRun = -1;
 
@@ -278,17 +282,19 @@ trait SliceDecodingTrait
                 }
                 if ($mbSkipRun--) {
                     $this->decodePSkip($mbX, $mbY);
-                    $this->mbTypeForDeblock[$mbIdx] = 0;
-                    $this->mbQpForDeblock[$mbIdx] = $qp;
+                    if ($this->deblockInfoEnabled) {
+                        $this->mbTypeForDeblock[$mbIdx] = 0;
+                        $this->mbQpForDeblock[$mbIdx] = $qp;
+                    }
                     $this->mvTopLeft = [$nextMvTopLeft, $nextMvTopLeft, $nextMvTopLeft, $nextMvTopLeft];
                     continue;
                 }
             }
             $mbQpDelta = $this->decodeMacroblock($mbX, $mbY, $qp, $sliceType);
             $qp = max(0, min(51, $qp + $mbQpDelta));
-            $this->mbQpForDeblock[$mbIdx] = $qp;
+            if ($this->deblockInfoEnabled) $this->mbQpForDeblock[$mbIdx] = $qp;
             $this->mvTopLeft = [$nextMvTopLeft, $nextMvTopLeft, $nextMvTopLeft, $nextMvTopLeft];
         }
-        $this->applyDeblockingFilter();
+        if ($this->deblockInfoEnabled) $this->applyDeblockingFilter();
     }
 }

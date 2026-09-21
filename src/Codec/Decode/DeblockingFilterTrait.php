@@ -25,9 +25,6 @@ trait DeblockingFilterTrait
     private array $deblockTc0Cache = [];
     private array $deblockChromaQpCache = [];
 
-    /** @var array<int,string> 256 个单字节字符查找表，替代热路径中的 chr() 调用。 */
-    private array $deblockChrTable = [];
-
     private function clip3(int $lo, int $hi, int $x): int
     {
         if ($x < $lo) return $lo;
@@ -155,7 +152,6 @@ trait DeblockingFilterTrait
         $stride = $this->deblockYStride;
         $plane = &$this->yPlane;
         $base = ($mbY * 16) * $stride + ($mbX * 16) + $edge * 4;
-        $chr = $this->deblockChrTable;
 
         for ($i = 0; $i < 4; $i++) {
             $curBs = $bs[$i];
@@ -166,12 +162,12 @@ trait DeblockingFilterTrait
             $off = $base + $i * 4 * $stride;
 
             for ($d = 0; $d < 4; $d++, $off += $stride) {
-                $p0 = ord($plane[$off - 1]);
-                $p1 = ord($plane[$off - 2]);
-                $p2 = ord($plane[$off - 3]);
-                $q0 = ord($plane[$off]);
-                $q1 = ord($plane[$off + 1]);
-                $q2 = ord($plane[$off + 2]);
+                $p0 = $plane[$off - 1];
+                $p1 = $plane[$off - 2];
+                $p2 = $plane[$off - 3];
+                $q0 = $plane[$off];
+                $q1 = $plane[$off + 1];
+                $q2 = $plane[$off + 2];
 
                 if ($curBs < 4) {
                     if (abs($p0 - $q0) < $alpha && abs($p1 - $p0) < $beta && abs($q1 - $q0) < $beta) {
@@ -201,30 +197,30 @@ trait DeblockingFilterTrait
                         // delta==0 时 p0/q0 不变（约三成像素），省两次字符串写
                         if ($delta !== 0) {
                             $__v = $p0 + $delta;
-                            $plane[$off - 1] = $chr[$__v < 0 ? 0 : ($__v > 255 ? 255 : $__v)];
+                            $plane[$off - 1] = $__v < 0 ? 0 : ($__v > 255 ? 255 : $__v);
                             $__v = $q0 - $delta;
-                            $plane[$off] = $chr[$__v < 0 ? 0 : ($__v > 255 ? 255 : $__v)];
+                            $plane[$off] = $__v < 0 ? 0 : ($__v > 255 ? 255 : $__v);
                         }
                         if ($newP1 !== $p1) {
-                            $plane[$off - 2] = $chr[$newP1];
+                            $plane[$off - 2] = $newP1;
                         }
                         if ($newQ1 !== $q1) {
-                            $plane[$off + 1] = $chr[$newQ1];
+                            $plane[$off + 1] = $newQ1;
                         }
                     }
                 } else {
-                    $p3 = ord($plane[$off - 4]);
-                    $q3 = ord($plane[$off + 3]);
+                    $p3 = $plane[$off - 4];
+                    $q3 = $plane[$off + 3];
                     if ($this->filterStrongLuma(
                         $p0, $p1, $p2, $p3, $q0, $q1, $q2, $q3, $alpha, $beta,
                         $newP0, $newP1, $newP2, $newQ0, $newQ1, $newQ2
                     )) {
-                        $plane[$off - 1] = $chr[$newP0];
-                        $plane[$off - 2] = $chr[$newP1];
-                        $plane[$off - 3] = $chr[$newP2];
-                        $plane[$off] = $chr[$newQ0];
-                        $plane[$off + 1] = $chr[$newQ1];
-                        $plane[$off + 2] = $chr[$newQ2];
+                        $plane[$off - 1] = $newP0;
+                        $plane[$off - 2] = $newP1;
+                        $plane[$off - 3] = $newP2;
+                        $plane[$off] = $newQ0;
+                        $plane[$off + 1] = $newQ1;
+                        $plane[$off + 2] = $newQ2;
                     }
                 }
             }
@@ -242,7 +238,6 @@ trait DeblockingFilterTrait
         $stride = $this->deblockYStride;
         $plane = &$this->yPlane;
         $base = ($mbY * 16 + $edge * 4) * $stride + ($mbX * 16);
-        $chr = $this->deblockChrTable;
 
         for ($i = 0; $i < 4; $i++) {
             $curBs = $bs[$i];
@@ -253,12 +248,12 @@ trait DeblockingFilterTrait
             $off = $base + $i * 4;
 
             for ($d = 0; $d < 4; $d++, $off++) {
-                $p0 = ord($plane[$off - $stride]);
-                $p1 = ord($plane[$off - 2 * $stride]);
-                $p2 = ord($plane[$off - 3 * $stride]);
-                $q0 = ord($plane[$off]);
-                $q1 = ord($plane[$off + $stride]);
-                $q2 = ord($plane[$off + 2 * $stride]);
+                $p0 = $plane[$off - $stride];
+                $p1 = $plane[$off - 2 * $stride];
+                $p2 = $plane[$off - 3 * $stride];
+                $q0 = $plane[$off];
+                $q1 = $plane[$off + $stride];
+                $q2 = $plane[$off + 2 * $stride];
 
                 if ($curBs < 4) {
                     if (abs($p0 - $q0) < $alpha && abs($p1 - $p0) < $beta && abs($q1 - $q0) < $beta) {
@@ -287,30 +282,30 @@ trait DeblockingFilterTrait
                         $delta = $__v < -$tc ? -$tc : ($__v > $tc ? $tc : $__v);
                         if ($delta !== 0) {
                             $__v = $p0 + $delta;
-                            $plane[$off - $stride] = $chr[$__v < 0 ? 0 : ($__v > 255 ? 255 : $__v)];
+                            $plane[$off - $stride] = $__v < 0 ? 0 : ($__v > 255 ? 255 : $__v);
                             $__v = $q0 - $delta;
-                            $plane[$off] = $chr[$__v < 0 ? 0 : ($__v > 255 ? 255 : $__v)];
+                            $plane[$off] = $__v < 0 ? 0 : ($__v > 255 ? 255 : $__v);
                         }
                         if ($newP1 !== $p1) {
-                            $plane[$off - 2 * $stride] = $chr[$newP1];
+                            $plane[$off - 2 * $stride] = $newP1;
                         }
                         if ($newQ1 !== $q1) {
-                            $plane[$off + $stride] = $chr[$newQ1];
+                            $plane[$off + $stride] = $newQ1;
                         }
                     }
                 } else {
-                    $p3 = ord($plane[$off - 4 * $stride]);
-                    $q3 = ord($plane[$off + 3 * $stride]);
+                    $p3 = $plane[$off - 4 * $stride];
+                    $q3 = $plane[$off + 3 * $stride];
                     if ($this->filterStrongLuma(
                         $p0, $p1, $p2, $p3, $q0, $q1, $q2, $q3, $alpha, $beta,
                         $newP0, $newP1, $newP2, $newQ0, $newQ1, $newQ2
                     )) {
-                        $plane[$off - $stride] = $chr[$newP0];
-                        $plane[$off - 2 * $stride] = $chr[$newP1];
-                        $plane[$off - 3 * $stride] = $chr[$newP2];
-                        $plane[$off] = $chr[$newQ0];
-                        $plane[$off + $stride] = $chr[$newQ1];
-                        $plane[$off + 2 * $stride] = $chr[$newQ2];
+                        $plane[$off - $stride] = $newP0;
+                        $plane[$off - 2 * $stride] = $newP1;
+                        $plane[$off - 3 * $stride] = $newP2;
+                        $plane[$off] = $newQ0;
+                        $plane[$off + $stride] = $newQ1;
+                        $plane[$off + 2 * $stride] = $newQ2;
                     }
                 }
             }
@@ -327,7 +322,6 @@ trait DeblockingFilterTrait
 
         $stride = $this->deblockUvStride;
         $base = ($mbY * 8) * $stride + ($mbX * 8) + $edge * 4;
-        $chr = $this->deblockChrTable;
 
         foreach (['uPlane', 'vPlane'] as $planeName) {
             $plane = &$this->$planeName;
@@ -340,10 +334,10 @@ trait DeblockingFilterTrait
                 $off = $base + $i * 2 * $stride;
 
                 for ($d = 0; $d < 2; $d++, $off += $stride) {
-                    $p0 = ord($plane[$off - 1]);
-                    $p1 = ord($plane[$off - 2]);
-                    $q0 = ord($plane[$off]);
-                    $q1 = ord($plane[$off + 1]);
+                    $p0 = $plane[$off - 1];
+                    $p1 = $plane[$off - 2];
+                    $q0 = $plane[$off];
+                    $q1 = $plane[$off + 1];
 
                     if ($curBs < 4) {
                         if (abs($p0 - $q0) < $alpha && abs($p1 - $p0) < $beta && abs($q1 - $q0) < $beta) {
@@ -351,16 +345,16 @@ trait DeblockingFilterTrait
                             $delta = $__v < -$tc ? -$tc : ($__v > $tc ? $tc : $__v);
                             if ($delta !== 0) {
                                 $__v = $p0 + $delta;
-                                $plane[$off - 1] = $chr[$__v < 0 ? 0 : ($__v > 255 ? 255 : $__v)];
+                                $plane[$off - 1] = $__v < 0 ? 0 : ($__v > 255 ? 255 : $__v);
                                 $__v = $q0 - $delta;
-                                $plane[$off] = $chr[$__v < 0 ? 0 : ($__v > 255 ? 255 : $__v)];
+                                $plane[$off] = $__v < 0 ? 0 : ($__v > 255 ? 255 : $__v);
                             }
                         }
                     } elseif ($this->filterStrongChroma(
                         $p0, $p1, $q0, $q1, $alpha, $beta, $newP0, $newQ0
                     )) {
-                        $plane[$off - 1] = $chr[$newP0];
-                        $plane[$off] = $chr[$newQ0];
+                        $plane[$off - 1] = $newP0;
+                        $plane[$off] = $newQ0;
                     }
                 }
             }
@@ -378,7 +372,6 @@ trait DeblockingFilterTrait
 
         $stride = $this->deblockUvStride;
         $base = ($mbY * 8 + $edge * 4) * $stride + ($mbX * 8);
-        $chr = $this->deblockChrTable;
 
         foreach (['uPlane', 'vPlane'] as $planeName) {
             $plane = &$this->$planeName;
@@ -391,10 +384,10 @@ trait DeblockingFilterTrait
                 $off = $base + $i * 2;
 
                 for ($d = 0; $d < 2; $d++, $off++) {
-                    $p0 = ord($plane[$off - $stride]);
-                    $p1 = ord($plane[$off - 2 * $stride]);
-                    $q0 = ord($plane[$off]);
-                    $q1 = ord($plane[$off + $stride]);
+                    $p0 = $plane[$off - $stride];
+                    $p1 = $plane[$off - 2 * $stride];
+                    $q0 = $plane[$off];
+                    $q1 = $plane[$off + $stride];
 
                     if ($curBs < 4) {
                         if (abs($p0 - $q0) < $alpha && abs($p1 - $p0) < $beta && abs($q1 - $q0) < $beta) {
@@ -402,16 +395,16 @@ trait DeblockingFilterTrait
                             $delta = $__v < -$tc ? -$tc : ($__v > $tc ? $tc : $__v);
                             if ($delta !== 0) {
                                 $__v = $p0 + $delta;
-                                $plane[$off - $stride] = $chr[$__v < 0 ? 0 : ($__v > 255 ? 255 : $__v)];
+                                $plane[$off - $stride] = $__v < 0 ? 0 : ($__v > 255 ? 255 : $__v);
                                 $__v = $q0 - $delta;
-                                $plane[$off] = $chr[$__v < 0 ? 0 : ($__v > 255 ? 255 : $__v)];
+                                $plane[$off] = $__v < 0 ? 0 : ($__v > 255 ? 255 : $__v);
                             }
                         }
                     } elseif ($this->filterStrongChroma(
                         $p0, $p1, $q0, $q1, $alpha, $beta, $newP0, $newQ0
                     )) {
-                        $plane[$off - $stride] = $chr[$newP0];
-                        $plane[$off] = $chr[$newQ0];
+                        $plane[$off - $stride] = $newP0;
+                        $plane[$off] = $newQ0;
                     }
                 }
             }
@@ -629,11 +622,6 @@ trait DeblockingFilterTrait
         $this->deblockThresholdCache = [];
         $this->deblockTc0Cache = [];
         $this->deblockChromaQpCache = [];
-        if (!$this->deblockChrTable) {
-            for ($i = 0; $i < 256; $i++) {
-                $this->deblockChrTable[$i] = chr($i);
-            }
-        }
 
         $mbWidth = $this->picWidthInMbs;
         $mbHeight = $this->picHeightInMbs;

@@ -96,8 +96,9 @@ final class Mp4DecoderWorkerServer
         if ($sps !== '') array_unshift($nals, ['type' => 7, 'data' => $sps]);
         if ($pps !== '') array_unshift($nals, ['type' => 8, 'data' => $pps]);
         $dropFrame = !empty($meta['drop']);
-        // 被丢弃的帧仍需完整解码以维持本GOP参考链，但它的YUV不会进入后续流水线，跳过裁剪输出
-        $frame = $this->decoder->decode($nals, false, !$dropFrame);
+        // 被丢弃的帧仍需完整解码以维持本GOP参考链，但它的YUV不会进入后续流水线，跳过裁剪输出；
+        // 开启 FLV2MP4_DROP_NODEBLOCK 时连去块滤波（及其簿记）也跳过
+        $frame = $this->decoder->decode($nals, false, !$dropFrame, $dropFrame && getenv('FLV2MP4_DROP_NODEBLOCK') !== false);
         // 抽帧决策由主进程统一下发
         if ($dropFrame) return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, $payload);
         if (!$frame || empty($frame['data'])) { unset($meta['drop']); return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, $payload); }

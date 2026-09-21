@@ -32,6 +32,24 @@ class BitReader
         }
 
         $pos = $this->pos;
+        // 热路径：码流内全部语法元素宽度 ≤16bit，最多跨 3 个字节，直接拼窗口取值，
+        // 避免通用 while/min 循环开销（基线 90 帧约 140 万次调用）
+        if ($n <= 16 && $pos + $n <= $this->bitLength) {
+            $bytePos = $pos >> 3;
+            $bitOff = $pos & 7;
+            $span = $bitOff + $n;
+            $this->pos = $pos + $n;
+            if ($span <= 8) {
+                return (ord($this->data[$bytePos]) >> (8 - $span)) & ((1 << $n) - 1);
+            }
+            if ($span <= 16) {
+                $w = (ord($this->data[$bytePos]) << 8) | ord($this->data[$bytePos + 1]);
+                return ($w >> (16 - $span)) & ((1 << $n) - 1);
+            }
+            $w = (ord($this->data[$bytePos]) << 16) | (ord($this->data[$bytePos + 1]) << 8) | ord($this->data[$bytePos + 2]);
+            return ($w >> (24 - $span)) & ((1 << $n) - 1);
+        }
+
         $available = min($n, $this->bitLength - $pos);
         $remaining = $available;
         $value = 0;
@@ -141,6 +159,22 @@ class BitReader
         }
 
         $pos = $this->pos;
+        // 与 readU 相同的 1/2/3 字节窗口快速路径（不推进位置）
+        if ($n <= 16 && $pos + $n <= $this->bitLength) {
+            $bytePos = $pos >> 3;
+            $bitOff = $pos & 7;
+            $span = $bitOff + $n;
+            if ($span <= 8) {
+                return (ord($this->data[$bytePos]) >> (8 - $span)) & ((1 << $n) - 1);
+            }
+            if ($span <= 16) {
+                $w = (ord($this->data[$bytePos]) << 8) | ord($this->data[$bytePos + 1]);
+                return ($w >> (16 - $span)) & ((1 << $n) - 1);
+            }
+            $w = (ord($this->data[$bytePos]) << 16) | (ord($this->data[$bytePos + 1]) << 8) | ord($this->data[$bytePos + 2]);
+            return ($w >> (24 - $span)) & ((1 << $n) - 1);
+        }
+
         $available = min($n, $this->bitLength - $pos);
         $remaining = $available;
         $value = 0;
