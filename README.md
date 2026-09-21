@@ -541,27 +541,32 @@ if ($result && file_exists($outputFile1)) {
 | **Operating System** | Windows | Linux (Docker) |
 | **CPU** | 16 cores (physical) | 14 cores (physical) |
 | **Memory** | 15.8 GB (available) | 4 GB (available) |
-| **Worker processes** | 8 ME sub‑processes | 8 ME sub‑processes |
-| **PHP version** | 8.4.3 (CLI, JIT enabled) | 8.1.24 (CLI, OPcache disabled) |
-| **OPcache** | `opcache.enable_cli=on`, `opcache.jit=on`, `opcache.jit_buffer_size=100M` | Not enabled |
-| **Test clip** | `test.flv`, 3.02 s, 720×742, 30 fps | Same as left |
-| **Output specs** | `output.flv`, 360×360, 10 fps | Same as left |
-| **Encoding settings** | H.264 Constrained Baseline, AAC 128 kbps | Same as left |
+| **Worker Processes** | 8 ME sub-processes | 8 ME sub-processes |
+| **PHP Version** | 8.4.3 (CLI) | 8.1.24 (CLI) |
+| **Test Clip** | `test.flv`, 3.02 s, 720×742, 30 fps | Same as left |
+| **Output Specs** | `output.flv`, 360×360, 10 fps | Same as left |
+| **Encoding Settings** | H.264 Constrained Baseline, AAC 128 kbps | Same as left |
 
 
 ### Cross-Platform Performance Comparison
 
 | Output Format | Windows Time | Linux (Docker) Time | Performance Gain |
 | :--- | :--- | :--- | :--- |
-| **FLV Re-encoding** | 18 s | **14 s** | **↓ 22.2%** |
-| **MP4 Re-encoding** | 18 s | **14 s** | **↓ 22.2%** |
-| **HLS (mpegts + m3u8)** | 19 s | **15 s** | **↓ 21.1%** |
+| **FLV Re-encoding** | 16 s | **9 s** | **↓ 43.8%** |
+| **MP4 Re-encoding** | 16 s | **9 s** | **↓ 43.8%** |
+| **HLS (mpegts + m3u8)** | 17 s | **10 s** | **↓ 41.2%** |
 
----
+### Long Video Test (7 min 5 s video)
+
+| Platform | Re-encoding Time | Time Ratio |
+| :--- | :--- | :--- |
+| **Windows** | **488 s (8 min 08 s)** | ~1.15× |
+| **Linux (Docker)** | **335 s (5 min 35 s)** | ~0.79× |
+
 
 ### Optimization History
 
-| Optimization Stage | FLV Re-encoding | MP4 Re-encoding | HLS Pipeline | Notes |
+| Optimization Stage | FLV | MP4 | HLS | Notes |
 | :--- | :--- | :--- | :--- | :--- |
 | **Initial Version** | ~91 s | ~60 s (old) | **135 s** | Serial, no optimization |
 | **Algorithm-Level Optimization** | 60 s | — | 97 s | DCT butterfly unrolling, string slicing, reduced array_fill, quantization + Zigzag merged |
@@ -574,12 +579,14 @@ if ($result && file_exists($outputFile1)) {
 | **Further Fine-Tuning** | 32 s | — | — | Specific method not specified |
 | **Extreme Optimization (Windows)** | 28 s | 29 s | 37 s | Windows + PHP 8.4.3 + JIT |
 | **Linux Docker Deployment** | 23 s | 24 s | 31 s | Linux + PHP 8.1.24, OPcache disabled |
-| **GOP Distributed Multi-Process Decoding** | 22 s | 22 s | 22 s | OPcache disabled; Windows platform |
-| **GOP Distributed Multi-Process Decoding** | 17 s | 17 s | 17 s | OPcache disabled; Linux platform |
-| **Removed Repeated SHA256 for Reference Frames + Static Block ME Early Exit** | **19 s** | **19 s** | **20 s** | Windows platform |
-| **Removed Repeated SHA256 for Reference Frames + Static Block ME Early Exit** | **16 s** | **16 s** | **17 s** | Linux platform |
-| **Zero-Region Skip + Deep Decoding/Filtering Optimization (Windows)** | **18 s** | **18 s** | **19 s** | 6-tap sliding recursion, Bs all-zero fast skip, skip memory write when filter result unchanged, CBP=0 whole-block skip, DPB lazy loading, `chr()` table lookup, on-demand unpack + cache |
-| **Zero-Region Skip + Deep Decoding/Filtering Optimization (Linux)** | **14 s** | **14 s** | **15 s** | Same as above; current best results |
+| **GOP Distributed Multi-Process Decoding (Windows)** | 22 s | 22 s | 22 s | Windows platform |
+| **GOP Distributed Multi-Process Decoding (Linux)** | 17 s | 17 s | 17 s | Linux platform |
+| **Removed Repeated SHA256 for Reference Frames + Static Block ME Early Exit (Windows)** | 19 s | 19 s | 20 s | Windows platform |
+| **Removed Repeated SHA256 for Reference Frames + Static Block ME Early Exit (Linux)** | 16 s | 16 s | 17 s | Linux platform |
+| **Zero-Region Skip + Deep Decoding/Filtering Optimization (Windows)** | 18 s | 18 s | 19 s | 6-tap sliding recursion, Bs all-zero fast skip, skip memory write when filter result unchanged, CBP=0 whole-block skip, DPB lazy loading, `chr()` table lookup, on-demand unpack + cache |
+| **Zero-Region Skip + Deep Decoding/Filtering Optimization (Linux)** | 14 s | 14 s | 15 s | Same as above |
+| **Dropped-Frame Deblock Skip + BitReader Fast Path + Integer Plane Arrays (Windows)** | **16 s** | **16 s** | **17 s** | This optimization round |
+| **Dropped-Frame Deblock Skip + BitReader Fast Path + Integer Plane Arrays (Linux)** | **9 s** | **9 s** | **10 s** | Current best results |
 
 **Notes:**
 - Test clip: `test.flv`, 3.02 s, 720×742, 30 fps; Output specs: 360×360, 10 fps.
@@ -587,7 +594,8 @@ if ($result && file_exists($outputFile1)) {
 - Best stable values taken from multiple test runs.
 - “—” indicates the format was not separately tested at this stage.
 - GOP distributed multi-process decoding is the latest optimization, achieving significant improvements on both Windows and Linux.
-- GOP-based multi-process parallel processing divides the serial encoding workload of long videos into multiple independent tasks and executes them concurrently, reducing the cumulative processing time of frame-by-frame serial processing. Another video with a duration of 425 seconds was tested, and re-encoding took 501 seconds.
+- **Platform difference**: Linux 9 s vs Windows 16 s; the gap mainly comes from process scheduling efficiency and system call overhead.
+
 ---
 
 ## Encoding/Decoding for AAC-MP3-OPUS-WAV
