@@ -58,7 +58,7 @@ final class HlsScaleWorkerServer
                 foreach ($upstreamOutputs as $id => $buffer) if ($buffer !== '') $write[] = $upstreams[$id];
                 foreach ($downstreams as $name => $socket) if ($outputs[$name] !== '') $write[] = $socket;
                 $except = null;
-                @stream_select($read, $write, $except, 0, 2000);
+                @stream_select($read, $write, $except, 0, 1);
 
                 foreach ($upstreams as $id => $socket) {
                     if (!in_array($socket, $read, true)) continue;
@@ -210,7 +210,7 @@ final class HlsScaleWorkerServer
     private function connect(string $address, string $name)
     {
         $deadline = microtime(true) + 15;
-        do { $socket = @stream_socket_client($address, $errno, $error, 0.2); if ($socket !== false) return $socket; usleep(50000); } while (microtime(true) < $deadline);
+        do { $socket = @stream_socket_client($address, $errno, $error, 0.2); if ($socket !== false) return $socket; usleep(1); } while (microtime(true) < $deadline);
         throw new RuntimeException("无法连接 profile {$name} 输出进程: {$error} ({$errno})");
     }
 

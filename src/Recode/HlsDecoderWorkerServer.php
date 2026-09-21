@@ -51,7 +51,7 @@ final class HlsDecoderWorkerServer
                 $write = $output === '' ? [] : [$downstream];
                 if ($upOutput !== '') $write[] = $upstream;
                 $except = null;
-                @stream_select($read, $write, $except, 0, 2000);
+                @stream_select($read, $write, $except, 0, 1);
                 if (in_array($upstream, $read, true)) {
                     while (true) {
                         $chunk = @fread($upstream, 65536);
@@ -242,7 +242,7 @@ final class HlsDecoderWorkerServer
     private function connect(string $address)
     {
         $deadline = microtime(true) + 15;
-        do { $socket = @stream_socket_client($address, $errno, $error, 0.2); if ($socket !== false) return $socket; usleep(50000); } while (microtime(true) < $deadline);
+        do { $socket = @stream_socket_client($address, $errno, $error, 0.2); if ($socket !== false) return $socket; usleep(1); } while (microtime(true) < $deadline);
         throw new RuntimeException("无法连接编码进程: {$error} ({$errno})");
     }
 

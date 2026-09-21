@@ -2,8 +2,6 @@
 
 namespace Xiaosongshu\Flv2mp4\Codec\Decode;
 
-use Xiaosongshu\Flv2mp4\Codec\H264Decoder;
-
 /**
  * @purpose 宏块解码器
  * @author yanglong

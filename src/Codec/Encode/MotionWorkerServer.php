@@ -43,7 +43,8 @@ final class MotionWorkerServer
                 if ($connection['output'] !== '') $write[] = $connection['socket'];
             }
             $except = null;
-            $ready = @stream_select($read, $write, $except, 0, $idleWaitUs);
+            //$ready = @stream_select($read, $write, $except, 0, $idleWaitUs);
+            $ready = @stream_select($read, $write, $except, 0, 1);
             if ($ready === false) continue;
             if ($ready > 0) $idleWaitUs = 1;
             else $idleWaitUs = min(2000, $idleWaitUs * 2);

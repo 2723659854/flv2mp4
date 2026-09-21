@@ -150,7 +150,7 @@ final class Mp4PipelineClient
                     throw new RuntimeException('解码进程媒体连接意外关闭');
                 }
                 $except = null;
-                if (@stream_select($read, $write, $except, 1) === false) {
+                if (@stream_select($read, $write, $except, 0,1) === false) {
                     if ($finishedCount >= $workerCount) break;
                     continue;
                 }
@@ -370,12 +370,12 @@ final class Mp4PipelineClient
                 if ($outOut !== '' && $outAlive) $write[] = $outputSocket;
                 if ($read === [] && $write === []) {
                     if ($outFinished) break;
-                    usleep(5000);
+                    usleep(1);
                     if (microtime(true) - $lastProgress > 180) throw new RuntimeException('段池流水线 180s 无进展');
                     continue;
                 }
                 $except = null;
-                if (@stream_select($read, $write, $except, 1) === false) continue;
+                if (@stream_select($read, $write, $except, 0,1) === false) continue;
 
                 foreach ($write as $socket) {
                     if ($socket === $outputSocket) {
@@ -594,7 +594,7 @@ final class Mp4PipelineClient
         foreach ($this->processes as $key => $process) {
             if (!is_resource($process)) { unset($this->processes[$key]); continue; }
             $deadline = microtime(true) + 30;
-            do { $status = proc_get_status($process); if (!$status['running']) break; usleep(50000); } while (microtime(true) < $deadline);
+            do { $status = proc_get_status($process); if (!$status['running']) break; usleep(1); } while (microtime(true) < $deadline);
             $timedOut = $status['running'];
             if ($timedOut) @proc_terminate($process);
             $exit = proc_close($process); unset($this->processes[$key]);
@@ -625,7 +625,7 @@ final class Mp4PipelineClient
     private function connect(string $address)
     {
         $deadline = microtime(true) + 15;
-        do { $socket = @stream_socket_client($address, $errno, $error, 0.2); if ($socket !== false) return $socket; usleep(50000); } while (microtime(true) < $deadline);
+        do { $socket = @stream_socket_client($address, $errno, $error, 0.2); if ($socket !== false) return $socket; usleep(1); } while (microtime(true) < $deadline);
         throw new RuntimeException("无法连接解码进程: {$error} ({$errno})");
     }
 

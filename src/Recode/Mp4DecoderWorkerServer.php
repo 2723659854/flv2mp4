@@ -37,7 +37,7 @@ final class Mp4DecoderWorkerServer
             while (true) {
                 $read = [$downstream]; if (!$ended && strlen($input) < HlsPipelineProtocol::HIGH_WATERMARK && strlen($output) < HlsPipelineProtocol::HIGH_WATERMARK) $read[] = $upstream;
                 $write = $output === '' ? [] : [$downstream]; if ($upOutput !== '') $write[] = $upstream;
-                $except = null; @stream_select($read, $write, $except, 0, 2000);
+                $except = null; @stream_select($read, $write, $except, 0, 1);
                 if (in_array($upstream, $read, true)) {
                     while (true) {
                         $chunk = @fread($upstream, 65536);
@@ -122,9 +122,9 @@ final class Mp4DecoderWorkerServer
                 if (strlen($input) < HlsPipelineProtocol::HIGH_WATERMARK && strlen($output) < HlsPipelineProtocol::HIGH_WATERMARK) $read[] = $upstream;
                 if ($output !== '') $write[] = $upstream;
                 if ($read === [] && $write === []) {
-                    @stream_select($r, $w, $except, 0, 20000);
+                    @stream_select($r, $w, $except, 0, 1);
                 } else {
-                    @stream_select($read, $write, $except, 0, 20000);
+                    @stream_select($read, $write, $except, 0, 1);
                 }
                 if (in_array($upstream, $read, true)) {
                     while (true) {
@@ -240,7 +240,7 @@ final class Mp4DecoderWorkerServer
 
     private function connect(string $address)
     {
-        $deadline = microtime(true) + 15; do { $socket = @stream_socket_client($address, $errno, $error, 0.2); if ($socket !== false) return $socket; usleep(50000); } while (microtime(true) < $deadline);
+        $deadline = microtime(true) + 15; do { $socket = @stream_socket_client($address, $errno, $error, 0.2); if ($socket !== false) return $socket; usleep(1); } while (microtime(true) < $deadline);
         throw new RuntimeException("无法连接输出进程: {$error} ({$errno})");
     }
 

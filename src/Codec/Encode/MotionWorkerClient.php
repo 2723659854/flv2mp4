@@ -141,7 +141,8 @@ final class MotionWorkerClient
                 if ($this->outputs[$worker] !== '') $write[] = $this->sockets[$worker];
             }
             $except = null;
-            $ready = @stream_select($read, $write, $except, 0, $waitUs);
+            //$ready = @stream_select($read, $write, $except, 0, $waitUs);
+            $ready = @stream_select($read, $write, $except, 0, 1);
             if ($ready === false) throw new RuntimeException('Failed waiting for motion worker');
             if ($ready > 0) $waitUs = 1;
             else $waitUs = min(1000, $waitUs * 2);
@@ -251,7 +252,7 @@ final class MotionWorkerClient
                 $this->outputs[$worker] = '';
                 unset($this->workerSeq[$worker], $pending[$worker]);
             }
-            if ($pending !== []) usleep(50000);
+            if ($pending !== []) usleep(1);
         }
     }
 

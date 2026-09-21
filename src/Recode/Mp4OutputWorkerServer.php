@@ -55,11 +55,11 @@ final class Mp4OutputWorkerServer
                 foreach ($outputs as $id => $buffer) if ($buffer !== '') $write[] = $sockets[$id];
                 if ($read === [] && $write === []) {
                     if ($finished) return;
-                    usleep(2000);
+                    usleep(1);
                     continue;
                 }
                 $except = null;
-                if (@stream_select($read, $write, $except, 0, 2000) === false) continue;
+                if (@stream_select($read, $write, $except, 0, 1) === false) continue;
                 foreach ($sockets as $id => $socket) {
                     if (!in_array($socket, $read, true)) continue;
                     $chunk = @fread($socket, 65536);
