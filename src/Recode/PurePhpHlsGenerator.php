@@ -301,11 +301,33 @@ class PurePhpHlsGenerator
             }
         }
 
+        $this->finishStream();
+        echo "Done! Processed {$frameCount} frames\n";
+    }
+
+    /**
+     * 单帧喂入入口（直播流式）：逐 tag 调用，等价于 processFlv 串行模式的循环体。
+     * $tag 需为含 tagType(8=音频/9=视频)、body 的对象，时间戳通过 getTime()/getTimestamp()
+     * 或可解析的 timestamp/Time 属性获得（与 Flv2Hls::processFrame 兼容的 tag 形态）。
+     * 注意：串行流式路径不做抽帧（fps 仅传给编码器），丢弃 P 帧会断参考链，故全部帧均编码。
+     * 流结束时必须调用 finishStream() 冲刷末帧并关闭分片。
+     */
+    public function processTag($tag): void
+    {
+        if (!is_object($tag) || !property_exists($tag, 'tagType')) return;
+        if ($tag->tagType === 9) $this->handleVideoFrame($tag);
+        elseif ($tag->tagType === 8) $this->handleAudioFrame($tag);
+    }
+
+    /**
+     * 结束流式喂入：冲刷双缓冲末帧、关闭全部分片，多码率时生成 master.m3u8
+     */
+    public function finishStream(): void
+    {
         // 冲刷双缓冲中最后一帧及排队音频，保证分片完整后再关闭
         $this->flushPendingVideo();
         $this->closeAllSegments();
         if (count($this->profiles) > 1) $this->generateMasterPlaylist();
-        echo "Done! Processed {$frameCount} frames\n";
     }
 
     public function processPipelineEvent(array $metadata, string $payload): void
