@@ -24,6 +24,8 @@ final class HlsDecoderWorkerServer
     public function __construct(private array $profiles)
     {
         $this->decoder = new H264Decoder();
+        // 单 profile：缩放/水印在解码进程完成（多解码进程并行，避免输出进程串行缩放成为瓶颈）；
+        // 多 profile：输出原始分辨率 YUV，由输出进程按各 profile 分别缩放
         $this->scaler = count($profiles) === 1 ? new VideoScaler() : null;
     }
 

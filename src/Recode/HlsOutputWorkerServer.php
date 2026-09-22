@@ -21,6 +21,10 @@ final class HlsOutputWorkerServer
         $server = @stream_socket_server($listenAddress, $errno, $error);
         if ($server === false) throw new RuntimeException("编码进程监听失败: {$error} ({$errno})");
         $generator = new PurePhpHlsGenerator($this->profiles, $this->outputDir, false);
+        // 直播切片时长经 profile 透传（默认 3 秒）
+        $firstProfile = $this->profiles[array_key_first($this->profiles)] ?? [];
+        $segmentDuration = (int)($firstProfile['segmentDuration'] ?? 3);
+        if ($segmentDuration > 0) $generator->setSegmentDuration($segmentDuration);
         // 冷启动运动估计子进程放在 accept 之前：监听 backlog 暂存 decoder 连接，
         // PHP 冷启动与 decoder 启动/首 GOP 解码完全并行
         $generator->warmupMotionWorkers();

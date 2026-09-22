@@ -3,6 +3,7 @@
 namespace Xiaosongshu\Flv2mp4\Manage;
 
 use RuntimeException;
+use Xiaosongshu\Flv2mp4\Recode\HlsPipelineProtocol;
 use Xiaosongshu\Flv2mp4\Recode\PurePhpHlsGenerator;
 
 /**
@@ -35,8 +36,16 @@ class Flv2HlsCompact
     private bool $isWebSocket;
     private bool $isSsl;
 
-    private PurePhpHlsGenerator $generator;
+    private ?PurePhpHlsGenerator $generator = null;
     private string $streamDir;
+
+    /**
+     * GOP分片解码流水线worker数：
+     *   0 = 旧的主进程内串行解码（回退用）；>=1 = 解码+缩放下沉到N个子进程按GOP并行，
+     *   输出worker负责编码/TS/HLS，主进程只做拉流转发与端到端反压
+     */
+    private int $decodeWorkers = 2;
+    private array $workerProfile = [];
 
     // ===== 拉流子进程参数 =====
     private int $maxRetries = 5;
@@ -74,6 +83,22 @@ class Flv2HlsCompact
     private float $startMicrotime;
     private float $lastStatsMicrotime = 0.0;
 
+    // ===== GOP分片解码流水线运行态 =====
+    /** @var array<int,resource> worker进程句柄 */
+    private array $plProcesses = [];
+    /** @var array<int,resource> 主进程→各解码worker的socket */
+    private array $plSocks = [];
+    /** @var array<int,string> 待写入各解码worker的缓冲 */
+    private array $plOut = [];
+    /** @var array<int,string> 各解码worker回报缓冲 */
+    private array $plIn = [];
+    private array $plDead = [];
+    private int $plSeq = 0;
+    private int $plGopSeq = 0;
+    private int $plCurrentWorker = 0;
+    private int $plFinished = 0;
+    private bool $plEndSent = false;
+
     /**
      * @param string $pullUrl 直播地址 http(s)-flv / ws(s)-flv
      * @param array $config 转码配置：width/height(0=保持)/bitrate/fps(仅编码器)/qp/audioBitrate/
@@ -96,6 +121,7 @@ class Flv2HlsCompact
         if (isset($config['queueMaxBytes'])) $this->queueMaxBytes = (int)$config['queueMaxBytes'];
         if (isset($config['duration'])) $this->duration = (int)$config['duration'];
         if (isset($config['tlsVerify'])) $this->tlsVerify = (bool)$config['tlsVerify'];
+        $this->decodeWorkers = max(0, (int)($config['decodeWorkers'] ?? 2));
 
         $streamName = $config['streamName'] ?? $this->deriveStreamName($parts);
         $this->streamDir = $config['outputDir'] ?? dirname(__DIR__, 2) . "/hls/{$streamName}/";
@@ -119,8 +145,16 @@ class Flv2HlsCompact
             $profile['tlsVerify'], $profile['multi']
         );
 
-        $this->generator = new PurePhpHlsGenerator($profile, rtrim($this->streamDir, '/'), false);
-        $this->generator->setSegmentDuration($segmentDuration > 0 ? $segmentDuration : 3);
+        if ($this->decodeWorkers > 0) {
+            // 流水线模式：profile 随 worker 启动参数下发，切片时长一并透传给 worker
+            $profile['segmentDuration'] = $segmentDuration > 0 ? $segmentDuration : 3;
+            // 缩放由解码worker并行完成：缩放是纯PHP重操作（768x432→640x360约80-160ms/帧），
+            // 放在输出进程会成为串行瓶颈（实测仅~5fps），2个decoder并行缩放下放到~10fps以上
+            $this->workerProfile = ['' => $profile];
+        } else {
+            $this->generator = new PurePhpHlsGenerator($profile, rtrim($this->streamDir, '/'), false);
+            $this->generator->setSegmentDuration($segmentDuration > 0 ? $segmentDuration : 3);
+        }
 
         if (function_exists('pcntl_async_signals')) {
             pcntl_async_signals(true);
@@ -181,23 +215,37 @@ class Flv2HlsCompact
         $this->log("拉流进程最大重连: {$this->maxRetries} 次，转码落后容忍: " . round($this->queueMaxBytes / 1048576, 1) . ' MB（超限跳IDR追直播，不反压上游）');
         $this->log('========================================');
 
+        $parallel = $this->decodeWorkers > 0;
         try {
             $port = $this->startIpcServer();
             $this->spawnPuller($port);
+            if ($parallel) $this->startPipeline();
             $this->acceptPuller($port);
-            $this->transcodeLoop();
+            if ($parallel) $this->pipelineLoop();
+            else $this->transcodeLoop();
         } catch (\Throwable $e) {
             $this->log('客户端异常: ' . $e->getMessage(), 'error');
         } finally {
-            if ($this->stopSignaled) {
-                $this->log('收到停止信号，正在冲刷末帧、关闭分片并写入ENDLIST...');
-            } elseif ($this->endReceived) {
-                $this->log('上游已结束，正在冲刷末帧、关闭分片...');
-            }
-            try {
-                $this->generator->finishStream();
-            } catch (\Throwable $e) {
-                $this->log('收尾异常: ' . $e->getMessage(), 'error');
+            if ($parallel) {
+                if ($this->stopSignaled || $this->endReceived) {
+                    $this->log('正在冲刷末帧、关闭分片并写入ENDLIST...');
+                }
+                try {
+                    $this->shutdownPipeline();
+                } catch (\Throwable $e) {
+                    $this->log('流水线收尾异常: ' . $e->getMessage(), 'error');
+                }
+            } else {
+                if ($this->stopSignaled) {
+                    $this->log('收到停止信号，正在冲刷末帧、关闭分片并写入ENDLIST...');
+                } elseif ($this->endReceived) {
+                    $this->log('上游已结束，正在冲刷末帧、关闭分片...');
+                }
+                try {
+                    $this->generator?->finishStream();
+                } catch (\Throwable $e) {
+                    $this->log('收尾异常: ' . $e->getMessage(), 'error');
+                }
             }
             $this->stopPuller();
             $this->closeIpc();
@@ -328,8 +376,9 @@ class Flv2HlsCompact
             $read = [$this->ipc];
             $write = $this->creditBuffer !== '' ? [$this->ipc] : [];
             $except = null;
-            // 转码期间不拉select空转；无数据时1秒醒一次以响应信号/时长
-            if (@stream_select($read, $write, $except, 1) === false) {
+            // 注意：Windows PHP 秒级超时(1s)下select可写/可读唤醒会退化到约2次/秒，
+            // 必须用毫秒级超时（实测2ms可恢复正常吞吐，idle时每秒500次唤醒开销可忽略）
+            if (@stream_select($read, $write, $except, 0, 2000) === false) {
                 if (!is_resource($this->ipc) || feof($this->ipc)) {
                     $this->running = false;
                     return;
@@ -346,7 +395,7 @@ class Flv2HlsCompact
         }
     }
 
-    private function onIpcReadable(): void
+    private function onIpcReadable(bool $pipeline = false): void
     {
         $chunk = @fread($this->ipc, 65536);
         if ($chunk === false || ($chunk === '' && feof($this->ipc))) {
@@ -356,7 +405,7 @@ class Flv2HlsCompact
         }
         if ($chunk === '') return;
         $this->readBuffer .= $chunk;
-        $this->drainFrames();
+        $this->drainFrames($pipeline);
     }
 
     /**
@@ -364,7 +413,7 @@ class Flv2HlsCompact
      * type=1 媒体tag：[tagType:1][timestamp:4BE][body]
      * type=2 上游结束
      */
-    private function drainFrames(): void
+    private function drainFrames(bool $pipeline = false): void
     {
         $buf = $this->readBuffer;
         $newlyConsumed = 0;
@@ -386,10 +435,11 @@ class Flv2HlsCompact
             $tagType = ord($payload[0]);
             $timestamp = unpack('N', substr($payload, 1, 4))[1];
             $body = substr($payload, 5);
-            $this->feedTranscoder($tagType, $body, $timestamp);
+            if ($pipeline) $this->plEnqueueTag($tagType, $body, $timestamp);
+            else $this->feedTranscoder($tagType, $body, $timestamp);
         }
         $this->readBuffer = $buf;
-        // 本批已全部喂入编码器后回报信用（在途的定义止于送编码器，编码耗时本身即落后量）
+        // 本批已全部放行后回报信用（流水线模式下"在途"含各worker出站缓冲，积压由转发反压消化）
         if ($newlyConsumed > 0) {
             $this->consumedBytes += $newlyConsumed;
             $this->grantCredit();
@@ -417,6 +467,272 @@ class Flv2HlsCompact
             }
         };
         $this->generator->processTag($tag);
+    }
+
+    // ================= GOP分片解码流水线 =================
+
+    /**
+     * 拉起 1个输出worker + N个解码worker（复用文件转码的分布式架构）
+     * 拓扑：主进程 → 解码worker(GOP轮询,各自解码+缩放) → 输出worker(编码+TS+HLS)
+     */
+    private function startPipeline(): void
+    {
+        $n = $this->decodeWorkers;
+        $autoload = dirname((new \ReflectionClass(\Composer\Autoload\ClassLoader::class))->getFileName(), 2) . '/autoload.php';
+        $entry = dirname(__DIR__, 2) . '/bin/hls-worker.php';
+        $profilesOpt = base64_encode(json_encode($this->workerProfile, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR));
+
+        [, $outputPort] = $this->reserveAddress();
+        $decoderPorts = [];
+        for ($i = 0; $i < $n; $i++) [, $decoderPorts[]] = $this->reserveAddress();
+
+        // 输出worker先启动（内部预热运动估计子进程并等待decoder接入）
+        $this->startWorker($entry, [
+            '--mode', 'output',
+            '--autoload', $autoload,
+            '--port', (string)$outputPort,
+            '--workers', (string)$n,
+            '--profiles', $profilesOpt,
+            '--output', rtrim($this->streamDir, '/\\') . '/',
+        ]);
+        for ($i = 0; $i < $n; $i++) {
+            $this->startWorker($entry, [
+                '--mode', 'decoder',
+                '--autoload', $autoload,
+                '--port', (string)$decoderPorts[$i],
+                '--output-port', (string)$outputPort,
+                '--profiles', $profilesOpt,
+            ]);
+            $this->plOut[$i] = '';
+            $this->plIn[$i] = '';
+        }
+
+        // 连接所有解码worker（冷启动并发，轮询等待就绪）
+        $pending = array_flip($decoderPorts);
+        $deadline = microtime(true) + 20;
+        while ($pending !== []) {
+            if (microtime(true) >= $deadline) {
+                throw new RuntimeException('解码worker连接超时: ' . implode(',', array_keys($pending)));
+            }
+            foreach ($pending as $port => $id) {
+                $sock = @stream_socket_client("tcp://127.0.0.1:{$port}", $errno, $errstr, 0.1);
+                if ($sock === false) continue;
+                stream_set_blocking($sock, false);
+                $this->plSocks[$id] = $sock;
+                unset($pending[$port]);
+            }
+            if ($pending !== []) usleep(50000);
+        }
+        ksort($this->plSocks);
+        $this->plSocks = array_values($this->plSocks);
+        $this->log("GOP分片流水线就绪：{$n} 个解码worker + 1 个输出worker");
+    }
+
+    private function reserveAddress(): array
+    {
+        $server = @stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
+        if ($server === false) throw new RuntimeException("本地端口分配失败: {$errstr} ({$errno})");
+        $name = stream_socket_get_name($server, false);
+        fclose($server);
+        return ['tcp://' . $name, (int)substr(strrchr($name, ':'), 1)];
+    }
+
+    private function startWorker(string $entry, array $args): void
+    {
+        $descriptors = [fopen('php://stdin', 'r'), fopen('php://stdout', 'a'), fopen('php://stderr', 'a')];
+        $options = ['bypass_shell' => true];
+        if (PHP_OS_FAMILY === 'Windows') $options['create_process_group'] = true;
+        $p = @proc_open(array_merge([PHP_BINARY, $entry], $args), $descriptors, $pipes, dirname(__DIR__, 2), null, $options);
+        if (!is_resource($p)) throw new RuntimeException('拉起HLS worker失败: ' . implode(' ', $args));
+        $this->plProcesses[] = $p;
+    }
+
+    private function pipelineLoop(): void
+    {
+        while ($this->running) {
+            if ($this->duration > 0 && microtime(true) - $this->startMicrotime >= $this->duration) {
+                $this->log("已达到运行时长 {$this->duration} 秒，停止");
+                $this->running = false;
+            }
+
+            $outBytes = 0;
+            foreach ($this->plOut as $buf) $outBytes += strlen($buf);
+            $canReadPuller = !$this->plEndSent && $outBytes < $this->queueMaxBytes && is_resource($this->ipc);
+
+            $read = [];
+            if ($canReadPuller) $read['puller'] = $this->ipc;
+            foreach ($this->plSocks as $id => $sock) {
+                if (!isset($this->plDead[$id])) $read[$id] = $sock;
+            }
+            $write = [];
+            if ($this->creditBuffer !== '' && is_resource($this->ipc)) $write['puller'] = $this->ipc;
+            foreach ($this->plOut as $id => $buf) {
+                if ($buf !== '' && !isset($this->plDead[$id])) $write[$id] = $this->plSocks[$id];
+            }
+            $except = null;
+            // 毫秒级超时：Windows PHP 秒级select唤醒退化（见transcodeLoop注释）
+            if (@stream_select($read, $write, $except, 0, 2000) === false) continue;
+
+            foreach ($write as $key => $sock) {
+                if ($key === 'puller') {
+                    $this->flushCredit();
+                    continue;
+                }
+                $n = @fwrite($sock, substr($this->plOut[$key], 0, 262144));
+                if ($n === false || ($n === 0 && feof($sock))) {
+                    if (!$this->plEndSent) throw new RuntimeException("解码worker#{$key} 写入失败");
+                    $this->plDead[$key] = true;
+                    continue;
+                }
+                if ($n > 0) $this->plOut[$key] = substr($this->plOut[$key], $n);
+            }
+            foreach ($read as $key => $sock) {
+                if ($key === 'puller') {
+                    $this->onIpcReadable(true);
+                    continue;
+                }
+                $this->onPipelineReadable((int)$key);
+            }
+
+            // 上游结束/主动停止：向worker0发END，输出worker冲刷并写ENDLIST后逐级FINISHED
+            if (!$this->plEndSent && ($this->endReceived || !$this->running)) {
+                $this->plOut[0] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::END, $this->plSeq++);
+                $this->plEndSent = true;
+            }
+            if ($this->plEndSent && $this->plFinished >= $this->decodeWorkers) {
+                $this->running = false;
+                return;
+            }
+            $this->maybePrintStats();
+        }
+    }
+
+    private function onPipelineReadable(int $id): void
+    {
+        $sock = $this->plSocks[$id];
+        $chunk = @fread($sock, 65536);
+        if ($chunk === false || ($chunk === '' && feof($sock))) {
+            if (!$this->plEndSent) throw new RuntimeException("解码worker#{$id} 意外退出");
+            $this->plDead[$id] = true;
+            return;
+        }
+        if ($chunk === '') return;
+        $this->plIn[$id] .= $chunk;
+        foreach (HlsPipelineProtocol::take($this->plIn[$id], PHP_INT_MAX) as $event) {
+            switch ($event['type']) {
+                case HlsPipelineProtocol::PROGRESS:
+                    break; // GOP进度回报：直播不做窗口gate，忽略
+                case HlsPipelineProtocol::FINISHED:
+                    $this->plFinished++;
+                    break;
+                case HlsPipelineProtocol::ERROR:
+                    throw new RuntimeException('流水线worker失败: ' . ($event['metadata']['message'] ?? '未知错误'));
+            }
+        }
+    }
+
+    /**
+     * 拉流tag按GOP轮询分发到解码worker（与文件流水线同构）：
+     * 视频序列头：worker0收EVENT，全体收CONTROL config；
+     * IDR：新GOP轮转worker，前一worker补gopEnd；音频随当前GOP worker走。
+     */
+    private function plEnqueueTag(int $tagType, string $body, int $timestamp): void
+    {
+        $this->tagsFed++;
+        if ($tagType === 9) $this->videoTags++;
+        else $this->audioTags++;
+
+        if ($tagType === 9 && strlen($body) >= 2 && (ord($body[0]) & 0x0f) === 7) {
+            $packetType = ord($body[1]);
+            if ($packetType === 0) {
+                $this->plOut[0] .= HlsPipelineProtocol::frame(
+                    HlsPipelineProtocol::EVENT, $this->plSeq++,
+                    ['tagType' => 9, 'timestamp' => $timestamp], $body
+                );
+                $control = HlsPipelineProtocol::frame(HlsPipelineProtocol::CONTROL, 0, ['cmd' => 'config'], $body);
+                for ($i = 0; $i < $this->decodeWorkers; $i++) $this->plOut[$i] .= $control;
+                return;
+            }
+            if ($packetType === 1) {
+                $isKey = ((ord($body[0]) >> 4) === 1) && $this->containsIdrNal($body);
+                if ($isKey) {
+                    if ($this->plGopSeq > 0) {
+                        $prev = $this->plGopSeq - 1;
+                        $this->plOut[$prev % $this->decodeWorkers] .= HlsPipelineProtocol::frame(
+                            HlsPipelineProtocol::CONTROL, 0, ['cmd' => 'gopEnd', 'gop' => $prev]
+                        );
+                    }
+                    $this->plCurrentWorker = $this->plGopSeq % $this->decodeWorkers;
+                    $this->plGopSeq++;
+                }
+                $this->plOut[$this->plCurrentWorker] .= HlsPipelineProtocol::frame(
+                    HlsPipelineProtocol::EVENT, $this->plSeq++,
+                    ['tagType' => 9, 'timestamp' => $timestamp], $body
+                );
+                return;
+            }
+        }
+        $this->plOut[$this->plCurrentWorker] .= HlsPipelineProtocol::frame(
+            HlsPipelineProtocol::EVENT, $this->plSeq++,
+            ['tagType' => $tagType, 'timestamp' => $timestamp], $body
+        );
+    }
+
+    /**
+     * 扫描AVCC视频包（跳过5字节FLV/AVC头），判断是否包含IDR NAL（type=5）
+     */
+    private function containsIdrNal(string $body): bool
+    {
+        $total = strlen($body);
+        $off = 5;
+        while ($off + 4 <= $total) {
+            $length = unpack('N', substr($body, $off, 4))[1];
+            $off += 4;
+            if ($length <= 0 || $off + $length > $total) break;
+            if ((ord($body[$off]) & 0x1f) === 5) return true;
+            $off += $length;
+        }
+        return false;
+    }
+
+    private function shutdownPipeline(): void
+    {
+        // 兜底发END（正常情况下pipelineLoop已发），并限时排空等待FINISHED
+        if (!$this->plEndSent) {
+            $this->plOut[0] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::END, $this->plSeq++);
+            $this->plEndSent = true;
+        }
+        $deadline = microtime(true) + 15;
+        while ($this->plFinished < $this->decodeWorkers && microtime(true) < $deadline) {
+            $read = [];
+            foreach ($this->plSocks as $id => $sock) {
+                if (is_resource($sock) && !isset($this->plDead[$id])) $read[$id] = $sock;
+            }
+            $write = [];
+            foreach ($this->plOut as $id => $buf) {
+                if ($buf !== '' && !isset($this->plDead[$id]) && is_resource($this->plSocks[$id])) $write[$id] = $this->plSocks[$id];
+            }
+            if ($read === [] && $write === []) break;
+            $except = null;
+            if (@stream_select($read, $write, $except, 0, 200000) === false) { usleep(20000); continue; }
+            foreach ($write as $id => $sock) {
+                $n = @fwrite($sock, substr($this->plOut[$id], 0, 262144));
+                if ($n === false || ($n === 0 && feof($sock))) { $this->plDead[$id] = true; continue; }
+                if ($n > 0) $this->plOut[$id] = substr($this->plOut[$id], $n);
+            }
+            foreach ($read as $id => $sock) {
+                try { $this->onPipelineReadable((int)$id); } catch (\Throwable) { $this->plDead[$id] = true; }
+            }
+        }
+        foreach ($this->plSocks as $sock) if (is_resource($sock)) @fclose($sock);
+        $this->plSocks = [];
+        foreach ($this->plProcesses as $p) {
+            if (!is_resource($p)) continue;
+            $status = @proc_get_status($p);
+            if (($status['running'] ?? false)) @proc_terminate($p);
+            @proc_close($p);
+        }
+        $this->plProcesses = [];
     }
 
     // ================= 日志/统计 =================

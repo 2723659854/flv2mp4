@@ -310,8 +310,9 @@ class FlvStreamPuller
             $read = [$this->socket, $this->ipc];
             $write = $this->ipcBuffer !== '' ? [$this->ipc] : [];
             $except = null;
-            // 有积压时短轮询尽快排空本地缓冲，无数据时1秒醒一次省CPU
-            if (@stream_select($read, $write, $except, 1) === false) {
+            // 毫秒级超时：Windows PHP 秒级select唤醒退化到约2次/秒（实测），
+            // 有积压时也依赖短轮询尽快排空本地缓冲
+            if (@stream_select($read, $write, $except, 0, 2000) === false) {
                 throw new RuntimeException('stream_select 失败');
             }
             // 先收信用回报再写，避免错过窗口更新

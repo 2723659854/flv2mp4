@@ -77,7 +77,9 @@ trait SliceEncodeTrait
 
         // 准备并异步派发 B（主进程紧接着在 finishFrame 中 CAVLC A，与 worker 并行）
         $ctxB = $this->prepareSliceContext($yuvData, $isKeyframe);
-        if ($ctxB['sliceType'] === 0) $this->dispatchSlice($ctxB);
+        if ($ctxB['sliceType'] === 0) {
+            $this->dispatchSlice($ctxB);
+        }
         $this->pipeFlight = $ctxB;
     }
 
@@ -138,37 +140,36 @@ trait SliceEncodeTrait
         $vPlane = substr($yuvData, $ySize + $uvSize, $uvSize);
 
         // 将输入图像扩展到宏块对齐尺寸（边缘复制填充）
+        // 行收集后一次性 implode：避免逐行 .= 造成的整串重复拷贝（360p 下每帧数千万次复制）
         if ($mbAlignedWidth !== $this->width || $mbAlignedHeight !== $this->height) {
-            $expandedY = '';
             $padRight = $mbAlignedWidth - $this->width;
+            $rows = [];
             for ($y = 0; $y < $this->height; $y++) {
                 $row = substr($yPlane, $y * $this->width, $this->width);
-                $lastPixel = $row[$this->width - 1];
-                $expandedY .= $row . str_repeat($lastPixel, $padRight);
+                $rows[] = $row . str_repeat($row[$this->width - 1], $padRight);
             }
-            $padBottom = $mbAlignedHeight - $this->height;
-            $lastRow = substr($expandedY, ($this->height - 1) * $mbAlignedWidth, $mbAlignedWidth);
-            for ($y = 0; $y < $padBottom; $y++) {
-                $expandedY .= $lastRow;
+            if ($mbAlignedHeight > $this->height) {
+                $lastRow = end($rows);
+                for ($y = 0, $yn = $mbAlignedHeight - $this->height; $y < $yn; $y++) $rows[] = $lastRow;
             }
-            $yPlane = $expandedY;
+            $yPlane = implode('', $rows);
 
             $uvW = (int)($this->width / 2);
             $uvH = (int)($this->height / 2);
-            $padRightUv = (int)($mbAlignedWidth / 2) - $uvW;
+            $uvAlineW = (int)($mbAlignedWidth / 2);
+            $padRightUv = $uvAlineW - $uvW;
             $padBottomUv = (int)($mbAlignedHeight / 2) - $uvH;
             foreach (['uPlane', 'vPlane'] as $planeName) {
-                $expandedUV = '';
+                $rowsUv = [];
                 for ($y = 0; $y < $uvH; $y++) {
                     $row = substr($$planeName, $y * $uvW, $uvW);
-                    $lastPixel = $row[$uvW - 1];
-                    $expandedUV .= $row . str_repeat($lastPixel, $padRightUv);
+                    $rowsUv[] = $row . str_repeat($row[$uvW - 1], $padRightUv);
                 }
-                $lastRowUv = substr($expandedUV, ($uvH - 1) * (int)($mbAlignedWidth / 2), (int)($mbAlignedWidth / 2));
-                for ($y = 0; $y < $padBottomUv; $y++) {
-                    $expandedUV .= $lastRowUv;
+                if ($padBottomUv > 0) {
+                    $lastRowUv = end($rowsUv);
+                    for ($y = 0; $y < $padBottomUv; $y++) $rowsUv[] = $lastRowUv;
                 }
-                $$planeName = $expandedUV;
+                $$planeName = implode('', $rowsUv);
             }
         }
 
@@ -226,16 +227,17 @@ trait SliceEncodeTrait
         $mbHeight = $ctx['mbHeight'];
         $aw = $ctx['aw'];
         $cw = intdiv($aw, 2);
-        $reconY = str_repeat("\0", $aw * $ctx['ah']);
-        $reconU = str_repeat("\0", $cw * intdiv($ctx['ah'], 2));
-        $reconV = $reconU;
+        // 行收集后一次性 implode：避免对整帧大串逐行 substr_replace（每帧上百 MB 内存搬移）
+        $rowsY = [];
+        $rowsU = [];
+        $rowsV = [];
         for ($my = 0; $my < $mbHeight; $my++) {
             for ($r = 0; $r < 16; $r++) {
                 $line = '';
                 for ($mx = 0; $mx < $mbWidth; $mx++) {
                     $line .= substr($results[$my * $mbWidth + $mx][6], $r * 16, 16);
                 }
-                $reconY = substr_replace($reconY, $line, ($my * 16 + $r) * $aw, $aw);
+                $rowsY[] = $line;
             }
             for ($r = 0; $r < 8; $r++) {
                 $lineU = '';
@@ -245,10 +247,13 @@ trait SliceEncodeTrait
                     $lineU .= substr($res[7], $r * 8, 8);
                     $lineV .= substr($res[8], $r * 8, 8);
                 }
-                $reconU = substr_replace($reconU, $lineU, ($my * 8 + $r) * $cw, $cw);
-                $reconV = substr_replace($reconV, $lineV, ($my * 8 + $r) * $cw, $cw);
+                $rowsU[] = $lineU;
+                $rowsV[] = $lineV;
             }
         }
+        $reconY = implode('', $rowsY);
+        $reconU = implode('', $rowsU);
+        $reconV = implode('', $rowsV);
         $this->refYPlane = $reconY;
         $this->refUPlane = $reconU;
         $this->refVPlane = $reconV;

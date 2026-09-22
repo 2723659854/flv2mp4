@@ -79,6 +79,7 @@ class PurePhpHlsGenerator
 
     // 帧级双缓冲：一个已 startFrame（所有 profile）的视频帧延后到下一帧到达后再 finish
     private ?array $pendingVideoJob = null;
+
     /** @var array<int,object> 在途视频帧之后到达的音频 tag，待该帧写出后按原顺序回放 */
     private array $queuedAudioTags = [];
 
@@ -620,7 +621,11 @@ class PurePhpHlsGenerator
             array_unshift($nalUnits, ['type' => 8, 'data' => $this->srcPpsData]);
         }
         
-        $frame = $this->decoder->decode($nalUnits);
+        // 直播实时链路可关闭解码器去块滤波（FLV2MP4_LIVE_SKIP_DEBLOCK=1）：
+        // 768x432 源上每帧省 5-7ms，低分辨率直播画质损失可忽略；编码侧本就不做去块
+        static $skipDeblock = null;
+        $skipDeblock ??= getenv('FLV2MP4_LIVE_SKIP_DEBLOCK') !== false;
+        $frame = $this->decoder->decode($nalUnits, false, true, $skipDeblock);
         if ($frame && !empty($frame['data'])) {
             return $frame['data'];
         }

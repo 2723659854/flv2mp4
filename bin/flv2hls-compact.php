@@ -71,6 +71,7 @@ if (isset($options['fps'])) $config['fps'] = (int)$options['fps'];
 if (isset($options['qp'])) $config['qp'] = (int)$options['qp'];
 if (isset($options['audio-bitrate'])) $config['audioBitrate'] = (int)$options['audio-bitrate'];
 if (isset($options['motion-workers'])) $config['motionWorkers'] = (int)$options['motion-workers'];
+if (isset($options['decode-workers'])) $config['decodeWorkers'] = (int)$options['decode-workers'];
 if (isset($options['segment'])) $config['segmentDuration'] = (int)$options['segment'];
 if (isset($options['queue-mb'])) $config['queueMaxBytes'] = (int)$options['queue-mb'] * 1048576;
 if (isset($options['retries'])) $config['maxRetries'] = (int)$options['retries'];
