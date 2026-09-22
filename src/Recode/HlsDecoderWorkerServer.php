@@ -29,10 +29,17 @@ final class HlsDecoderWorkerServer
         $this->scaler = count($profiles) === 1 ? new VideoScaler() : null;
     }
 
-    public function run(string $listenAddress, string $outputAddress): void
+    public function run(string $listenAddress, string $outputAddress, string $controlAddress = ''): void
     {
         $server = @stream_socket_server($listenAddress, $errno, $error);
         if ($server === false) throw new RuntimeException("解码进程监听失败: {$error} ({$errno})");
+        // 独立控制连接：finish 屏障走此通道，不被48MB媒体在途缓冲挡在后面
+        $ctrlServer = null;
+        if ($controlAddress !== '') {
+            $ctrlServer = @stream_socket_server($controlAddress, $errno, $error);
+            if ($ctrlServer === false) throw new RuntimeException("解码进程控制端口监听失败: {$error} ({$errno})");
+            stream_set_blocking($ctrlServer, false);
+        }
         $downstream = $this->connect($outputAddress);
         $upstream = @stream_socket_accept($server, 15);
         fclose($server);
@@ -43,15 +50,50 @@ final class HlsDecoderWorkerServer
         $output = '';
         $upOutput = '';
         $downstreamInput = '';
+        $ctrlConn = null;
+        $ctrlInput = '';
         $ended = false;
+        $finishing = false;
+        $triggerFinish = static function () use (&$input, &$finishing): void {
+            if ($finishing) return;
+            // 快速收尾：丢弃所有尚未解码的在途帧并停止解码（直播尾部无观看价值）。
+            // 不向下游媒体流插入任何字节（会切断已部分发出的大帧）；输出进程由主进程经
+            // 独立控制连接直接通知收尾
+            $input = '';
+            $finishing = true;
+        };
         try {
             while (true) {
                 $read = [$downstream];
-                if (!$ended && strlen($input) < HlsPipelineProtocol::HIGH_WATERMARK) $read[] = $upstream;
+                if (!$ended && !$finishing && strlen($input) < HlsPipelineProtocol::HIGH_WATERMARK) $read[] = $upstream;
+                if ($ctrlServer !== null) $read[] = $ctrlServer;
+                if ($ctrlConn !== null) $read[] = $ctrlConn;
                 $write = $output === '' ? [] : [$downstream];
                 if ($upOutput !== '') $write[] = $upstream;
                 $except = null;
                 @stream_select($read, $write, $except, 0, 2000);
+                if ($ctrlServer !== null && in_array($ctrlServer, $read, true)) {
+                    $conn = @stream_socket_accept($ctrlServer, 0);
+                    if ($conn !== false) {
+                        stream_set_blocking($conn, false);
+                        $ctrlConn = $conn;
+                        fclose($ctrlServer);
+                        $ctrlServer = null;
+                    }
+                }
+                if ($ctrlConn !== null && in_array($ctrlConn, $read, true)) {
+                    $chunk = @fread($ctrlConn, 65536);
+                    if ($chunk === false || ($chunk === '' && feof($ctrlConn))) {
+                        $ctrlConn = null;
+                    } else {
+                        $ctrlInput .= $chunk;
+                        foreach (HlsPipelineProtocol::take($ctrlInput, PHP_INT_MAX) as $ctrlEvent) {
+                            if ($ctrlEvent['type'] === HlsPipelineProtocol::CONTROL && ($ctrlEvent['metadata']['cmd'] ?? '') === 'finish') {
+                                $triggerFinish();
+                            }
+                        }
+                    }
+                }
                 if (in_array($upstream, $read, true)) {
                     while (true) {
                         $chunk = @fread($upstream, 65536);
@@ -62,9 +104,34 @@ final class HlsDecoderWorkerServer
                         if (strlen($chunk) < 65536) break;
                     }
                 }
+                // 兼容兜底：finish 若从媒体通道到达（无控制连接的旧调用方），长度前缀快扫定位，
+                // 不解析/不搬运媒体负载
+                if (!$finishing) {
+                    $off = 0;
+                    $scanTotal = strlen($input);
+                    $foundAt = -1;
+                    while ($off + 4 <= $scanTotal) {
+                        $frameLen = (int)unpack('N', substr($input, $off, 4))[1];
+                        if ($frameLen < 9 || $frameLen > HlsPipelineProtocol::MAX_FRAME_LENGTH) break;
+                        if ($off + 4 + $frameLen > $scanTotal) break;
+                        if (ord($input[$off + 4]) === HlsPipelineProtocol::CONTROL) {
+                            $metaLen = (int)unpack('N', substr($input, $off + 9, 4))[1];
+                            if ($metaLen <= $frameLen - 9) {
+                                $meta = json_decode(substr($input, $off + 13, $metaLen), true);
+                                if (is_array($meta) && ($meta['cmd'] ?? '') === 'finish') {
+                                    $foundAt = $off;
+                                    break;
+                                }
+                            }
+                        }
+                        $off += 4 + $frameLen;
+                    }
+                    if ($foundAt >= 0) $triggerFinish();
+                }
                 // 单次 select 唤醒（Windows 下粒度约 10~15ms）批量解码全部已缓冲事件，
-                // 下游输出积压到高水位时停止，让反压继续向下游传播，避免长文件下缓冲超限
-                while (strlen($output) < HlsPipelineProtocol::HIGH_WATERMARK) {
+                // 下游输出积压到高水位时停止，让反压继续向下游传播，避免长文件下缓冲超限。
+                // 收到 finish 后停止解码在途帧（快速收尾：尾部帧由输出进程直接丢弃）。
+                while (!$finishing && strlen($output) < HlsPipelineProtocol::HIGH_WATERMARK) {
                     $events = HlsPipelineProtocol::take($input, 1);
                     if ($events === []) break;
                     $event = $events[0];
@@ -122,6 +189,8 @@ final class HlsDecoderWorkerServer
         } finally {
             if (is_resource($upstream)) @fclose($upstream);
             if (is_resource($downstream)) @fclose($downstream);
+            if (is_resource($ctrlConn)) @fclose($ctrlConn);
+            if (is_resource($ctrlServer)) @fclose($ctrlServer);
         }
     }
 

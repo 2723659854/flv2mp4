@@ -82,12 +82,17 @@ class Flv2HlsCompact
     private int $audioTags = 0;
     private float $startMicrotime;
     private float $lastStatsMicrotime = 0.0;
+    private int $lastStatsTags = 0;
 
     // ===== GOP分片解码流水线运行态 =====
     /** @var array<int,resource> worker进程句柄 */
     private array $plProcesses = [];
     /** @var array<int,resource> 主进程→各解码worker的socket */
     private array $plSocks = [];
+    /** @var array<int,resource> 主进程→各解码worker的独立控制socket（finish屏障专用，不被媒体积压阻塞） */
+    private array $plCtrl = [];
+    /** @var resource|null 主进程→输出worker的独立控制socket（finish屏障直达，媒体流中插入会切断半帧） */
+    private $plOutCtrl = null;
     /** @var array<int,string> 待写入各解码worker的缓冲 */
     private array $plOut = [];
     /** @var array<int,string> 各解码worker回报缓冲 */
@@ -483,14 +488,20 @@ class Flv2HlsCompact
         $profilesOpt = base64_encode(json_encode($this->workerProfile, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR));
 
         [, $outputPort] = $this->reserveAddress();
+        [, $outputCtrlPort] = $this->reserveAddress();
         $decoderPorts = [];
-        for ($i = 0; $i < $n; $i++) [, $decoderPorts[]] = $this->reserveAddress();
+        $controlPorts = [];
+        for ($i = 0; $i < $n; $i++) {
+            [, $decoderPorts[]] = $this->reserveAddress();
+            [, $controlPorts[]] = $this->reserveAddress();
+        }
 
         // 输出worker先启动（内部预热运动估计子进程并等待decoder接入）
         $this->startWorker($entry, [
             '--mode', 'output',
             '--autoload', $autoload,
             '--port', (string)$outputPort,
+            '--control-port', (string)$outputCtrlPort,
             '--workers', (string)$n,
             '--profiles', $profilesOpt,
             '--output', rtrim($this->streamDir, '/\\') . '/',
@@ -500,6 +511,7 @@ class Flv2HlsCompact
                 '--mode', 'decoder',
                 '--autoload', $autoload,
                 '--port', (string)$decoderPorts[$i],
+                '--control-port', (string)$controlPorts[$i],
                 '--output-port', (string)$outputPort,
                 '--profiles', $profilesOpt,
             ]);
@@ -507,24 +519,34 @@ class Flv2HlsCompact
             $this->plIn[$i] = '';
         }
 
-        // 连接所有解码worker（冷启动并发，轮询等待就绪）
-        $pending = array_flip($decoderPorts);
+        // 连接所有解码worker（媒体+控制）及输出worker控制连接（冷启动并发轮询等待就绪）
+        $pending = [];
+        for ($i = 0; $i < $n; $i++) {
+            $pending[] = [0, $decoderPorts[$i], $i];
+            $pending[] = [1, $controlPorts[$i], $i];
+        }
+        $pending[] = [2, $outputCtrlPort, -1];
         $deadline = microtime(true) + 20;
         while ($pending !== []) {
             if (microtime(true) >= $deadline) {
-                throw new RuntimeException('解码worker连接超时: ' . implode(',', array_keys($pending)));
+                throw new RuntimeException('流水线worker连接超时: ' . implode(',', array_map(static fn($p) => ($p[0] === 0 ? 'media' : ($p[0] === 1 ? 'ctrl' : 'outctrl')) . ':' . $p[1], $pending)));
             }
-            foreach ($pending as $port => $id) {
+            foreach ($pending as $idx => $item) {
+                [$kind, $port, $id] = $item;
                 $sock = @stream_socket_client("tcp://127.0.0.1:{$port}", $errno, $errstr, 0.1);
                 if ($sock === false) continue;
                 stream_set_blocking($sock, false);
-                $this->plSocks[$id] = $sock;
-                unset($pending[$port]);
+                if ($kind === 0) $this->plSocks[$id] = $sock;
+                elseif ($kind === 1) $this->plCtrl[$id] = $sock;
+                else $this->plOutCtrl = $sock;
+                unset($pending[$idx]);
             }
             if ($pending !== []) usleep(50000);
         }
         ksort($this->plSocks);
         $this->plSocks = array_values($this->plSocks);
+        ksort($this->plCtrl);
+        $this->plCtrl = array_values($this->plCtrl);
         $this->log("GOP分片流水线就绪：{$n} 个解码worker + 1 个输出worker");
     }
 
@@ -594,10 +616,11 @@ class Flv2HlsCompact
                 $this->onPipelineReadable((int)$key);
             }
 
-            // 上游结束/主动停止：向worker0发END，输出worker冲刷并写ENDLIST后逐级FINISHED
+            // 上游结束/主动停止：立即停拉流，并经独立控制连接广播finish屏障（快速收尾）：
+            // 输出进程收齐屏障后丢弃十几秒直播尾部在途帧、只冲刷当前帧并写ENDLIST
             if (!$this->plEndSent && ($this->endReceived || !$this->running)) {
-                $this->plOut[0] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::END, $this->plSeq++);
-                $this->plEndSent = true;
+                $this->sendPipelineFinish();
+                $this->stopPuller();
             }
             if ($this->plEndSent && $this->plFinished >= $this->decodeWorkers) {
                 $this->running = false;
@@ -695,13 +718,32 @@ class Flv2HlsCompact
         return false;
     }
 
+    /**
+     * 发送finish屏障：输出worker经独立控制连接直达（立即丢尾部、冲刷1帧、写ENDLIST）；
+     * 各解码worker同样经控制连接停止解码（释放CPU给收尾冲刷）。控制连接无媒体积压，即时到达。
+     * 解码worker控制连接缺失/写入失败时退回媒体通道（decoder有长度前缀快扫兜底）
+     */
+    private function sendPipelineFinish(): void
+    {
+        $finishFrame = HlsPipelineProtocol::frame(HlsPipelineProtocol::CONTROL, 0, ['cmd' => 'finish']);
+        if (is_resource($this->plOutCtrl)) @fwrite($this->plOutCtrl, $finishFrame);
+        for ($i = 0; $i < $this->decodeWorkers; $i++) {
+            $sent = false;
+            if (isset($this->plCtrl[$i]) && is_resource($this->plCtrl[$i])) {
+                $n = @fwrite($this->plCtrl[$i], $finishFrame);
+                if ($n !== false && $n > 0) $sent = true;
+            }
+            if (!$sent) $this->plOut[$i] .= $finishFrame; // 媒体通道兜底（decoder快扫截获，仅令其停止解码）
+        }
+        $this->plEndSent = true;
+    }
+
     private function shutdownPipeline(): void
     {
-        // 兜底发END（正常情况下pipelineLoop已发），并限时排空等待FINISHED
-        if (!$this->plEndSent) {
-            $this->plOut[0] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::END, $this->plSeq++);
-            $this->plEndSent = true;
-        }
+        $shutdownStart = microtime(true);
+        // 兜底广播finish（正常情况下pipelineLoop已发），并限时等待FINISHED
+        if (!$this->plEndSent) $this->sendPipelineFinish();
+        $this->stopPuller();
         $deadline = microtime(true) + 15;
         while ($this->plFinished < $this->decodeWorkers && microtime(true) < $deadline) {
             $read = [];
@@ -726,6 +768,10 @@ class Flv2HlsCompact
         }
         foreach ($this->plSocks as $sock) if (is_resource($sock)) @fclose($sock);
         $this->plSocks = [];
+        foreach ($this->plCtrl as $sock) if (is_resource($sock)) @fclose($sock);
+        $this->plCtrl = [];
+        if (is_resource($this->plOutCtrl)) @fclose($this->plOutCtrl);
+        $this->plOutCtrl = null;
         foreach ($this->plProcesses as $p) {
             if (!is_resource($p)) continue;
             $status = @proc_get_status($p);
@@ -733,6 +779,12 @@ class Flv2HlsCompact
             @proc_close($p);
         }
         $this->plProcesses = [];
+        $shutdownElapsed = microtime(true) - $shutdownStart;
+        if ($this->plFinished >= $this->decodeWorkers) {
+            $this->log(sprintf('收尾完成（%.2fs），ENDLIST 已写入', $shutdownElapsed));
+        } else {
+            $this->log(sprintf('收尾超时（%.1fs，缺少 %d 个worker确认），已强制关闭', $shutdownElapsed, $this->decodeWorkers - $this->plFinished), 'warning');
+        }
     }
 
     // ================= 日志/统计 =================
@@ -741,13 +793,17 @@ class Flv2HlsCompact
     {
         $now = microtime(true);
         if ($now - $this->lastStatsMicrotime < 5) return;
-        $this->lastStatsMicrotime = $now;
         $elapsed = max(0.001, $now - $this->startMicrotime);
+        $interval = max(0.001, $now - $this->lastStatsMicrotime);
         $this->log(sprintf(
-            '[转码] 已转 %d tags (v%d/a%d) | %.1f tags/s',
+            '[转码] 已转 %d tags (v%d/a%d) | 平均 %.1f tags/s，近%d秒 %.1f tags/s',
             $this->tagsFed, $this->videoTags, $this->audioTags,
-            $this->tagsFed / $elapsed
+            $this->tagsFed / $elapsed,
+            (int)round($interval),
+            ($this->tagsFed - $this->lastStatsTags) / $interval
         ), 'progress');
+        $this->lastStatsMicrotime = $now;
+        $this->lastStatsTags = $this->tagsFed;
     }
 
     private function printStats(): void

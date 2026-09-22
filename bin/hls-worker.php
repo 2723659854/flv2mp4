@@ -1,7 +1,7 @@
 <?php
 
 try {
-    $options = getopt('', ['mode:', 'autoload:', 'port:', 'output-port:', 'output-ports:', 'profiles:', 'output:', 'workers:']);
+    $options = getopt('', ['mode:', 'autoload:', 'port:', 'control-port:', 'output-port:', 'output-ports:', 'profiles:', 'output:', 'workers:']);
     $mode = $options['mode'] ?? '';
     if (empty($options['autoload']) || empty($options['port']) || empty($options['profiles'])) {
         throw new RuntimeException('HLS worker 参数不完整');
@@ -17,7 +17,8 @@ try {
         if (empty($options['output-port'])) throw new RuntimeException('解码 worker 缺少 output-port');
         (new \Xiaosongshu\Flv2mp4\Recode\HlsDecoderWorkerServer($profiles))->run(
             'tcp://127.0.0.1:' . (int)$options['port'],
-            'tcp://127.0.0.1:' . (int)$options['output-port']
+            'tcp://127.0.0.1:' . (int)$options['output-port'],
+            isset($options['control-port']) ? 'tcp://127.0.0.1:' . (int)$options['control-port'] : ''
         );
     } elseif ($mode === 'scale') {
         if (ini_set('memory_limit', '512M') === false) throw new RuntimeException('无法设置缩放 worker 内存上限');
@@ -35,7 +36,8 @@ try {
         if (!isset($options['output'])) throw new RuntimeException('输出 worker 缺少 output');
         (new \Xiaosongshu\Flv2mp4\Recode\HlsOutputWorkerServer($profiles, $options['output']))->run(
             'tcp://127.0.0.1:' . (int)$options['port'],
-            $workers
+            $workers,
+            isset($options['control-port']) ? 'tcp://127.0.0.1:' . (int)$options['control-port'] : ''
         );
     } else throw new RuntimeException('未知 HLS worker 模式');
 } catch (Throwable $e) {
