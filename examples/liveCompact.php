@@ -15,26 +15,29 @@ ini_set('memory_limit', '2048M');
  */
 
 // ======================== 拉流配置 ========================
-$pullUrl = 'http://127.0.0.1:8501/a/b.flv'; // 直播地址（http/https/ws/wss）
+$pullUrl = 'http://192.168.110.72:8501/a/b.flv'; // 直播地址（http/https/ws/wss）
 
 // ======================== 转码压缩配置 ========================
 $config = [
     // —— 目标规格（width/height 必须同时给，0=保持源尺寸）——
-    'width'        => 360,
+    // 实测（i5-13400/16逻辑线程，768x432@10fps源）：640x360 + motionWorkers=12 可实时10fps零跳帧；
+    // 机器核少或卡顿可降为 426x240（约8-10个worker即可实时）
+    'width'        => 640,
     'height'       => 360,
-    'bitrate'      => 600000,  // 目标视频码率 bps
+    'bitrate'      => 800000,  // 目标视频码率 bps
     'fps'          => 0,       // 目标帧率（串行管道仅传编码器，不抽帧；0=保持）
     'qp'           => 10,      // 量化参数 0-51
     'audioBitrate' => 64000,   // 音频码率 bps
 
     // —— 并行/输出 ——
-    'motionWorkers'   => 3,    // 运动估计子进程数（180p可降到2，核少的机器建议2-3）
+    'motionWorkers'   => 12,   // 运动估计子进程数（360p实时的关键；约需14+逻辑线程，核少请同时降到240p）
+    'decodeWorkers'   => 2,    // 解码+缩放worker数（缩放在此并行完成，勿置0走串行）
     'segmentDuration' => 3,    // HLS切片时长（秒）
     // 'watermark'       => true,
     // 'watermark_file'  => __DIR__ . '/watermark_80x16.yuv',
 
     // —— 输出目录与流名（默认 项目根/hls/<URL末段>/）——
-     'outputDir'  => __DIR__ . '/hls/live/',
+    'outputDir'  => __DIR__ . '/hls/live/',
     // 'streamName' => 'room1',
 
     // ======================== 拉流客户端配置 ========================
@@ -42,7 +45,7 @@ $config = [
     'retryDelay'    => 3,      // 重连间隔（秒）
     'connectTimeout'=> 10,     // 连接/握手超时（秒）
     'idleTimeout'   => 30,     // 连续无数据判定断流（秒）
-    'queueMaxBytes' => 67108864, // 缓存队列上限64MB（满则TCP反压上游，不丢帧）
+    'queueMaxBytes' => 8388608,  // 转码落后容忍8MB；超限拉流进程跳IDR追直播（独立进程，绝不反压上游）
     // 'duration'   => 0,      // 限定运行秒数，0=不限
     // 'tlsVerify'  => false,  // https/wss 自签证书时关闭校验
 ];
