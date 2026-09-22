@@ -17,7 +17,7 @@
  *   --audio-bitrate=<bps>   音频码率（默认64000）
  *   --motion-workers=<n>    运动估计子进程数（默认6）
  *   --segment=<秒>          HLS切片时长（默认3）
- *   --queue-mb=<MB>         缓存队列上限（默认64）
+ *   --queue-mb=<MB>         转码落后容忍MB，超限拉流端跳IDR追直播（默认8，绝不反压上游）
  *   --retries=<n>           断线重连次数（默认5）
  *   --retry-delay=<秒>      重连间隔（默认3）
  *   --idle-timeout=<秒>     无数据断流判定（默认30）
