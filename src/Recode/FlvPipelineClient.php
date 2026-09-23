@@ -346,7 +346,7 @@ final class FlvPipelineClient
         foreach ($this->processes as $key => $process) {
             if (!is_resource($process)) { unset($this->processes[$key]); continue; }
             $deadline = microtime(true) + 30;
-            do { $status = proc_get_status($process); if (!$status['running']) break; usleep(50000); } while (microtime(true) < $deadline);
+            do { $status = proc_get_status($process); if (!$status['running']) break; usleep(1); } while (microtime(true) < $deadline);
             $timedOut = $status['running'];
             if ($timedOut) @proc_terminate($process);
             $exit = proc_close($process); unset($this->processes[$key]);
@@ -377,7 +377,7 @@ final class FlvPipelineClient
     private function connect(string $address)
     {
         $deadline = microtime(true) + 15;
-        do { $socket = @stream_socket_client($address, $errno, $error, 0.2); if ($socket !== false) return $socket; usleep(50000); } while (microtime(true) < $deadline);
+        do { $socket = @stream_socket_client($address, $errno, $error, 0.2); if ($socket !== false) return $socket; usleep(1); } while (microtime(true) < $deadline);
         throw new RuntimeException("无法连接解码进程: {$error} ({$errno})");
     }
 

@@ -215,7 +215,7 @@ final class MotionWorkerClient
                 $this->outputs[$worker] = '';
                 unset($this->workerSeq[$worker], $pending[$worker]);
             }
-            if ($pending !== []) usleep(50000);
+            if ($pending !== []) usleep(1);
         }
     }
 

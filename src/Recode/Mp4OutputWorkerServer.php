@@ -55,7 +55,7 @@ final class Mp4OutputWorkerServer
                 foreach ($outputs as $id => $buffer) if ($buffer !== '') $write[] = $sockets[$id];
                 if ($read === [] && $write === []) {
                     if ($finished) return;
-                    usleep(2000);
+                    usleep(1);
                     continue;
                 }
                 $except = null;

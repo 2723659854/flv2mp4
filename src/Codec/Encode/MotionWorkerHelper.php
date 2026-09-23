@@ -2,6 +2,11 @@
 
 namespace Xiaosongshu\Flv2mp4\Codec\Encode;
 
+/**
+ * @purpose 运动模块进程管理辅助函数
+ * @author yanglong
+ * @time 2026年9月18日11:00:03
+ */
 final class MotionWorkerHelper
 {
     private const INTERP_TAP0 = 1;

@@ -1989,8 +1989,8 @@ trait MacroblockDecodingTrait
             $chromaQpIndex = max(0, min(51, $qp + $this->chromaQpIndexOffset));
             $chromaQp = self::CHROMA_QP_TABLE[$chromaQpIndex];
 
-            $cbDc = array_fill(0, 4, 0);
-            $crDc = array_fill(0, 4, 0);
+            //$cbDc = array_fill(0, 4, 0);
+            //$crDc = array_fill(0, 4, 0);
             $cbAcCoeffs = array_fill(0, 4, array_fill(0, 16, 0));
             $crAcCoeffs = array_fill(0, 4, array_fill(0, 16, 0));
 
