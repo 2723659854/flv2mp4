@@ -41,6 +41,7 @@ Supports FLV, FMP4, MP4, HLS mutual conversion, live streaming gateway, pushing,
     - [FLV → HLS Multi-bitrate Example](#flv2hls)
     - [FLV → FLV Re-encoding Example](#flv2flv)
     - [MP4 → MP4 Re-encoding Example](#mp42mp4)
+    - [Live Stream Compression & Transcoding](#live-stream-compression--transcoding)
     - [Watermark Generator](#watermark-generator)
     - [Performance Test Report](#performance-test-report)
 - [Encoding/Decoding for AAC-MP3-OPUS-WAV](#encodingdecoding-for-aac-mp3-opus-wav)
@@ -428,7 +429,9 @@ echo "MP4 re‑encoding done.\n";
 - The re‑encoding module exposes a **YUV pixel‑level interface**, which can be used to implement custom features like subtitles, picture‑in‑picture, video stitching, etc.
 - For detailed H.264 usage, see <a href="./src/Codec/README.md">src/Codec/README.md</a>.
 
-#### Live Stream Compression & Transcoding
+----
+
+### Live Stream Compression & Transcoding
 
 This project supports compressing a live FLV stream and transcoding it to HLS, making it suitable for mobile users on weak networks. Example code:
 
