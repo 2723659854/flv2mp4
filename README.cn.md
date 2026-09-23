@@ -401,6 +401,57 @@ echo "mp4重编码完成\r\n";
 - h264详细使用方法见<a href="./src/Codec/README.md">README</a>。
 
 ---
+#### 直播压缩转码
+本项目支持将直播flv流压缩并转码hls，以适配移动端弱网络场景。示例代码如下：
+```php
+<?php
+
+require_once __DIR__ . '/vendor/autoload.php';
+ini_set('memory_limit', '2048M');
+
+// ======================== 拉流配置 支持（http/https/ws/wss） ========================
+$pullUrl = 'ws://127.0.0.1:8501/live/stream.flv';
+
+// ======================== 转码压缩配置 ========================
+$config = [
+    // —— 目标规格（width/height 必须同时给，0=保持源尺寸）——
+    'width'        => 640,
+    'height'       => 360,
+    'bitrate'      => 800000,  // 目标视频码率 bps
+    'fps'          => 0,       // 目标帧率；0=保持源帧率。
+    'qp'           => 10,      // 量化参数 0-51
+    'audioBitrate' => 64000,   // 音频码率 bps
+
+    // —— 重编码配置 ——
+    'motionWorkers'   => 12,   // 运动估计子进程数
+    'decodeWorkers'   => 2,    // 解码+缩放worker进程数（缩放在此并行完成，勿置0走串行）
+    'segmentDuration' => 3,    // HLS切片时长（秒）
+    'watermark'       => false, // 是否加水印
+    'watermark_file'  => __DIR__ . '/watermark_80x16.yuv', //水印文件
+
+    // —— 输出目录与流名 ——
+    'outputDir'  => __DIR__ . '/hls/live/',
+
+    // ======================== 拉流客户端配置 ========================
+    'maxRetries'    => 5,      // 断线重连次数
+    'retryDelay'    => 3,      // 重连间隔（秒）
+    'connectTimeout'=> 10,     // 连接/握手超时（秒）
+    'idleTimeout'   => 30,     // 连续无数据判定断流（秒）
+    'queueMaxBytes' => 8388608,  // 转码落后容忍8MB；超限时跳过非关键帧，等待下一个 IDR 帧重新同步
+    'duration'   => 0,      // 限定运行秒数，0=不限
+    'tlsVerify'  => false,  // https/wss 自签证书时关闭校验
+];
+// 启动压缩转码服务
+(new \Xiaosongshu\Flv2mp4\Manage\Flv2HlsCompact($pullUrl, $config))->run();
+
+```
+
+- 当前项目直播压缩转码，支持多分辨率，满足直播需求，具体性能与服务器性能密切相关，你可以根据自己的服务器配置调整以上参数。
+- `motionWorkers`和`decodeWorkers`输入分辨率越高，越应增加 decodeWorkers；输出分辨率越高，越应增加 motionWorkers。两者之和不要超过服务器逻辑处理器数。
+- 测试使用 OBS 推流：输入 1920×1080、10fps、每 4 秒一个关键帧、Baseline Profile、H.264 + AAC；输出 640×360、10fps、HLS 切片 3 秒。连续运行 30 分钟无跳帧、无积压。
+- ⚠️ 直播压缩转码仅支持 CLI 模式运行，请勿在 FPM 请求中直接调用，否则会阻塞 Web 服务的 worker 进程。
+
+----
 
 ### 已支持的重编码特性
 
@@ -414,8 +465,6 @@ echo "mp4重编码完成\r\n";
 - [x] **码率控制**（通过 QP 参数调节）
 - [ ] **B 帧支持**（计划中，需扩展至 Main Profile 并实现双向预测）
 - [ ] **CABAC 熵编码**（计划中，Main Profile 支持）
-
-> ⚠️ **性能说明**：当前 H.264 重编码模块由纯 PHP 实现，适用于**短时长视频（建议 ≤ 10 秒）**的离线处理或功能验证。对于长视频或高分辨率转码，建议使用 FFmpeg 等专业工具。
 ---
 
 ### 水印生成工具

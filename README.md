@@ -428,6 +428,58 @@ echo "MP4 re‑encoding done.\n";
 - The re‑encoding module exposes a **YUV pixel‑level interface**, which can be used to implement custom features like subtitles, picture‑in‑picture, video stitching, etc.
 - For detailed H.264 usage, see <a href="./src/Codec/README.md">src/Codec/README.md</a>.
 
+#### Live Stream Compression & Transcoding
+
+This project supports compressing a live FLV stream and transcoding it to HLS, making it suitable for mobile users on weak networks. Example code:
+
+```php
+<?php
+
+require_once __DIR__ . '/vendor/autoload.php';
+ini_set('memory_limit', '2048M');
+
+// ======================== Pull configuration (supports http/https/ws/wss) ========================
+$pullUrl = 'ws://127.0.0.1:8501/live/stream.flv';
+
+// ======================== Transcoding compression configuration ========================
+$config = [
+    // —— Target specs (width/height must be provided together; 0 = keep source size) ——
+    'width'        => 640,
+    'height'       => 360,
+    'bitrate'      => 800000,  // Target video bitrate (bps)
+    'fps'          => 0,       // Target frame rate; 0 = keep source frame rate
+    'qp'           => 10,      // Quantization parameter, 0-51
+    'audioBitrate' => 64000,   // Audio bitrate (bps)
+
+    // —— Re-encoding configuration ——
+    'motionWorkers'   => 12,   // Number of motion estimation sub-processes
+    'decodeWorkers'   => 2,    // Number of decode + scale workers (scaling is parallelized here; do not set to 0 to force serial mode)
+    'segmentDuration' => 3,    // HLS segment duration (seconds)
+    'watermark'       => false, // Whether to add a watermark
+    'watermark_file'  => __DIR__ . '/watermark_80x16.yuv', // Watermark file
+
+    // —— Output directory and stream name ——
+    'outputDir'  => __DIR__ . '/hls/live/',
+
+    // ======================== Pull client configuration ========================
+    'maxRetries'    => 5,      // Number of reconnection attempts
+    'retryDelay'    => 3,      // Reconnection interval (seconds)
+    'connectTimeout'=> 10,     // Connection/handshake timeout (seconds)
+    'idleTimeout'   => 30,     // Consecutive no-data time before considering the stream dead (seconds)
+    'queueMaxBytes' => 8388608,  // Tolerance for transcoding lag: 8 MB; when exceeded, skip non-keyframes and wait for the next IDR frame to resync
+    'duration'   => 0,      // Run duration in seconds; 0 = unlimited
+    'tlsVerify'  => false,  // Disable verification for self-signed https/wss certificates
+];
+// Start the compression transcoding service
+(new \Xiaosongshu\Flv2mp4\Manage\Flv2HlsCompact($pullUrl, $config))->run();
+
+```
+
+- The project supports live compression transcoding with multiple resolutions to meet live streaming requirements. Actual performance depends heavily on server configuration. Adjust the parameters above according to your server resources.
+- `motionWorkers` and `decodeWorkers`: the higher the input resolution, the more you should increase `decodeWorkers`; the higher the output resolution, the more you should increase `motionWorkers`. The sum of both should not exceed the number of logical processors on the server.
+- Tested with OBS push: input 1920×1080, 10 fps, one keyframe every 4 seconds, Baseline Profile, H.264 + AAC; output 640×360, 10 fps, 3-second HLS segments. Ran continuously for 30 minutes with no dropped frames and no backlog.
+- ⚠️ Live compression transcoding only supports CLI mode. Do not call it directly in an FPM request, otherwise it will block the web service worker processes.
+
 ---
 
 ### Supported Re‑encoding Features
