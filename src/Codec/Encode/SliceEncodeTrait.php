@@ -35,13 +35,24 @@ trait SliceEncodeTrait
     private const SCENE_SAD_THRESHOLD = 40;
     /** 场景切换触发阈值：|ΔY|≥32 的抽样点占比（实测普通运动 ≤0.061、硬切 0.615~1.0） */
     private const SCENE_RATIO_THRESHOLD = 0.5;
+    /**
+     * 局部硬切触发阈值：4 抽样点中 ≥3 个 |ΔY|≥32 的宏块占比。
+     * 屏幕采集类内容（浏览器静态边框 + 内部播放窗硬切）全局均值会被静态区域稀释，
+     * 实测播放窗占 55% 面积时硬切全局 mean=39.6/ratio=0.389 漏判，而该指标=0.354；
+     * 播放窗内 life 满屏随机跳动（极端正常运动）该指标 ≤0.071，裕量 5 倍。
+     */
+    private const SCENE_REGION_MB_RATIO = 0.20;
+    /** 局部硬切触发阈值：剧变宏块自身的平均 |ΔY|，避免少量边缘闪烁误触（实测硬切 95） */
+    private const SCENE_REGION_MEAN = 55;
 
     /**
      * 帧间亮度变化抽样统计：每个 16x16 宏块抽 4 个点 (4,4)/(11,4)/(4,11)/(11,11)，
-     * 360p 全帧仅 3680 点（约 1ms 级）。返回 [平均绝对差, 强差点占比]。
-     * 硬切时绝大多数块同时剧变（mean 高、ratio 高）；普通运动只局部变化。
+     * 360p 全帧仅 3680 点（约 1ms 级）。
+     * 返回 [全局平均绝对差, 全局强差点占比, 局部剧变宏块占比, 剧变宏块平均绝对差]。
+     * 全帧硬切时绝大多数块同时剧变（mean/ratio 高）；屏幕采集硬切仅播放窗区域剧变，
+     * 靠 hardRatio/activeMean 识别；普通运动只稀疏边缘变化，三项都低。
      *
-     * @return array{0:float,1:float}
+     * @return array{0:float,1:float,2:float,3:float}
      */
     private function measureSceneChange(string $curY, int $aw, int $mbWidth, int $mbHeight): array
     {
@@ -49,32 +60,48 @@ trait SliceEncodeTrait
         $sum = 0;
         $high = 0;
         $n = 0;
+        $hardMb = 0;
+        $hardSum = 0;
         $rowGap = 7 * $aw;
         for ($my = 0; $my < $mbHeight; $my++) {
             $mbRowBase = $my * 16 * $aw;
             for ($mx = 0; $mx < $mbWidth; $mx++) {
                 $p = $mbRowBase + $mx * 16;
                 $p2 = $p + $rowGap;
+                $mbSum = 0;
+                $mbHigh = 0;
                 $d = ord($curY[$p + 4]) - ord($prev[$p + 4]);
                 if ($d < 0) $d = -$d;
-                $sum += $d;
-                if ($d >= 32) $high++;
+                $mbSum += $d;
+                if ($d >= 32) $mbHigh++;
                 $d = ord($curY[$p + 11]) - ord($prev[$p + 11]);
                 if ($d < 0) $d = -$d;
-                $sum += $d;
-                if ($d >= 32) $high++;
+                $mbSum += $d;
+                if ($d >= 32) $mbHigh++;
                 $d = ord($curY[$p2 + 4]) - ord($prev[$p2 + 4]);
                 if ($d < 0) $d = -$d;
-                $sum += $d;
-                if ($d >= 32) $high++;
+                $mbSum += $d;
+                if ($d >= 32) $mbHigh++;
                 $d = ord($curY[$p2 + 11]) - ord($prev[$p2 + 11]);
                 if ($d < 0) $d = -$d;
-                $sum += $d;
-                if ($d >= 32) $high++;
+                $mbSum += $d;
+                if ($d >= 32) $mbHigh++;
                 $n += 4;
+                $sum += $mbSum;
+                $high += $mbHigh;
+                if ($mbHigh >= 3) {
+                    $hardMb++;
+                    $hardSum += $mbSum;
+                }
             }
         }
-        return [$sum / $n, $high / $n];
+        $mbCount = $mbWidth * $mbHeight;
+        return [
+            $sum / $n,
+            $high / $n,
+            $hardMb / $mbCount,
+            $hardMb > 0 ? $hardSum / ($hardMb * 4) : 0.0,
+        ];
     }
 
     /**
@@ -213,8 +240,12 @@ trait SliceEncodeTrait
             && $this->scenePrevY !== null
             && $this->scenePrevAw === $mbAlignedWidth
             && $this->scenePrevAh === $mbAlignedHeight) {
-            [$sceneMean, $sceneRatio] = $this->measureSceneChange($yPlane, $mbAlignedWidth, $mbWidth, $mbHeight);
-            if ($sceneMean >= self::SCENE_SAD_THRESHOLD && $sceneRatio >= self::SCENE_RATIO_THRESHOLD) {
+            [$sceneMean, $sceneRatio, $sceneHardRatio, $sceneActiveMean] = $this->measureSceneChange($yPlane, $mbAlignedWidth, $mbWidth, $mbHeight);
+            // 规则一：全帧硬切（全局均值+强差点占比双阈值）；
+            // 规则二：屏幕采集类局部硬切——大面积静态边框会稀释全局指标，
+            // 改看"≥3/4 抽样点剧变"的宏块覆盖率及其自身幅度
+            if (($sceneMean >= self::SCENE_SAD_THRESHOLD && $sceneRatio >= self::SCENE_RATIO_THRESHOLD)
+                || ($sceneHardRatio >= self::SCENE_REGION_MB_RATIO && $sceneActiveMean >= self::SCENE_REGION_MEAN)) {
                 $isIDR = true;
             }
         }
