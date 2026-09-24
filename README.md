@@ -441,7 +441,7 @@ This project supports compressing a live FLV stream and transcoding it to HLS, m
 require_once __DIR__ . '/vendor/autoload.php';
 ini_set('memory_limit', '2048M');
 
-// ======================== Pull configuration (supports http/https/ws/wss) ========================
+// ======================== Pull configuration (supports http/https/ws/wss/rtmp) ========================
 $pullUrl = 'ws://127.0.0.1:8501/live/stream.flv';
 
 // ======================== Transcoding compression configuration ========================
