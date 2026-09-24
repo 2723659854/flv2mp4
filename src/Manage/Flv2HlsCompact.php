@@ -215,7 +215,11 @@ class Flv2HlsCompact
         $this->log('========================================');
         $this->log('FLV拉流转码HLS客户端 v2.0（拉流/转码双进程）');
         $this->log("拉流地址: {$this->pullUrl}");
-        $this->log('协议: ' . ($this->isWebSocket ? ($this->isSsl ? 'WSS-FLV' : 'WS-FLV') : ($this->isSsl ? 'HTTPS-FLV' : 'HTTP-FLV')));
+        $scheme = strtolower(parse_url($this->pullUrl, PHP_URL_SCHEME) ?: 'http');
+        $protocolLabel = str_starts_with($scheme, 'rtmp') ? 'RTMP'
+            : ($this->isWebSocket ? ($this->isSsl ? 'WSS-FLV' : 'WS-FLV')
+            : ($this->isSsl ? 'HTTPS-FLV' : 'HTTP-FLV'));
+        $this->log('协议: ' . $protocolLabel);
         $this->log("输出目录: {$this->streamDir}");
         $this->log("拉流进程最大重连: {$this->maxRetries} 次，转码落后容忍: " . round($this->queueMaxBytes / 1048576, 1) . ' MB（超限跳IDR追直播，不反压上游）');
         $this->log('========================================');
@@ -270,7 +274,11 @@ class Flv2HlsCompact
 
     private function spawnPuller(int $port): void
     {
-        $entry = dirname(__DIR__, 2) . '/bin/flv2hls-puller.php';
+        // rtmp:// 走独立的RTMP拉流子进程；http(s)-flv/ws(s)-flv 走原FLV拉流子进程（两者IPC协议一致）
+        $entryFile = str_starts_with(strtolower($this->pullUrl), 'rtmp://')
+            ? 'bin/flv2hls-rtmp-puller.php'
+            : 'bin/flv2hls-puller.php';
+        $entry = dirname(__DIR__, 2) . '/' . $entryFile;
         $autoload = dirname((new \ReflectionClass(\Composer\Autoload\ClassLoader::class))->getFileName(), 2) . '/autoload.php';
         $args = [
             PHP_BINARY, $entry,
@@ -383,7 +391,7 @@ class Flv2HlsCompact
             $except = null;
             // 注意：Windows PHP 秒级超时(1s)下select可写/可读唤醒会退化到约2次/秒，
             // 必须用毫秒级超时（实测2ms可恢复正常吞吐，idle时每秒500次唤醒开销可忽略）
-            if (@stream_select($read, $write, $except, 0, 2000) === false) {
+            if (@stream_select($read, $write, $except, 0, 1) === false) {
                 if (!is_resource($this->ipc) || feof($this->ipc)) {
                     $this->running = false;
                     return;
@@ -541,7 +549,7 @@ class Flv2HlsCompact
                 else $this->plOutCtrl = $sock;
                 unset($pending[$idx]);
             }
-            if ($pending !== []) usleep(50000);
+            if ($pending !== []) usleep(1);
         }
         ksort($this->plSocks);
         $this->plSocks = array_values($this->plSocks);
@@ -593,7 +601,7 @@ class Flv2HlsCompact
             }
             $except = null;
             // 毫秒级超时：Windows PHP 秒级select唤醒退化（见transcodeLoop注释）
-            if (@stream_select($read, $write, $except, 0, 2000) === false) continue;
+            if (@stream_select($read, $write, $except, 0, 1) === false) continue;
 
             foreach ($write as $key => $sock) {
                 if ($key === 'puller') {
@@ -756,7 +764,7 @@ class Flv2HlsCompact
             }
             if ($read === [] && $write === []) break;
             $except = null;
-            if (@stream_select($read, $write, $except, 0, 200000) === false) { usleep(20000); continue; }
+            if (@stream_select($read, $write, $except, 0, 1) === false) { usleep(1); continue; }
             foreach ($write as $id => $sock) {
                 $n = @fwrite($sock, substr($this->plOut[$id], 0, 262144));
                 if ($n === false || ($n === 0 && feof($sock))) { $this->plDead[$id] = true; continue; }
