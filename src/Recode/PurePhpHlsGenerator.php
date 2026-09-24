@@ -621,11 +621,8 @@ class PurePhpHlsGenerator
             array_unshift($nalUnits, ['type' => 8, 'data' => $this->srcPpsData]);
         }
         
-        // 直播实时链路可关闭解码器去块滤波（FLV2MP4_LIVE_SKIP_DEBLOCK=1）：
-        // 768x432 源上每帧省 5-7ms，低分辨率直播画质损失可忽略；编码侧本就不做去块
-        static $skipDeblock = null;
-        $skipDeblock ??= getenv('FLV2MP4_LIVE_SKIP_DEBLOCK') !== false;
-        $frame = $this->decoder->decode($nalUnits, false, true, $skipDeblock);
+        // 源解码始终执行去块滤波（编码侧本身不做去块；跳过去块会让缩放输入出现块边界混叠）
+        $frame = $this->decoder->decode($nalUnits, false, true, false);
         if ($frame && !empty($frame['data'])) {
             return $frame['data'];
         }
@@ -769,27 +766,9 @@ class PurePhpHlsGenerator
     }
 
     /**
-     * NAL防竞争字节转义
-     */
-    private function escapeNAL(string $nalData): string
-    {
-        if (strlen($nalData) <= 1) return $nalData;
-        $escaped = '';
-        $zeroCnt = 0;
-        foreach (str_split($nalData) as $byte) {
-            $b = ord($byte);
-            if ($zeroCnt >= 2 && $b <= 0x03) {
-                $escaped .= "\x03";
-                $zeroCnt = 0;
-            }
-            $escaped .= $byte;
-            $zeroCnt = $b === 0 ? $zeroCnt + 1 : 0;
-        }
-        return $escaped;
-    }
-
-    /**
      * AVCC(4字节长度前缀) 转 AnnexB(0001起始码)
+     * 注意：AVCC 中的 NAL 单元本身已包含防竞争字节（EP3），此处只替换长度前缀为起始码，
+     * 绝不能再次转义，否则 00 00 03 xx 会被写成 00 00 03 03 xx，导致 H264 码流非法。
      */
     private function avccToAnnexB(string $data): string
     {
@@ -800,9 +779,8 @@ class PurePhpHlsGenerator
             $nalSize = unpack('N', substr($data, $offset, 4))[1];
             $offset += 4;
             if ($offset + $nalSize > $totalLen) break;
-            $nalRaw = substr($data, $offset, $nalSize);
+            $result .= "\x00\x00\x00\x01" . substr($data, $offset, $nalSize);
             $offset += $nalSize;
-            $result .= "\x00\x00\x00\x01" . $this->escapeNAL($nalRaw);
         }
         return $result;
     }

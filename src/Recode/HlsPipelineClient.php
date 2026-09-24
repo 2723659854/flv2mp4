@@ -84,11 +84,9 @@ final class HlsPipelineClient
             $stopReading = false;
             $endEnqueued = false;
             $finishedCount = 0;
-            // GOP 窗口分发：默认全量并行派发（实测整体最快）；
-            // 可用环境变量 HLS_WINDOW 限制在途 GOP 数（特殊机型调优），"dyn" 表示首 GOP 完成后全量扇出
-            $envWindow = getenv('HLS_WINDOW');
-            if ($envWindow === 'dyn') { $window = 2; $dynamicWindow = true; }
-            else { $window = $envWindow !== false ? max(1, (int)$envWindow) : 1000000; $dynamicWindow = false; }
+            // GOP 窗口分发：全量并行派发（实测整体最快）
+            $window = 1000000;
+            $dynamicWindow = false;
             $gopBuffer = []; // gop => [[worker, frame], ...] 已读取但未放行
             $gopDone = [];   // gop => true 该 GOP 已解码完成
             $gopWatermark = 0; // 连续完成的 GOP 数（g < watermark 均已解码完）

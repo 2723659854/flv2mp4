@@ -572,8 +572,7 @@ trait MotionTrait
      * Tier2 阈值：16x16 宏块整数 (0,0) SAD 上限。
      * 低于该值时跳过昂贵的 6 抽头半/四像素插值精搜（整数 MV=(0,0) 的残差已落入
      * 量化死区量级，亚像素收益可忽略）。DCT/量化仍照常执行，仅影响压缩效率、不影响正确性。
-     * 基础量级取 4 个 4x4 块 DC 系数的死区容量，系数可用 FLV2MP4_SUBPEL_SAD_MUL 调整（默认 4；
-     * 静态画面为主的监控/会议/桌面场景可上调到 12，进一步跳过亚像素精搜）。
+     * 基础量级取 4 个 4x4 块 DC 系数的死区容量，倍数固定 4。
      */
     public static function subpelSkipSad(int $qp): int
     {
@@ -582,11 +581,7 @@ trait MotionTrait
         if (isset($cache[$qp])) return $cache[$qp];
         $mf = \Xiaosongshu\Flv2mp4\Codec\H264Encoder::QUANT_MF[$qp];
         $ff = \Xiaosongshu\Flv2mp4\Codec\H264Encoder::QUANT_INTER_FF[$qp];
-        static $mul = null;
-        if ($mul === null) {
-            $env = getenv('FLV2MP4_SUBPEL_SAD_MUL');
-            $mul = is_string($env) && $env !== '' && (float)$env > 0 ? (float)$env : 4.0;
-        }
+        $mul = 4.0;
         return $cache[$qp] = (int)round(max(0, intdiv(65535, $mf[0]) - $ff[0]) * $mul);
     }
 

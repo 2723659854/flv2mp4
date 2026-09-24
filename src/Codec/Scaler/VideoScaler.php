@@ -19,10 +19,7 @@ class VideoScaler
     /**
      * 使用双线性插值缩放 YUV420P 图像
      * 比双立方插值快3-4倍，低分辨率下质量损失可忽略
-     *
-     * 性能模式（环境变量 FLV2MP4_SCALE_MODE）：
-     *   bilinear（默认）：列映射按分辨率缓存，行级 pack 输出
-     *   nearest：最近邻采样（约2-3倍速），实时直播降载可选
+     * 列映射按分辨率缓存，行级 pack 输出
      */
     public function scaleYUV420P(string $yuvData, int $srcW, int $srcH, int $dstW, int $dstH): string
     {
@@ -41,12 +38,9 @@ class VideoScaler
         $uPlane = substr($yuvData, $ySize, $uvSize);
         $vPlane = substr($yuvData, $ySize + $uvSize, $uvSize);
 
-        $mode = getenv('FLV2MP4_SCALE_MODE') === 'nearest' ? 'nearest' : 'bilinear';
-        $scaleFn = $mode === 'nearest' ? 'scalePlaneNearest' : 'scalePlaneBilinear';
-
-        $scaledY = $this->$scaleFn($yPlane, $srcW, $srcH, $dstW, $dstH);
-        $scaledU = $this->$scaleFn($uPlane, $srcW >> 1, $srcH >> 1, $dstW >> 1, $dstH >> 1);
-        $scaledV = $this->$scaleFn($vPlane, $srcW >> 1, $srcH >> 1, $dstW >> 1, $dstH >> 1);
+        $scaledY = $this->scalePlaneBilinear($yPlane, $srcW, $srcH, $dstW, $dstH);
+        $scaledU = $this->scalePlaneBilinear($uPlane, $srcW >> 1, $srcH >> 1, $dstW >> 1, $dstH >> 1);
+        $scaledV = $this->scalePlaneBilinear($vPlane, $srcW >> 1, $srcH >> 1, $dstW >> 1, $dstH >> 1);
 
         return $scaledY . $scaledU . $scaledV;
     }
@@ -101,41 +95,6 @@ class VideoScaler
                 $val = ((65536 - $dx) * $yd * $v00 + $dx * $yd * $v01
                      + (65536 - $dx) * $dy * $v10 + $dx * $dy * $v11) >> 32;
                 $vals[] = $val > 255 ? 255 : ($val < 0 ? 0 : $val);
-            }
-            $rows[] = pack('C*', ...$vals);
-        }
-        return implode('', $rows);
-    }
-
-    /**
-     * 最近邻采样（实时降载模式，约为双线性 2-3 倍速）
-     */
-    private function scalePlaneNearest(string $data, int $srcW, int $srcH, int $dstW, int $dstH): string
-    {
-        if ($srcW === $dstW && $srcH === $dstH) {
-            return $data;
-        }
-
-        $key = "n_{$srcW}_{$dstW}";
-        if (!isset(self::$xMapCache[$key])) {
-            $xMap = [];
-            for ($x = 0; $x < $dstW; $x++) {
-                // 像素中心映射，避免画面整体偏移
-                $sx = (int)(($x + 0.5) * $srcW / $dstW);
-                $xMap[] = min($sx, $srcW - 1);
-            }
-            self::$xMapCache[$key] = [$xMap, [], []];
-        }
-        $xMap = self::$xMapCache[$key][0];
-
-        $rows = [];
-        for ($y = 0; $y < $dstH; $y++) {
-            $sy = (int)(($y + 0.5) * $srcH / $dstH);
-            if ($sy >= $srcH) $sy = $srcH - 1;
-            $rowOff = $sy * $srcW;
-            $vals = [];
-            for ($x = 0; $x < $dstW; $x++) {
-                $vals[] = ord($data[$rowOff + $xMap[$x]]);
             }
             $rows[] = pack('C*', ...$vals);
         }

@@ -22,11 +22,59 @@ trait SliceEncodeTrait
     /** 当前待编码帧的 recon 是否已由 installReconFromResults 预拼（区别于非流水线 P 帧） */
     private bool $reconPrefetched = false;
 
-    /** 帧流水线总开关（FLV2MP4_FRAME_PIPELINE=0 关闭，用于 A/B 与灰度回退） */
-    private function framePipelineEnabled(): bool
+    /**
+     * 场景切换检测：保存上一帧【输入】（宏块对齐后）的 Y 平面。
+     * P 帧编码器只有 P_Skip/P_L0_16x16、色度零残差，硬切后残差补不回大面变化，
+     * 旧画面会作为参考污染整个源 GOP。检测到切换时把该帧强制升级为 IDR 截断传播。
+     */
+    private ?string $scenePrevY = null;
+    private int $scenePrevAw = 0;
+    private int $scenePrevAh = 0;
+
+    /** 场景切换触发阈值：每抽样点平均 |ΔY|（实测普通运动 ≤5、硬切 68~184） */
+    private const SCENE_SAD_THRESHOLD = 40;
+    /** 场景切换触发阈值：|ΔY|≥32 的抽样点占比（实测普通运动 ≤0.061、硬切 0.615~1.0） */
+    private const SCENE_RATIO_THRESHOLD = 0.5;
+
+    /**
+     * 帧间亮度变化抽样统计：每个 16x16 宏块抽 4 个点 (4,4)/(11,4)/(4,11)/(11,11)，
+     * 360p 全帧仅 3680 点（约 1ms 级）。返回 [平均绝对差, 强差点占比]。
+     * 硬切时绝大多数块同时剧变（mean 高、ratio 高）；普通运动只局部变化。
+     *
+     * @return array{0:float,1:float}
+     */
+    private function measureSceneChange(string $curY, int $aw, int $mbWidth, int $mbHeight): array
     {
-        static $enabled = null;
-        return $enabled ??= getenv('FLV2MP4_FRAME_PIPELINE') !== '0';
+        $prev = $this->scenePrevY;
+        $sum = 0;
+        $high = 0;
+        $n = 0;
+        $rowGap = 7 * $aw;
+        for ($my = 0; $my < $mbHeight; $my++) {
+            $mbRowBase = $my * 16 * $aw;
+            for ($mx = 0; $mx < $mbWidth; $mx++) {
+                $p = $mbRowBase + $mx * 16;
+                $p2 = $p + $rowGap;
+                $d = ord($curY[$p + 4]) - ord($prev[$p + 4]);
+                if ($d < 0) $d = -$d;
+                $sum += $d;
+                if ($d >= 32) $high++;
+                $d = ord($curY[$p + 11]) - ord($prev[$p + 11]);
+                if ($d < 0) $d = -$d;
+                $sum += $d;
+                if ($d >= 32) $high++;
+                $d = ord($curY[$p2 + 4]) - ord($prev[$p2 + 4]);
+                if ($d < 0) $d = -$d;
+                $sum += $d;
+                if ($d >= 32) $high++;
+                $d = ord($curY[$p2 + 11]) - ord($prev[$p2 + 11]);
+                if ($d < 0) $d = -$d;
+                $sum += $d;
+                if ($d >= 32) $high++;
+                $n += 4;
+            }
+        }
+        return [$sum / $n, $high / $n];
     }
 
     /**
@@ -38,18 +86,6 @@ trait SliceEncodeTrait
      */
     public function startFrame(string $yuvData, bool $isKeyframe): void
     {
-        if (!$this->framePipelineEnabled()) {
-            // 关闸退化为同步编码，但保持与流水线相同的双槽语义：
-            // flight 存"待编码输入"，start(N+1) 时同步编码 N，finish(N) 取结果 —— 兼容驱动"先 start 后 emit"顺序
-            if ($this->pipeFlight === null && $this->pipePending === null) {
-                $this->pipeFlight = ['inlineTodo' => [$yuvData, $isKeyframe]];
-                return;
-            }
-            $a = $this->pipeFlight;
-            $this->pipePending = ['cachedNals' => $this->encodeFrameInline($a['inlineTodo'][0], $a['inlineTodo'][1])];
-            $this->pipeFlight = ['inlineTodo' => [$yuvData, $isKeyframe]];
-            return;
-        }
         if ($this->pipeFlight !== null && $this->pipePending !== null) {
             throw new \RuntimeException('编码器流水线深度为 1：finishFrame 后才能 startFrame');
         }
@@ -97,9 +133,6 @@ trait SliceEncodeTrait
         }
         $ctx = $this->pipeFlight;
         $this->pipeFlight = null;
-        if (isset($ctx['inlineTodo'])) {
-            return $this->encodeFrameInline($ctx['inlineTodo'][0], $ctx['inlineTodo'][1]);
-        }
         $results = null;
         if ($ctx['sliceType'] === 0) $results = $this->motionWorkerClient->collect();
         return $this->encodeSliceBody($ctx, $results);
@@ -107,14 +140,14 @@ trait SliceEncodeTrait
 
     public function encodeFrame(string $yuvData, bool $isKeyframe = false): array
     {
-        if ($this->framePipelineEnabled() && $this->pipeFlight === null && $this->pipePending === null) {
+        if ($this->pipeFlight === null && $this->pipePending === null) {
             $this->startFrame($yuvData, $isKeyframe);
             return $this->finishFrame();
         }
         return $this->encodeFrameInline($yuvData, $isKeyframe);
     }
 
-    /** 非流水线同步编码（关闸或流水线外的直接调用） */
+    /** 非流水线同步编码（流水线状态被占用时的直接调用） */
     private function encodeFrameInline(string $yuvData, bool $isKeyframe): array
     {
         $ctx = $this->prepareSliceContext($yuvData, $isKeyframe);
@@ -172,6 +205,23 @@ trait SliceEncodeTrait
                 $$planeName = implode('', $rowsUv);
             }
         }
+
+        // 场景切换检测（在派发 P 帧运动估计之前定案，流水线 start(N+1) 与同步路径都在此分叉，
+        // 不存在"N+1 已按错误参考派发"的时序问题）：与上一帧【输入】做抽样 SAD，
+        // 超阈值则把本帧强制升级 IDR，阻止硬切旧画面沿 P 参考链污染整个源 GOP。
+        if (!$isIDR && $this->enableInter && $this->refYPlane !== null
+            && $this->scenePrevY !== null
+            && $this->scenePrevAw === $mbAlignedWidth
+            && $this->scenePrevAh === $mbAlignedHeight) {
+            [$sceneMean, $sceneRatio] = $this->measureSceneChange($yPlane, $mbAlignedWidth, $mbWidth, $mbHeight);
+            if ($sceneMean >= self::SCENE_SAD_THRESHOLD && $sceneRatio >= self::SCENE_RATIO_THRESHOLD) {
+                $isIDR = true;
+            }
+        }
+        // 保存当前帧【输入】作为下帧比对基准（IDR/P 后连续，分辨率变化时自然断档一帧）
+        $this->scenePrevY = $yPlane;
+        $this->scenePrevAw = $mbAlignedWidth;
+        $this->scenePrevAh = $mbAlignedHeight;
 
         $usePFrame = $this->enableInter && !$isIDR && $this->refYPlane !== null;
         return [

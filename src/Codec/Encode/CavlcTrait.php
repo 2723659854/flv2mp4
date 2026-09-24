@@ -162,17 +162,32 @@ trait CavlcTrait
             $levelSuffixSize = $suffixLength;
             $levelSuffix = $levelCode - ($levelPrefix << $suffixLength);
 
-            if ($levelPrefix >= 14 && $levelPrefix < 30 && $suffixLength == 0) {
+            if ($suffixLength == 0 && $levelPrefix >= 14 && $levelPrefix < 30) {
+                // sl==0 且 code∈[14,29]：prefix=14，4 位后缀
                 $levelPrefix = 14;
-                $levelSuffix = $levelCode - $levelPrefix;
+                $levelSuffix = $levelCode - 14;
                 $levelSuffixSize = 4;
-            } else if ($levelPrefix >= 15) {
+            } else if ($suffixLength == 0 && $levelPrefix >= 30) {
+                // sl==0 转义：基准 code=30，prefix=15 时 12 位后缀，溢出则递增 prefix
                 $levelPrefix = 15;
-                $levelSuffix = $levelCode - ($levelPrefix << $suffixLength);
-                if ($suffixLength == 0) {
-                    $levelSuffix -= 15;
-                }
+                $levelSuffix = $levelCode - 30;
                 $levelSuffixSize = 12;
+                while ($levelSuffix >= (1 << $levelSuffixSize)) {
+                    $levelSuffix -= (1 << $levelSuffixSize);
+                    $levelPrefix++;
+                    $levelSuffixSize++;
+                }
+            } else if ($levelPrefix >= 15) {
+                // sl>0 转义：基准 code=(15<<sl)，prefix=15 时 12 位后缀，
+                // 超出 4096 需递增 prefix（16→13 位、17→14 位…），不能钳制
+                $levelPrefix = 15;
+                $levelSuffix = $levelCode - (15 << $suffixLength);
+                $levelSuffixSize = 12;
+                while ($levelSuffix >= (1 << $levelSuffixSize)) {
+                    $levelSuffix -= (1 << $levelSuffixSize);
+                    $levelPrefix++;
+                    $levelSuffixSize++;
+                }
             }
 
             $n = $levelPrefix + 1 + $levelSuffixSize;

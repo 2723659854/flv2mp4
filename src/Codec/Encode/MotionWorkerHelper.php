@@ -27,7 +27,7 @@ final class MotionWorkerHelper
     public int $qp;
     public array $dequant4Table = [];
     public $refInts = null;
-    /** early-skip 总开关（FLV2MP4_EARLY_SKIP=0 关闭，用于 A/B 与灰度回退） */
+    /** early-skip 开关：静止宏块提前跳过精搜（量化死区内残差归零，不影响正确性） */
     public bool $earlySkip = true;
     private static ?array $sharedDequantTable = null;
 
@@ -38,7 +38,6 @@ final class MotionWorkerHelper
         $this->mbAlignedWidth = $aw;
         $this->mbAlignedHeight = $ah;
         $this->qp = $qp;
-        $this->earlySkip = getenv('FLV2MP4_EARLY_SKIP') !== '0';
         if (self::$sharedDequantTable === null) {
             $positionClass = [0,1,0,1,1,2,1,2,0,1,0,1,1,2,1,2];
             $table = array_fill(0, 6, array_fill(0, 52, array_fill(0, 16, 0)));

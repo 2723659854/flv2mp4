@@ -582,7 +582,7 @@ class FlvRecoder
     private function prepareTranscodeVideoFrame(FlvTag $tag, string $avcData, bool $isKeyFrame, int $timestamp, bool $hasPipelineEncoded): ?array
     {
         // 多进程模式中所有输入 sample 已由 decoder worker 解码；单进程仍在此维持参考链。
-        $yuvData = $this->pipelineYuv ?? $this->decodeNaluToYuv($avcData, getenv('FLV2MP4_DROP_NODEBLOCK') !== false && $this->frameWillBeDropped($isKeyFrame, $timestamp));
+        $yuvData = $this->pipelineYuv ?? $this->decodeNaluToYuv($avcData);
         if ($yuvData === null) return null;
 
         if ($this->baseTimestamp === null) {
@@ -787,20 +787,7 @@ class FlvRecoder
         }
     }
 
-    /**
-     * 与 prepareTranscodeVideoFrame 中的抽帧判定完全一致（仅时间轴相关量），
-     * 用于解码前预判：丢弃帧在 FLV2MP4_DROP_NODEBLOCK 下可跳过去块滤波。
-     */
-    private function frameWillBeDropped(bool $isKeyFrame, int $timestamp): bool
-    {
-        if ($this->baseTimestamp === null) return !$isKeyFrame;
-        if (!$this->dropFrames) return false;
-        $reservedCount = $this->outputVideoFrameCount + ($this->pendingVideoJob !== null ? 1 : 0);
-        return $reservedCount !== 0
-            && ($timestamp - $this->baseTimestamp) * $this->effectiveTargetFps < $reservedCount * 1000;
-    }
-
-    private function decodeNaluToYuv(string $avcData, bool $skipDeblock = false): ?string
+    private function decodeNaluToYuv(string $avcData): ?string
     {
         $nalUnits = $this->extractNalUnitsFromAVCC($avcData);
 
@@ -811,7 +798,7 @@ class FlvRecoder
             array_unshift($nalUnits, ['type' => 8, 'data' => $this->srcPpsData]);
         }
 
-        $frame = $this->decoder->decode($nalUnits, false, !$skipDeblock, $skipDeblock);
+        $frame = $this->decoder->decode($nalUnits, false, true, false);
         if ($frame && !empty($frame['data'])) {
             return $frame['data'];
         }
