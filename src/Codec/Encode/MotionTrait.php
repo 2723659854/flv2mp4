@@ -240,6 +240,9 @@ trait MotionTrait
         if ($this->earlySkip && $bestDX === 0 && $bestDY === 0 && $bestSAD <= self::subpelSkipSad($this->qp)) {
             return [0, 0, $bestSAD];
         }
+        if ($searchRange <= 8 && $bestSAD <= (self::subpelSkipSad($this->qp) * 2)) {
+            return [$bestDX * 4, $bestDY * 4, $bestSAD];
+        }
 
         [$bestMVx, $bestMVy, $bestSAD] = $this->refineSubpelShared(
             $curFlat, $origX, $origY, $bestDX, $bestDY, $bestSAD, $blockW, $blockH,

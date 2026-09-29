@@ -28,6 +28,8 @@ trait InterPredTrait
         if ($this->earlySkip) {
             $zeroT = $this->zeroResidualBlockSad($this->qp);
             $stride = $this->mbAlignedWidth;
+            if ($this->refInts === null) $this->refInts = unpack('C*', $refYPlane);
+            $refInts = $this->refInts;
             $ox = $mbX * 16;
             $oy = $mbY * 16;
             $blockSads = array_fill(0, 16, 0);
@@ -37,7 +39,7 @@ trait InterPredTrait
                 $rowBase = ($oy + $y) * $stride + $ox;
                 $biBase = ($y >> 2) * 4;
                 for ($x = 0; $x < 16; $x++) {
-                    $diff = $curFlat[$y * 16 + $x] - ord($refYPlane[$rowBase + $x]);
+                    $diff = $curFlat[$y * 16 + $x] - $refInts[$rowBase + $x + 1];
                     if ($diff < 0) $diff = -$diff;
                     $totalSad += $diff;
                     $bi = $biBase + ($x >> 2);
@@ -65,7 +67,7 @@ trait InterPredTrait
                 return [
                     0, 0, $totalSad, 0,
                     array_fill(0, 24, 0),
-                    array_fill(0, 16, array_fill(0, 16, 0)),
+                    [],
                     $reconY, $reconU, $reconV,
                 ];
             }
