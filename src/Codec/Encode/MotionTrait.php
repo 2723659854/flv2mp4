@@ -319,7 +319,9 @@ trait MotionTrait
 
         $bestMVx = $bestDX * 4;
         $bestMVy = $bestDY * 4;
-        $halfPattern = [
+        $halfPattern = $skipQuarter ? [
+            [-2, 0], [2, 0], [0, -2], [0, 2],
+        ] : [
             [-2, -2], [-2, 0], [-2, 2],
             [ 0, -2],          [ 0, 2],
             [ 2, -2], [ 2, 0], [ 2, 2],
