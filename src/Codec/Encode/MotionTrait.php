@@ -272,7 +272,7 @@ trait MotionTrait
             $ys[$y + 8] = $ry < 0 ? 0 : ($ry >= $height ? $height - 1 : $ry);
         }
 
-        $hFull = [];
+        $hFull = $skipQuarter ? null : [];
         $h = [];
         for ($y = -8; $y <= $blockH + 8; $y++) {
             $row = $ys[$y + 8] * $stride + 1;
@@ -281,7 +281,7 @@ trait MotionTrait
                 $full = $ref[$row + $xs[$xi - 2]] - 5 * $ref[$row + $xs[$xi - 1]]
                     + 20 * $ref[$row + $xs[$xi]] + 20 * $ref[$row + $xs[$xi + 1]]
                     - 5 * $ref[$row + $xs[$xi + 2]] + $ref[$row + $xs[$xi + 3]];
-                $hFull[($y + 8) * $bufW + $x + 6] = $full;
+                if (!$skipQuarter) $hFull[($y + 8) * $bufW + $x + 6] = $full;
                 if ($y >= -6 && $y <= $blockH + 5) {
                     $half = ($full + 16) >> 5;
                     $h[($y + 6) * $bufW + $x + 6] = $half < 0 ? 0 : ($half > 255 ? 255 : $half);
@@ -290,7 +290,7 @@ trait MotionTrait
         }
 
         $v = [];
-        $c = [];
+        $c = $skipQuarter ? null : [];
         for ($y = -6; $y <= $blockH + 5; $y++) {
             $yi = $y + 8;
             $r0 = $ys[$yi - 2] * $stride + 1;
@@ -308,12 +308,14 @@ trait MotionTrait
                 $half = ($full + 16) >> 5;
                 $v[$idx] = $half < 0 ? 0 : ($half > 255 ? 255 : $half);
 
-                $hf = ($y + 6) * $bufW + $x + 6;
-                $full = $hFull[$hf] - 5 * $hFull[$hf + $bufW]
-                    + 20 * $hFull[$hf + 2 * $bufW] + 20 * $hFull[$hf + 3 * $bufW]
-                    - 5 * $hFull[$hf + 4 * $bufW] + $hFull[$hf + 5 * $bufW];
-                $center = ($full + 512) >> 10;
-                $c[$idx] = $center < 0 ? 0 : ($center > 255 ? 255 : $center);
+                if (!$skipQuarter) {
+                    $hf = ($y + 6) * $bufW + $x + 6;
+                    $full = $hFull[$hf] - 5 * $hFull[$hf + $bufW]
+                        + 20 * $hFull[$hf + 2 * $bufW] + 20 * $hFull[$hf + 3 * $bufW]
+                        - 5 * $hFull[$hf + 4 * $bufW] + $hFull[$hf + 5 * $bufW];
+                    $center = ($full + 512) >> 10;
+                    $c[$idx] = $center < 0 ? 0 : ($center > 255 ? 255 : $center);
+                }
             }
         }
 
