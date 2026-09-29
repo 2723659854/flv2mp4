@@ -175,6 +175,13 @@ trait MotionTrait
                 if (isset($candidateSads[$candidateKey])) {
                     $sad = $candidateSads[$candidateKey];
                 } else {
+                    if ($searchRange <= 8) {
+                        $rough = $this->computeSADRough($curFlat, $origX, $origY, $dx, $dy, $blockW, $blockH, $refStride);
+                        if ($rough * 4 >= $bestSAD) {
+                            $candidateSads[$candidateKey] = $rough * 4;
+                            continue;
+                        }
+                    }
                     $sad = $this->computeSADFast($curFlat, $origX, $origY, $dx, $dy, $blockW, $blockH, $refStride, $bestSAD);
                     $candidateSads[$candidateKey] = $sad;
                 }
@@ -201,6 +208,13 @@ trait MotionTrait
                 if (isset($candidateSads[$candidateKey])) {
                     $sad = $candidateSads[$candidateKey];
                 } else {
+                    if ($searchRange <= 8) {
+                        $rough = $this->computeSADRough($curFlat, $origX, $origY, $dx, $dy, $blockW, $blockH, $refStride);
+                        if ($rough * 4 >= $bestSAD) {
+                            $candidateSads[$candidateKey] = $rough * 4;
+                            continue;
+                        }
+                    }
                     $sad = $this->computeSADFast($curFlat, $origX, $origY, $dx, $dy, $blockW, $blockH, $refStride, $bestSAD);
                     $candidateSads[$candidateKey] = $sad;
                 }
@@ -516,6 +530,22 @@ trait MotionTrait
                 if ($sad >= $cutoff) {
                     return $sad;
                 }
+            }
+        }
+        return $sad;
+    }
+
+    private function computeSADRough(array $curFlat, int $origX, int $origY, int $dx, int $dy, int $blockW, int $blockH, int $refStride): int
+    {
+        $refStart = ($origY + $dy) * $refStride + $origX + $dx + 1;
+        $sad = 0;
+        $refInts = $this->refInts;
+        for ($y = 0; $y < $blockH; $y += 2) {
+            $rowOffset = $refStart + $y * $refStride;
+            for ($x = 0; $x < $blockW; $x += 2) {
+                $diff = $curFlat[$y * 16 + $x] - $refInts[$rowOffset + $x];
+                if ($diff < 0) $diff = -$diff;
+                $sad += $diff;
             }
         }
         return $sad;
