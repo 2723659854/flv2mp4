@@ -274,9 +274,13 @@ trait MotionTrait
 
         $hFull = $skipQuarter ? null : [];
         $h = [];
-        for ($y = -8; $y <= $blockH + 8; $y++) {
+        $hMinY = $skipQuarter ? -1 : -8;
+        $hMaxY = $skipQuarter ? $blockH - 1 : $blockH + 8;
+        $hMinX = $skipQuarter ? -1 : -6;
+        $hMaxX = $skipQuarter ? $blockW - 1 : $blockW + 5;
+        for ($y = $hMinY; $y <= $hMaxY; $y++) {
             $row = $ys[$y + 8] * $stride + 1;
-            for ($x = -6; $x <= $blockW + 5; $x++) {
+            for ($x = $hMinX; $x <= $hMaxX; $x++) {
                 $xi = $x + 8;
                 $full = $ref[$row + $xs[$xi - 2]] - 5 * $ref[$row + $xs[$xi - 1]]
                     + 20 * $ref[$row + $xs[$xi]] + 20 * $ref[$row + $xs[$xi + 1]]
