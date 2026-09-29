@@ -1,5 +1,5 @@
 <?php
-
+ini_set('memory_limit', '2048M');
 try {
     $options = getopt('', ['mode:', 'autoload:', 'port:', 'output-port:', 'config:', 'output:', 'workers:']);
     $mode = $options['mode'] ?? '';

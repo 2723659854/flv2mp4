@@ -1,4 +1,5 @@
 <?php
+ini_set('memory_limit', '2048M');
 // Windows下worker与父进程共享控制台：父级直播客户端收到Ctrl+C做优雅收尾时，
 // 广播的CTRL事件不能把worker先杀掉（否则父级finishStream报"Motion worker closed"）。
 // 注册空处理器即拦截CTRL_C/CTRL_BREAK，worker生命周期由父进程通过TCP管理。

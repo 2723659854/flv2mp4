@@ -10,7 +10,7 @@
  * 转码落后超限时在IDR关键帧边界跳帧追直播。信号由主进程统一处理，本进程忽略Ctrl+C。
  */
 
-ini_set('memory_limit', '512M');
+ini_set('memory_limit', '2048M');
 
 $autoload = null;
 $opts = [];

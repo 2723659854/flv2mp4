@@ -319,6 +319,11 @@ class H264Encoder
     public const MB_TYPE_P_8x16 = 4;
     public const MB_TYPE_P_8x8 = 5;
 
+    private const SCENE_SAD_THRESHOLD = 40;
+    private const SCENE_RATIO_THRESHOLD = 0.5;
+    private const SCENE_REGION_MB_RATIO = 0.20;
+    private const SCENE_REGION_MEAN = 55;
+
     public $width = 640;
     public $height = 360;
     public $fps = 30;

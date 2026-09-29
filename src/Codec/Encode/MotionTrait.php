@@ -345,6 +345,7 @@ trait MotionTrait
             }
             $fracX = $mvx & 3;
             $fracY = $mvy & 3;
+            if ($skipQuarter && $fracX !== 0 && $fracY !== 0) continue;
             $offX = $dx - $bestDX;
             $offY = $dy - $bestDY;
             $sad = 0;

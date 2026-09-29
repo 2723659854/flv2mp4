@@ -33,6 +33,7 @@ $config = [
     'motionWorkers'   => 12,   // 运动估计子进程数（360p实时的关键；约需14+逻辑线程，核少请同时降到240p）
     'decodeWorkers'   => 2,    // 解码+缩放worker数（缩放在此并行完成，勿置0走串行）
     'segmentDuration' => 3,    // HLS切片时长（秒）
+    'fastMotion' => true,      // 快速运动估计：缩小搜索并跳过四分之一像素
     // 'watermark'       => true,
     // 'watermark_file'  => __DIR__ . '/watermark_80x16.yuv',
 

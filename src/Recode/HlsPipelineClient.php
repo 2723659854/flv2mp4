@@ -333,7 +333,8 @@ final class HlsPipelineClient
         $options = ['bypass_shell' => true];
         if (PHP_OS_FAMILY === 'Windows') $options['create_process_group'] = true;
         $pipes = [];
-        $process = proc_open(array_merge([PHP_BINARY], $arguments), [fopen('php://stdin', 'r'), fopen('php://stdout', 'a'), fopen('php://stderr', 'a')], $pipes, dirname(__DIR__, 2), null, $options);
+        $command = [PHP_BINARY, '-d', 'memory_limit=2048M'];
+        $process = proc_open(array_merge($command, $arguments), [fopen('php://stdin', 'r'), fopen('php://stdout', 'a'), fopen('php://stderr', 'a')], $pipes, dirname(__DIR__, 2), null, $options);
         if (!is_resource($process)) throw new RuntimeException('无法启动 HLS worker');
         $this->processes[] = $process;
     }

@@ -1,5 +1,5 @@
 <?php
-
+ini_set('memory_limit', '2048M');
 try {
     $options = getopt('', ['mode:', 'autoload:', 'port:', 'control-port:', 'output-port:', 'output-ports:', 'profiles:', 'output:', 'workers:']);
     $mode = $options['mode'] ?? '';
@@ -13,7 +13,7 @@ try {
     $profiles = json_decode(base64_decode($options['profiles'], true), true, 32, JSON_THROW_ON_ERROR);
     $workers = (int)($options['workers'] ?? 1);
     if ($mode === 'decoder') {
-        if (ini_set('memory_limit', '512M') === false) throw new RuntimeException('无法设置解码 worker 内存上限');
+        if (ini_set('memory_limit', '2048M') === false) throw new RuntimeException('无法设置解码 worker 内存上限');
         if (empty($options['output-port'])) throw new RuntimeException('解码 worker 缺少 output-port');
         (new \Xiaosongshu\Flv2mp4\Recode\HlsDecoderWorkerServer($profiles))->run(
             'tcp://127.0.0.1:' . (int)$options['port'],

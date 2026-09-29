@@ -31,19 +31,7 @@ trait SliceEncodeTrait
     private int $scenePrevAw = 0;
     private int $scenePrevAh = 0;
 
-    /** 场景切换触发阈值：每抽样点平均 |ΔY|（实测普通运动 ≤5、硬切 68~184） */
-    private const SCENE_SAD_THRESHOLD = 40;
-    /** 场景切换触发阈值：|ΔY|≥32 的抽样点占比（实测普通运动 ≤0.061、硬切 0.615~1.0） */
-    private const SCENE_RATIO_THRESHOLD = 0.5;
-    /**
-     * 局部硬切触发阈值：4 抽样点中 ≥3 个 |ΔY|≥32 的宏块占比。
-     * 屏幕采集类内容（浏览器静态边框 + 内部播放窗硬切）全局均值会被静态区域稀释，
-     * 实测播放窗占 55% 面积时硬切全局 mean=39.6/ratio=0.389 漏判，而该指标=0.354；
-     * 播放窗内 life 满屏随机跳动（极端正常运动）该指标 ≤0.071，裕量 5 倍。
-     */
-    private const SCENE_REGION_MB_RATIO = 0.20;
-    /** 局部硬切触发阈值：剧变宏块自身的平均 |ΔY|，避免少量边缘闪烁误触（实测硬切 95） */
-    private const SCENE_REGION_MEAN = 55;
+    /** 场景切换触发阈值和局部硬切判定常量定义在 H264Encoder 类中，兼容 PHP 8.1。 */
 
     /**
      * 帧间亮度变化抽样统计：每个 16x16 宏块抽 4 个点 (4,4)/(11,4)/(4,11)/(11,11)，

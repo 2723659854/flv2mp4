@@ -572,7 +572,8 @@ class Flv2HlsCompact
         $descriptors = [fopen('php://stdin', 'r'), fopen('php://stdout', 'a'), fopen('php://stderr', 'a')];
         $options = ['bypass_shell' => true];
         if (PHP_OS_FAMILY === 'Windows') $options['create_process_group'] = true;
-        $p = @proc_open(array_merge([PHP_BINARY, $entry], $args), $descriptors, $pipes, dirname(__DIR__, 2), null, $options);
+        $command = [PHP_BINARY, '-d', 'memory_limit=2048M', $entry];
+        $p = @proc_open(array_merge($command, $args), $descriptors, $pipes, dirname(__DIR__, 2), null, $options);
         if (!is_resource($p)) throw new RuntimeException('拉起HLS worker失败: ' . implode(' ', $args));
         $this->plProcesses[] = $p;
     }

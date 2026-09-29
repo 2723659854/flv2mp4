@@ -1,5 +1,5 @@
 <?php
-
+ini_set('memory_limit', '2048M');
 use Xiaosongshu\Flv2mp4\Opus\OpusWorkerServer;
 
 try {
