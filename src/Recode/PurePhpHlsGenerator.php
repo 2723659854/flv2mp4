@@ -125,6 +125,7 @@ class PurePhpHlsGenerator
         foreach ($this->profiles as $name => $profile) {
             $this->encoders[$name] = new H264Encoder();
             $this->encoders[$name]->motionWorkers = max(1, (int)($profile['motionWorkers'] ?? 8));
+            if (!empty($profile['fastMotion'])) $this->encoders[$name]->setFastMotion(true);
             $dir = $this->profileDir($name) . '/';
             if (!is_dir($dir)) mkdir($dir, 0777, true);
 

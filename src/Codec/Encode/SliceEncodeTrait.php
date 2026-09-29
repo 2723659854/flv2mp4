@@ -277,7 +277,7 @@ trait SliceEncodeTrait
         $jobs = [];
         for ($y = 0; $y < $mbHeight; $y++) {
             for ($x = 0; $x < $mbWidth; $x++) {
-                $jobs[$y * $mbWidth + $x] = [$x, $y, 32];
+                $jobs[$y * $mbWidth + $x] = [$x, $y, $this->fastMotion ? min(8, $this->motionRange) : $this->motionRange];
             }
         }
         $client = $this->motionWorkerClient ??= new MotionWorkerClient(workers: $this->motionWorkers);

@@ -162,7 +162,8 @@ trait MotionTrait
         $bestSAD = $this->computeSADFast($curFlat, $origX, $origY, 0, 0, $blockW, $blockH, $refStride, PHP_INT_MAX);
         $candidateSads = ['0,0' => $bestSAD];
 
-        for ($iter = 0; $iter < 10; $iter++) {
+        $largeIterations = $searchRange <= 8 ? 4 : 10;
+        for ($iter = 0; $iter < $largeIterations; $iter++) {
             $foundBetter = false;
             foreach ($ldspPattern as [$px, $py]) {
                 $dx = $bestDX + $px;
@@ -187,7 +188,8 @@ trait MotionTrait
             if (!$foundBetter) break;
         }
 
-        for ($iter = 0; $iter < 3; $iter++) {
+        $smallIterations = $searchRange <= 8 ? 1 : 3;
+        for ($iter = 0; $iter < $smallIterations; $iter++) {
             $foundBetter = false;
             foreach ($sdspPattern as [$px, $py]) {
                 $dx = $bestDX + $px;
@@ -227,7 +229,7 @@ trait MotionTrait
 
         [$bestMVx, $bestMVy, $bestSAD] = $this->refineSubpelShared(
             $curFlat, $origX, $origY, $bestDX, $bestDY, $bestSAD, $blockW, $blockH,
-            $minDx, $maxDx, $minDy, $maxDy
+            $minDx, $maxDx, $minDy, $maxDy, $searchRange <= 8
         );
 
         return [$bestMVx, $bestMVy, $bestSAD];
@@ -235,7 +237,8 @@ trait MotionTrait
 
     private function refineSubpelShared(
         array $curFlat, int $origX, int $origY, int $bestDX, int $bestDY, int $bestSAD,
-        int $blockW, int $blockH, int $minDx, int $maxDx, int $minDy, int $maxDy
+        int $blockW, int $blockH, int $minDx, int $maxDx, int $minDy, int $maxDy,
+        bool $skipQuarter = false
     ): array {
         $stride = $this->mbAlignedWidth;
         $height = $this->mbAlignedHeight;
@@ -345,6 +348,7 @@ trait MotionTrait
             }
         }
 
+        if ($skipQuarter) return [$bestMVx, $bestMVy, $bestSAD];
         $quarterPattern = [[-1, 0], [1, 0], [0, -1], [0, 1]];
         foreach ($quarterPattern as [$ox, $oy]) {
             $mvx = $bestMVx + $ox;

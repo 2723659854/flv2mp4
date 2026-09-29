@@ -457,12 +457,20 @@ class H264Encoder
     public $lastMbWasSkip = false; // 上一个宏块是否为P_Skip
     public $motionWorkerClient = null;
     public int $motionWorkers = 4;
+    public int $motionRange = 32;
+    public bool $fastMotion = false;
     public array $motionWorkerResults = [];
 
     /**
      * 预热运动估计子进程：在首批 P 帧到来之前完成 PHP 冷启动与建链，
      * 避免把启动开销计入首帧等待（仅多进程 worker 入口调用）。
      */
+    public function setFastMotion(bool $enabled = true): void
+    {
+        $this->fastMotion = $enabled;
+        if ($enabled) $this->motionRange = min($this->motionRange, 8);
+    }
+
     public function warmupMotionWorkers(): void
     {
         if ($this->enableInter) {
