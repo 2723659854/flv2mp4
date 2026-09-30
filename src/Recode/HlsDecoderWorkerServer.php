@@ -221,9 +221,10 @@ final class HlsDecoderWorkerServer
         if ($this->sps !== '') array_unshift($nals, ['type' => 7, 'data' => $this->sps]);
         if ($this->pps !== '') array_unshift($nals, ['type' => 8, 'data' => $this->pps]);
         $dropFrame = !empty($meta['drop']);
-        // 抽帧丢弃的帧仅维持P链参考：仍完整解码并执行去块滤波，保证后续保留帧的参考质量
-        $frame = $this->decoder->decode($nals, false, true, false);
-        // 抽帧丢弃：解码已完成（维持 GOP 内后续帧的参考链），但不缩放/不附 YUV，
+        // 抽帧帧仍需解码以维持P链，但不需要生成YUV输出，也不需要执行去块滤波。
+        // IDR在解码器内部仍会强制保留去块，保证关键帧参考链正确。
+        $frame = $this->decoder->decode($nals, false, !$dropFrame, $dropFrame);
+        // 抽帧丢弃：解码已完成（维持 GOP 内后续帧的参考链），不缩放/不附 YUV，
         // meta.drop 原样透传，输出端直接跳过编码
         if ($dropFrame) {
             return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, $body);

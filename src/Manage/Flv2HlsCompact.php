@@ -54,6 +54,7 @@ class Flv2HlsCompact
     private int $idleTimeout = 30;
     private int $queueMaxBytes = 8388608; // 转发积压上限8MB，超过拉流端跳帧追直播
     private int $duration = 0;            // 0=不限时
+    private int $targetFps = 0;           // 0=不抽帧；大于0时按目标帧率跳过多余视频帧
     private bool $tlsVerify = true;
 
     private bool $running = true;
@@ -109,13 +110,14 @@ class Flv2HlsCompact
     private int $plCurrentWorker = 0;
     private int $plFinished = 0;
     private bool $plEndSent = false;
+    private ?int $lastEncodedVideoTimestamp = null;
 
     /**
      * @param string $pullUrl 直播地址 http(s)-flv / ws(s)-flv
      * @param array $config 转码配置：width/height(0=保持)/bitrate/fps(仅编码器)/qp/audioBitrate/
      *                      motionWorkers/watermark/watermark_file/segmentDuration；
      *                      部署配置：outputDir/streamName/maxRetries/retryDelay/connectTimeout/
-     *                      idleTimeout/queueMaxBytes(转码落后容忍字节,默认8MB)/duration/tlsVerify
+     *                      idleTimeout/queueMaxBytes(转码落后容忍字节,默认8MB)/duration/fps/tlsVerify
      */
     public function __construct(string $pullUrl, array $config = [])
     {
@@ -131,6 +133,7 @@ class Flv2HlsCompact
         $this->idleTimeout = (int)($config['idleTimeout'] ?? 30);
         if (isset($config['queueMaxBytes'])) $this->queueMaxBytes = (int)$config['queueMaxBytes'];
         if (isset($config['duration'])) $this->duration = (int)$config['duration'];
+        if (isset($config['fps'])) $this->targetFps = max(0, (int)$config['fps']);
         if (isset($config['tlsVerify'])) $this->tlsVerify = (bool)$config['tlsVerify'];
         $this->decodeWorkers = max(0, (int)($config['decodeWorkers'] ?? 2));
 
@@ -702,6 +705,16 @@ class Flv2HlsCompact
             }
             if ($packetType === 1) {
                 $isKey = ((ord($body[0]) >> 4) === 1) && $this->containsIdrNal($body);
+                $drop = false;
+                if ($isKey) {
+                    $this->lastEncodedVideoTimestamp = $timestamp;
+                } elseif ($this->targetFps > 0 && $this->lastEncodedVideoTimestamp !== null) {
+                    $frameInterval = 1000 / $this->targetFps;
+                    if ($timestamp - $this->lastEncodedVideoTimestamp < $frameInterval) $drop = true;
+                    else $this->lastEncodedVideoTimestamp = $timestamp;
+                } else {
+                    $this->lastEncodedVideoTimestamp = $timestamp;
+                }
                 if ($isKey) {
                     if ($this->plGopSeq > 0) {
                         $prev = $this->plGopSeq - 1;
@@ -712,9 +725,11 @@ class Flv2HlsCompact
                     $this->plCurrentWorker = $this->plGopSeq % $this->decodeWorkers;
                     $this->plGopSeq++;
                 }
+                $metadata = ['tagType' => 9, 'timestamp' => $timestamp];
+                if ($drop) $metadata['drop'] = true;
                 $this->plOut[$this->plCurrentWorker] .= HlsPipelineProtocol::frame(
                     HlsPipelineProtocol::EVENT, $this->plSeq++,
-                    ['tagType' => 9, 'timestamp' => $timestamp], $body
+                    $metadata, $body
                 );
                 return;
             }
