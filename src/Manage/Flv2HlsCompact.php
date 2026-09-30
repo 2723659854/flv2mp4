@@ -83,6 +83,8 @@ class Flv2HlsCompact
     private int $audioTags = 0;
     private ?int $firstMediaTimestamp = null;
     private ?int $lastMediaTimestamp = null;
+    private ?int $firstVideoTimestamp = null;
+    private ?int $lastVideoTimestamp = null;
     private float $startMicrotime;
     private float $pullStartMicrotime;
     private float $pullEndMicrotime = 0.0;
@@ -468,6 +470,10 @@ class Flv2HlsCompact
             $timestamp = unpack('N', substr($payload, 1, 4))[1];
             if ($this->firstMediaTimestamp === null) $this->firstMediaTimestamp = $timestamp;
             $this->lastMediaTimestamp = $timestamp;
+            if ($tagType === 9) {
+                if ($this->firstVideoTimestamp === null) $this->firstVideoTimestamp = $timestamp;
+                $this->lastVideoTimestamp = $timestamp;
+            }
             $body = substr($payload, 5);
             if ($pipeline) $this->plEnqueueTag($tagType, $body, $timestamp);
             else $this->feedTranscoder($tagType, $body, $timestamp);
@@ -862,13 +868,11 @@ class Flv2HlsCompact
         $pullElapsed = ($this->pullEndMicrotime > 0.0 ? $this->pullEndMicrotime : microtime(true)) - $this->pullStartMicrotime;
         $pullStart = $this->pullStartUnix > 0 ? date('Y-m-d H:i:s', $this->pullStartUnix) : '-';
         $pullEnd = $this->pullEndUnix > 0 ? date('Y-m-d H:i:s', $this->pullEndUnix) : '-';
-        $mediaDuration = ($this->firstMediaTimestamp !== null && $this->lastMediaTimestamp !== null)
-            ? max(0.0, ($this->lastMediaTimestamp - $this->firstMediaTimestamp) / 1000)
-            : 0.0;
+
         $this->log('========================================');
         $this->log('转码结束统计');
         $this->log("开始拉流: {$pullStart}，结束拉流: {$pullEnd}");
-        $this->log(sprintf('拉流时长: %.1fs，媒体时间跨度: %.1fs，收尾转码耗时: %.1fs', $pullElapsed, $mediaDuration, max(0.0, $elapsed - $pullElapsed)));
+        $this->log(sprintf('拉流时长: %.1fs，收尾转码耗时: %.1fs', $pullElapsed,  max(0.0, $elapsed - $pullElapsed)));
         $this->log('总耗时: ' . round($elapsed, 1) . "s，送转码tag: {$this->tagsFed} (视频{$this->videoTags}/音频{$this->audioTags})");
         $this->log("播放列表: {$this->streamDir}index.m3u8");
         $this->log('========================================');

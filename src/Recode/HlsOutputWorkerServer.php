@@ -151,12 +151,12 @@ final class HlsOutputWorkerServer
                         for ($i = 0; $i < $workers; $i++) $outputs[$i] .= $frame;
                         $finished = true;
                     } elseif ($event['type'] === HlsPipelineProtocol::EVENT) {
-                        $eventStart = microtime(true);
-                        if ($drainStarted > 0.0) fwrite(STDERR, sprintf("[收尾-编码] 开始处理 sequence=%d payload=%.2fMB\n", $event['sequence'], strlen($event['payload']) / 1048576));
+                        //$eventStart = microtime(true);
+                        //if ($drainStarted > 0.0) fwrite(STDERR, sprintf("[收尾-编码] 开始处理 sequence=%d payload=%.2fMB\n", $event['sequence'], strlen($event['payload']) / 1048576));
                         if ($pool !== null) $pool->push($event, $this->profiles, $replay);
                         else $generator->processPipelineEvent($event['metadata'], $event['payload']);
-                        $eventElapsed = microtime(true) - $eventStart;
-                        if ($drainStarted > 0.0) fwrite(STDERR, sprintf("[收尾-编码] 完成处理 sequence=%d 耗时=%.2fs\n", $event['sequence'], $eventElapsed));
+                        //$eventElapsed = microtime(true) - $eventStart;
+                        //if ($drainStarted > 0.0) fwrite(STDERR, sprintf("[收尾-编码] 完成处理 sequence=%d 耗时=%.2fs\n", $event['sequence'], $eventElapsed));
                     } else throw new RuntimeException('编码进程收到未知事件');
                     $expected++;
                 }
