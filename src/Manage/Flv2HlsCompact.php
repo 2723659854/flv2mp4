@@ -80,7 +80,13 @@ class Flv2HlsCompact
     private int $tagsFed = 0;
     private int $videoTags = 0;
     private int $audioTags = 0;
+    private ?int $firstMediaTimestamp = null;
+    private ?int $lastMediaTimestamp = null;
     private float $startMicrotime;
+    private float $pullStartMicrotime;
+    private float $pullEndMicrotime = 0.0;
+    private int $pullStartUnix = 0;
+    private int $pullEndUnix = 0;
     private float $lastStatsMicrotime = 0.0;
     private int $lastStatsTags = 0;
 
@@ -210,6 +216,8 @@ class Flv2HlsCompact
     public function run(): void
     {
         $this->startMicrotime = microtime(true);
+        $this->pullStartMicrotime = $this->startMicrotime;
+        $this->pullStartUnix = time();
         $this->lastStatsMicrotime = $this->startMicrotime;
         $this->log('========================================');
         $this->log('FLV拉流转码HLS客户端 v2.0（拉流/转码双进程）');
@@ -351,6 +359,10 @@ class Flv2HlsCompact
 
     private function stopPuller(): void
     {
+        if ($this->pullEndMicrotime <= 0.0) {
+            $this->pullEndMicrotime = microtime(true);
+            $this->pullEndUnix = time();
+        }
         if (!is_resource($this->process)) return;
         $status = proc_get_status($this->process);
         if ($status['running']) {
@@ -446,6 +458,8 @@ class Flv2HlsCompact
 
             $tagType = ord($payload[0]);
             $timestamp = unpack('N', substr($payload, 1, 4))[1];
+            if ($this->firstMediaTimestamp === null) $this->firstMediaTimestamp = $timestamp;
+            $this->lastMediaTimestamp = $timestamp;
             $body = substr($payload, 5);
             if ($pipeline) $this->plEnqueueTag($tagType, $body, $timestamp);
             else $this->feedTranscoder($tagType, $body, $timestamp);
@@ -816,8 +830,16 @@ class Flv2HlsCompact
     private function printStats(): void
     {
         $elapsed = microtime(true) - $this->startMicrotime;
+        $pullElapsed = ($this->pullEndMicrotime > 0.0 ? $this->pullEndMicrotime : microtime(true)) - $this->pullStartMicrotime;
+        $pullStart = $this->pullStartUnix > 0 ? date('Y-m-d H:i:s', $this->pullStartUnix) : '-';
+        $pullEnd = $this->pullEndUnix > 0 ? date('Y-m-d H:i:s', $this->pullEndUnix) : '-';
+        $mediaDuration = ($this->firstMediaTimestamp !== null && $this->lastMediaTimestamp !== null)
+            ? max(0.0, ($this->lastMediaTimestamp - $this->firstMediaTimestamp) / 1000)
+            : 0.0;
         $this->log('========================================');
         $this->log('转码结束统计');
+        $this->log("开始拉流: {$pullStart}，结束拉流: {$pullEnd}");
+        $this->log(sprintf('拉流时长: %.1fs，媒体时间跨度: %.1fs，收尾转码耗时: %.1fs', $pullElapsed, $mediaDuration, max(0.0, $elapsed - $pullElapsed)));
         $this->log('总耗时: ' . round($elapsed, 1) . "s，送转码tag: {$this->tagsFed} (视频{$this->videoTags}/音频{$this->audioTags})");
         $this->log("播放列表: {$this->streamDir}index.m3u8");
         $this->log('========================================');
