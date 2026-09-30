@@ -473,13 +473,15 @@ class PurePhpHlsGenerator
         if ($pts < $dts) $pts = $dts;
 
         $profileJobs = [];
+        $encodedPayload = $this->pipelineEncodedPayload;
+        $encodedVariants = $this->pipelineEncodedVariants;
         foreach ($this->profiles as $name => $profile) {
             $writer = &$this->segmentWriters[$name];
             if (!is_resource($writer['handle'])) {
                 $profileJobs[$name] = ['transcode' => false, 'skip' => true];
                 continue;
             }
-            if (!empty($this->pipelineEncodedVariants[$name])) {
+            if (!empty($encodedVariants[$name])) {
                 $profileJobs[$name] = ['transcode' => false, 'encoded' => true, 'skip' => false];
                 continue;
             }
@@ -543,6 +545,8 @@ class PurePhpHlsGenerator
             'pts' => $pts,
             'segmentSwitches' => $segmentSwitches,
             'profiles' => $profileJobs,
+            'encodedPayload' => $encodedPayload,
+            'encodedVariants' => $encodedVariants,
         ];
     }
 
@@ -557,9 +561,9 @@ class PurePhpHlsGenerator
             $outputSpsPps = $this->spsPpsData[$name];
             $isTranscoded = false;
 
-            if (!empty($this->pipelineEncodedVariants[$name])) {
-                $variant = $this->pipelineEncodedVariants[$name];
-                $outputData = substr($this->pipelineEncodedPayload, $variant['offset'], $variant['length']);
+            if (!empty($pjob['encoded'])) {
+                $variant = $job['encodedVariants'][$name];
+                $outputData = substr($job['encodedPayload'], $variant['offset'], $variant['length']);
                 $outputSpsPps = '';
                 $isTranscoded = true;
             } elseif (!empty($pjob['transcode'])) {
