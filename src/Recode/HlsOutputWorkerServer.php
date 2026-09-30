@@ -33,9 +33,8 @@ final class HlsOutputWorkerServer
         $firstProfile = $this->profiles[array_key_first($this->profiles)] ?? [];
         $segmentDuration = (int)($firstProfile['segmentDuration'] ?? 3);
         if ($segmentDuration > 0) $generator->setSegmentDuration($segmentDuration);
-        // 冷启动运动估计子进程放在 accept 之前：监听 backlog 暂存 decoder 连接，
-        // PHP 冷启动与 decoder 启动/首 GOP 解码完全并行
-        $generator->warmupMotionWorkers();
+        // 先接受全部 decoder 连接，避免运动估计子进程冷启动阻塞流水线建链。
+        // warmup 放到连接完成后执行，decoder 的媒体连接可在内核缓冲中等待。
         $sockets = [];
         for ($i = 0; $i < $workers; $i++) {
             $socket = @stream_socket_accept($server, 30);
@@ -44,6 +43,17 @@ final class HlsOutputWorkerServer
             $sockets[] = $socket;
         }
         fclose($server);
+        // 控制连接也要在预热前接入，否则主进程仍会卡在 outCtrl 建链阶段。
+        if ($ctrlServer !== null) {
+            $ctrlConn = @stream_socket_accept($ctrlServer, 15);
+            if ($ctrlConn === false) throw new RuntimeException('编码进程等待控制连接超时');
+            stream_set_blocking($ctrlConn, false);
+            fclose($ctrlServer);
+            $ctrlServer = null;
+        }
+        // 媒体和控制连接全部建立后再预热运动估计进程。
+        // 主进程此时可以立即完成流水线就绪，不再等待运动 worker 冷启动。
+        $generator->warmupMotionWorkers();
         $inputs = array_fill(0, $workers, '');
         $outputs = array_fill(0, $workers, '');
         $pending = [];
@@ -54,7 +64,6 @@ final class HlsOutputWorkerServer
         $drainStarted = 0.0;
         $lastDrainLog = 0.0;
         $lastSeq = array_fill(0, $workers, -1);
-        $ctrlConn = null;
         $ctrlInput = '';
         $ctrlFinish = false;
         $pool = null;

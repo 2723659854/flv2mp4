@@ -18,9 +18,12 @@ $pullUrl = 'rtmp://192.168.110.72:1935/a/b'; // RTMP直播地址（rtmp://host:p
 
 // ======================== 转码压缩配置 ========================
 $config = [
+    // 当使用960x540，1280×720推流，可以做到实时压缩转码
     // —— 目标规格（width/height 必须同时给，0=保持源尺寸）——
-    'width'        => 640,
-    'height'       => 360,
+//    'width'        => 640,
+//    'height'       => 360,
+    'width'        => 480,
+    'height'       => 270,
     'bitrate'      => 0,  // 目标视频码率 bps
     'fps'          => 15,       // 目标帧率；流水线按时间间隔抽帧，0=不抽帧
     'qp'           => 30,      // 量化参数 0-51
@@ -43,7 +46,8 @@ $config = [
     'connectTimeout'=> 10,     // 连接/握手/命令响应超时（秒）
     'idleTimeout'   => 30,     // 连续无数据判定断流（秒）
     'queueMaxBytes' => 8388608,  // 转码落后容忍8MB；超限拉流进程跳IDR追直播（独立进程，绝不反压上游）
-    'duration'   => 161,      // 限定运行秒数，0=不限
+    //'duration'   => 161,      // 限定运行秒数，0=不限
+    'duration'   => 60,      // 限定运行秒数，0=不限
     'tlsVerify'  => false,  // https/wss 自签证书时关闭校验
 ];
 (new \Xiaosongshu\Flv2mp4\Manage\Flv2HlsCompact($pullUrl, $config))->run();

@@ -244,8 +244,13 @@ class Flv2HlsCompact
         $parallel = $this->decodeWorkers > 0;
         try {
             $port = $this->startIpcServer();
-            $this->spawnPuller($port);
-            if ($parallel) $this->startPipeline();
+            if ($parallel) {
+                // 先完成全部转码worker及其内部连接，再启动拉流，避免流水线冷启动期间积压直播数据。
+                $this->startPipeline();
+                $this->spawnPuller($port);
+            } else {
+                $this->spawnPuller($port);
+            }
             $this->acceptPuller($port);
             if ($parallel) $this->pipelineLoop();
             else $this->transcodeLoop();
