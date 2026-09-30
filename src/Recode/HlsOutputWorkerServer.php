@@ -50,6 +50,9 @@ final class HlsOutputWorkerServer
         $pendingBytes = 0;
         $expected = 0;
         $finished = false;
+        $endCount = 0;
+        $drainStarted = 0.0;
+        $lastDrainLog = 0.0;
         $lastSeq = array_fill(0, $workers, -1);
         $ctrlConn = null;
         $ctrlInput = '';
@@ -97,6 +100,7 @@ final class HlsOutputWorkerServer
                     foreach (HlsPipelineProtocol::take($ctrlInput, PHP_INT_MAX) as $ctrlEvent) {
                         if ($ctrlEvent['type'] === HlsPipelineProtocol::CONTROL && ($ctrlEvent['metadata']['cmd'] ?? '') === 'finish') {
                             $ctrlFinish = true;
+                            if ($drainStarted === 0.0) $drainStarted = microtime(true);
                         }
                     }
                 }
@@ -110,7 +114,11 @@ final class HlsOutputWorkerServer
                 foreach ($inputs as $id => $buffer) {
                     foreach (HlsPipelineProtocol::take($inputs[$id], PHP_INT_MAX) as $event) {
                         // 媒体通道只接受EVENT/END；CONTROL/PROGRESS等控制帧不入重排队列
-                        if ($event['type'] !== HlsPipelineProtocol::EVENT && $event['type'] !== HlsPipelineProtocol::END) continue;
+                        if ($event['type'] === HlsPipelineProtocol::END) {
+                            $endCount++;
+                            continue;
+                        }
+                        if ($event['type'] !== HlsPipelineProtocol::EVENT) continue;
                         $seq = $event['sequence'];
                         if ($seq < $expected) continue;
                         if (isset($pending[$seq])) throw new RuntimeException("媒体事件 sequence 重复: {$seq}");
@@ -120,11 +128,13 @@ final class HlsOutputWorkerServer
                         $lastSeq[$id] = $seq;
                     }
                 }
-                // 收到主进程finish屏障：直播尾部在途帧（最多十几秒）已无观看价值，
-                // 直接丢弃重排队列，只冲刷编码器内已在途的一帧并关闭分片写 ENDIST
-                if (!$finished && $ctrlFinish) {
-                    $pending = [];
-                    $pendingBytes = 0;
+                // 只有所有 decoder 都报告 END，且重排队列已经连续排空后，才关闭分片。
+                // 控制连接 finish 仅作为异常收尾兜底，不清空已收到的媒体事件。
+                if ($drainStarted > 0.0 && microtime(true) - $lastDrainLog >= 5.0) {
+                    $lastDrainLog = microtime(true);
+                    fwrite(STDERR, sprintf("[收尾] 编码worker待处理 pending=%.2fMB outputs=%.2fMB end=%d/%d expected=%d\n", $pendingBytes / 1048576, array_sum(array_map('strlen', $outputs)) / 1048576, $endCount, $workers, $expected));
+                }
+                if (!$finished && $endCount >= $workers && $pending === []) {
                     $generator->finishPipelineOutput(count($this->profiles) > 1);
                     $frame = HlsPipelineProtocol::frame(HlsPipelineProtocol::FINISHED, $expected);
                     for ($i = 0; $i < $workers; $i++) $outputs[$i] .= $frame;
@@ -141,8 +151,12 @@ final class HlsOutputWorkerServer
                         for ($i = 0; $i < $workers; $i++) $outputs[$i] .= $frame;
                         $finished = true;
                     } elseif ($event['type'] === HlsPipelineProtocol::EVENT) {
+                        $eventStart = microtime(true);
+                        if ($drainStarted > 0.0) fwrite(STDERR, sprintf("[收尾-编码] 开始处理 sequence=%d payload=%.2fMB\n", $event['sequence'], strlen($event['payload']) / 1048576));
                         if ($pool !== null) $pool->push($event, $this->profiles, $replay);
                         else $generator->processPipelineEvent($event['metadata'], $event['payload']);
+                        $eventElapsed = microtime(true) - $eventStart;
+                        if ($drainStarted > 0.0) fwrite(STDERR, sprintf("[收尾-编码] 完成处理 sequence=%d 耗时=%.2fs\n", $event['sequence'], $eventElapsed));
                     } else throw new RuntimeException('编码进程收到未知事件');
                     $expected++;
                 }

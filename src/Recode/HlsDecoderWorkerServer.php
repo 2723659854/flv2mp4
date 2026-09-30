@@ -54,12 +54,12 @@ final class HlsDecoderWorkerServer
         $ctrlInput = '';
         $ended = false;
         $finishing = false;
-        $triggerFinish = static function () use (&$input, &$finishing): void {
-            if ($finishing) return;
-            // 快速收尾：丢弃所有尚未解码的在途帧并停止解码（直播尾部无观看价值）。
-            // 不向下游媒体流插入任何字节（会切断已部分发出的大帧）；输出进程由主进程经
-            // 独立控制连接直接通知收尾
-            $input = '';
+        $endSent = false;
+        $drainStarted = 0.0;
+        $lastDrainLog = 0.0;
+        $triggerFinish = static function () use (&$finishing, &$drainStarted): void {
+            if (!$finishing) $drainStarted = microtime(true);
+
             $finishing = true;
         };
         try {
@@ -130,8 +130,8 @@ final class HlsDecoderWorkerServer
                 }
                 // 单次 select 唤醒（Windows 下粒度约 10~15ms）批量解码全部已缓冲事件，
                 // 下游输出积压到高水位时停止，让反压继续向下游传播，避免长文件下缓冲超限。
-                // 收到 finish 后停止解码在途帧（快速收尾：尾部帧由输出进程直接丢弃）。
-                while (!$finishing && strlen($output) < HlsPipelineProtocol::HIGH_WATERMARK) {
+                // finish 仅停止接收新数据；已进入 input 的媒体必须全部解码并转发。
+                while (strlen($output) < HlsPipelineProtocol::HIGH_WATERMARK) {
                     $events = HlsPipelineProtocol::take($input, 1);
                     if ($events === []) break;
                     $event = $events[0];
@@ -149,6 +149,14 @@ final class HlsDecoderWorkerServer
                         $output .= $this->transform($event);
                     }
                     if (strlen($output) > HlsPipelineProtocol::MAX_BUFFER_LENGTH) throw new RuntimeException('解码进程下游缓冲超限');
+                }
+                if ($finishing && $drainStarted > 0.0 && microtime(true) - $lastDrainLog >= 5.0) {
+                    $lastDrainLog = microtime(true);
+                    fwrite(STDERR, sprintf("[收尾] 解码worker待处理 input=%.2fMB output=%.2fMB\n", strlen($input) / 1048576, strlen($output) / 1048576));
+                }
+                if ($finishing && !$endSent && $input === '') {
+                    $output .= HlsPipelineProtocol::frame(HlsPipelineProtocol::END, 0);
+                    $endSent = true;
                 }
                 if (in_array($downstream, $write, true)) {
                     while ($output !== '') {

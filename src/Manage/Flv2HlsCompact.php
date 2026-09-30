@@ -175,8 +175,7 @@ class Flv2HlsCompact
     public function handleSignal(int $signal): void
     {
         $this->stopSignaled = true;
-        $this->log("收到信号 {$signal}，准备停止...");
-        $this->running = false;
+        $this->log("收到信号 {$signal}，准备停止并排空已接收数据...");
     }
 
     public function handleWindowsCtrl(int $event): void
@@ -588,7 +587,7 @@ class Flv2HlsCompact
 
             $outBytes = 0;
             foreach ($this->plOut as $buf) $outBytes += strlen($buf);
-            $canReadPuller = !$this->plEndSent && $outBytes < $this->queueMaxBytes && is_resource($this->ipc);
+            $canReadPuller = !$this->plEndSent && !$this->stopSignaled && $outBytes < $this->queueMaxBytes && is_resource($this->ipc);
 
             $read = [];
             if ($canReadPuller) $read['puller'] = $this->ipc;
@@ -625,11 +624,13 @@ class Flv2HlsCompact
                 $this->onPipelineReadable((int)$key);
             }
 
-            // 上游结束/主动停止：立即停拉流，并经独立控制连接广播finish屏障（快速收尾）：
-            // 输出进程收齐屏障后丢弃十几秒直播尾部在途帧、只冲刷当前帧并写ENDLIST
-            if (!$this->plEndSent && ($this->endReceived || !$this->running)) {
+            if ($this->stopSignaled && is_resource($this->process)) $this->stopPuller();
+            // 主动停止时先排空主进程已收到的媒体，再通知 decoder 优雅结束；
+            // 不提前通知 output，否则它会丢弃尚未编码的重排队列。
+            $pendingInput = $this->readBuffer !== '';
+            foreach ($this->plOut as $buf) if ($buf !== '') { $pendingInput = true; break; }
+            if (!$this->plEndSent && ($this->endReceived || ($this->stopSignaled && !$pendingInput))) {
                 $this->sendPipelineFinish();
-                $this->stopPuller();
             }
             if ($this->plEndSent && $this->plFinished >= $this->decodeWorkers) {
                 $this->running = false;
@@ -728,21 +729,16 @@ class Flv2HlsCompact
     }
 
     /**
-     * 发送finish屏障：输出worker经独立控制连接直达（立即丢尾部、冲刷1帧、写ENDLIST）；
-     * 各解码worker同样经控制连接停止解码（释放CPU给收尾冲刷）。控制连接无媒体积压，即时到达。
-     * 解码worker控制连接缺失/写入失败时退回媒体通道（decoder有长度前缀快扫兜底）
+     * 发送finish屏障：输出worker经独立控制连接直达，仅解除其媒体反压；
+     * 解码worker的finish必须追加到媒体通道末尾，不能走独立控制连接。
+     * 否则控制帧可能先于尚在decoder内核接收缓冲中的媒体到达，decoder会提前停止读媒体并丢帧。
      */
     private function sendPipelineFinish(): void
     {
         $finishFrame = HlsPipelineProtocol::frame(HlsPipelineProtocol::CONTROL, 0, ['cmd' => 'finish']);
         if (is_resource($this->plOutCtrl)) @fwrite($this->plOutCtrl, $finishFrame);
         for ($i = 0; $i < $this->decodeWorkers; $i++) {
-            $sent = false;
-            if (isset($this->plCtrl[$i]) && is_resource($this->plCtrl[$i])) {
-                $n = @fwrite($this->plCtrl[$i], $finishFrame);
-                if ($n !== false && $n > 0) $sent = true;
-            }
-            if (!$sent) $this->plOut[$i] .= $finishFrame; // 媒体通道兜底（decoder快扫截获，仅令其停止解码）
+            $this->plOut[$i] .= $finishFrame;
         }
         $this->plEndSent = true;
     }
@@ -753,7 +749,9 @@ class Flv2HlsCompact
         // 兜底广播finish（正常情况下pipelineLoop已发），并限时等待FINISHED
         if (!$this->plEndSent) $this->sendPipelineFinish();
         $this->stopPuller();
-        $deadline = microtime(true) + 15;
+        // 编码速度低于实时速度时，尾部可能积累数百 MB；正常收尾必须等待完整排空，
+        // 不能用15秒固定超时把尚未编码的数据直接丢掉。600秒仅作为异常worker兜底。
+        $deadline = microtime(true) + 600;
         while ($this->plFinished < $this->decodeWorkers && microtime(true) < $deadline) {
             $read = [];
             foreach ($this->plSocks as $id => $sock) {
