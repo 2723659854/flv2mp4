@@ -406,6 +406,33 @@ class H264Encoder
         $this->height = $height;
     }
 
+    /** 清理单个GOP的参考帧和帧级流水线状态，保留已预热的运动worker。 */
+    public function resetGopState(): void
+    {
+        $this->frameNum = 0;
+        $this->idrPicId = 0;
+        $this->poc = 0;
+        $this->refYPlane = null;
+        $this->refUPlane = null;
+        $this->refVPlane = null;
+        $this->refInts = null;
+        $this->reconYPlane = '';
+        $this->reconUPlane = '';
+        $this->reconVPlane = '';
+        $this->mvLeftCol = [];
+        $this->mvTopRow = [];
+        $this->mvTopLeft = null;
+        $this->lastMbWasSkip = false;
+        $this->motionWorkerResults = [];
+        $this->pipeFlight = null;
+        $this->pipePending = null;
+        $this->reconPreassembled = false;
+        $this->reconPrefetched = false;
+        $this->scenePrevY = null;
+        $this->scenePrevAw = 0;
+        $this->scenePrevAh = 0;
+    }
+
     public function setQp(int $qp): void
     {
         if ($qp < 0) $qp = 0;

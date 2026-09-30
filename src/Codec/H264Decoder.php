@@ -249,6 +249,41 @@ class H264Decoder
     // ZIGZAG_SCAN_4X4
     public const ZIGZAG_SCAN_4X4 = [0, 1, 4, 8, 5, 2, 3, 6, 9, 12, 13, 10, 7, 11, 14, 15];
 
+    /** 清理当前GOP的参考帧和帧级缓存，保留SPS/PPS、量化表和已解析分辨率。 */
+    public function resetGopState(): void
+    {
+        $this->yPlane = [];
+        $this->uPlane = [];
+        $this->vPlane = [];
+        $this->dpb = [];
+        $this->refPicList0 = [];
+        $this->refFrameY = null;
+        $this->refFrameU = null;
+        $this->refFrameV = null;
+        $this->refStrideY = 0;
+        $this->refStrideUv = 0;
+        $this->refWidthY = 0;
+        $this->refHeightY = 0;
+        $this->refWidthUv = 0;
+        $this->refHeightUv = 0;
+        $this->frameNum = 0;
+        $this->currFrameNum = 0;
+        $this->mvTopRow = [];
+        $this->mvTopLeft = [];
+        $this->mvLeftCol = [];
+        $this->nzTopRowLuma = [];
+        $this->nzTopRowChroma = [];
+        $this->nzLeftColLuma = [];
+        $this->nzLeftColChroma = [];
+        $this->intra4x4TopModes = [];
+        $this->intra4x4LeftModes = [];
+        $this->mbTypeForDeblock = [];
+        $this->mbQpForDeblock = [];
+        $this->mbNnzForDeblock = [];
+        $this->mbMvForDeblock = [];
+        $this->mbRefForDeblock = [];
+    }
+
     public function initQuantMatrix(): void
     {
         // 当scaling_matrix_present_flag=0时，所有矩阵初始化为16（flat matrix）

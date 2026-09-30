@@ -5,6 +5,7 @@ namespace Xiaosongshu\Flv2mp4\Recode;
 use RuntimeException;
 use Throwable;
 use Xiaosongshu\Flv2mp4\Codec\H264Decoder;
+use Xiaosongshu\Flv2mp4\Codec\H264Encoder;
 use Xiaosongshu\Flv2mp4\Codec\NalUtil;
 use Xiaosongshu\Flv2mp4\Codec\Scaler\VideoScaler;
 
@@ -16,6 +17,7 @@ final class HlsDecoderWorkerServer
 {
     private H264Decoder $decoder;
     private ?VideoScaler $scaler;
+    private array $encoders = [];
     private string $sps = '';
     private string $pps = '';
     private int $width = 0;
@@ -24,9 +26,14 @@ final class HlsDecoderWorkerServer
     public function __construct(private array $profiles)
     {
         $this->decoder = new H264Decoder();
-        // 单 profile：缩放/水印在解码进程完成（多解码进程并行，避免输出进程串行缩放成为瓶颈）；
-        // 多 profile：输出原始分辨率 YUV，由输出进程按各 profile 分别缩放
-        $this->scaler = count($profiles) === 1 ? new VideoScaler() : null;
+        foreach ($profiles as $name => $profile) {
+            $encoder = new H264Encoder();
+            $encoder->motionWorkers = max(1, (int)($profile['motionWorkers'] ?? 8));
+            if (!empty($profile['fastMotion'])) $encoder->setFastMotion(true);
+            $this->encoders[$name] = $encoder;
+        }
+        // 每个 GOP worker 独立完成缩放/水印，避免输出端再次处理视频帧。
+        $this->scaler = new VideoScaler();
     }
 
     public function run(string $listenAddress, string $outputAddress, string $controlAddress = ''): void
@@ -55,6 +62,8 @@ final class HlsDecoderWorkerServer
         $ended = false;
         $finishing = false;
         $endSent = false;
+        // 启动即报告空闲，主进程只向READY worker投递完整GOP。
+        $upOutput .= HlsPipelineProtocol::frame(HlsPipelineProtocol::READY, 0, ['worker' => true]);
         $drainStarted = 0.0;
         $lastDrainLog = 0.0;
         $triggerFinish = static function () use (&$finishing, &$drainStarted): void {
@@ -65,7 +74,9 @@ final class HlsDecoderWorkerServer
         try {
             while (true) {
                 $read = [$downstream];
-                if (!$ended && !$finishing && strlen($input) < HlsPipelineProtocol::HIGH_WATERMARK) $read[] = $upstream;
+                // finish 只表示主进程不再追加媒体；仍需继续读取上游socket，
+                // 否则最后一个媒体帧可能只收到半帧，input 永远不会变为空，END也无法发送。
+                if (!$ended && strlen($input) < HlsPipelineProtocol::HIGH_WATERMARK) $read[] = $upstream;
                 if ($ctrlServer !== null) $read[] = $ctrlServer;
                 if ($ctrlConn !== null) $read[] = $ctrlConn;
                 $write = $output === '' ? [] : [$downstream];
@@ -139,8 +150,11 @@ final class HlsDecoderWorkerServer
                         $cmd = $event['metadata']['cmd'] ?? '';
                         if ($cmd === 'config') $this->parseConfiguration(substr($event['payload'], 5));
                         elseif ($cmd === 'gopEnd') {
-                            // 处理到此处时，该 GOP 之前的所有帧均已解码并转发
-                            $upOutput .= HlsPipelineProtocol::frame(HlsPipelineProtocol::PROGRESS, 0, ['gop' => (int)($event['metadata']['gop'] ?? -1)]);
+                            // GOP 边界只清理参考/帧计数，保留已预热的编码器和运动worker。
+                            $gop = (int)($event['metadata']['gop'] ?? -1);
+                            $this->resetGopState();
+                            $upOutput .= HlsPipelineProtocol::frame(HlsPipelineProtocol::PROGRESS, 0, ['gop' => $gop]);
+                            $upOutput .= HlsPipelineProtocol::frame(HlsPipelineProtocol::READY, 0, ['gop' => $gop]);
                         }
                     } elseif ($event['type'] === HlsPipelineProtocol::END) {
                         $output .= HlsPipelineProtocol::frame(HlsPipelineProtocol::END, $event['sequence']);
@@ -234,19 +248,50 @@ final class HlsDecoderWorkerServer
         $meta['sourceWidth'] = $this->width;
         $meta['sourceHeight'] = $this->height;
         $yuv = $frame['data'];
-        if ($this->scaler !== null) {
-            $name = array_key_first($this->profiles);
-            $profile = $this->profiles[$name];
-            $width = ($profile['width'] ?? 0) > 0 ? (int)$profile['width'] : $this->width;
-            $height = ($profile['height'] ?? 0) > 0 ? (int)$profile['height'] : $this->height;
-            if ($width !== $this->width || $height !== $this->height) {
-                $yuv = $this->scaler->scaleYUV420P($yuv, $this->width, $this->height, $width, $height);
-            }
-            if (!empty($profile['watermark']) && !empty($profile['watermark_file'])) $yuv = $this->applyWatermark($yuv, $width, $height, $profile['watermark_file']);
-            $meta['variants'] = [$name => ['offset' => 0, 'length' => strlen($yuv), 'width' => $width, 'height' => $height]];
+        $encodedPayload = '';
+        $encodedVariants = [];
+        foreach ($this->profiles as $name => $profile) {
+            $targetWidth = ($profile['width'] ?? 0) > 0 ? (int)$profile['width'] : $this->width;
+            $targetHeight = ($profile['height'] ?? 0) > 0 ? (int)$profile['height'] : $this->height;
+            $variant = ($targetWidth !== $this->width || $targetHeight !== $this->height)
+                ? $this->scaler->scaleYUV420P($yuv, $this->width, $this->height, $targetWidth, $targetHeight) : $yuv;
+            if (!empty($profile['watermark']) && !empty($profile['watermark_file'])) $variant = $this->applyWatermark($variant, $targetWidth, $targetHeight, $profile['watermark_file']);
+            $encoder = $this->encoders[$name];
+            $encoder->setResolution($targetWidth, $targetHeight);
+            $encoder->setBitrate((int)($profile['bitrate'] ?? 500000));
+            $encoder->setFps((int)($profile['fps'] ?? 25));
+            $encoder->setQp((int)($profile['qp'] ?? 26));
+            $nals = $encoder->encodeFrame($variant, !empty($meta['keyFrame']) || ((ord($body[0]) >> 4) === 1));
+            $annexb = '';
+            foreach ($nals as $nal) $annexb .= $nal;
+            $encodedVariants[$name] = ['offset' => strlen($encodedPayload), 'length' => strlen($annexb), 'width' => $targetWidth, 'height' => $targetHeight];
+            $encodedPayload .= $annexb;
         }
-        $payload = pack('N', strlen($body)) . $body . $yuv;
-        return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, $payload);
+        $meta['encoded'] = true;
+        $meta['keyFrame'] = ((ord($body[0]) >> 4) === 1);
+        $meta['encodedVariants'] = $encodedVariants;
+        $meta['timestamp'] = $meta['timestamp'] ?? 0;
+        $meta['pts'] = (int)(($meta['outTimestamp'] ?? $meta['timestamp']) * 90);
+        $meta['dts'] = (int)($meta['timestamp'] * 90);
+        return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, pack('N', strlen($body)) . $body . $encodedPayload);
+    }
+
+    private function resetGopState(): void
+    {
+        // 解码器内部仍包含较多SPS/PPS、参考帧和帧计数耦合状态，先保留原有安全做法：
+        // GOP边界重建解码器；编码器则使用轻量重置并复用已连接的运动估计worker。
+        $this->decoder = new H264Decoder();
+        if ($this->sps !== '') {
+            $this->decoder->decode([['type' => 7, 'data' => $this->sps]], true);
+            $this->width = $this->decoder->getWidth();
+            $this->height = $this->decoder->getHeight();
+        }
+        foreach ($this->encoders as $encoder) $encoder->resetGopState();
+    }
+
+    private function resetEncoders(): void
+    {
+        foreach ($this->encoders as $encoder) $encoder->resetGopState();
     }
 
     private function parseConfiguration(string $data): void

@@ -76,6 +76,8 @@ class PurePhpHlsGenerator
     private bool $singleProfile = false;
     private ?array $pipelineVariants = null;
     private string $pipelineYuvPayload = '';
+    private string $pipelineEncodedPayload = '';
+    private array $pipelineEncodedVariants = [];
 
     // 帧级双缓冲：一个已 startFrame（所有 profile）的视频帧延后到下一帧到达后再 finish
     private ?array $pendingVideoJob = null;
@@ -347,11 +349,14 @@ class PurePhpHlsGenerator
                 return (int)($this->metadata['outTimestamp'] ?? $this->metadata['timestamp'] ?? 0);
             }
         };
-        if (!empty($metadata['decoded'])) {
+        if (!empty($metadata['decoded']) || !empty($metadata['encoded'])) {
             $bodyLength = unpack('N', substr($payload, 0, 4))[1];
             $tag->body = substr($payload, 4, $bodyLength);
-            $this->pipelineVariants = $metadata['variants'];
+            $this->pipelineVariants = $metadata['variants'] ?? null;
             $this->pipelineYuvPayload = substr($payload, 4 + $bodyLength);
+            $this->pipelineEncodedPayload = $this->pipelineYuvPayload;
+            $this->pipelineEncodedVariants = $metadata['encodedVariants'] ?? [];
+            $metadata['compositionTime'] = (int)($metadata['compositionTime'] ?? 0);
         }
         // 抽帧丢弃帧：decoder 已解码维持参考链，输出端不编码、不写 TS，时间轴由保留帧推进
         if ($tag->tagType === 9 && !empty($metadata['drop'])) {
@@ -363,6 +368,8 @@ class PurePhpHlsGenerator
         elseif ($tag->tagType === 8) $this->handleAudioFrame($tag);
         $this->pipelineVariants = null;
         $this->pipelineYuvPayload = '';
+        $this->pipelineEncodedPayload = '';
+        $this->pipelineEncodedVariants = [];
     }
 
     public function finishPipelineOutput(bool $generateMasterPlaylist = true): void
@@ -472,6 +479,10 @@ class PurePhpHlsGenerator
                 $profileJobs[$name] = ['transcode' => false, 'skip' => true];
                 continue;
             }
+            if (!empty($this->pipelineEncodedVariants[$name])) {
+                $profileJobs[$name] = ['transcode' => false, 'encoded' => true, 'skip' => false];
+                continue;
+            }
 
             $targetW = $profile['width'] > 0 ? $profile['width'] : $this->srcWidth;
             $targetH = $profile['height'] > 0 ? $profile['height'] : $this->srcHeight;
@@ -546,7 +557,12 @@ class PurePhpHlsGenerator
             $outputSpsPps = $this->spsPpsData[$name];
             $isTranscoded = false;
 
-            if (!empty($pjob['transcode'])) {
+            if (!empty($this->pipelineEncodedVariants[$name])) {
+                $variant = $this->pipelineEncodedVariants[$name];
+                $outputData = substr($this->pipelineEncodedPayload, $variant['offset'], $variant['length']);
+                $outputSpsPps = '';
+                $isTranscoded = true;
+            } elseif (!empty($pjob['transcode'])) {
                 $encodedNals = $this->encoders[$name]->finishFrame();
                 $outputData = '';
                 $outputSpsPps = '';

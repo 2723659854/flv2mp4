@@ -105,9 +105,14 @@ class Flv2HlsCompact
     /** @var array<int,string> 各解码worker回报缓冲 */
     private array $plIn = [];
     private array $plDead = [];
+    private array $plBusy = [];
+    private array $plGopQueue = [];
+    private array $plCurrentGop = [];
+    private string $plConfigFrame = '';
     private int $plSeq = 0;
     private int $plGopSeq = 0;
     private int $plCurrentWorker = 0;
+    private bool $plFinishing = false;
     private int $plFinished = 0;
     private bool $plEndSent = false;
     private ?int $lastEncodedVideoTimestamp = null;
@@ -541,6 +546,7 @@ class Flv2HlsCompact
             ]);
             $this->plOut[$i] = '';
             $this->plIn[$i] = '';
+            $this->plBusy[$i] = false;
         }
 
         // 连接所有解码worker（媒体+控制）及输出worker控制连接（冷启动并发轮询等待就绪）
@@ -647,7 +653,10 @@ class Flv2HlsCompact
             $pendingInput = $this->readBuffer !== '';
             foreach ($this->plOut as $buf) if ($buf !== '') { $pendingInput = true; break; }
             if (!$this->plEndSent && ($this->endReceived || ($this->stopSignaled && !$pendingInput))) {
-                $this->sendPipelineFinish();
+                if ($this->plCurrentGop !== []) $this->queueGop();
+                $this->dispatchGops();
+                $allIdle = $this->plGopQueue === [] && !in_array(true, $this->plBusy, true);
+                if ($allIdle) $this->sendPipelineFinish();
             }
             if ($this->plEndSent && $this->plFinished >= $this->decodeWorkers) {
                 $this->running = false;
@@ -671,7 +680,11 @@ class Flv2HlsCompact
         foreach (HlsPipelineProtocol::take($this->plIn[$id], PHP_INT_MAX) as $event) {
             switch ($event['type']) {
                 case HlsPipelineProtocol::PROGRESS:
-                    break; // GOP进度回报：直播不做窗口gate，忽略
+                    break;
+                case HlsPipelineProtocol::READY:
+                    $this->plBusy[$id] = false;
+                    $this->dispatchGops();
+                    break;
                 case HlsPipelineProtocol::FINISHED:
                     $this->plFinished++;
                     break;
@@ -689,55 +702,56 @@ class Flv2HlsCompact
     private function plEnqueueTag(int $tagType, string $body, int $timestamp): void
     {
         $this->tagsFed++;
-        if ($tagType === 9) $this->videoTags++;
-        else $this->audioTags++;
-
+        if ($tagType === 9) $this->videoTags++; else $this->audioTags++;
         if ($tagType === 9 && strlen($body) >= 2 && (ord($body[0]) & 0x0f) === 7) {
             $packetType = ord($body[1]);
             if ($packetType === 0) {
-                $this->plOut[0] .= HlsPipelineProtocol::frame(
-                    HlsPipelineProtocol::EVENT, $this->plSeq++,
-                    ['tagType' => 9, 'timestamp' => $timestamp], $body
-                );
-                $control = HlsPipelineProtocol::frame(HlsPipelineProtocol::CONTROL, 0, ['cmd' => 'config'], $body);
-                for ($i = 0; $i < $this->decodeWorkers; $i++) $this->plOut[$i] .= $control;
+                $frame = HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $this->plSeq++, ['tagType' => 9, 'timestamp' => $timestamp], $body);
+                $this->plOut[0] .= $frame;
+                $this->plConfigFrame = HlsPipelineProtocol::frame(HlsPipelineProtocol::CONTROL, 0, ['cmd' => 'config'], $body);
+                for ($i = 0; $i < $this->decodeWorkers; $i++) $this->plOut[$i] .= $this->plConfigFrame;
                 return;
             }
             if ($packetType === 1) {
                 $isKey = ((ord($body[0]) >> 4) === 1) && $this->containsIdrNal($body);
                 $drop = false;
+                if ($isKey) $this->lastEncodedVideoTimestamp = $timestamp;
+                elseif ($this->targetFps > 0 && $this->lastEncodedVideoTimestamp !== null) {
+                    $drop = $timestamp - $this->lastEncodedVideoTimestamp < 1000 / $this->targetFps;
+                    if (!$drop) $this->lastEncodedVideoTimestamp = $timestamp;
+                } else $this->lastEncodedVideoTimestamp = $timestamp;
                 if ($isKey) {
-                    $this->lastEncodedVideoTimestamp = $timestamp;
-                } elseif ($this->targetFps > 0 && $this->lastEncodedVideoTimestamp !== null) {
-                    $frameInterval = 1000 / $this->targetFps;
-                    if ($timestamp - $this->lastEncodedVideoTimestamp < $frameInterval) $drop = true;
-                    else $this->lastEncodedVideoTimestamp = $timestamp;
-                } else {
-                    $this->lastEncodedVideoTimestamp = $timestamp;
-                }
-                if ($isKey) {
-                    if ($this->plGopSeq > 0) {
-                        $prev = $this->plGopSeq - 1;
-                        $this->plOut[$prev % $this->decodeWorkers] .= HlsPipelineProtocol::frame(
-                            HlsPipelineProtocol::CONTROL, 0, ['cmd' => 'gopEnd', 'gop' => $prev]
-                        );
-                    }
-                    $this->plCurrentWorker = $this->plGopSeq % $this->decodeWorkers;
+                    if ($this->plGopSeq > 0 && $this->plCurrentGop !== []) $this->queueGop();
                     $this->plGopSeq++;
                 }
                 $metadata = ['tagType' => 9, 'timestamp' => $timestamp];
                 if ($drop) $metadata['drop'] = true;
-                $this->plOut[$this->plCurrentWorker] .= HlsPipelineProtocol::frame(
-                    HlsPipelineProtocol::EVENT, $this->plSeq++,
-                    $metadata, $body
-                );
+                $this->plCurrentGop[] = HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $this->plSeq++, $metadata, $body);
                 return;
             }
         }
-        $this->plOut[$this->plCurrentWorker] .= HlsPipelineProtocol::frame(
-            HlsPipelineProtocol::EVENT, $this->plSeq++,
-            ['tagType' => $tagType, 'timestamp' => $timestamp], $body
-        );
+        $this->plCurrentGop[] = HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $this->plSeq++, ['tagType' => $tagType, 'timestamp' => $timestamp], $body);
+    }
+
+    private function queueGop(): void
+    {
+        $gop = $this->plGopSeq - 1;
+        $this->plGopQueue[] = [$gop, $this->plCurrentGop];
+        $this->plCurrentGop = [];
+        $this->dispatchGops();
+    }
+
+    private function dispatchGops(): void
+    {
+        foreach ($this->plGopQueue as $index => [$gop, $frames]) {
+            $worker = array_search(false, $this->plBusy, true);
+            if ($worker === false) break;
+            $this->plBusy[$worker] = true;
+            foreach ($frames as $frame) $this->plOut[$worker] .= $frame;
+            $this->plOut[$worker] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::CONTROL, 0, ['cmd' => 'gopEnd', 'gop' => $gop]);
+            unset($this->plGopQueue[$index]);
+        }
+        $this->plGopQueue = array_values($this->plGopQueue);
     }
 
     /**
