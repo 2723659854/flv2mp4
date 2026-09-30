@@ -1,5 +1,6 @@
 <?php
 ini_set('memory_limit', '2048M');
+if (function_exists('pcntl_signal')) pcntl_signal(SIGINT, SIG_IGN);
 try {
     $options = getopt('', ['mode:', 'autoload:', 'port:', 'control-port:', 'output-port:', 'output-ports:', 'profiles:', 'output:', 'workers:']);
     $mode = $options['mode'] ?? '';

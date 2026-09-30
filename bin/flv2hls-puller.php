@@ -11,6 +11,7 @@
  */
 
 ini_set('memory_limit', '2048M');
+if (function_exists('pcntl_signal')) pcntl_signal(SIGINT, SIG_IGN);
 
 $autoload = null;
 $opts = [];

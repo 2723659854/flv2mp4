@@ -10,8 +10,9 @@
  * 经本地TCP把tag帧交给转码主进程；转码落后超限时在IDR关键帧边界跳帧追直播。
  * IPC帧协议与 flv2hls-puller.php 完全一致。信号由主进程统一处理，本进程忽略Ctrl+C。
  */
+
 ini_set('memory_limit', '2048M');
-ini_set('memory_limit', '512M');
+if (function_exists('pcntl_signal')) pcntl_signal(SIGINT, SIG_IGN);
 
 $opts = [];
 foreach (array_slice($argv, 1) as $arg) {
