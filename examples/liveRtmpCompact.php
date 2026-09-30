@@ -21,19 +21,18 @@ $config = [
     // —— 目标规格（width/height 必须同时给，0=保持源尺寸）——
     'width'        => 640,
     'height'       => 360,
-    'bitrate'      => 800000,  // 目标视频码率 bps
-    'fps'          => 0,       // 目标帧率（串行管道仅传编码器，不抽帧；0=保持）
-    'qp'           => 10,      // 量化参数 0-51
+    'bitrate'      => 0,  // 目标视频码率 bps
+    'fps'          => 15,       // 目标帧率（串行管道仅传编码器，不抽帧；0=保持）
+    'qp'           => 30,      // 量化参数 0-51
     'audioBitrate' => 64000,   // 音频码率 bps
 
     // —— 并行/输出 ——
-    'motionWorkers'   => 12,   // 运动估计子进程数（360p实时的关键；约需14+逻辑线程，核少请同时降到240p）
-    'decodeWorkers'   => 2,    // 解码+缩放worker数（缩放在此并行完成，勿置0走串行）
+    'motionWorkers'   => 12,   // 运动估计子进程数（i5-13400/16线程实测12最优）
+    'decodeWorkers'   => 6,    // 解码+缩放worker数（1080p 实测 6 可保 30fps 聚合）
     'segmentDuration' => 3,    // HLS切片时长（秒）
     'fastMotion' => true,      // 快速运动估计：缩小搜索并跳过四分之一像素
-
     // —— 输出目录与流名（默认 项目根/hls/<URL末段>/）——
-     'outputDir'  => __DIR__ . '/hls/live_rtmp/',
+    'outputDir'  => __DIR__ . '/hls/live_rtmp/',
     // 'streamName' => 'room1',
 
     // ======================== 拉流客户端配置 ========================
@@ -43,6 +42,6 @@ $config = [
     'idleTimeout'   => 30,     // 连续无数据判定断流（秒）
     'queueMaxBytes' => 8388608,  // 转码落后容忍8MB；超限拉流进程跳IDR追直播（独立进程，绝不反压上游）
     // 'duration'   => 0,      // 限定运行秒数，0=不限
+    // 'tlsVerify'  => false,  // https/wss 自签证书时关闭校验
 ];
-
 (new \Xiaosongshu\Flv2mp4\Manage\Flv2HlsCompact($pullUrl, $config))->run();
