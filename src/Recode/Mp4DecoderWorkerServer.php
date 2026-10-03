@@ -122,10 +122,10 @@ final class Mp4DecoderWorkerServer
         if ($sps !== '') array_unshift($nals, ['type' => 7, 'data' => $sps]);
         if ($pps !== '') array_unshift($nals, ['type' => 8, 'data' => $pps]);
         $dropFrame = !empty($meta['drop']);
-        // 与中央 Mp4Recoder 同策略：抽帧丢弃的帧仍完整解码（含去块滤波）以维持参考链，
-        // 后续保留帧要以它的重建图为参考；其 YUV 不缩放、不编码。
-        // （FLV 中央路径相反：丢帧在解码前跳过，两条路径各自与自己的中央实现保持一致。）
-        $frame = $this->decoder->decode($nals, false, true, false);
+        // 与 FLV/HLS worker 同策略：抽帧丢弃的帧仍解码 slice 以更新 DPB/P 链参考
+        // （不解参考后续保留帧会出现马赛克），但不组装 YUV、跳过去块滤波；
+        // IDR 在解码器内部仍强制去块。省下抽帧场景（约 2/3 帧）的大头开销。
+        $frame = $this->decoder->decode($nals, false, !$dropFrame, $dropFrame);
         if ($dropFrame) return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, $payload);
         if (!$frame || empty($frame['data'])) { unset($meta['drop']); return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, $payload); }
         $srcW = (int)$pipeline['srcWidth']; $srcH = (int)$pipeline['srcHeight'];
