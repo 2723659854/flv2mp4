@@ -183,7 +183,13 @@ final class HlsPipelineClient
                     $gopBuffer = [];
                 }
                 if (($exhausted || $stopReading) && !$endEnqueued && $gopBuffer === []) {
-                    $outbound[0] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::END, $sequence++);
+                    // END 必须广播给每个解码 worker：各 worker 排空自己通道内的媒体后各自转发 END，
+                    // 输出 worker 需收齐 workerCount 个 END 才会关闭分片、回 FINISHED
+                    // （收尾协议与直播流水线一致；只发给 worker0 会导致其余 worker 与输出进程永久等待）。
+                    // END 追加在各 worker 媒体末尾，天然保证"先收完媒体再收尾"的顺序，无需独立控制连接。
+                    for ($i = 0; $i < $workerCount; $i++) {
+                        $outbound[$i] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::END, $sequence++);
+                    }
                     $endEnqueued = true;
                 }
 
