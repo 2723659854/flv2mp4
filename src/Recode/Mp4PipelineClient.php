@@ -23,19 +23,21 @@ final class Mp4PipelineClient
 
     public function process(string $inputFile, string $outputFile): void
     {
-        $workerCount = max(1, min(8, (int)($this->config['decode_workers'] ?? 4)));
         $autoload = $this->locateAutoload();
         $worker = dirname(__DIR__, 2) . DIRECTORY_SEPARATOR . 'bin' . DIRECTORY_SEPARATOR . 'mp4-recode-worker.php';
         [$streamMetadata, $samples] = (new Mp4Recoder($this->config, false))->preparePipelineInput($inputFile);
-        // MP4 只能在关键帧边界切分并行，worker 超过 GOP 数纯属空转（白白承担进程启动与等待开销）
+        // GOP 数决定可用的解码并行度，先统计再自适应规划（GOP 少时收缩解码 worker、加码帧内运动并行）
         $gopCount = 0;
         foreach ($samples as $sample) if ($sample['type'] === 'video' && !empty($sample['keyframe'])) $gopCount++;
-        if ($gopCount > 0) $workerCount = max(1, min($workerCount, $gopCount));
+        [$workerCount, $motionPerWorker] = $this->planWorkers($gopCount);
+        echo "并行规划: GOP={$gopCount}, 解码worker={$workerCount}, 每worker运动进程={$motionPerWorker}（运动进程共" . ($workerCount * $motionPerWorker) . "）\n";
         [, $outputPort] = $this->reserveAddress();
         $decoderAddresses = [];
         for ($i = 0; $i < $workerCount; $i++) $decoderAddresses[] = $this->reserveAddress();
         $config = $this->config;
         $config['pipeline'] = $streamMetadata;
+        // 下发给 worker 的是"每 worker 运动进程数"（自适应结果）
+        $config['motionWorkers'] = $motionPerWorker;
         $encodedConfig = base64_encode(json_encode($config, JSON_THROW_ON_ERROR));
         $sockets = [];
         try {
@@ -168,6 +170,32 @@ final class Mp4PipelineClient
             $this->terminateWorkers();
             throw $e;
         }
+    }
+
+    /**
+     * 按 GOP 数量自适应规划进程布局，返回 [解码worker数, 每worker运动估计进程数]
+     *
+     * 实测（640x360/fastMotion，PHP 纯实现）：每 worker 的运动进程 M=2 为甜点——
+     * 帧内条带并行超过 2 路后，运动计算已不是瓶颈，多出的子进程只增加冷启动/调度开销
+     * （90帧片段 2x2=10.4s vs 2x4=12.4s；387帧片段 4x2=22.2s vs 4x4=25.4s）。
+     * 因此运动预算 motion_budget 全部用于扩张解码 worker（GOP 并行）：
+     *   M = min(2, 配置motionWorkers)
+     *   D = min(decode_workers上限, GOP数, floor(budget / M))
+     * 例（budget=8）：GOP=1 → 1×2；GOP=2 → 2×2；GOP≥4 → 4×2。
+     *
+     * @return array{0:int,1:int}
+     */
+    private function planWorkers(int $gopCount): array
+    {
+        $decodeMax = max(1, min(8, (int)($this->config['decode_workers'] ?? 4)));
+        $configuredMotion = max(1, (int)($this->config['motionWorkers'] ?? 2));
+        if ($gopCount <= 0) {
+            return [$decodeMax, $configuredMotion];
+        }
+        $budget = max(1, (int)($this->config['motion_budget'] ?? 8));
+        $m = min(2, $configuredMotion);
+        $d = min($decodeMax, $gopCount, max(1, intdiv($budget, $m)));
+        return [$d, $m];
     }
 
     private function bufferedBytes(array $buffers): int

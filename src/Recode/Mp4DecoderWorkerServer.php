@@ -16,6 +16,14 @@ final class Mp4DecoderWorkerServer
     private H264Decoder $decoder;
     private VideoScaler $scaler;
     private H264Encoder $encoder;
+    /**
+     * 帧级双缓冲中已 startFrame、等待下一帧到来后 finish 的在途编码帧。
+     * 运动子进程计算 N+1 与主进程 CAVLC 编码 N 重叠（与中央编码器同一条流水线），
+     * 缺少这层重叠时每帧都要"派运动→等结果→CAVLC"串行，GOP 越少损失越明显。
+     */
+    private ?array $pendingFrame = null;
+    /** 在途视频帧之后到达、须等它先发出的直通帧（音频/丢帧/解码失败回退），维持本路序号严格递增。 */
+    private string $deferredOutput = '';
 
     public function __construct(private array $config)
     {
@@ -35,6 +43,8 @@ final class Mp4DecoderWorkerServer
         $upstream = @stream_socket_accept($server, 15); fclose($server);
         if ($upstream === false) throw new RuntimeException('解码进程等待主进程连接超时');
         stream_set_blocking($upstream, false); stream_set_blocking($downstream, false);
+        // 立即拉起运动估计子进程，让冷启动与主进程派发其它 worker/读取文件并行（与中央编码器同策略）
+        $this->encoder->warmupMotionWorkers();
         $input = ''; $output = ''; $response = ''; $ended = false;
         try {
             while (true) {
@@ -56,10 +66,18 @@ final class Mp4DecoderWorkerServer
                     if ($events === []) break;
                     $event = $events[0];
                     if ($event['type'] === HlsPipelineProtocol::CONTROL) {
-                        // GOP 边界标记在 worker 内消费，不转发给输出进程
-                        if (($event['metadata']['cmd'] ?? '') === 'gopEnd') $this->resetGopState();
-                    } elseif ($event['type'] === HlsPipelineProtocol::END) { $output .= HlsPipelineProtocol::frame(HlsPipelineProtocol::END, $event['sequence']); $ended = true; }
-                    else $output .= $this->transform($event);
+                        // GOP 边界标记在 worker 内消费，不转发给输出进程；先冲刷在途帧再重置
+                        if (($event['metadata']['cmd'] ?? '') === 'gopEnd') {
+                            $output .= $this->flushEncodedFrame();
+                            $this->resetGopState();
+                        }
+                    } elseif ($event['type'] === HlsPipelineProtocol::END) {
+                        // 末帧在途：收尾后再转发 END
+                        $output .= $this->flushEncodedFrame();
+                        $output .= HlsPipelineProtocol::frame(HlsPipelineProtocol::END, $event['sequence']);
+                        $ended = true;
+                    }
+                    else $output .= $this->orderFrame($this->transform($event));
                     if (strlen($output) > HlsPipelineProtocol::MAX_BUFFER_LENGTH) throw new RuntimeException('解码进程下游缓冲超限');
                 }
                 if (in_array($downstream, $write, true)) {
@@ -104,9 +122,10 @@ final class Mp4DecoderWorkerServer
         if ($sps !== '') array_unshift($nals, ['type' => 7, 'data' => $sps]);
         if ($pps !== '') array_unshift($nals, ['type' => 8, 'data' => $pps]);
         $dropFrame = !empty($meta['drop']);
-        // 被丢弃的帧仍需完整解码以维持本GOP参考链，但它的YUV不会进入后续流水线，跳过裁剪输出；去块滤波照常执行
-        $frame = $this->decoder->decode($nals, false, !$dropFrame, false);
-        // 抽帧决策由主进程统一下发
+        // 与中央 Mp4Recoder 同策略：抽帧丢弃的帧仍完整解码（含去块滤波）以维持参考链，
+        // 后续保留帧要以它的重建图为参考；其 YUV 不缩放、不编码。
+        // （FLV 中央路径相反：丢帧在解码前跳过，两条路径各自与自己的中央实现保持一致。）
+        $frame = $this->decoder->decode($nals, false, true, false);
         if ($dropFrame) return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, $payload);
         if (!$frame || empty($frame['data'])) { unset($meta['drop']); return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, $payload); }
         $srcW = (int)$pipeline['srcWidth']; $srcH = (int)$pipeline['srcHeight'];
@@ -120,17 +139,67 @@ final class Mp4DecoderWorkerServer
         $encoderFps = isset($pipeline['effectiveTargetFps']) ? (float)$pipeline['effectiveTargetFps'] : (float)($pipeline['sourceFps'] ?? 0);
         if ($encoderFps <= 0.0) $encoderFps = (float)($pipeline['sourceFps'] ?? 0);
         if ($encoderFps > 0) $this->encoder->setFps(max(1, (int)round($encoderFps)));
-        $encodedNals = $this->encoder->encodeFrame($yuv, !empty($meta['keyframe']));
+        return $this->feedEncoder($event, $meta, $payload, $yuv, $outW, $outH, !empty($meta['keyframe']));
+    }
+
+    /**
+     * 维持本路连接序号严格递增：在途帧未 finish 期间，后续直通帧（序号更大）先缓存，
+     * 待在途帧产出时按"在途帧 + 缓存帧"顺序一并吐出。
+     */
+    private function orderFrame(string $frame): string
+    {
+        if ($frame === '') return '';
+        if ($this->pendingFrame === null) return $frame;
+        $this->deferredOutput .= $frame;
+        return '';
+    }
+
+    /**
+     * 帧级双缓冲喂帧：首帧只 startFrame（异步派运动估计）不产出；
+     * 后续帧先 startFrame(N+1) 再 finishFrame() 取 N 的 NAL，
+     * 主进程 CAVLC(N) 与运动子进程计算(N+1) 在时间上重叠。
+     * 返回上一帧（已 finish）的协议帧（连同被延后的直通帧）；首帧返回空串。
+     */
+    private function feedEncoder(array $event, array $meta, string $payload, string $yuv, int $outW, int $outH, bool $isKey): string
+    {
+        $this->encoder->startFrame($yuv, $isKey);
+        if ($this->pendingFrame === null) {
+            $this->pendingFrame = ['sequence' => $event['sequence'], 'meta' => $meta, 'payload' => $payload, 'w' => $outW, 'h' => $outH, 'isKey' => $isKey];
+            return '';
+        }
+        $frame = $this->buildPendingFrame($this->encoder->finishFrame());
+        $this->pendingFrame = ['sequence' => $event['sequence'], 'meta' => $meta, 'payload' => $payload, 'w' => $outW, 'h' => $outH, 'isKey' => $isKey];
+        if ($this->deferredOutput !== '') { $frame .= $this->deferredOutput; $this->deferredOutput = ''; }
+        return $frame;
+    }
+
+    /** 冲刷在途的最后一帧（GOP 边界或 END），并带出其后缓存的直通帧。 */
+    private function flushEncodedFrame(): string
+    {
+        if ($this->pendingFrame === null) return '';
+        $frame = $this->buildPendingFrame($this->encoder->finishFrame());
+        $this->pendingFrame = null;
+        if ($this->deferredOutput !== '') { $frame .= $this->deferredOutput; $this->deferredOutput = ''; }
+        return $frame;
+    }
+
+    private function buildPendingFrame(array $encodedNals): string
+    {
+        $p = $this->pendingFrame;
         $annexb = '';
         foreach ($encodedNals as $nal) $annexb .= $nal;
+        $meta = $p['meta'];
         $meta['encoded'] = true;
-        $meta['encodedVariant'] = ['offset' => 4 + strlen($payload), 'length' => strlen($annexb), 'width' => $outW, 'height' => $outH];
-        return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, pack('N', strlen($payload)) . $payload . $annexb);
+        $meta['keyframe'] = $p['isKey'];
+        $meta['encodedVariant'] = ['offset' => 4 + strlen($p['payload']), 'length' => strlen($annexb), 'width' => $p['w'], 'height' => $p['h']];
+        return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $p['sequence'], $meta, pack('N', strlen($p['payload'])) . $p['payload'] . $annexb);
     }
 
     private function resetGopState(): void
     {
         // GOP 边界：解码器重建（SPS/PPS 每帧随样本注入），编码器轻量重置并复用运动估计子进程
+        $this->pendingFrame = null;
+        $this->deferredOutput = '';
         $this->decoder = new H264Decoder();
         $this->encoder->resetGopState();
     }
