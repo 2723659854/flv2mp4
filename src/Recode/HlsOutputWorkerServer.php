@@ -23,6 +23,7 @@ final class HlsOutputWorkerServer
         // 独立控制连接：主进程的finish屏障走此通道直达，与媒体FIFO完全隔离
         // （媒体流里可能正卡着一个已发出一半的大帧，任何插入都会破坏长度前缀分帧）
         $ctrlServer = null;
+        $ctrlConn = null;
         if ($controlAddress !== '') {
             $ctrlServer = @stream_socket_server($controlAddress, $errno, $error);
             if ($ctrlServer === false) throw new RuntimeException("编码进程控制端口监听失败: {$error} ({$errno})");
