@@ -536,7 +536,8 @@ class Flv2HlsCompact
             [, $controlPorts[]] = $this->reserveAddress();
         }
 
-        // 输出worker先启动（内部预热运动估计子进程并等待decoder接入）
+        // 输出worker先启动（单profile下视频帧已在解码worker预编码完成，输出worker只做TS封装；
+        // --preencoded 跳过编码器运动子进程预热，避免白冷启动 motionWorkers 个永不使用的PHP进程）
         $this->startWorker($entry, [
             '--mode', 'output',
             '--autoload', $autoload,
@@ -545,6 +546,7 @@ class Flv2HlsCompact
             '--workers', (string)$n,
             '--profiles', $profilesOpt,
             '--output', rtrim($this->streamDir, '/\\') . '/',
+            '--preencoded',
         ]);
         for ($i = 0; $i < $n; $i++) {
             $this->startWorker($entry, [
