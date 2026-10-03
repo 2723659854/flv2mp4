@@ -87,7 +87,12 @@ final class FlvPipelineClient
                         if ($frameCount % 50 === 0) echo "Processed {$frameCount} frames ({$videoCount} video)\n";
                     }
                     if (($exhausted || $stopReading) && !$endEnqueued) {
-                        $outbound[0] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::END, $sequence++);
+                        // END 必须广播给每个解码 worker：各 worker 排空自己通道内的媒体后各自转发 END，
+                        // 输出 worker 需收齐 workerCount 个 END 才收尾并回 FINISHED（与 HLS 流水线一致）。
+                        // END 追加在各 worker 媒体末尾，天然保证"先收完媒体再收尾"的顺序。
+                        for ($i = 0; $i < $workerCount; $i++) {
+                            $outbound[$i] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::END, $sequence++);
+                        }
                         $endEnqueued = true;
                     }
                 }
@@ -174,6 +179,12 @@ final class FlvPipelineClient
         $isKey = (ord($body[0]) >> 4) === 1 && $this->containsIdrNal($body);
         if ($isKey) {
             // 每个IDR开启一个独立GOP，轮询分配给空闲解码worker
+            if ($gopSeq > 0) {
+                // 上一GOP所有帧之后插入边界标记：worker 处理到此处即代表该 GOP 已完成，
+                // 重置解码参考链与编码器 GOP 状态（保留已预热的运动估计子进程）
+                $prevWorker = ($gopSeq - 1) % $workerCount;
+                $outbound[$prevWorker] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::CONTROL, 0, ['cmd' => 'gopEnd', 'gop' => $gopSeq - 1]);
+            }
             $currentWorker = $gopSeq % $workerCount;
             $gopSeq++;
         }

@@ -4,22 +4,27 @@ namespace Xiaosongshu\Flv2mp4\Recode;
 
 use RuntimeException;
 use Xiaosongshu\Flv2mp4\Codec\H264Decoder;
+use Xiaosongshu\Flv2mp4\Codec\H264Encoder;
 use Xiaosongshu\Flv2mp4\Codec\NalUtil;
 use Xiaosongshu\Flv2mp4\Codec\Scaler\VideoScaler;
 
 /**
- * @purpose mp4重编码分布式架构-解码
- * @author yanglong
+ * @purpose mp4重编码分布式架构-GOP worker（解码+缩放+编码，每个worker携带1组运动估计子进程）
  */
 final class Mp4DecoderWorkerServer
 {
     private H264Decoder $decoder;
     private VideoScaler $scaler;
+    private H264Encoder $encoder;
 
     public function __construct(private array $config)
     {
         $this->decoder = new H264Decoder();
         $this->scaler = new VideoScaler();
+        // 编码在 GOP worker 内完成：每个 worker 独立编码器 + 独立运动估计子进程
+        $this->encoder = new H264Encoder();
+        $this->encoder->motionWorkers = max(1, (int)($config['motionWorkers'] ?? 8));
+        if (!empty($config['fastMotion'])) $this->encoder->setFastMotion(true);
     }
 
     public function run(string $listenAddress, string $outputAddress): void
@@ -50,7 +55,10 @@ final class Mp4DecoderWorkerServer
                     $events = HlsPipelineProtocol::take($input, 1);
                     if ($events === []) break;
                     $event = $events[0];
-                    if ($event['type'] === HlsPipelineProtocol::END) { $output .= HlsPipelineProtocol::frame(HlsPipelineProtocol::END, $event['sequence']); $ended = true; }
+                    if ($event['type'] === HlsPipelineProtocol::CONTROL) {
+                        // GOP 边界标记在 worker 内消费，不转发给输出进程
+                        if (($event['metadata']['cmd'] ?? '') === 'gopEnd') $this->resetGopState();
+                    } elseif ($event['type'] === HlsPipelineProtocol::END) { $output .= HlsPipelineProtocol::frame(HlsPipelineProtocol::END, $event['sequence']); $ended = true; }
                     else $output .= $this->transform($event);
                     if (strlen($output) > HlsPipelineProtocol::MAX_BUFFER_LENGTH) throw new RuntimeException('解码进程下游缓冲超限');
                 }
@@ -105,9 +113,26 @@ final class Mp4DecoderWorkerServer
         $outW = (int)$pipeline['outputWidth']; $outH = (int)$pipeline['outputHeight'];
         $yuv = ($srcW === $outW && $srcH === $outH) ? $frame['data'] : $this->scaler->scaleYUV420P($frame['data'], $srcW, $srcH, $outW, $outH);
         if (!empty($this->config['watermark']) && !empty($this->config['watermark_file'])) $yuv = $this->applyWatermark($yuv, $outW, $outH, $this->config['watermark_file']);
-        $meta['decoded'] = true;
-        $meta['variants'] = ['default' => ['offset' => 0, 'length' => strlen($yuv), 'width' => $outW, 'height' => $outH]];
-        return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, pack('N', strlen($payload)) . $payload . $yuv);
+        // GOP worker 内直接完成编码（运动估计走本 worker 的子进程），输出侧只做封装
+        $this->encoder->setResolution($outW, $outH);
+        if ((int)($this->config['bitrate'] ?? 0) > 0) $this->encoder->setBitrate((int)$this->config['bitrate']);
+        else $this->encoder->setQp((int)($this->config['qp'] ?? 26));
+        $encoderFps = isset($pipeline['effectiveTargetFps']) ? (float)$pipeline['effectiveTargetFps'] : (float)($pipeline['sourceFps'] ?? 0);
+        if ($encoderFps <= 0.0) $encoderFps = (float)($pipeline['sourceFps'] ?? 0);
+        if ($encoderFps > 0) $this->encoder->setFps(max(1, (int)round($encoderFps)));
+        $encodedNals = $this->encoder->encodeFrame($yuv, !empty($meta['keyframe']));
+        $annexb = '';
+        foreach ($encodedNals as $nal) $annexb .= $nal;
+        $meta['encoded'] = true;
+        $meta['encodedVariant'] = ['offset' => 4 + strlen($payload), 'length' => strlen($annexb), 'width' => $outW, 'height' => $outH];
+        return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, pack('N', strlen($payload)) . $payload . $annexb);
+    }
+
+    private function resetGopState(): void
+    {
+        // GOP 边界：解码器重建（SPS/PPS 每帧随样本注入），编码器轻量重置并复用运动估计子进程
+        $this->decoder = new H264Decoder();
+        $this->encoder->resetGopState();
     }
 
     private function extractNals(string $data): array

@@ -34,6 +34,7 @@ final class FlvOutputWorkerServer
         $pending = [];
         $pendingBytes = 0;
         $expected = 0;
+        $endCount = 0;
         $finished = false;
         $lastSeq = array_fill(0, $workers, -1);
         try {
@@ -69,6 +70,13 @@ final class FlvOutputWorkerServer
                 }
                 foreach ($inputs as $id => $buffer) {
                     foreach (HlsPipelineProtocol::take($inputs[$id], PHP_INT_MAX) as $event) {
+                        // END 不进入按序号重排队列：每个 decoder 排空本路媒体后各发一个 END，
+                        // 收齐 workerCount 个且重排队列连续排空后才允许收尾（与 HLS 流水线一致）
+                        if ($event['type'] === HlsPipelineProtocol::END) {
+                            $endCount++;
+                            continue;
+                        }
+                        if ($event['type'] !== HlsPipelineProtocol::EVENT) continue;
                         $seq = $event['sequence'];
                         if ($seq < $expected) continue;
                         if (isset($pending[$seq])) throw new RuntimeException("媒体事件 sequence 重复: {$seq}");
@@ -78,16 +86,17 @@ final class FlvOutputWorkerServer
                         $lastSeq[$id] = $seq;
                     }
                 }
+                if (!$finished && $endCount >= $workers && $pending === []) {
+                    $recoder->finishPipelineOutput($this->outputFile);
+                    $frame = HlsPipelineProtocol::frame(HlsPipelineProtocol::FINISHED, $expected);
+                    for ($i = 0; $i < $workers; $i++) $outputs[$i] .= $frame;
+                    $finished = true;
+                }
                 while (isset($pending[$expected])) {
                     [$event, $eventBytes] = $pending[$expected];
                     unset($pending[$expected]);
                     $pendingBytes -= $eventBytes;
-                    if ($event['type'] === HlsPipelineProtocol::END) {
-                        $recoder->finishPipelineOutput($this->outputFile);
-                        $frame = HlsPipelineProtocol::frame(HlsPipelineProtocol::FINISHED, $event['sequence']);
-                        for ($i = 0; $i < $workers; $i++) $outputs[$i] .= $frame;
-                        $finished = true;
-                    } elseif ($event['type'] === HlsPipelineProtocol::EVENT) {
+                    if ($event['type'] === HlsPipelineProtocol::EVENT) {
                         $recoder->processPipelineEvent($event['metadata'], $event['payload']);
                     } else throw new RuntimeException('输出进程收到未知事件');
                     $expected++;

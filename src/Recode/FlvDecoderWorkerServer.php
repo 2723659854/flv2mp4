@@ -5,17 +5,19 @@ namespace Xiaosongshu\Flv2mp4\Recode;
 use RuntimeException;
 use Throwable;
 use Xiaosongshu\Flv2mp4\Codec\H264Decoder;
+use Xiaosongshu\Flv2mp4\Codec\H264Encoder;
 use Xiaosongshu\Flv2mp4\Codec\NalUtil;
 use Xiaosongshu\Flv2mp4\Codec\Scaler\VideoScaler;
 
 /**
- * @purpose flv重编码分布式架构-解码服务端
+ * @purpose flv重编码分布式架构-GOP worker（解码+缩放+编码，每个worker携带1组运动估计子进程）
  * @author yanglong
  */
 final class FlvDecoderWorkerServer
 {
     private H264Decoder $decoder;
     private VideoScaler $scaler;
+    private H264Encoder $encoder;
     private string $sps = '';
     private string $pps = '';
     private int $width = 0;
@@ -25,6 +27,10 @@ final class FlvDecoderWorkerServer
     {
         $this->decoder = new H264Decoder();
         $this->scaler = new VideoScaler();
+        // 编码在 GOP worker 内完成：每个 worker 独立编码器 + 独立运动估计子进程（GOP边界只重置状态不重建）
+        $this->encoder = new H264Encoder();
+        $this->encoder->motionWorkers = max(1, (int)($config['motionWorkers'] ?? 8));
+        if (!empty($config['fastMotion'])) $this->encoder->setFastMotion(true);
     }
 
     public function run(string $listenAddress, string $outputAddress): void
@@ -56,7 +62,9 @@ final class FlvDecoderWorkerServer
                     if ($events === []) break;
                     $event = $events[0];
                     if ($event['type'] === HlsPipelineProtocol::CONTROL) {
-                        if (($event['metadata']['cmd'] ?? '') === 'config') $this->parseConfiguration(substr($event['payload'], 5));
+                        $cmd = $event['metadata']['cmd'] ?? '';
+                        if ($cmd === 'config') $this->parseConfiguration(substr($event['payload'], 5));
+                        elseif ($cmd === 'gopEnd') $this->resetGopState();
                     } elseif ($event['type'] === HlsPipelineProtocol::END) { $output .= HlsPipelineProtocol::frame(HlsPipelineProtocol::END, $event['sequence']); $ended = true; }
                     else $output .= $this->transform($event);
                     if (strlen($output) > HlsPipelineProtocol::MAX_BUFFER_LENGTH) throw new RuntimeException('解码进程下游缓冲超限');
@@ -103,18 +111,50 @@ final class FlvDecoderWorkerServer
         if ($this->sps !== '') array_unshift($nals, ['type' => 7, 'data' => $this->sps]);
         if ($this->pps !== '') array_unshift($nals, ['type' => 8, 'data' => $this->pps]);
         $dropFrame = !empty($meta['drop']);
-        // 抽帧丢弃的帧仅维持P链参考：仍完整解码并执行去块滤波，保证后续保留帧的参考质量
-        $frame = $this->decoder->decode($nals, false, true, false);
-        // 丢帧仍需解码以维持本进程参考链，但输出侧会直接丢弃：不缩放、不附 YUV，避免无效负载占满流水线
-        if ($dropFrame) return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, $body);
-        if (!$frame || empty($frame['data'])) { unset($meta['drop']); return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, $body); }
+        $isKeyFrame = (ord($body[0]) >> 4) === 1;
+        $sourceFps = isset($meta['sourceFps']) ? (float)$meta['sourceFps'] : (float)($this->config['source_fps'] ?? 0);
+        if ($sourceFps <= 0.0) $sourceFps = 0.0;
+        $targetFps = (int)($this->config['fps'] ?? 0);
+        $dropFrames = $targetFps > 0 && $sourceFps > 0.0 && $targetFps < $sourceFps - 0.01;
         $w = ($this->config['width'] ?? 0) > 0 ? (int)$this->config['width'] : $this->width;
         $h = ($this->config['height'] ?? 0) > 0 ? (int)$this->config['height'] : $this->height;
+        $needTranscode = ($w !== $this->width || $h !== $this->height)
+            || (int)($this->config['bitrate'] ?? 0) > 0 || $dropFrames
+            || (!empty($this->config['watermark']) && !empty($this->config['watermark_file']));
+        // 无需转码（纯直通）时原封不动转发，输出侧同样判定为直通
+        if (!$needTranscode) return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, $body);
+        // 抽帧丢弃的帧仅维持P链参考：仍完整解码并执行去块滤波，保证后续保留帧的参考质量
+        $frame = $this->decoder->decode($nals, false, true, false);
+        // 丢帧仍需解码以维持本进程参考链，但输出侧会直接丢弃：不缩放、不编码，避免无效负载占满流水线
+        if ($dropFrame) return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, $body);
+        if (!$frame || empty($frame['data'])) { unset($meta['drop']); return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, $body); }
         $yuv = ($w === $this->width && $h === $this->height) ? $frame['data'] : $this->scaler->scaleYUV420P($frame['data'], $this->width, $this->height, $w, $h);
         if (!empty($this->config['watermark']) && !empty($this->config['watermark_file'])) $yuv = $this->applyWatermark($yuv, $w, $h, $this->config['watermark_file']);
-        $meta['decoded'] = true;
-        $meta['variants'] = ['default' => ['offset' => 0, 'length' => strlen($yuv), 'width' => $w, 'height' => $h]];
-        return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, pack('N', strlen($body)) . $body . $yuv);
+        // GOP worker 内直接完成编码（运动估计走本 worker 的子进程），输出侧只做封装
+        $this->encoder->setResolution($w, $h);
+        if ((int)($this->config['bitrate'] ?? 0) > 0) $this->encoder->setBitrate((int)$this->config['bitrate']);
+        else $this->encoder->setQp((int)($this->config['qp'] ?? 26));
+        $encoderFps = $dropFrames ? (float)$targetFps : ($sourceFps > 0.0 ? $sourceFps : null);
+        if ($encoderFps !== null && $encoderFps > 0) $this->encoder->setFps(max(1, (int)round($encoderFps)));
+        $encodedNals = $this->encoder->encodeFrame($yuv, $isKeyFrame);
+        $annexb = '';
+        foreach ($encodedNals as $nal) $annexb .= $nal;
+        $meta['encoded'] = true;
+        $meta['keyFrame'] = $isKeyFrame;
+        $meta['encodedVariant'] = ['offset' => 4 + strlen($body), 'length' => strlen($annexb), 'width' => $w, 'height' => $h];
+        return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, pack('N', strlen($body)) . $body . $annexb);
+    }
+
+    private function resetGopState(): void
+    {
+        // GOP 边界：解码器重建（参考链/帧计数耦合较多），编码器轻量重置并复用已连接的运动估计子进程
+        $this->decoder = new H264Decoder();
+        if ($this->sps !== '') {
+            $this->decoder->decode([['type' => 7, 'data' => $this->sps]], true);
+            $this->width = $this->decoder->getWidth();
+            $this->height = $this->decoder->getHeight();
+        }
+        $this->encoder->resetGopState();
     }
 
     private function parseConfiguration(string $data): void

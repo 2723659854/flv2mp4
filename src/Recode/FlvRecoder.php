@@ -111,6 +111,7 @@ class FlvRecoder
         $this->decoder = new H264Decoder();
         $this->encoder = new H264Encoder();
         $this->encoder->motionWorkers = max(1, (int)($config['motionWorkers'] ?? 8));
+        if (!empty($config['fastMotion'])) $this->encoder->setFastMotion(true);
         $this->scaler = new VideoScaler();
     }
 
@@ -216,6 +217,7 @@ class FlvRecoder
         $this->decoder = new H264Decoder();
         $this->encoder = new H264Encoder();
         $this->encoder->motionWorkers = max(1, (int)($this->config['motionWorkers'] ?? 8));
+        if (!empty($this->config['fastMotion'])) $this->encoder->setFastMotion(true);
         $this->srcWidth = 0;
         $this->srcHeight = 0;
         $this->srcInitialized = false;
@@ -356,9 +358,17 @@ class FlvRecoder
         if ($tag->tagType === 9) {
             if (!empty($metadata['drop'])) return;
             $this->pipelineYuv = null;
-            $this->pipelineEncoded = $metadata['gopEncoded']['profiles']['default'] ?? null;
-            $this->pipelineForcedIdr = !empty($metadata['forcedIdr']);
-            if (!empty($metadata['decoded'])) {
+            $this->pipelineEncoded = null;
+            $this->pipelineForcedIdr = false;
+            if (!empty($metadata['encoded']) && isset($metadata['encodedVariant'])) {
+                // GOP worker 已完成解码+缩放+编码：payload = [u32 bodyLen][原始tag body][AnnexB编码帧]
+                $bodyLength = unpack('N', substr($payload, 0, 4))[1];
+                $tag->body = substr($payload, 4, $bodyLength);
+                $variant = $metadata['encodedVariant'];
+                $annexb = substr($payload, (int)$variant['offset'], (int)$variant['length']);
+                $this->pipelineEncoded = $this->splitAnnexBToNals($annexb);
+                $this->pipelineForcedIdr = !empty($metadata['keyFrame']);
+            } elseif (!empty($metadata['decoded'])) {
                 $bodyLength = unpack('N', substr($payload, 0, 4))[1];
                 $tag->body = substr($payload, 4, $bodyLength);
                 $this->pipelineYuv = substr($payload, 4 + $bodyLength);
@@ -581,10 +591,6 @@ class FlvRecoder
      */
     private function prepareTranscodeVideoFrame(FlvTag $tag, string $avcData, bool $isKeyFrame, int $timestamp, bool $hasPipelineEncoded): ?array
     {
-        // 多进程模式中所有输入 sample 已由 decoder worker 解码；单进程仍在此维持参考链。
-        $yuvData = $this->pipelineYuv ?? $this->decodeNaluToYuv($avcData);
-        if ($yuvData === null) return null;
-
         if ($this->baseTimestamp === null) {
             if (!$isKeyFrame) return null;
             $this->baseTimestamp = $timestamp;
@@ -608,9 +614,14 @@ class FlvRecoder
             'pipelineEncoded' => $this->pipelineEncoded,
         ];
 
+        // GOP worker 已编码的帧直接挂 job：输出进程不再解码/缩放/编码，只负责封装
         if ($hasPipelineEncoded) {
             return $job;
         }
+
+        // 多进程模式中输入 sample 已由 decoder worker 解码；单进程仍在此维持参考链。
+        $yuvData = $this->pipelineYuv ?? $this->decodeNaluToYuv($avcData);
+        if ($yuvData === null) return null;
 
         $targetW = $this->outputVideoWidth;
         $targetH = $this->outputVideoHeight;
@@ -1138,6 +1149,16 @@ class FlvRecoder
         if (substr($nal, 0, 4) === "\x00\x00\x00\x01") return 4;
         if ($len >= 3 && substr($nal, 0, 3) === "\x00\x00\x01") return 3;
         return -1;
+    }
+
+    /** 将 GOP worker 产出的 AnnexB 码流拆为带4字节起始码的 NAL 数组（编码器输出格式） */
+    private function splitAnnexBToNals(string $annexb): array
+    {
+        $nals = [];
+        foreach (NalUtil::splitNalUnits($annexb) as $unit) {
+            $nals[] = "\x00\x00\x00\x01" . $unit['raw'];
+        }
+        return $nals;
     }
 
 }

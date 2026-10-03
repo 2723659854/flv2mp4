@@ -104,6 +104,7 @@ class Mp4Recoder
         $this->decoder = new H264Decoder();
         $this->encoder = new H264Encoder();
         $this->encoder->motionWorkers = max(1, (int)($config['motionWorkers'] ?? 8));
+        if (!empty($config['fastMotion'])) $this->encoder->setFastMotion(true);
         $this->scaler = new VideoScaler();
     }
 
@@ -208,6 +209,7 @@ class Mp4Recoder
         $this->decoder = new H264Decoder();
         $this->encoder = new H264Encoder();
         $this->encoder->motionWorkers = max(1, (int)($this->config['motionWorkers'] ?? 8));
+        if (!empty($this->config['fastMotion'])) $this->encoder->setFastMotion(true);
         $this->mp4Data = '';
         $this->boxTree = [];
         $this->videoTrack = null;
@@ -614,10 +616,13 @@ class Mp4Recoder
             return;
         }
         if (!empty($metadata['drop'])) return;
-        if (!empty($metadata['gopEncoded']['profiles']['default'])) {
-            // 预编码 GOP 样本与逐帧流水线编码互斥：先冲刷在途帧与排队音频保序
+        if (!empty($metadata['encoded']) && isset($metadata['encodedVariant'])) {
+            // GOP worker 已完成解码+缩放+编码：payload = [u32 sampleLen][原始AVCC sample][AnnexB编码帧]
+            // 预编码样本与逐帧流水线编码互斥：先冲刷在途帧与排队音频保序
+            $variant = $metadata['encodedVariant'];
+            $annexb = substr($payload, (int)$variant['offset'], (int)$variant['length']);
             $this->flushPendingVideo();
-            $this->appendPipelineEncodedSample($metadata, $metadata['gopEncoded']['profiles']['default']);
+            $this->appendPipelineEncodedSample($metadata, $this->splitAnnexBToNals($annexb));
             return;
         }
         $this->pipelineYuv = null;
@@ -643,11 +648,27 @@ class Mp4Recoder
         }
         $data = $this->extractVideoAvccFromNals($nals);
         if ($data === '') return;
+        // 与逐帧转码路径一致：抽帧时按目标帧率生成 CFR 时间轴（帧序号 × 帧时长），不抽帧保留源 DTS；
+        // 重编码器不生成 B 帧，CTS 固定为 0
+        $frameIndex = count($this->videoSamples);
+        $timestamp = ($this->dropFrames && $this->effectiveTargetFps !== null && $this->effectiveTargetFps > 0)
+            ? (int)round($frameIndex * 1000 / $this->effectiveTargetFps)
+            : (int)$metadata['dtsMs'];
         $this->storePipelineSample($this->videoSamples, $data, [
-            'timestamp' => (int)$metadata['dtsMs'],
+            'timestamp' => $timestamp,
             'cts' => 0,
-            'keyframe' => !empty($metadata['forcedIdr']),
+            'keyframe' => $frameIndex === 0 || !empty($metadata['keyframe']),
         ]);
+    }
+
+    /** 将 GOP worker 产出的 AnnexB 码流拆为带4字节起始码的 NAL 数组（编码器输出格式） */
+    private function splitAnnexBToNals(string $annexb): array
+    {
+        $nals = [];
+        foreach (NalUtil::splitNalUnits($annexb) as $unit) {
+            $nals[] = "\x00\x00\x00\x01" . $unit['raw'];
+        }
+        return $nals;
     }
 
     public function finishPipelineOutput(string $outputFile): void

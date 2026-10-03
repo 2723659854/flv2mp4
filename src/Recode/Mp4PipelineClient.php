@@ -75,6 +75,11 @@ final class Mp4PipelineClient
                             $videoCount++;
                             if (!empty($sample['keyframe'])) {
                                 // 每个关键帧开启一个独立GOP，轮询分配给解码worker
+                                if ($gopSeq > 0) {
+                                    // GOP 边界标记：worker 完成上一 GOP 后重置解码参考链与编码器状态
+                                    $prevWorker = ($gopSeq - 1) % $workerCount;
+                                    $outbound[$prevWorker] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::CONTROL, 0, ['cmd' => 'gopEnd', 'gop' => $gopSeq - 1]);
+                                }
                                 $currentWorker = $gopSeq % $workerCount;
                                 $gopSeq++;
                             }
@@ -106,7 +111,10 @@ final class Mp4PipelineClient
                     }
                     if ($index >= $total) $allEnqueued = true;
                     if ($allEnqueued && !$endEnqueued) {
-                        $outbound[0] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::END, $sequence++);
+                        // END 广播给每个解码 worker，输出 worker 收齐 workerCount 个 END 才收尾
+                        for ($i = 0; $i < $workerCount; $i++) {
+                            $outbound[$i] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::END, $sequence++);
+                        }
                         $endEnqueued = true;
                     }
                 }
