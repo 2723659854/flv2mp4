@@ -2,7 +2,7 @@
 ini_set('memory_limit', '2048M');
 if (function_exists('pcntl_signal')) pcntl_signal(SIGINT, SIG_IGN);
 try {
-    $options = getopt('', ['mode:', 'autoload:', 'port:', 'control-port:', 'output-port:', 'output-ports:', 'profiles:', 'output:', 'workers:']);
+    $options = getopt('', ['mode:', 'autoload:', 'port:', 'control-port:', 'output-port:', 'output-ports:', 'profiles:', 'output:', 'workers:', 'preencoded']);
     $mode = $options['mode'] ?? '';
     if (empty($options['autoload']) || empty($options['port']) || empty($options['profiles'])) {
         throw new RuntimeException('HLS worker 参数不完整');
@@ -38,7 +38,8 @@ try {
         (new \Xiaosongshu\Flv2mp4\Recode\HlsOutputWorkerServer($profiles, $options['output']))->run(
             'tcp://127.0.0.1:' . (int)$options['port'],
             $workers,
-            isset($options['control-port']) ? 'tcp://127.0.0.1:' . (int)$options['control-port'] : ''
+            isset($options['control-port']) ? 'tcp://127.0.0.1:' . (int)$options['control-port'] : '',
+            array_key_exists('preencoded', $options)
         );
     } else throw new RuntimeException('未知 HLS worker 模式');
 } catch (Throwable $e) {

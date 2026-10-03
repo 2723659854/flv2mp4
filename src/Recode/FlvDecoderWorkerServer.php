@@ -87,7 +87,9 @@ final class FlvDecoderWorkerServer
                         $output .= $this->flushEncodedFrame();
                         $output .= HlsPipelineProtocol::frame(HlsPipelineProtocol::END, $event['sequence']);
                         $ended = true;
-                    } else $output .= $this->orderFrame($this->transform($event));
+                    } else {
+                        $output .= $this->orderFrame($this->transform($event));
+                    }
                     if (strlen($output) > HlsPipelineProtocol::MAX_BUFFER_LENGTH) throw new RuntimeException('解码进程下游缓冲超限');
                 }
                 if (in_array($downstream, $write, true)) {

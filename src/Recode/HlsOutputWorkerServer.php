@@ -15,7 +15,7 @@ final class HlsOutputWorkerServer
     {
     }
 
-    public function run(string $listenAddress, int $workers = 1, string $controlAddress = ''): void
+    public function run(string $listenAddress, int $workers = 1, string $controlAddress = '', bool $preEncoded = false): void
     {
         $workers = max(1, $workers);
         $server = @stream_socket_server($listenAddress, $errno, $error);
@@ -53,7 +53,9 @@ final class HlsOutputWorkerServer
         }
         // 媒体和控制连接全部建立后再预热运动估计进程。
         // 主进程此时可以立即完成流水线就绪，不再等待运动 worker 冷启动。
-        $generator->warmupMotionWorkers();
+        // 单 profile 分布式路径下视频帧已在解码 worker 编码完成，输出 worker 的编码器
+        // 永远不会被调用，跳过预热，避免白启动 2 个 PHP 子进程（多 profile 输出 worker 仍需要）。
+        if (!$preEncoded) $generator->warmupMotionWorkers();
         $inputs = array_fill(0, $workers, '');
         $outputs = array_fill(0, $workers, '');
         $pending = [];

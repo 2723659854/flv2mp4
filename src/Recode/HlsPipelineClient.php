@@ -45,7 +45,9 @@ final class HlsPipelineClient
         try {
             if (count($this->profiles) === 1) {
                 [, $outputPort] = $this->reserveAddress();
-                $this->startWorker([$worker, '--mode', 'output', '--autoload', $autoload, '--port', (string)$outputPort, '--workers', (string)$workerCount, '--profiles', $this->encodeOption($this->profiles), '--output', $this->outputDir]);
+                // 单 profile：视频帧在解码 worker 内已完成编码，输出 worker 只做 TS 封装，
+                // 传 --preencoded 跳过其编码器运动子进程预热（白冷启动 2 个永不使用的 PHP 进程）
+                $this->startWorker([$worker, '--mode', 'output', '--autoload', $autoload, '--port', (string)$outputPort, '--workers', (string)$workerCount, '--profiles', $this->encodeOption($this->profiles), '--output', $this->outputDir, '--preencoded']);
                 $decoderDownstreamPort = $outputPort;
             } else {
                 [, $scalePort] = $this->reserveAddress();
