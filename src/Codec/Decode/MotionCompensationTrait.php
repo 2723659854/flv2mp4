@@ -49,6 +49,30 @@ trait MotionCompensationTrait
 
         if ($fracX === 0 && $fracY === 0) {
             if ($intX >= 0 && $intY >= 0 && $intX + $blockW <= $refWidth && $intY + $blockH <= $refHeight) {
+                // 热路径手工展开：16x16 与 16x8/16x? 等16宽块（PSkip/P_16x16 每帧大量命中）
+                if ($blockW === 16) {
+                    for ($j = 0; $j < $blockH; $j++) {
+                        $s = ($intY + $j) * $refStride + $intX;
+                        $d = ($dstY + $j) * $dstStride + $dstX;
+                        $dstPlane[$d]      = $refPlane[$s];
+                        $dstPlane[$d + 1]  = $refPlane[$s + 1];
+                        $dstPlane[$d + 2]  = $refPlane[$s + 2];
+                        $dstPlane[$d + 3]  = $refPlane[$s + 3];
+                        $dstPlane[$d + 4]  = $refPlane[$s + 4];
+                        $dstPlane[$d + 5]  = $refPlane[$s + 5];
+                        $dstPlane[$d + 6]  = $refPlane[$s + 6];
+                        $dstPlane[$d + 7]  = $refPlane[$s + 7];
+                        $dstPlane[$d + 8]  = $refPlane[$s + 8];
+                        $dstPlane[$d + 9]  = $refPlane[$s + 9];
+                        $dstPlane[$d + 10] = $refPlane[$s + 10];
+                        $dstPlane[$d + 11] = $refPlane[$s + 11];
+                        $dstPlane[$d + 12] = $refPlane[$s + 12];
+                        $dstPlane[$d + 13] = $refPlane[$s + 13];
+                        $dstPlane[$d + 14] = $refPlane[$s + 14];
+                        $dstPlane[$d + 15] = $refPlane[$s + 15];
+                    }
+                    return;
+                }
                 for ($j = 0; $j < $blockH; $j++) {
                     $srcBase = ($intY + $j) * $refStride + $intX;
                     $dstBase = ($dstY + $j) * $dstStride + $dstX;
@@ -560,6 +584,29 @@ trait MotionCompensationTrait
         $maxY = $height - 1;
 
         if ($fracX === 0 && $fracY === 0 && $intX >= 0 && $intY >= 0 && $intX + $blockW <= $width && $intY + $blockH <= $height) {
+            if ($blockW === 8) {
+                for ($j = 0; $j < $blockH; $j++) {
+                    $s = ($intY + $j) * $stride + $intX;
+                    $d = ($dstY + $j) * $dstStride + $dstX;
+                    $dstU[$d]     = $uPlane[$s];
+                    $dstV[$d]     = $vPlane[$s];
+                    $dstU[$d + 1] = $uPlane[$s + 1];
+                    $dstV[$d + 1] = $vPlane[$s + 1];
+                    $dstU[$d + 2] = $uPlane[$s + 2];
+                    $dstV[$d + 2] = $vPlane[$s + 2];
+                    $dstU[$d + 3] = $uPlane[$s + 3];
+                    $dstV[$d + 3] = $vPlane[$s + 3];
+                    $dstU[$d + 4] = $uPlane[$s + 4];
+                    $dstV[$d + 4] = $vPlane[$s + 4];
+                    $dstU[$d + 5] = $uPlane[$s + 5];
+                    $dstV[$d + 5] = $vPlane[$s + 5];
+                    $dstU[$d + 6] = $uPlane[$s + 6];
+                    $dstV[$d + 6] = $vPlane[$s + 6];
+                    $dstU[$d + 7] = $uPlane[$s + 7];
+                    $dstV[$d + 7] = $vPlane[$s + 7];
+                }
+                return;
+            }
             for ($j = 0; $j < $blockH; $j++) {
                 $srcBase = ($intY + $j) * $stride + $intX;
                 $dstBase = ($dstY + $j) * $dstStride + $dstX;

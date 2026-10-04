@@ -152,63 +152,73 @@ trait DeblockingFilterTrait
         $stride = $this->deblockYStride;
         $plane = &$this->yPlane;
         $base = ($mbY * 16) * $stride + ($mbX * 16) + $edge * 4;
+        // 同一调用内 qp 固定，bs1..3 的 tc0 只查一次
+        $tc0Map = [
+            1 => $this->getTc0($qp, $this->sliceAlphaC0Offset, 1),
+            2 => $this->getTc0($qp, $this->sliceAlphaC0Offset, 2),
+            3 => $this->getTc0($qp, $this->sliceAlphaC0Offset, 3),
+        ];
 
         for ($i = 0; $i < 4; $i++) {
             $curBs = $bs[$i];
             if ($curBs == 0) {
                 continue;
             }
-            $tc0 = $curBs < 4 ? $this->getTc0($qp, $this->sliceAlphaC0Offset, $curBs) : 0;
+            $tc0 = $curBs < 4 ? $tc0Map[$curBs] : 0;
             $off = $base + $i * 4 * $stride;
 
             for ($d = 0; $d < 4; $d++, $off += $stride) {
+                // 惰性读取：高运动场景多数像素第一关即失败，只需 2 次读取而非 6 次
                 $p0 = $plane[$off - 1];
-                $p1 = $plane[$off - 2];
-                $p2 = $plane[$off - 3];
                 $q0 = $plane[$off];
-                $q1 = $plane[$off + 1];
-                $q2 = $plane[$off + 2];
 
                 if ($curBs < 4) {
-                    if (abs($p0 - $q0) < $alpha && abs($p1 - $p0) < $beta && abs($q1 - $q0) < $beta) {
-                        $tc = $tc0;
-                        $newP1 = $p1;
-                        $newQ1 = $q1;
-                        $p0q0 = ($p0 + $q0 + 1) >> 1;
+                    if (abs($p0 - $q0) < $alpha) {
+                        $p1 = $plane[$off - 2];
+                        $q1 = $plane[$off + 1];
+                        if (abs($p1 - $p0) < $beta && abs($q1 - $q0) < $beta) {
+                            $tc = $tc0;
+                            $newP1 = $p1;
+                            $newQ1 = $q1;
+                            $p0q0 = ($p0 + $q0 + 1) >> 1;
 
-                        if (abs($p2 - $p0) < $beta) {
-                            if ($tc0 !== 0) {
+                            $p2 = $plane[$off - 3];
+                            if (abs($p2 - $p0) < $beta) {
+                                // tc0==0 时 clamp 到 [-0,0] 恒为 0，newP1 不变，无需 guard
                                 $__v = (($p2 + $p0q0) >> 1) - $p1;
                                 $newP1 = $p1 + ($__v < -$tc0 ? -$tc0 : ($__v > $tc0 ? $tc0 : $__v));
+                                $tc++;
                             }
-                            $tc++;
-                        }
 
-                        if (abs($q2 - $q0) < $beta) {
-                            if ($tc0 !== 0) {
+                            $q2 = $plane[$off + 2];
+                            if (abs($q2 - $q0) < $beta) {
                                 $__v = (($q2 + $p0q0) >> 1) - $q1;
                                 $newQ1 = $q1 + ($__v < -$tc0 ? -$tc0 : ($__v > $tc0 ? $tc0 : $__v));
+                                $tc++;
                             }
-                            $tc++;
-                        }
 
-                        $__v = (($q0 - $p0) * 4 + ($p1 - $q1) + 4) >> 3;
-                        $delta = $__v < -$tc ? -$tc : ($__v > $tc ? $tc : $__v);
-                        // delta==0 时 p0/q0 不变（约三成像素），省两次字符串写
-                        if ($delta !== 0) {
-                            $__v = $p0 + $delta;
-                            $plane[$off - 1] = $__v < 0 ? 0 : ($__v > 255 ? 255 : $__v);
-                            $__v = $q0 - $delta;
-                            $plane[$off] = $__v < 0 ? 0 : ($__v > 255 ? 255 : $__v);
-                        }
-                        if ($newP1 !== $p1) {
-                            $plane[$off - 2] = $newP1;
-                        }
-                        if ($newQ1 !== $q1) {
-                            $plane[$off + 1] = $newQ1;
+                            $__v = (($q0 - $p0) * 4 + ($p1 - $q1) + 4) >> 3;
+                            $delta = $__v < -$tc ? -$tc : ($__v > $tc ? $tc : $__v);
+                            // delta==0 时 p0/q0 不变（约三成像素），省两次字符串写
+                            if ($delta !== 0) {
+                                $__v = $p0 + $delta;
+                                $plane[$off - 1] = $__v < 0 ? 0 : ($__v > 255 ? 255 : $__v);
+                                $__v = $q0 - $delta;
+                                $plane[$off] = $__v < 0 ? 0 : ($__v > 255 ? 255 : $__v);
+                            }
+                            if ($newP1 !== $p1) {
+                                $plane[$off - 2] = $newP1;
+                            }
+                            if ($newQ1 !== $q1) {
+                                $plane[$off + 1] = $newQ1;
+                            }
                         }
                     }
                 } else {
+                    $p1 = $plane[$off - 2];
+                    $q1 = $plane[$off + 1];
+                    $p2 = $plane[$off - 3];
+                    $q2 = $plane[$off + 2];
                     $p3 = $plane[$off - 4];
                     $q3 = $plane[$off + 3];
                     if ($this->filterStrongLuma(
@@ -238,62 +248,70 @@ trait DeblockingFilterTrait
         $stride = $this->deblockYStride;
         $plane = &$this->yPlane;
         $base = ($mbY * 16 + $edge * 4) * $stride + ($mbX * 16);
+        $tc0Map = [
+            1 => $this->getTc0($qp, $this->sliceAlphaC0Offset, 1),
+            2 => $this->getTc0($qp, $this->sliceAlphaC0Offset, 2),
+            3 => $this->getTc0($qp, $this->sliceAlphaC0Offset, 3),
+        ];
 
         for ($i = 0; $i < 4; $i++) {
             $curBs = $bs[$i];
             if ($curBs == 0) {
                 continue;
             }
-            $tc0 = $curBs < 4 ? $this->getTc0($qp, $this->sliceAlphaC0Offset, $curBs) : 0;
+            $tc0 = $curBs < 4 ? $tc0Map[$curBs] : 0;
             $off = $base + $i * 4;
 
             for ($d = 0; $d < 4; $d++, $off++) {
+                // 惰性读取：高运动场景多数像素第一关即失败
                 $p0 = $plane[$off - $stride];
-                $p1 = $plane[$off - 2 * $stride];
-                $p2 = $plane[$off - 3 * $stride];
                 $q0 = $plane[$off];
-                $q1 = $plane[$off + $stride];
-                $q2 = $plane[$off + 2 * $stride];
 
                 if ($curBs < 4) {
-                    if (abs($p0 - $q0) < $alpha && abs($p1 - $p0) < $beta && abs($q1 - $q0) < $beta) {
-                        $tc = $tc0;
-                        $newP1 = $p1;
-                        $newQ1 = $q1;
-                        $p0q0 = ($p0 + $q0 + 1) >> 1;
+                    if (abs($p0 - $q0) < $alpha) {
+                        $p1 = $plane[$off - 2 * $stride];
+                        $q1 = $plane[$off + $stride];
+                        if (abs($p1 - $p0) < $beta && abs($q1 - $q0) < $beta) {
+                            $tc = $tc0;
+                            $newP1 = $p1;
+                            $newQ1 = $q1;
+                            $p0q0 = ($p0 + $q0 + 1) >> 1;
 
-                        if (abs($p2 - $p0) < $beta) {
-                            if ($tc0 !== 0) {
+                            $p2 = $plane[$off - 3 * $stride];
+                            if (abs($p2 - $p0) < $beta) {
                                 $__v = (($p2 + $p0q0) >> 1) - $p1;
                                 $newP1 = $p1 + ($__v < -$tc0 ? -$tc0 : ($__v > $tc0 ? $tc0 : $__v));
+                                $tc++;
                             }
-                            $tc++;
-                        }
 
-                        if (abs($q2 - $q0) < $beta) {
-                            if ($tc0 !== 0) {
+                            $q2 = $plane[$off + 2 * $stride];
+                            if (abs($q2 - $q0) < $beta) {
                                 $__v = (($q2 + $p0q0) >> 1) - $q1;
                                 $newQ1 = $q1 + ($__v < -$tc0 ? -$tc0 : ($__v > $tc0 ? $tc0 : $__v));
+                                $tc++;
                             }
-                            $tc++;
-                        }
 
-                        $__v = (($q0 - $p0) * 4 + ($p1 - $q1) + 4) >> 3;
-                        $delta = $__v < -$tc ? -$tc : ($__v > $tc ? $tc : $__v);
-                        if ($delta !== 0) {
-                            $__v = $p0 + $delta;
-                            $plane[$off - $stride] = $__v < 0 ? 0 : ($__v > 255 ? 255 : $__v);
-                            $__v = $q0 - $delta;
-                            $plane[$off] = $__v < 0 ? 0 : ($__v > 255 ? 255 : $__v);
-                        }
-                        if ($newP1 !== $p1) {
-                            $plane[$off - 2 * $stride] = $newP1;
-                        }
-                        if ($newQ1 !== $q1) {
-                            $plane[$off + $stride] = $newQ1;
+                            $__v = (($q0 - $p0) * 4 + ($p1 - $q1) + 4) >> 3;
+                            $delta = $__v < -$tc ? -$tc : ($__v > $tc ? $tc : $__v);
+                            if ($delta !== 0) {
+                                $__v = $p0 + $delta;
+                                $plane[$off - $stride] = $__v < 0 ? 0 : ($__v > 255 ? 255 : $__v);
+                                $__v = $q0 - $delta;
+                                $plane[$off] = $__v < 0 ? 0 : ($__v > 255 ? 255 : $__v);
+                            }
+                            if ($newP1 !== $p1) {
+                                $plane[$off - 2 * $stride] = $newP1;
+                            }
+                            if ($newQ1 !== $q1) {
+                                $plane[$off + $stride] = $newQ1;
+                            }
                         }
                     }
                 } else {
+                    $p1 = $plane[$off - 2 * $stride];
+                    $q1 = $plane[$off + $stride];
+                    $p2 = $plane[$off - 3 * $stride];
+                    $q2 = $plane[$off + 2 * $stride];
                     $p3 = $plane[$off - 4 * $stride];
                     $q3 = $plane[$off + 3 * $stride];
                     if ($this->filterStrongLuma(
@@ -322,39 +340,51 @@ trait DeblockingFilterTrait
 
         $stride = $this->deblockUvStride;
         $base = ($mbY * 8) * $stride + ($mbX * 8) + $edge * 4;
+        $tcMap = [
+            1 => $this->getTc0($qp, $this->sliceAlphaC0Offset, 1) + 1,
+            2 => $this->getTc0($qp, $this->sliceAlphaC0Offset, 2) + 1,
+            3 => $this->getTc0($qp, $this->sliceAlphaC0Offset, 3) + 1,
+        ];
 
-        foreach (['uPlane', 'vPlane'] as $planeName) {
+        static $planeNames = ['uPlane', 'vPlane'];
+        foreach ($planeNames as $planeName) {
             $plane = &$this->$planeName;
             for ($i = 0; $i < 4; $i++) {
                 $curBs = $bs[$i];
                 if ($curBs == 0) {
                     continue;
                 }
-                $tc = $curBs < 4 ? $this->getTc0($qp, $this->sliceAlphaC0Offset, $curBs) + 1 : 0;
+                $tc = $curBs < 4 ? $tcMap[$curBs] : 0;
                 $off = $base + $i * 2 * $stride;
 
                 for ($d = 0; $d < 2; $d++, $off += $stride) {
                     $p0 = $plane[$off - 1];
-                    $p1 = $plane[$off - 2];
                     $q0 = $plane[$off];
-                    $q1 = $plane[$off + 1];
 
                     if ($curBs < 4) {
-                        if (abs($p0 - $q0) < $alpha && abs($p1 - $p0) < $beta && abs($q1 - $q0) < $beta) {
-                            $__v = (($q0 - $p0) * 4 + ($p1 - $q1) + 4) >> 3;
-                            $delta = $__v < -$tc ? -$tc : ($__v > $tc ? $tc : $__v);
-                            if ($delta !== 0) {
-                                $__v = $p0 + $delta;
-                                $plane[$off - 1] = $__v < 0 ? 0 : ($__v > 255 ? 255 : $__v);
-                                $__v = $q0 - $delta;
-                                $plane[$off] = $__v < 0 ? 0 : ($__v > 255 ? 255 : $__v);
+                        if (abs($p0 - $q0) < $alpha) {
+                            $p1 = $plane[$off - 2];
+                            $q1 = $plane[$off + 1];
+                            if (abs($p1 - $p0) < $beta && abs($q1 - $q0) < $beta) {
+                                $__v = (($q0 - $p0) * 4 + ($p1 - $q1) + 4) >> 3;
+                                $delta = $__v < -$tc ? -$tc : ($__v > $tc ? $tc : $__v);
+                                if ($delta !== 0) {
+                                    $__v = $p0 + $delta;
+                                    $plane[$off - 1] = $__v < 0 ? 0 : ($__v > 255 ? 255 : $__v);
+                                    $__v = $q0 - $delta;
+                                    $plane[$off] = $__v < 0 ? 0 : ($__v > 255 ? 255 : $__v);
+                                }
                             }
                         }
-                    } elseif ($this->filterStrongChroma(
-                        $p0, $p1, $q0, $q1, $alpha, $beta, $newP0, $newQ0
-                    )) {
-                        $plane[$off - 1] = $newP0;
-                        $plane[$off] = $newQ0;
+                    } else {
+                        $p1 = $plane[$off - 2];
+                        $q1 = $plane[$off + 1];
+                        if ($this->filterStrongChroma(
+                            $p0, $p1, $q0, $q1, $alpha, $beta, $newP0, $newQ0
+                        )) {
+                            $plane[$off - 1] = $newP0;
+                            $plane[$off] = $newQ0;
+                        }
                     }
                 }
             }
@@ -372,39 +402,51 @@ trait DeblockingFilterTrait
 
         $stride = $this->deblockUvStride;
         $base = ($mbY * 8 + $edge * 4) * $stride + ($mbX * 8);
+        $tcMap = [
+            1 => $this->getTc0($qp, $this->sliceAlphaC0Offset, 1) + 1,
+            2 => $this->getTc0($qp, $this->sliceAlphaC0Offset, 2) + 1,
+            3 => $this->getTc0($qp, $this->sliceAlphaC0Offset, 3) + 1,
+        ];
 
-        foreach (['uPlane', 'vPlane'] as $planeName) {
+        static $planeNamesH = ['uPlane', 'vPlane'];
+        foreach ($planeNamesH as $planeName) {
             $plane = &$this->$planeName;
             for ($i = 0; $i < 4; $i++) {
                 $curBs = $bs[$i];
                 if ($curBs == 0) {
                     continue;
                 }
-                $tc = $curBs < 4 ? $this->getTc0($qp, $this->sliceAlphaC0Offset, $curBs) + 1 : 0;
+                $tc = $curBs < 4 ? $tcMap[$curBs] : 0;
                 $off = $base + $i * 2;
 
                 for ($d = 0; $d < 2; $d++, $off++) {
                     $p0 = $plane[$off - $stride];
-                    $p1 = $plane[$off - 2 * $stride];
                     $q0 = $plane[$off];
-                    $q1 = $plane[$off + $stride];
 
                     if ($curBs < 4) {
-                        if (abs($p0 - $q0) < $alpha && abs($p1 - $p0) < $beta && abs($q1 - $q0) < $beta) {
-                            $__v = (($q0 - $p0) * 4 + ($p1 - $q1) + 4) >> 3;
-                            $delta = $__v < -$tc ? -$tc : ($__v > $tc ? $tc : $__v);
-                            if ($delta !== 0) {
-                                $__v = $p0 + $delta;
-                                $plane[$off - $stride] = $__v < 0 ? 0 : ($__v > 255 ? 255 : $__v);
-                                $__v = $q0 - $delta;
-                                $plane[$off] = $__v < 0 ? 0 : ($__v > 255 ? 255 : $__v);
+                        if (abs($p0 - $q0) < $alpha) {
+                            $p1 = $plane[$off - 2 * $stride];
+                            $q1 = $plane[$off + $stride];
+                            if (abs($p1 - $p0) < $beta && abs($q1 - $q0) < $beta) {
+                                $__v = (($q0 - $p0) * 4 + ($p1 - $q1) + 4) >> 3;
+                                $delta = $__v < -$tc ? -$tc : ($__v > $tc ? $tc : $__v);
+                                if ($delta !== 0) {
+                                    $__v = $p0 + $delta;
+                                    $plane[$off - $stride] = $__v < 0 ? 0 : ($__v > 255 ? 255 : $__v);
+                                    $__v = $q0 - $delta;
+                                    $plane[$off] = $__v < 0 ? 0 : ($__v > 255 ? 255 : $__v);
+                                }
                             }
                         }
-                    } elseif ($this->filterStrongChroma(
-                        $p0, $p1, $q0, $q1, $alpha, $beta, $newP0, $newQ0
-                    )) {
-                        $plane[$off - $stride] = $newP0;
-                        $plane[$off] = $newQ0;
+                    } else {
+                        $p1 = $plane[$off - 2 * $stride];
+                        $q1 = $plane[$off + $stride];
+                        if ($this->filterStrongChroma(
+                            $p0, $p1, $q0, $q1, $alpha, $beta, $newP0, $newQ0
+                        )) {
+                            $plane[$off - $stride] = $newP0;
+                            $plane[$off] = $newQ0;
+                        }
                     }
                 }
             }
@@ -641,6 +683,8 @@ trait DeblockingFilterTrait
 
                 $this->computeBoundaryStrengths($mbX, $mbY, $bsVertical, $bsHorizontal);
 
+                // 内部边 qp 恒为当前 MB qp，色度 QP 每 MB 只查一次
+                $chromaQpCur = $this->getChromaQp($curQp);
                 for ($edge = 0; $edge < 4; $edge++) {
                     $isMbEdge = ($edge == 0);
 
@@ -653,13 +697,16 @@ trait DeblockingFilterTrait
                         continue;
                     }
 
-                    $qp = $isMbEdge && $mbX > 0 ? $this->avgQp($curQp, $this->mbQpForDeblock[($mbY * $mbWidth + $mbX - 1)] ?? $curQp) : $curQp;
+                    if ($isMbEdge) {
+                        $qp = $this->avgQp($curQp, $this->mbQpForDeblock[($mbY * $mbWidth + $mbX - 1)] ?? $curQp);
+                    } else {
+                        $qp = $curQp;
+                    }
                     $this->filterVerticalLuma($mbX, $mbY, $edge, $strengths, $qp);
 
-                    $chromaQp = $this->getChromaQp($qp);
                     if ($edge == 0 || $edge == 2) {
                         $chromaEdge = (int)($edge / 2);
-                        $this->filterVerticalChroma($mbX, $mbY, $chromaEdge, $strengths, $chromaQp);
+                        $this->filterVerticalChroma($mbX, $mbY, $chromaEdge, $strengths, $isMbEdge ? $this->getChromaQp($qp) : $chromaQpCur);
                     }
                 }
 
@@ -675,13 +722,16 @@ trait DeblockingFilterTrait
                         continue;
                     }
 
-                    $qp = $isMbEdge && $mbY > 0 ? $this->avgQp($curQp, $this->mbQpForDeblock[(($mbY - 1) * $mbWidth + $mbX)] ?? $curQp) : $curQp;
+                    if ($isMbEdge) {
+                        $qp = $this->avgQp($curQp, $this->mbQpForDeblock[(($mbY - 1) * $mbWidth + $mbX)] ?? $curQp);
+                    } else {
+                        $qp = $curQp;
+                    }
                     $this->filterHorizontalLuma($mbX, $mbY, $edge, $strengths, $qp);
 
-                    $chromaQp = $this->getChromaQp($qp);
                     if ($edge == 0 || $edge == 2) {
                         $chromaEdge = (int)($edge / 2);
-                        $this->filterHorizontalChroma($mbX, $mbY, $chromaEdge, $strengths, $chromaQp);
+                        $this->filterHorizontalChroma($mbX, $mbY, $chromaEdge, $strengths, $isMbEdge ? $this->getChromaQp($qp) : $chromaQpCur);
                     }
                 }
             }

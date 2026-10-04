@@ -94,6 +94,9 @@ class H264Decoder
     public bool $enableMbStats = false;
     public array $mbStats = [];
 
+    /** 临时：T_PRF 门控的阶段耗时（纳秒），优化验证后移除 */
+    public array $prf = ['mc' => 0, 'res' => 0, 'dbk' => 0, 'pack' => 0, 'init' => 0, 'skip' => 0, 'cavlc' => 0, 'n' => 0];
+
     // 宏块间Intra4x4预测模式缓存（用于跨宏块预测模式计算）
     public array $intra4x4TopModes = [];  // 上边行：每列1个，共 picWidthInMbs * 4
     public array $intra4x4LeftModes = []; // 左边列：每行1个，共 4
@@ -378,9 +381,14 @@ class H264Decoder
                 //$sliceCount++;
                 $this->frameNum++;
                 // 每帧重新初始化像素平面（128 = H.264 规定的帧内预测默认值）
+                static $__prfOn = null;
+                if ($__prfOn === null) $__prfOn = getenv('T_PRF') !== false;
+                $__tI = $__prfOn ? hrtime(true) : 0;
                 $this->yPlane = array_fill(0, $ySize, 128);
                 $this->uPlane = array_fill(0, $uvSize, 128);
                 $this->vPlane = array_fill(0, $uvSize, 128);
+                if ($__prfOn) $this->prf['init'] += hrtime(true) - $__tI;
+                $this->prf['n']++;
 
                 // 保存实际图像尺寸，临时使用宏块对齐的尺寸进行解码
                 $origWidth = $this->width;
@@ -461,6 +469,7 @@ class H264Decoder
 
                 // 将本帧转为二进制并追加到输出（裁剪到实际图像尺寸）
                 if ($buildOutput) {
+                    $__tP = $__prfOn ? hrtime(true) : 0;
                     $yBin = '';
                     for ($yy = 0; $yy < $this->height; $yy++) {
                         $yBin .= pack('C*', ...array_slice($this->yPlane, $yy * $mbAlignedWidth, $this->width));
@@ -475,6 +484,7 @@ class H264Decoder
                         $vBin .= pack('C*', ...array_slice($this->vPlane, $yy * $uvMbAlignedWidth, $uvWidth));
                     }
                     $outputData .= $yBin . $uBin . $vBin;
+                    if ($__prfOn) $this->prf['pack'] += hrtime(true) - $__tP;
                 }
             }
         }

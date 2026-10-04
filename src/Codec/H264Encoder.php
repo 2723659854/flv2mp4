@@ -323,6 +323,8 @@ class H264Encoder
     private const SCENE_RATIO_THRESHOLD = 0.5;
     private const SCENE_REGION_MB_RATIO = 0.20;
     private const SCENE_REGION_MEAN = 55;
+    /** 持续高 SAD 超过该帧数后再允许一次 IDR（兜底"运动中硬切"）；15fps 下约 6 秒 */
+    private const SCENE_SUSTAIN_MAX = 90;
 
     public $width = 640;
     public $height = 360;
@@ -431,6 +433,7 @@ class H264Encoder
         $this->scenePrevY = null;
         $this->scenePrevAw = 0;
         $this->scenePrevAh = 0;
+        $this->sceneHighRun = 0;
     }
 
     public function setQp(int $qp): void

@@ -73,6 +73,13 @@ final class HlsPipelineClient
             $sequence = 0;
             $gopSeq = 0;
             $currentWorker = 0;
+            // GOP 负载均衡分配：各 GOP 解码成本（含帧密度/运动剧烈度）不均，
+            // 固定轮询会让分到重 GOP 的 worker 拖慢整线（实测最慢 worker 满载 35s，
+            // 其余仅 25s）。新 GOP 派给"在途加权帧数"最少的 worker：
+            // 保留帧需全解码+缩放+编码（权重 2），丢弃帧仅解码维持参考链（权重 1）。
+            $workerLoad = array_fill(0, $workerCount, 0);
+            /** @var array<int,int> GOP序号 => worker */
+            $gopWorker = [];
             $frameCount = 0;
             $videoCount = 0;
             // 抽帧状态：首个输出 IDR 的源时间戳基准；已保留帧计数（含首 IDR）
@@ -118,7 +125,8 @@ final class HlsPipelineClient
                         $tag = $tags->current(); $tags->next();
                         $frameCount++;
                         if ($tag['tagType'] === 8) {
-                            $enqueue($currentWorker, HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $sequence++, ['tagType' => 8, 'timestamp' => $tag['timestamp']], $tag['body']), max(0, $gopSeq - 1));
+                            $audioGopWorker = $gopWorker[max(0, $gopSeq - 1)] ?? 0;
+                            $enqueue($audioGopWorker, HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $sequence++, ['tagType' => 8, 'timestamp' => $tag['timestamp']], $tag['body']), max(0, $gopSeq - 1));
                         } elseif ($tag['tagType'] === 9) {
                             $videoCount++;
                             $body = $tag['body'];
@@ -136,9 +144,19 @@ final class HlsPipelineClient
                                     if ($newGop > 0) {
                                         // 上一 GOP 所有帧之后插入边界标记：worker 处理到此处即代表该 GOP 已解码完
                                         $prevGop = $newGop - 1;
-                                        $enqueue($prevGop % $workerCount, HlsPipelineProtocol::frame(HlsPipelineProtocol::CONTROL, 0, ['cmd' => 'gopEnd', 'gop' => $prevGop]), $prevGop);
+                                        $enqueue($gopWorker[$prevGop], HlsPipelineProtocol::frame(HlsPipelineProtocol::CONTROL, 0, ['cmd' => 'gopEnd', 'gop' => $prevGop]), $prevGop);
                                     }
-                                    $currentWorker = $newGop % $workerCount;
+                                    // 派给在途加权负载最小的 worker（首个 GOP 固定 worker0，序列头只投递给它）
+                                    if ($newGop === 0) {
+                                        $currentWorker = 0;
+                                    } else {
+                                        $currentWorker = 0;
+                                        $minLoad = $workerLoad[0];
+                                        for ($wi = 1; $wi < $workerCount; $wi++) {
+                                            if ($workerLoad[$wi] < $minLoad) { $minLoad = $workerLoad[$wi]; $currentWorker = $wi; }
+                                        }
+                                    }
+                                    $gopWorker[$newGop] = $currentWorker;
                                     $gopSeq++;
                                 }
                                 // 抽帧选帧（保持播放时长不变：保留帧时间戳重映射到目标帧率均匀网格，
@@ -167,6 +185,8 @@ final class HlsPipelineClient
                                     }
                                 }
                                 $enqueue($currentWorker, HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $sequence++, $videoMeta, $body), max(0, $gopSeq - 1));
+                                // 在途加权负载：丢弃帧只解码（权重1），保留帧全链路（权重2）
+                                $workerLoad[$currentWorker] += empty($videoMeta['drop']) ? 2 : 1;
                                 if ($this->maxFrames !== null && $videoCount >= $this->maxFrames) {
                                     echo "Reached max frames limit ({$this->maxFrames}), stopping...\n";
                                     $stopReading = true;

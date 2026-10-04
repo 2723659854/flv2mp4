@@ -28,6 +28,8 @@ final class HlsDecoderWorkerServer
      * "派运动→等结果→CAVLC" 串行（与 FLV/MP4 worker 同款优化，输出 NAL 不变）。
      */
     private ?array $pendingFrame = null;
+    /** @var array<string,mixed>|null TEMP profiling (T_PRFO) */
+    private ?array $prf = null;
     /**
      * 在途视频帧之后到达、但必须等它先发出的直通帧（音频/丢帧/序列头/解码失败回退）。
      * 输出进程依赖每路连接序号严格递增，不能让后续帧在同路连接上反超在途帧。
@@ -66,6 +68,15 @@ final class HlsDecoderWorkerServer
         stream_set_blocking($downstream, false);
         // 立即拉起各 profile 的运动估计子进程，让 PHP 冷启动与主进程派发/读文件并行
         foreach ($this->encoders as $encoder) $encoder->warmupMotionWorkers();
+        if (getenv('T_PRFO') !== false) {
+            $this->prf = ['decKeep' => 0.0, 'decDrop' => 0.0, 'scale' => 0.0, 'start' => 0.0, 'finish' => 0.0, 'kept' => 0, 'drop' => 0, 'idr' => 0, 'bytes' => 0, 'meWait' => 0.0, 'wait' => 0.0, 'loops' => 0, 'w0' => hrtime(true), 'w1' => 0];
+            register_shutdown_function(function (): void {
+                if ($this->prf['w1'] === 0) $this->prf['w1'] = hrtime(true);
+                $this->prf['wall'] = ($this->prf['w1'] - $this->prf['w0']) / 1e9;
+                unset($this->prf['w0'], $this->prf['w1']);
+                file_put_contents(__DIR__ . '/tmp_prf_' . getmypid() . '.json', json_encode($this->prf));
+            });
+        }
         $input = '';
         $output = '';
         $upOutput = '';
@@ -95,7 +106,12 @@ final class HlsDecoderWorkerServer
                 $write = $output === '' ? [] : [$downstream];
                 if ($upOutput !== '') $write[] = $upstream;
                 $except = null;
-                @stream_select($read, $write, $except, 0, 2000);
+                $__tW = $this->prf !== null ? hrtime(true) : 0;
+                $__sel = @stream_select($read, $write, $except, 0, 2000);
+                if ($this->prf !== null) {
+                    $this->prf['loops']++;
+                    if ($__sel === 0) $this->prf['wait'] += (hrtime(true) - $__tW) / 1e9;
+                }
                 if ($ctrlServer !== null && in_array($ctrlServer, $read, true)) {
                     $conn = @stream_socket_accept($ctrlServer, 0);
                     if ($conn !== false) {
@@ -216,6 +232,7 @@ final class HlsDecoderWorkerServer
                     if ($response['type'] === HlsPipelineProtocol::ERROR) throw new RuntimeException($response['metadata']['message'] ?? '编码进程失败');
                     if ($response['type'] === HlsPipelineProtocol::FINISHED) {
                         $this->writeAll($upstream, HlsPipelineProtocol::frame(HlsPipelineProtocol::FINISHED, $response['sequence']));
+                        if ($this->prf !== null) $this->prf['w1'] = hrtime(true);
                         return;
                     }
                 }
@@ -254,10 +271,13 @@ final class HlsDecoderWorkerServer
         $dropFrame = !empty($meta['drop']);
         // 抽帧帧仍需解码以维持P链，但不需要生成YUV输出，也不需要执行去块滤波。
         // IDR在解码器内部仍会强制保留去块，保证关键帧参考链正确。
-        $frame = $this->decoder->decode($nals, false, !$dropFrame, $dropFrame);
+        $__tA = $this->prf !== null ? hrtime(true) : 0;
+        $frame = $this->decoder->decode($nals, false, !$dropFrame, $dropFrame || getenv('T_NODBK') !== false);
+        if ($this->prf !== null) $this->prf[$dropFrame ? 'decDrop' : 'decKeep'] += (hrtime(true) - $__tA) / 1e9;
         // 抽帧丢弃：解码已完成（维持 GOP 内后续帧的参考链），不缩放/不附 YUV，
         // meta.drop 原样透传，输出端直接跳过编码
         if ($dropFrame) {
+            if ($this->prf !== null) $this->prf['drop']++;
             return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, $body);
         }
         if (!$frame || empty($frame['data'])) return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, $body);
@@ -271,15 +291,19 @@ final class HlsDecoderWorkerServer
         foreach ($this->profiles as $name => $profile) {
             $targetWidth = ($profile['width'] ?? 0) > 0 ? (int)$profile['width'] : $this->width;
             $targetHeight = ($profile['height'] ?? 0) > 0 ? (int)$profile['height'] : $this->height;
+            $__tB = $this->prf !== null ? hrtime(true) : 0;
             $variant = ($targetWidth !== $this->width || $targetHeight !== $this->height)
                 ? $this->scaler->scaleYUV420P($frame['data'], $this->width, $this->height, $targetWidth, $targetHeight) : $frame['data'];
+            if ($this->prf !== null) $this->prf['scale'] += (hrtime(true) - $__tB) / 1e9;
             if (!empty($profile['watermark']) && !empty($profile['watermark_file'])) $variant = $this->applyWatermark($variant, $targetWidth, $targetHeight, $profile['watermark_file']);
             $encoder = $this->encoders[$name];
             $encoder->setResolution($targetWidth, $targetHeight);
             $encoder->setBitrate((int)($profile['bitrate'] ?? 500000));
             $encoder->setFps((int)($profile['fps'] ?? 25));
             $encoder->setQp((int)($profile['qp'] ?? 26));
+            $__tC = $this->prf !== null ? hrtime(true) : 0;
             $encoder->startFrame($variant, $isKeyFrame);
+            if ($this->prf !== null) $this->prf['start'] += (hrtime(true) - $__tC) / 1e9;
             $variantDims[$name] = [$targetWidth, $targetHeight];
         }
         return $this->feedEncoder($event, $meta, $body, $isKeyFrame, $variantDims);
@@ -328,12 +352,25 @@ final class HlsDecoderWorkerServer
 
     private function buildPendingFrame(): string
     {
+        if ($this->prf !== null) $this->prf['kept']++;
         $p = $this->pendingFrame;
         $encodedPayload = '';
         $encodedVariants = [];
         foreach ($this->profiles as $name => $_) {
             $annexb = '';
-            foreach ($this->encoders[$name]->finishFrame() as $nal) $annexb .= $nal;
+            $__tD = $this->prf !== null ? hrtime(true) : 0;
+            foreach ($this->encoders[$name]->finishFrame() as $nal) {
+                $annexb .= $nal;
+                if ($this->prf !== null) {
+                    $p0 = strpos($nal, "\x00\x00\x00\x01");
+                    $hi = $p0 === false ? 3 : $p0 + 4;
+                    if ((ord($nal[$hi]) & 0x1F) === 5) $this->prf['idr']++;
+                }
+            }
+            if ($this->prf !== null) {
+                $this->prf['finish'] += (hrtime(true) - $__tD) / 1e9;
+                $this->prf['bytes'] += strlen($annexb);
+            }
             [$w, $h] = $p['dims'][$name];
             $encodedVariants[$name] = ['offset' => strlen($encodedPayload), 'length' => strlen($annexb), 'width' => $w, 'height' => $h];
             $encodedPayload .= $annexb;

@@ -213,12 +213,11 @@ trait MacroblockDecodingTrait
                     $rasterIdx = $scanToRaster[$scanIdx];
                     $nc = $this->computeNc($rasterIdx, $mbX, $mbY, $nzCache, $leftNz, $topNz, $leftAvailable, $topAvailable);
                     $coeffs = $this->decodeResidualBlock(16, $nc);
-                    for ($i = 0; $i < 16; $i++) $yCoeffs[$rasterIdx][$i] = $coeffs[$i];
-                    $yCoeffs[$rasterIdx] = $this->zigzagToRaster($yCoeffs[$rasterIdx]);
-                    $yCoeffs[$rasterIdx] = $this->dequantize4x4($yCoeffs[$rasterIdx], 0, $qp);
                     $nzCount = 0;
                     for ($i = 0; $i < 16; $i++) if ($coeffs[$i] != 0) $nzCount++;
                     $nzCache[$rasterIdx] = $nzCount;
+                    // zigzag重排+反量化融合为一步
+                    $yCoeffs[$rasterIdx] = $this->dequantZigzag4x4($coeffs, 0, $qp);
                 }
             } else {
                 for ($i4x4 = 0; $i4x4 < 4; $i4x4++) {
@@ -254,14 +253,11 @@ trait MacroblockDecodingTrait
                 $blk = $blockIdx - 16;
                 $nc = $this->computeNc($blockIdx, $mbX, $mbY, $nzCache, $leftNz, $topNz, $leftAvailable, $topAvailable);
                 $ac = $this->decodeResidualBlock(15, $nc);
-                for ($i = 0; $i < 15; $i++) $cbCoeffs[$blk][$i + 1] = $ac[$i];
-                $cbCoeffs[$blk] = $this->zigzagToRaster($cbCoeffs[$blk]);
-                // 反量化AC系数（coeffs[0]保持为0，DC单独处理）
-                $cbCoeffs[$blk] = $this->dequantize4x4($cbCoeffs[$blk], 1, $chromaQp);
-                // AC-only count
                 $nzCount = 0;
                 for ($i = 0; $i < 15; $i++) if ($ac[$i] != 0) $nzCount++;
                 $nzCache[$blockIdx] = $nzCount;
+                // zigzag重排+反量化融合（coeffs[0]留空给DC）
+                $cbCoeffs[$blk] = $this->dequantAcZigzag4x4($ac, 1, $chromaQp);
             }
             // Cr块空间布局：20 21 (上行), 22 23 (下行)
             // 按递增顺序解码：20,21,22,23
@@ -270,14 +266,11 @@ trait MacroblockDecodingTrait
                 $blk = $blockIdx - 20;
                 $nc = $this->computeNc($blockIdx, $mbX, $mbY, $nzCache, $leftNz, $topNz, $leftAvailable, $topAvailable);
                 $ac = $this->decodeResidualBlock(15, $nc);
-                for ($i = 0; $i < 15; $i++) $crCoeffs[$blk][$i + 1] = $ac[$i];
-                $crCoeffs[$blk] = $this->zigzagToRaster($crCoeffs[$blk]);
-                // 反量化AC系数（coeffs[0]保持为0，DC单独处理）
-                $crCoeffs[$blk] = $this->dequantize4x4($crCoeffs[$blk], 2, $chromaQp);
-                // AC-only count
                 $nzCount = 0;
                 for ($i = 0; $i < 15; $i++) if ($ac[$i] != 0) $nzCount++;
                 $nzCache[$blockIdx] = $nzCount;
+                // zigzag重排+反量化融合（coeffs[0]留空给DC）
+                $crCoeffs[$blk] = $this->dequantAcZigzag4x4($ac, 2, $chromaQp);
             }
         }
 
@@ -531,16 +524,12 @@ trait MacroblockDecodingTrait
                 $rasterIdx = $blockIndexToRaster[$blkIdx];
                 $nc = $this->computeNc($rasterIdx, $mbX, $mbY, $nzCache, $leftNz, $topNz, $leftAvailable, $topAvailable);
                 $ac = $this->decodeResidualBlock(15, $nc);
-                // 直接用 ZIGZAG_SCAN_4X4 表映射AC系数到raster位置，跳过位置0（DC）
-                for ($scanPos = 0; $scanPos < 15; $scanPos++) {
-                    $yAcCoeffs[$rasterIdx][self::ZIGZAG_SCAN_4X4[$scanPos + 1]] = $ac[$scanPos];
-                }
-                // 反量化AC系数（coeffs[0]保持为0，DC单独处理）
-                $yAcCoeffs[$rasterIdx] = $this->dequantize4x4($yAcCoeffs[$rasterIdx], 0, $qp);
                 // AC-only count（totalCoeff[blockIndex]只存AC计数，不包括DC）
                 $nzCount = 0;
                 for ($i = 0; $i < 15; $i++) if ($ac[$i] != 0) $nzCount++;
                 $nzCache[$rasterIdx] = $nzCount;
+                // zigzag重排+反量化融合（coeffs[0]留空给DC）
+                $yAcCoeffs[$rasterIdx] = $this->dequantAcZigzag4x4($ac, 0, $qp);
             }
         }
 
@@ -580,11 +569,9 @@ trait MacroblockDecodingTrait
                 $nc = $this->computeNc($blockIdx, $mbX, $mbY, $nzCache, $leftNz, $topNz, $leftAvailable, $topAvailable);
                 $ac = $this->decodeResidualBlock(15, $nc);
                 $nzCnt = 0; for ($i = 0; $i < 15; $i++) if ($ac[$i] != 0) $nzCnt++;
-                for ($i = 1; $i < 16; $i++) $cbAcCoeffs[$blk][$i] = $ac[$i - 1];
-                $cbAcCoeffs[$blk] = $this->zigzagToRaster($cbAcCoeffs[$blk]);
-                // 反量化AC系数（coeffs[0]保持为0，DC单独处理）
-                $cbAcCoeffs[$blk] = $this->dequantize4x4($cbAcCoeffs[$blk], 1, $chromaQp);
                 $nzCache[$blockIdx] = $nzCnt;
+                // zigzag重排+反量化融合（coeffs[0]留空给DC）
+                $cbAcCoeffs[$blk] = $this->dequantAcZigzag4x4($ac, 1, $chromaQp);
             }
             // Cr块空间布局（与Cb相同）：
             //   20 21  (上行)
@@ -596,11 +583,9 @@ trait MacroblockDecodingTrait
                 $nc = $this->computeNc($blockIdx, $mbX, $mbY, $nzCache, $leftNz, $topNz, $leftAvailable, $topAvailable);
                 $ac = $this->decodeResidualBlock(15, $nc);
                 $nzCnt = 0; for ($i = 0; $i < 15; $i++) if ($ac[$i] != 0) $nzCnt++;
-                for ($i = 1; $i < 16; $i++) $crAcCoeffs[$blk][$i] = $ac[$i - 1];
-                $crAcCoeffs[$blk] = $this->zigzagToRaster($crAcCoeffs[$blk]);
-                // 反量化AC系数（coeffs[0]保持为0，DC单独处理）
-                $crAcCoeffs[$blk] = $this->dequantize4x4($crAcCoeffs[$blk], 2, $chromaQp);
                 $nzCache[$blockIdx] = $nzCnt;
+                // zigzag重排+反量化融合（coeffs[0]留空给DC）
+                $crAcCoeffs[$blk] = $this->dequantAcZigzag4x4($ac, 2, $chromaQp);
             }
         }
 
@@ -1968,12 +1953,11 @@ trait MacroblockDecodingTrait
                         $rasterIdx = $scanToRaster[$scanIdx];
                         $nc = $this->computeNc($rasterIdx, $mbX, $mbY, $nzCache, $leftNz, $topNz, $leftAvailable, $topAvailable);
                         $coeffs = $this->decodeResidualBlock(16, $nc);
-                        for ($i = 0; $i < 16; $i++) $yCoeffs[$rasterIdx][$i] = $coeffs[$i];
-                        $yCoeffs[$rasterIdx] = $this->zigzagToRaster($yCoeffs[$rasterIdx]);
-                        $yCoeffs[$rasterIdx] = $this->dequantize4x4($yCoeffs[$rasterIdx], 3, $qp);
                         $nzCount = 0;
                         for ($i = 0; $i < 16; $i++) if ($coeffs[$i] != 0) $nzCount++;
                         $nzCache[$rasterIdx] = $nzCount;
+                        // zigzag重排+反量化融合为一步
+                        $yCoeffs[$rasterIdx] = $this->dequantZigzag4x4($coeffs, 3, $qp);
                     }
                 }
             }
@@ -2009,10 +1993,9 @@ trait MacroblockDecodingTrait
                     $nc = $this->computeNc($blockIdx, $mbX, $mbY, $nzCache, $leftNz, $topNz, $leftAvailable, $topAvailable);
                     $ac = $this->decodeResidualBlock(15, $nc);
                     $nzCnt = 0; for ($i = 0; $i < 15; $i++) if ($ac[$i] != 0) $nzCnt++;
-                    for ($i = 1; $i < 16; $i++) $cbAcCoeffs[$blk][$i] = $ac[$i - 1];
-                    $cbAcCoeffs[$blk] = $this->zigzagToRaster($cbAcCoeffs[$blk]);
-                    $cbAcCoeffs[$blk] = $this->dequantize4x4($cbAcCoeffs[$blk], 5, $chromaQp);
                     $nzCache[$blockIdx] = $nzCnt;
+                    // zigzag重排+反量化融合（coeffs[0]留空给DC）
+                    $cbAcCoeffs[$blk] = $this->dequantAcZigzag4x4($ac, 5, $chromaQp);
                 }
                 $crScanOrder = [20, 21, 22, 23];
                 foreach ($crScanOrder as $blockIdx) {
@@ -2021,10 +2004,9 @@ trait MacroblockDecodingTrait
                     $ac = $this->decodeResidualBlock(15, $nc);
 
                     $nzCnt = 0; for ($i = 0; $i < 15; $i++) if ($ac[$i] != 0) $nzCnt++;
-                    for ($i = 1; $i < 16; $i++) $crAcCoeffs[$blk][$i] = $ac[$i - 1];
-                    $crAcCoeffs[$blk] = $this->zigzagToRaster($crAcCoeffs[$blk]);
-                    $crAcCoeffs[$blk] = $this->dequantize4x4($crAcCoeffs[$blk], 4, $chromaQp);
                     $nzCache[$blockIdx] = $nzCnt;
+                    // zigzag重排+反量化融合（coeffs[0]留空给DC）
+                    $crAcCoeffs[$blk] = $this->dequantAcZigzag4x4($ac, 4, $chromaQp);
                 }
             }
         }

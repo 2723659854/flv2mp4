@@ -30,6 +30,11 @@ trait SliceEncodeTrait
     private ?string $scenePrevY = null;
     private int $scenePrevAw = 0;
     private int $scenePrevAh = 0;
+    /**
+     * 连续"高 SAD"帧计数。真硬切是突发单帧（上一帧平稳），摇移/快速运动则连续多帧高 SAD。
+     * 只在高 SAD 突发首帧强制 IDR；持续运动期间保持 P 帧，避免高运动场景帧帧 IDR 拖垮编码速度。
+     */
+    private int $sceneHighRun = 0;
 
     /** 场景切换触发阈值和局部硬切判定常量定义在 H264Encoder 类中，兼容 PHP 8.1。 */
 
@@ -232,9 +237,18 @@ trait SliceEncodeTrait
             // 规则一：全帧硬切（全局均值+强差点占比双阈值）；
             // 规则二：屏幕采集类局部硬切——大面积静态边框会稀释全局指标，
             // 改看"≥3/4 抽样点剧变"的宏块覆盖率及其自身幅度
-            if (($sceneMean >= self::SCENE_SAD_THRESHOLD && $sceneRatio >= self::SCENE_RATIO_THRESHOLD)
-                || ($sceneHardRatio >= self::SCENE_REGION_MB_RATIO && $sceneActiveMean >= self::SCENE_REGION_MEAN)) {
-                $isIDR = true;
+            $sceneDetected = ($sceneMean >= self::SCENE_SAD_THRESHOLD && $sceneRatio >= self::SCENE_RATIO_THRESHOLD)
+                || ($sceneHardRatio >= self::SCENE_REGION_MB_RATIO && $sceneActiveMean >= self::SCENE_REGION_MEAN);
+            if ($sceneDetected) {
+                $this->sceneHighRun++;
+                // 仅突发首帧（真硬切特征）升级 IDR；连续高 SAD 是摇移/剧烈运动，保持 P 帧。
+                // 持续运动超过 SCENE_SUSTAIN_MAX 帧后再给一次机会，兜住"运动中硬切"的极端情况。
+                if ($this->sceneHighRun === 1 || $this->sceneHighRun >= self::SCENE_SUSTAIN_MAX) {
+                    $isIDR = true;
+                    if ($this->sceneHighRun >= self::SCENE_SUSTAIN_MAX) $this->sceneHighRun = 0;
+                }
+            } else {
+                $this->sceneHighRun = 0;
             }
         }
         // 保存当前帧【输入】作为下帧比对基准（IDR/P 后连续，分辨率变化时自然断档一帧）

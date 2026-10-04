@@ -46,6 +46,45 @@ trait TransformTrait
     }
 
     /**
+     * 热路径融合：CAVLC输出的16个zigzag系数 → raster顺序反量化，一步完成。
+     * 替代 copy16 + zigzagToRaster + dequantize4x4（每块省2次数组分配与32次循环）。
+     * 数值与原三步完全一致：反量化乘数按raster位置查表。
+     */
+    public function dequantZigzag4x4(array $coeff, int $listIdx, int $qp): array
+    {
+        $out = array_fill(0, 16, 0);
+        $qp = max(0, min(51, $qp));
+        $tab = $this->dequant4Table[$listIdx][$qp];
+        for ($z = 0; $z < 16; $z++) {
+            $c = $coeff[$z];
+            if ($c != 0) {
+                $r = self::ZIGZAG_SCAN_4X4[$z];
+                $out[$r] = ($c * $tab[$r] + 32) >> 6;
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * 热路径融合（AC专用）：CAVLC输出的15个AC系数（对应zigzag位置1..15）
+     * → raster顺序反量化，位置0留空给DC后续填入。
+     */
+    public function dequantAcZigzag4x4(array $ac15, int $listIdx, int $qp): array
+    {
+        $out = array_fill(0, 16, 0);
+        $qp = max(0, min(51, $qp));
+        $tab = $this->dequant4Table[$listIdx][$qp];
+        for ($z = 1; $z < 16; $z++) {
+            $c = $ac15[$z - 1];
+            if ($c != 0) {
+                $r = self::ZIGZAG_SCAN_4X4[$z];
+                $out[$r] = ($c * $tab[$r] + 32) >> 6;
+            }
+        }
+        return $out;
+    }
+
+    /**
      * 4x4 IDCT整数逆变换
      * 先列变换，后行变换，中间>>1不可交换顺序
      */
@@ -83,8 +122,7 @@ trait TransformTrait
             $block[$i + 12] = $z0 - $z3;
         }
 
-        // 第二遍：行变换并>>6
-        $out = array_fill(0, 16, 0);
+        // 第二遍：行变换并>>6，原地写回（每行的4次读取先于该行4次写入，各行互不重叠）
         for ($i = 0; $i < 4; $i++) {
             $row = 4 * $i;
             $z0 = $block[$row + 0] + $block[$row + 2];
@@ -92,13 +130,13 @@ trait TransformTrait
             $z2 = ($block[$row + 1] >> 1) - $block[$row + 3];
             $z3 = $block[$row + 1] + ($block[$row + 3] >> 1);
 
-            $out[$row + 0] = ($z0 + $z3) >> 6;
-            $out[$row + 1] = ($z1 + $z2) >> 6;
-            $out[$row + 2] = ($z1 - $z2) >> 6;
-            $out[$row + 3] = ($z0 - $z3) >> 6;
+            $block[$row + 0] = ($z0 + $z3) >> 6;
+            $block[$row + 1] = ($z1 + $z2) >> 6;
+            $block[$row + 2] = ($z1 - $z2) >> 6;
+            $block[$row + 3] = ($z0 - $z3) >> 6;
         }
 
-        return $out;
+        return $block;
     }
 
     /**

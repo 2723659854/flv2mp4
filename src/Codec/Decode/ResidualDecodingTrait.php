@@ -696,7 +696,37 @@ trait ResidualDecodingTrait
         $maxZeros = $maxCoeff - $totalCoeff;
         if ($maxZeros === 0) return 0;
 
-        static $TOTAL_ZEROS_LEN = [
+        // 快速路径：预生成的定宽查找表（索引=peek出的比特值，值=[zero数, 码长]）
+        static $LUT = null;
+        if ($LUT === null) {
+            $LUT = self::buildTotalZerosLut();
+        }
+        if ($maxCoeff == 4) {
+            $tableIdx = $totalCoeff - 1;
+            if ($tableIdx < 0 || $tableIdx > 2) return 0;
+            $peeked = $this->reader->peek(3);
+            $e = $LUT['c' . $tableIdx][$peeked];
+            if ($e[1] !== 0) {
+                $this->reader->skip($e[1]);
+                return $e[0];
+            }
+            return 0;
+        }
+        $tableIdx = $totalCoeff - 1;
+        if ($tableIdx < 0 || $tableIdx > 14) return 0;
+        $peeked = $this->reader->peek(9);
+        $e = $LUT['l' . $tableIdx][$peeked];
+        if ($e[1] !== 0) {
+            $this->reader->skip($e[1]);
+            return $e[0];
+        }
+        return 0;
+    }
+
+    /** 预生成 total_zeros 定宽查找表（每进程一次） */
+    private function buildTotalZerosLut(): array
+    {
+        $LENS = [
             [1, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 9],
             [3, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 6, 6, 6, 6, 0],
             [4, 3, 3, 3, 4, 4, 3, 3, 4, 5, 5, 6, 5, 6, 0, 0],
@@ -714,7 +744,7 @@ trait ResidualDecodingTrait
             [1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         ];
 
-        static $TOTAL_ZEROS_BITS = [
+        $BITS = [
             [1, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 1],
             [7, 6, 5, 4, 3, 5, 4, 3, 2, 3, 2, 3, 2, 1, 0, 0],
             [5, 7, 6, 5, 4, 3, 4, 3, 2, 3, 2, 1, 1, 0, 0, 0],
@@ -732,46 +762,76 @@ trait ResidualDecodingTrait
             [0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         ];
 
-        static $CHROMA_DC_TOTAL_ZEROS_LEN = [[1, 2, 3, 3], [1, 2, 2, 0], [1, 1, 0, 0]];
-        static $CHROMA_DC_TOTAL_ZEROS_BITS = [[1, 1, 1, 0], [1, 1, 0, 0], [1, 0, 0, 0]];
+        $CHROMA_LEN = [[1, 2, 3, 3], [1, 2, 2, 0], [1, 1, 0, 0]];
+        $CHROMA_BITS = [[1, 1, 1, 0], [1, 1, 0, 0], [1, 0, 0, 0]];
 
-        if ($maxCoeff == 4) {
-            $tableIdx = $totalCoeff - 1;
-            if ($tableIdx < 0 || $tableIdx > 2) return 0;
-            $lens = $CHROMA_DC_TOTAL_ZEROS_LEN[$tableIdx];
-            $bitsTab = $CHROMA_DC_TOTAL_ZEROS_BITS[$tableIdx];
-            $count = 4;
-            $maxBits = 3;
-        } else {
-            $tableIdx = $totalCoeff - 1;
-            if ($tableIdx < 0 || $tableIdx > 14) return 0;
-            $lens = $TOTAL_ZEROS_LEN[$tableIdx];
-            $bitsTab = $TOTAL_ZEROS_BITS[$tableIdx];
-            $count = 16;
-            $maxBits = 9;
-        }
-
-        $peeked = $this->reader->peek($maxBits);
-
-        for ($i = 0; $i < $count; $i++) {
-            $len = $lens[$i];
-            if ($len == 0) continue;
-            $code = $bitsTab[$i];
-            $shift = $maxBits - $len;
-            if (($peeked >> $shift) == $code) {
-                $this->reader->skip($len);
-                return $i;
+        $lut = [];
+        // 亮度15张表，定宽9位
+        for ($t = 0; $t < 15; $t++) {
+            $row = array_fill(0, 512, [0, 0]);
+            for ($i = 0; $i < 16; $i++) {
+                $len = $LENS[$t][$i];
+                if ($len == 0) continue;
+                $code = $BITS[$t][$i];
+                $shift = 9 - $len;
+                // 填充所有前缀匹配的9位模式
+                $base = $code << $shift;
+                $cnt = 1 << $shift;
+                for ($p = 0; $p < $cnt; $p++) {
+                    $row[$base + $p] = [$i, $len];
+                }
             }
+            $lut['l' . $t] = $row;
         }
-
-        return 0;
+        // 色度DC 3张表，定宽3位
+        for ($t = 0; $t < 3; $t++) {
+            $row = array_fill(0, 8, [0, 0]);
+            for ($i = 0; $i < 4; $i++) {
+                $len = $CHROMA_LEN[$t][$i];
+                if ($len == 0) continue;
+                $code = $CHROMA_BITS[$t][$i];
+                $shift = 3 - $len;
+                $base = $code << $shift;
+                $cnt = 1 << $shift;
+                for ($p = 0; $p < $cnt; $p++) {
+                    $row[$base + $p] = [$i, $len];
+                }
+            }
+            $lut['c' . $t] = $row;
+        }
+        return $lut;
     }
 
     public function readRunBefore(int $leftZeros): int
     {
         if ($leftZeros <= 0) return 0;
 
-        static $RUN_BEFORE_LEN = [
+        // 快速路径：预生成定宽查找表（表0-5宽3位，表6宽11位）
+        static $LUT = null;
+        if ($LUT === null) {
+            $LUT = $this->buildRunBeforeLut();
+        }
+
+        $tableIdx = min($leftZeros, 7) - 1;
+        if ($tableIdx < 0 || $tableIdx > 6) return 0;
+
+        if ($tableIdx === 6) {
+            $peeked = $this->reader->peek(11);
+            $e = $LUT[6][$peeked];
+        } else {
+            $peeked = $this->reader->peek(3);
+            $e = $LUT[$tableIdx][$peeked];
+        }
+        if ($e[1] !== 0) {
+            $this->reader->skip($e[1]);
+        }
+        return $e[0];
+    }
+
+    /** 预生成 run_before 定宽查找表（每进程一次） */
+    private function buildRunBeforeLut(): array
+    {
+        $RUN_BEFORE_LEN = [
             [1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             [1, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             [2, 2, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
@@ -781,7 +841,7 @@ trait ResidualDecodingTrait
             [3, 3, 3, 3, 3, 3, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0],
         ];
 
-        static $RUN_BEFORE_BITS = [
+        $RUN_BEFORE_BITS = [
             [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             [1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             [3, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
@@ -791,31 +851,27 @@ trait ResidualDecodingTrait
             [7, 6, 5, 4, 3, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
         ];
 
-        static $RUN_BEFORE_COUNT = [2, 3, 4, 5, 6, 7, 15];
+        $RUN_BEFORE_COUNT = [2, 3, 4, 5, 6, 7, 15];
 
-        $tableIdx = min($leftZeros, 7) - 1;
-        if ($tableIdx < 0 || $tableIdx > 6) return 0;
-
-        $lens = $RUN_BEFORE_LEN[$tableIdx];
-        $bitsTab = $RUN_BEFORE_BITS[$tableIdx];
-        $count = $RUN_BEFORE_COUNT[$tableIdx];
-
-        $maxBits = ($leftZeros >= 7) ? 11 : 3;
-
-        $peeked = $this->reader->peek($maxBits);
-
-        for ($i = 0; $i < $count; $i++) {
-            $len = $lens[$i];
-            if ($len == 0) continue;
-            $code = $bitsTab[$i];
-            $shift = $maxBits - $len;
-            if (($peeked >> $shift) == $code) {
-                $this->reader->skip($len);
-                return $i;
+        $all = [];
+        for ($t = 0; $t < 7; $t++) {
+            $maxBits = $t === 6 ? 11 : 3;
+            $size = 1 << $maxBits;
+            $row = array_fill(0, $size, [0, 0]);
+            for ($i = 0; $i < $RUN_BEFORE_COUNT[$t]; $i++) {
+                $len = $RUN_BEFORE_LEN[$t][$i];
+                if ($len == 0) continue;
+                $code = $RUN_BEFORE_BITS[$t][$i];
+                $shift = $maxBits - $len;
+                $base = $code << $shift;
+                $cnt = 1 << $shift;
+                for ($p = 0; $p < $cnt; $p++) {
+                    $row[$base + $p] = [$i, $len];
+                }
             }
+            $all[$t] = $row;
         }
-
-        return 0;
+        return $all;
     }
 
     /**
@@ -843,29 +899,27 @@ trait ResidualDecodingTrait
             return $coeffs;
         }
 
-        // 2. Read levels
-        $levels = array_fill(0, $totalCoeff, 0);
+        // 2. Read levels（顺序追加，避免预填充数组；高运动帧约 50 万系数/帧）
+        $levels = [];
 
         // 2a. Trailing ones: read sign bits (1 bit each)
         for ($i = 0; $i < $trailingOnes; $i++) {
             $sign = $this->reader->readU(1);
-            $levels[$i] = $sign ? -1 : 1;
+            $levels[] = $sign ? -1 : 1;
         }
 
         // 2b. Read remaining levels (totalCoeff - trailingOnes)
         $remaining = $totalCoeff - $trailingOnes;
         if ($remaining > 0) {
+            static $SUFFIX_LIMIT = [0, 3, 6, 12, 24, 48, PHP_INT_MAX];
             $suffixLength = ($totalCoeff > 10 && $trailingOnes < 3) ? 1 : 0;
 
             for ($i = 0; $i < $remaining; $i++) {
                 $levelIdx = $trailingOnes + $i;
                 $isFirst = ($i === 0);
 
-                // Read level_prefix: count consecutive zero bits before a '1'
-                $prefix = 0;
-                while ($prefix < 32 && $this->reader->readU(1) === 0) {
-                    $prefix++;
-                }
+                // Read level_prefix: 连续 0 的个数 + 终止位 1
+                $prefix = $this->reader->readLevelPrefix();
 
                 // Compute level_code from prefix and suffix
                 //$levelCode = 0;
@@ -913,11 +967,8 @@ trait ResidualDecodingTrait
                 $absLevel = abs($levels[$levelIdx]);
                 if ($isFirst) {
                     $suffixLength = ($absLevel > 3) ? 2 : 1;
-                } else {
-                    $suffixLimit = [0, 3, 6, 12, 24, 48, PHP_INT_MAX];
-                    if ($suffixLength < 6 && $absLevel > $suffixLimit[$suffixLength]) {
-                        $suffixLength++;
-                    }
+                } elseif ($suffixLength < 6 && $absLevel > $SUFFIX_LIMIT[$suffixLength]) {
+                    $suffixLength++;
                 }
             }
         }

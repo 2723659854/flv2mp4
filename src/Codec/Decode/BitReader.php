@@ -11,12 +11,14 @@ class BitReader
 {
     private string $data;
     private int $bitLength;
+    private int $byteLen;
     private int $pos;
 
     public function __construct(string $data)
     {
         $this->data = $data;
         $this->bitLength = strlen($data) * 8;
+        $this->byteLen = strlen($data);
         $this->pos = 0;
     }
 
@@ -70,6 +72,76 @@ class BitReader
             $value <<= $n - $available;
         }
         return $value;
+    }
+
+    /**
+     * CAVLC level_prefix 快速读取：返回连续 0 的个数（终止位 1 也一并消费）。
+     * 热路径约 50 万次/帧，旧实现逐位 readU(1) 方法调用开销大，
+     * 这里直接按字节窗口 + 256 项前导零查表，最多扫描 4 个字节。
+     */
+    public function readLevelPrefix(int $max = 32): int
+    {
+        static $clz8 = null;
+        if ($clz8 === null) {
+            $clz8 = array_fill(0, 256, 0);
+            for ($v = 1; $v < 256; $v++) {
+                $x = $v;
+                $n = 0;
+                while (($x & 0x80) === 0) {
+                    $n++;
+                    $x <<= 1;
+                }
+                $clz8[$v] = $n;
+            }
+        }
+
+        $pos = $this->pos;
+        if ($pos >= $this->bitLength) {
+            return $max;
+        }
+
+        $bytePos = $pos >> 3;
+        $bitOff = $pos & 7;
+
+        // 当前字节的剩余有效位顶对齐后查表
+        $b = (ord($this->data[$bytePos]) << $bitOff) & 0xFF;
+        if ($b !== 0) {
+            $clz = $clz8[$b];
+            $this->pos = $pos + $clz + 1;
+            return $clz;
+        }
+
+        $prefix = 8 - $bitOff;
+        $bytePos++;
+
+        while ($prefix + 8 <= $max && $bytePos < $this->byteLen) {
+            $b = ord($this->data[$bytePos]);
+            if ($b !== 0) {
+                $clz = $clz8[$b];
+                if ($prefix + $clz >= $max) {
+                    $this->pos = $pos + $max;
+                    return $max;
+                }
+                $this->pos = $pos + $prefix + $clz + 1;
+                return $prefix + $clz;
+            }
+            $prefix += 8;
+            $bytePos++;
+        }
+
+        // max 边界处不足一个整字节的剩余位
+        if ($prefix < $max && $bytePos < $this->byteLen) {
+            $rem = $max - $prefix;
+            $b = ord($this->data[$bytePos]) >> (8 - $rem);
+            if ($b !== 0) {
+                $clz = $clz8[$b << (8 - $rem)];
+                $this->pos = $pos + $prefix + $clz + 1;
+                return $prefix + $clz;
+            }
+        }
+
+        $this->pos = min($pos + $max, $this->bitLength);
+        return $max;
     }
 
     public function readUe(): int
