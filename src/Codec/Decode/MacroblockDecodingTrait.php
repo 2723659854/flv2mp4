@@ -36,9 +36,10 @@ trait MacroblockDecodingTrait
 
         if ($this->deblockInfoEnabled) {
             $this->mbTypeForDeblock[$mbIdx] = $mbType;
-            $this->mbNnzForDeblock[$mbIdx] = array_fill(0, 24, 0);
-            $this->mbMvForDeblock[$mbIdx] = array_fill(0, 16, [0, 0]);
-            $this->mbRefForDeblock[$mbIdx] = array_fill(0, 16, 0);
+            // 去块簿记的零值槽位在帧开始时已用共享零数组预填：
+            // - nz：有残差的 MB 会在 decodeResidualAndAdd() 末尾整体替换为 nzCache；
+            // - mv/ref：16x16/16x8/skip 路径整体替换；8x16/8x8ref0 原地改写路径各自先换私有数组。
+            // 逐 MB 预分配（每帧 2000+ MB × 33 个数组）在频闪高 intra 流里是纯浪费。
         }
 
         $mbQpDelta = 0;
@@ -1128,6 +1129,9 @@ trait MacroblockDecodingTrait
         $mbWidth = $this->picWidthInMbs;
         $mbIdx = $mbY * $mbWidth + $mbX;
         if ($this->deblockInfoEnabled) {
+            // 下方按子块原地改写，先换成本 MB 私有数组，避免污染帧级共享零数组
+            $this->mbMvForDeblock[$mbIdx] = array_fill(0, 16, [0, 0]);
+            $this->mbRefForDeblock[$mbIdx] = array_fill(0, 16, 0);
             foreach (self::$left8x16Blocks as $i) {
                 $this->mbMvForDeblock[$mbIdx][$i] = [$mv0X, $mv0Y];
                 $this->mbRefForDeblock[$mbIdx][$i] = $refIdx0;
@@ -1453,13 +1457,18 @@ trait MacroblockDecodingTrait
 
         $mbWidth = $this->picWidthInMbs;
         $mbIdx = $mbY * $mbWidth + $mbX;
-        if ($this->deblockInfoEnabled) for ($y = 0; $y < 4; $y++) {
-            for ($x = 0; $x < 4; $x++) {
-                $idx = $y * 4 + $x;
-                $mv = $mbMvs[$y][$x];
-                if ($mv !== null) {
-                    $this->mbMvForDeblock[$mbIdx][$idx] = [$mv[0], $mv[1]];
-                    $this->mbRefForDeblock[$mbIdx][$idx] = $mv[2];
+        if ($this->deblockInfoEnabled) {
+            // 下方按子块原地改写，先换成本 MB 私有数组，避免污染帧级共享零数组
+            $this->mbMvForDeblock[$mbIdx] = array_fill(0, 16, [0, 0]);
+            $this->mbRefForDeblock[$mbIdx] = array_fill(0, 16, 0);
+            for ($y = 0; $y < 4; $y++) {
+                for ($x = 0; $x < 4; $x++) {
+                    $idx = $y * 4 + $x;
+                    $mv = $mbMvs[$y][$x];
+                    if ($mv !== null) {
+                        $this->mbMvForDeblock[$mbIdx][$idx] = [$mv[0], $mv[1]];
+                        $this->mbRefForDeblock[$mbIdx][$idx] = $mv[2];
+                    }
                 }
             }
         }
@@ -1912,6 +1921,7 @@ trait MacroblockDecodingTrait
      */
     private function decodeResidualAndAdd(int $mbX, int $mbY, int $codedBlockPattern, int $qp, int $mbType): void
     {
+        static $scanToRasterL = [0, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15];
         $cbp = $codedBlockPattern;
         $lumaCbp = $cbp & 0x0F;
         $chromaCbp = ($cbp >> 4) & 0x03;
@@ -1942,7 +1952,7 @@ trait MacroblockDecodingTrait
         $yCoeffs = [];
         if ($lumaCbp !== 0) {
             $yCoeffs = array_fill(0, 16, array_fill(0, 16, 0));
-            $scanToRaster = [0, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15];
+            $scanToRaster = $scanToRasterL;
 
             // 亮度4x4残差 - Inter帧每个块有16个系数（DC+AC一起）
             // 按zigzag扫描顺序解码，每个块计算nC（与Intra4x4相同）

@@ -24,6 +24,53 @@ trait DeblockingFilterTrait
     private array $deblockThresholdCache = [];
     private array $deblockTc0Cache = [];
     private array $deblockChromaQpCache = [];
+    /**
+     * 按 qp 预聚合的滤波参数元组（热路径每帧上万次边调用，避免重复查表与小array字面量分配）：
+     * 亮度 [alpha, beta, tc0(bs1), tc0(bs2), tc0(bs3)]
+     * @var array<int,array{0:int,1:int,2:int,3:int,4:int}>
+     */
+    private array $deblockLumaQpTuple = [];
+    /** 色度 [alpha, beta, tc(bs1), tc(bs2), tc(bs3)]（tc 已含 +1） */
+    private array $deblockChromaQpTuple = [];
+
+    /** 当前帧亮度 qp 元组（alpha/beta/tc0，仅依赖 qp 与 slice offset） */
+    private function lumaQpTuple(int $qp): array
+    {
+        $key = ($qp << 16) | ((($this->sliceAlphaC0Offset + 12) & 0xFF) << 8) | ($this->sliceBetaOffset + 12);
+        if (!isset($this->deblockLumaQpTuple[$key])) {
+            $alpha = $beta = 0;
+            $this->getThresholds($qp, $this->sliceAlphaC0Offset, $this->sliceBetaOffset, $alpha, $beta);
+            $this->deblockLumaQpTuple[$key] = [
+                $alpha,
+                $beta,
+                $this->getTc0($qp, $this->sliceAlphaC0Offset, 1),
+                $this->getTc0($qp, $this->sliceAlphaC0Offset, 2),
+                $this->getTc0($qp, $this->sliceAlphaC0Offset, 3),
+            ];
+        }
+        return $this->deblockLumaQpTuple[$key];
+    }
+
+    /**
+     * 色度滤波参数元组，key 为【已换算的色度 QP】（调用方负责 getChromaQp）：
+     * [alpha, beta, tc(bs1), tc(bs2), tc(bs3)]（tc 已按规范 +1）
+     */
+    private function chromaQpTuple(int $chromaQp): array
+    {
+        $key = $chromaQp | (($this->sliceAlphaC0Offset + 12) << 8) | (($this->sliceBetaOffset + 12) << 16);
+        if (!isset($this->deblockChromaQpTuple[$key])) {
+            $alpha = $beta = 0;
+            $this->getThresholds($chromaQp, $this->sliceAlphaC0Offset, $this->sliceBetaOffset, $alpha, $beta);
+            $this->deblockChromaQpTuple[$key] = [
+                $alpha,
+                $beta,
+                $this->getTc0($chromaQp, $this->sliceAlphaC0Offset, 1) + 1,
+                $this->getTc0($chromaQp, $this->sliceAlphaC0Offset, 2) + 1,
+                $this->getTc0($chromaQp, $this->sliceAlphaC0Offset, 3) + 1,
+            ];
+        }
+        return $this->deblockChromaQpTuple[$key];
+    }
 
     private function clip3(int $lo, int $hi, int $x): int
     {
@@ -143,28 +190,23 @@ trait DeblockingFilterTrait
 
     private function filterVerticalLuma(int $mbX, int $mbY, int $edge, array $bs, int $qp): void
     {
-        $alpha = $beta = 0;
-        $this->getThresholds($qp, $this->sliceAlphaC0Offset, $this->sliceBetaOffset, $alpha, $beta);
-        if ($alpha == 0 || $beta == 0) {
+        $qt = $this->lumaQpTuple($qp);
+        if ($qt[0] == 0 || $qt[1] == 0) {
             return;
         }
+        $alpha = $qt[0];
+        $beta = $qt[1];
 
         $stride = $this->deblockYStride;
         $plane = &$this->yPlane;
         $base = ($mbY * 16) * $stride + ($mbX * 16) + $edge * 4;
-        // 同一调用内 qp 固定，bs1..3 的 tc0 只查一次
-        $tc0Map = [
-            1 => $this->getTc0($qp, $this->sliceAlphaC0Offset, 1),
-            2 => $this->getTc0($qp, $this->sliceAlphaC0Offset, 2),
-            3 => $this->getTc0($qp, $this->sliceAlphaC0Offset, 3),
-        ];
 
         for ($i = 0; $i < 4; $i++) {
             $curBs = $bs[$i];
             if ($curBs == 0) {
                 continue;
             }
-            $tc0 = $curBs < 4 ? $tc0Map[$curBs] : 0;
+            $tc0 = $curBs === 1 ? $qt[2] : ($curBs === 2 ? $qt[3] : ($curBs === 3 ? $qt[4] : 0));
             $off = $base + $i * 4 * $stride;
 
             for ($d = 0; $d < 4; $d++, $off += $stride) {
@@ -239,27 +281,23 @@ trait DeblockingFilterTrait
 
     private function filterHorizontalLuma(int $mbX, int $mbY, int $edge, array $bs, int $qp): void
     {
-        $alpha = $beta = 0;
-        $this->getThresholds($qp, $this->sliceAlphaC0Offset, $this->sliceBetaOffset, $alpha, $beta);
-        if ($alpha == 0 || $beta == 0) {
+        $qt = $this->lumaQpTuple($qp);
+        if ($qt[0] == 0 || $qt[1] == 0) {
             return;
         }
+        $alpha = $qt[0];
+        $beta = $qt[1];
 
         $stride = $this->deblockYStride;
         $plane = &$this->yPlane;
         $base = ($mbY * 16 + $edge * 4) * $stride + ($mbX * 16);
-        $tc0Map = [
-            1 => $this->getTc0($qp, $this->sliceAlphaC0Offset, 1),
-            2 => $this->getTc0($qp, $this->sliceAlphaC0Offset, 2),
-            3 => $this->getTc0($qp, $this->sliceAlphaC0Offset, 3),
-        ];
 
         for ($i = 0; $i < 4; $i++) {
             $curBs = $bs[$i];
             if ($curBs == 0) {
                 continue;
             }
-            $tc0 = $curBs < 4 ? $tc0Map[$curBs] : 0;
+            $tc0 = $curBs === 1 ? $qt[2] : ($curBs === 2 ? $qt[3] : ($curBs === 3 ? $qt[4] : 0));
             $off = $base + $i * 4;
 
             for ($d = 0; $d < 4; $d++, $off++) {
@@ -332,19 +370,15 @@ trait DeblockingFilterTrait
 
     private function filterVerticalChroma(int $mbX, int $mbY, int $edge, array $bs, int $qp): void
     {
-        $alpha = $beta = 0;
-        $this->getThresholds($qp, $this->sliceAlphaC0Offset, $this->sliceBetaOffset, $alpha, $beta);
-        if ($alpha == 0 || $beta == 0) {
+        $qt = $this->chromaQpTuple($qp);
+        if ($qt[0] == 0 || $qt[1] == 0) {
             return;
         }
+        $alpha = $qt[0];
+        $beta = $qt[1];
 
         $stride = $this->deblockUvStride;
         $base = ($mbY * 8) * $stride + ($mbX * 8) + $edge * 4;
-        $tcMap = [
-            1 => $this->getTc0($qp, $this->sliceAlphaC0Offset, 1) + 1,
-            2 => $this->getTc0($qp, $this->sliceAlphaC0Offset, 2) + 1,
-            3 => $this->getTc0($qp, $this->sliceAlphaC0Offset, 3) + 1,
-        ];
 
         static $planeNames = ['uPlane', 'vPlane'];
         foreach ($planeNames as $planeName) {
@@ -354,7 +388,7 @@ trait DeblockingFilterTrait
                 if ($curBs == 0) {
                     continue;
                 }
-                $tc = $curBs < 4 ? $tcMap[$curBs] : 0;
+                $tc = $curBs === 1 ? $qt[2] : ($curBs === 2 ? $qt[3] : ($curBs === 3 ? $qt[4] : 0));
                 $off = $base + $i * 2 * $stride;
 
                 for ($d = 0; $d < 2; $d++, $off += $stride) {
@@ -394,19 +428,15 @@ trait DeblockingFilterTrait
 
     private function filterHorizontalChroma(int $mbX, int $mbY, int $edge, array $bs, int $qp): void
     {
-        $alpha = $beta = 0;
-        $this->getThresholds($qp, $this->sliceAlphaC0Offset, $this->sliceBetaOffset, $alpha, $beta);
-        if ($alpha == 0 || $beta == 0) {
+        $qt = $this->chromaQpTuple($qp);
+        if ($qt[0] == 0 || $qt[1] == 0) {
             return;
         }
+        $alpha = $qt[0];
+        $beta = $qt[1];
 
         $stride = $this->deblockUvStride;
         $base = ($mbY * 8 + $edge * 4) * $stride + ($mbX * 8);
-        $tcMap = [
-            1 => $this->getTc0($qp, $this->sliceAlphaC0Offset, 1) + 1,
-            2 => $this->getTc0($qp, $this->sliceAlphaC0Offset, 2) + 1,
-            3 => $this->getTc0($qp, $this->sliceAlphaC0Offset, 3) + 1,
-        ];
 
         static $planeNamesH = ['uPlane', 'vPlane'];
         foreach ($planeNamesH as $planeName) {
@@ -416,7 +446,7 @@ trait DeblockingFilterTrait
                 if ($curBs == 0) {
                     continue;
                 }
-                $tc = $curBs < 4 ? $tcMap[$curBs] : 0;
+                $tc = $curBs === 1 ? $qt[2] : ($curBs === 2 ? $qt[3] : ($curBs === 3 ? $qt[4] : 0));
                 $off = $base + $i * 2;
 
                 for ($d = 0; $d < 2; $d++, $off++) {
@@ -661,9 +691,7 @@ trait DeblockingFilterTrait
 
         $this->deblockYStride = $this->width;
         $this->deblockUvStride = (int)($this->width / 2);
-        $this->deblockThresholdCache = [];
-        $this->deblockTc0Cache = [];
-        $this->deblockChromaQpCache = [];
+        // qp→阈值/tc 映射与帧内容无关，缓存跨帧保留（首次出现的 qp 才计算）
 
         $mbWidth = $this->picWidthInMbs;
         $mbHeight = $this->picHeightInMbs;

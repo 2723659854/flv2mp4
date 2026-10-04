@@ -75,13 +75,16 @@ final class HlsDecoderWorkerServer
         $ended = false;
         $finishing = false;
         $endSent = false;
+        // 输入中"已闭合但尚未处理完"的GOP数（压缩字节数不能反映频闪帧的解码算力开销，
+        // 1MB约200帧≈40s解码，按字节门控仍会在EOF积压上百秒；按GOP门控把每worker在途
+        // 工作量限制为 当前GOP+1个完整GOP）。finish后放开，保证收尾能读尽剩余媒体。
+        // 注意：口径必须是"当前输入缓冲内未处理的完整GOP数"（缓冲里能扫到几个gopEnd），
+        // 不能减去累计已处理数——已处理的gopEnd已随take()离开缓冲，相减会让计数恒为负、
+        // 闸门永不闭合。
+        $queuedGops = 0;
         // 启动即报告空闲，主进程只向READY worker投递完整GOP。
         $upOutput .= HlsPipelineProtocol::frame(HlsPipelineProtocol::READY, 0, ['worker' => true]);
-        $drainStarted = 0.0;
-        $lastDrainLog = 0.0;
-        $triggerFinish = static function () use (&$finishing, &$drainStarted): void {
-            if (!$finishing) $drainStarted = microtime(true);
-
+        $triggerFinish = static function () use (&$finishing): void {
             $finishing = true;
         };
         try {
@@ -89,7 +92,13 @@ final class HlsDecoderWorkerServer
                 $read = [$downstream];
                 // finish 只表示主进程不再追加媒体；仍需继续读取上游socket，
                 // 否则最后一个媒体帧可能只收到半帧，input 永远不会变为空，END也无法发送。
-                if (!$ended && strlen($input) < HlsPipelineProtocol::HIGH_WATERMARK) $read[] = $upstream;
+                // 输入高水位取 INPUT_HIGH_WATERMARK（1MB）+ 未处理GOP数门控：
+                // 频闪帧压缩后很小但解码昂贵，GOP门控把在途算力限制在当前GOP+1个完整GOP；
+                // 停读让反压沿 socket→主进程→拉流信用窗传播，避免EOF时内部积压上百秒。
+                // finish后必须继续读尽剩余媒体，门控仅在未收尾时生效。
+                if (!$ended && !$finishing
+                    && strlen($input) < HlsPipelineProtocol::INPUT_HIGH_WATERMARK
+                    && $queuedGops < HlsPipelineProtocol::INPUT_MAX_QUEUED_GOPS) $read[] = $upstream;
                 if ($ctrlServer !== null) $read[] = $ctrlServer;
                 if ($ctrlConn !== null) $read[] = $ctrlConn;
                 $write = $output === '' ? [] : [$downstream];
@@ -129,11 +138,12 @@ final class HlsDecoderWorkerServer
                     }
                 }
                 // 兼容兜底：finish 若从媒体通道到达（无控制连接的旧调用方），长度前缀快扫定位，
-                // 不解析/不搬运媒体负载
+                // 不解析/不搬运媒体负载；同一次遍历顺带统计缓冲内未处理的 gopEnd 数量
                 if (!$finishing) {
                     $off = 0;
                     $scanTotal = strlen($input);
                     $foundAt = -1;
+                    $bufferedGopEnds = 0;
                     while ($off + 4 <= $scanTotal) {
                         $frameLen = (int)unpack('N', substr($input, $off, 4))[1];
                         if ($frameLen < 9 || $frameLen > HlsPipelineProtocol::MAX_FRAME_LENGTH) break;
@@ -146,10 +156,13 @@ final class HlsDecoderWorkerServer
                                     $foundAt = $off;
                                     break;
                                 }
+                                if (is_array($meta) && ($meta['cmd'] ?? '') === 'gopEnd') $bufferedGopEnds++;
                             }
                         }
                         $off += 4 + $frameLen;
                     }
+                    // 缓冲中闭合GOP数即"排队待解码"的完整GOP（gopEnd随take()处理后即离开缓冲）
+                    $queuedGops = $bufferedGopEnds;
                     if ($foundAt >= 0) $triggerFinish();
                 }
                 // 单次 select 唤醒（Windows 下粒度约 10~15ms）批量解码全部已缓冲事件，
@@ -179,10 +192,6 @@ final class HlsDecoderWorkerServer
                         $output .= $this->orderFrame($this->transform($event));
                     }
                     if (strlen($output) > HlsPipelineProtocol::MAX_BUFFER_LENGTH) throw new RuntimeException('解码进程下游缓冲超限');
-                }
-                if ($finishing && $drainStarted > 0.0 && microtime(true) - $lastDrainLog >= 5.0) {
-                    $lastDrainLog = microtime(true);
-                    fwrite(STDERR, sprintf("[收尾] 解码worker待处理 input=%.2fMB output=%.2fMB\n", strlen($input) / 1048576, strlen($output) / 1048576));
                 }
                 if ($finishing && !$endSent && $input === '') {
                     $output .= $this->flushEncodedFrame();

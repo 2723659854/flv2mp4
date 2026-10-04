@@ -1,5 +1,6 @@
 <?php
 ini_set('memory_limit', '2048M');
+gc_disable(); // 同 hls-worker.php：无循环引用临时数据，省去GC根缓冲簿记
 // Windows下worker与父进程共享控制台：父级直播客户端收到Ctrl+C做优雅收尾时，
 // 广播的CTRL事件不能把worker先杀掉（否则父级finishStream报"Motion worker closed"）。
 // 注册空处理器即拦截CTRL_C/CTRL_BREAK，worker生命周期由父进程通过TCP管理。

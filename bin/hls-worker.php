@@ -1,5 +1,9 @@
 <?php
 ini_set('memory_limit', '2048M');
+// 转码worker全程只处理无循环引用的临时数据（平面数组/字符串/帧上下文），
+// 循环引用GC的根缓冲簿记在百万级小数组分配下有实测开销（解码约7%），根缓冲长期不触发；
+// 数据树随帧即时refcount释放，关闭GC不产生泄漏。
+gc_disable();
 if (function_exists('pcntl_signal')) pcntl_signal(SIGINT, SIG_IGN);
 try {
     $options = getopt('', ['mode:', 'autoload:', 'port:', 'control-port:', 'output-port:', 'output-ports:', 'profiles:', 'output:', 'workers:', 'preencoded']);

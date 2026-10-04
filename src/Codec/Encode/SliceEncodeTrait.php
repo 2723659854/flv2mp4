@@ -35,22 +35,26 @@ trait SliceEncodeTrait
      * 只在高 SAD 突发首帧强制 IDR；持续运动期间保持 P 帧，避免高运动场景帧帧 IDR 拖垮编码速度。
      */
     private int $sceneHighRun = 0;
+    /** 距下次允许强制 IDR 的输出帧计数；频闪连闪期限流，源 IDR 到达后清零 */
+    private int $sceneForceCooldown = 0;
 
     /** 场景切换触发阈值和局部硬切判定常量定义在 H264Encoder 类中，兼容 PHP 8.1。 */
 
     /**
      * 帧间亮度变化抽样统计：每个 16x16 宏块抽 4 个点 (4,4)/(11,4)/(4,11)/(11,11)，
      * 360p 全帧仅 3680 点（约 1ms 级）。
-     * 返回 [全局平均绝对差, 全局强差点占比, 局部剧变宏块占比, 剧变宏块平均绝对差]。
+     * 返回 [全局平均绝对差, 全局强差点占比, 局部剧变宏块占比, 剧变宏块平均绝对差, 全局平均带符号差]。
      * 全帧硬切时绝大多数块同时剧变（mean/ratio 高）；屏幕采集硬切仅播放窗区域剧变，
      * 靠 hardRatio/activeMean 识别；普通运动只稀疏边缘变化，三项都低。
+     * 灯光频闪/曝光跳变则是全帧同向变化（第 5 项绝对值接近第 1 项）。
      *
-     * @return array{0:float,1:float,2:float,3:float}
+     * @return array{0:float,1:float,2:float,3:float,4:float}
      */
     private function measureSceneChange(string $curY, int $aw, int $mbWidth, int $mbHeight): array
     {
         $prev = $this->scenePrevY;
         $sum = 0;
+        $signedSum = 0;
         $high = 0;
         $n = 0;
         $hardMb = 0;
@@ -64,18 +68,22 @@ trait SliceEncodeTrait
                 $mbSum = 0;
                 $mbHigh = 0;
                 $d = ord($curY[$p + 4]) - ord($prev[$p + 4]);
+                $signedSum += $d;
                 if ($d < 0) $d = -$d;
                 $mbSum += $d;
                 if ($d >= 32) $mbHigh++;
                 $d = ord($curY[$p + 11]) - ord($prev[$p + 11]);
+                $signedSum += $d;
                 if ($d < 0) $d = -$d;
                 $mbSum += $d;
                 if ($d >= 32) $mbHigh++;
                 $d = ord($curY[$p2 + 4]) - ord($prev[$p2 + 4]);
+                $signedSum += $d;
                 if ($d < 0) $d = -$d;
                 $mbSum += $d;
                 if ($d >= 32) $mbHigh++;
                 $d = ord($curY[$p2 + 11]) - ord($prev[$p2 + 11]);
+                $signedSum += $d;
                 if ($d < 0) $d = -$d;
                 $mbSum += $d;
                 if ($d >= 32) $mbHigh++;
@@ -94,6 +102,7 @@ trait SliceEncodeTrait
             $high / $n,
             $hardMb / $mbCount,
             $hardMb > 0 ? $hardSum / ($hardMb * 4) : 0.0,
+            $signedSum / $n,
         ];
     }
 
@@ -233,23 +242,36 @@ trait SliceEncodeTrait
             && $this->scenePrevY !== null
             && $this->scenePrevAw === $mbAlignedWidth
             && $this->scenePrevAh === $mbAlignedHeight) {
-            [$sceneMean, $sceneRatio, $sceneHardRatio, $sceneActiveMean] = $this->measureSceneChange($yPlane, $mbAlignedWidth, $mbWidth, $mbHeight);
+            if ($this->sceneForceCooldown > 0) $this->sceneForceCooldown--;
+            [$sceneMean, $sceneRatio, $sceneHardRatio, $sceneActiveMean, $sceneSignedMean] = $this->measureSceneChange($yPlane, $mbAlignedWidth, $mbWidth, $mbHeight);
             // 规则一：全帧硬切（全局均值+强差点占比双阈值）；
             // 规则二：屏幕采集类局部硬切——大面积静态边框会稀释全局指标，
             // 改看"≥3/4 抽样点剧变"的宏块覆盖率及其自身幅度
             $sceneDetected = ($sceneMean >= self::SCENE_SAD_THRESHOLD && $sceneRatio >= self::SCENE_RATIO_THRESHOLD)
                 || ($sceneHardRatio >= self::SCENE_REGION_MB_RATIO && $sceneActiveMean >= self::SCENE_REGION_MEAN);
+            // 灯光频闪/曝光跳变：全帧亮度同向偏移（|带符号均值|≈绝对均值），空间内容并未切换。
+            // 硬切的差值方向随机，带符号均值接近 0。频闪强制 IDR 收益极低却要付出整帧帧内编码代价。
+            if ($sceneDetected && $sceneMean > 0.0
+                && abs($sceneSignedMean) / $sceneMean >= self::SCENE_FLASH_SIGNED_RATIO) {
+                $sceneDetected = false;
+            }
             if ($sceneDetected) {
                 $this->sceneHighRun++;
                 // 仅突发首帧（真硬切特征）升级 IDR；连续高 SAD 是摇移/剧烈运动，保持 P 帧。
                 // 持续运动超过 SCENE_SUSTAIN_MAX 帧后再给一次机会，兜住"运动中硬切"的极端情况。
-                if ($this->sceneHighRun === 1 || $this->sceneHighRun >= self::SCENE_SUSTAIN_MAX) {
+                // 冷却期内（频闪连闪/切后短时间）不重复强制，等源 GOP 的自然 IDR 即可。
+                if (($this->sceneHighRun === 1 || $this->sceneHighRun >= self::SCENE_SUSTAIN_MAX)
+                    && $this->sceneForceCooldown === 0) {
                     $isIDR = true;
+                    $this->sceneForceCooldown = self::SCENE_FORCE_COOLDOWN;
                     if ($this->sceneHighRun >= self::SCENE_SUSTAIN_MAX) $this->sceneHighRun = 0;
                 }
             } else {
                 $this->sceneHighRun = 0;
             }
+        } elseif ($isIDR) {
+            // 源自然 IDR 已刷新参考，强制 IDR 冷却无需继续
+            $this->sceneForceCooldown = 0;
         }
         // 保存当前帧【输入】作为下帧比对基准（IDR/P 后连续，分辨率变化时自然断档一帧）
         $this->scenePrevY = $yPlane;

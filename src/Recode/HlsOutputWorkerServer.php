@@ -64,8 +64,6 @@ final class HlsOutputWorkerServer
         $expected = 0;
         $finished = false;
         $endCount = 0;
-        $drainStarted = 0.0;
-        $lastDrainLog = 0.0;
         $lastSeq = array_fill(0, $workers, -1);
         $ctrlInput = '';
         $ctrlFinish = false;
@@ -112,7 +110,6 @@ final class HlsOutputWorkerServer
                     foreach (HlsPipelineProtocol::take($ctrlInput, PHP_INT_MAX) as $ctrlEvent) {
                         if ($ctrlEvent['type'] === HlsPipelineProtocol::CONTROL && ($ctrlEvent['metadata']['cmd'] ?? '') === 'finish') {
                             $ctrlFinish = true;
-                            if ($drainStarted === 0.0) $drainStarted = microtime(true);
                         }
                     }
                 }
@@ -142,10 +139,6 @@ final class HlsOutputWorkerServer
                 }
                 // 只有所有 decoder 都报告 END，且重排队列已经连续排空后，才关闭分片。
                 // 控制连接 finish 仅作为异常收尾兜底，不清空已收到的媒体事件。
-                if ($drainStarted > 0.0 && microtime(true) - $lastDrainLog >= 5.0) {
-                    $lastDrainLog = microtime(true);
-                    fwrite(STDERR, sprintf("[收尾] 编码worker待处理 pending=%.2fMB outputs=%.2fMB end=%d/%d expected=%d\n", $pendingBytes / 1048576, array_sum(array_map('strlen', $outputs)) / 1048576, $endCount, $workers, $expected));
-                }
                 if (!$finished && $endCount >= $workers && $pending === []) {
                     $generator->finishPipelineOutput(count($this->profiles) > 1);
                     $frame = HlsPipelineProtocol::frame(HlsPipelineProtocol::FINISHED, $expected);

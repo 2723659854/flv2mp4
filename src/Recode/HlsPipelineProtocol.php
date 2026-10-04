@@ -22,6 +22,10 @@ final class HlsPipelineProtocol
     public const READY = 7;
     public const MAX_FRAME_LENGTH = 67108864;
     public const HIGH_WATERMARK = 50331648;
+    /** 解码worker媒体输入缓冲高水位（1MB）：超限停读，反压传导至上游，约束EOF收尾在途量 */
+    public const INPUT_HIGH_WATERMARK = 1048576;
+    /** 解码worker输入中最多排队的【已闭合未处理】GOP数（频闪帧小而贵，按GOP而非字节约束算力在途） */
+    public const INPUT_MAX_QUEUED_GOPS = 1;
     public const MAX_BUFFER_LENGTH = 67108868;
     /** 输出进程乱序重排队列软上限（按负载字节计）：超过则停止读解码进程，形成端到端反压 */
     public const PENDING_SOFT_LIMIT = 50331648;

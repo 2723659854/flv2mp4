@@ -325,6 +325,10 @@ class H264Encoder
     private const SCENE_REGION_MEAN = 55;
     /** 持续高 SAD 超过该帧数后再允许一次 IDR（兜底"运动中硬切"）；15fps 下约 6 秒 */
     private const SCENE_SUSTAIN_MAX = 90;
+    /** 抽样点带符号差均值/绝对差均值 ≥ 此值 → 同向全局亮度变化（灯光频闪/曝光跳变），非硬切，不强制 IDR */
+    private const SCENE_FLASH_SIGNED_RATIO = 0.62;
+    /** 两次强制 IDR 的最小间隔（输出帧，15fps 下约 1 秒）：频闪连闪期间只允许一次，其余等源 IDR */
+    private const SCENE_FORCE_COOLDOWN = 15;
 
     public $width = 640;
     public $height = 360;
