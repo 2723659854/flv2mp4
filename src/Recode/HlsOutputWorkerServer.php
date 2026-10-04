@@ -71,17 +71,6 @@ final class HlsOutputWorkerServer
         $ctrlFinish = false;
         $pool = null;
         $replay = static fn(array $queued) => $generator->processPipelineEvent($queued['metadata'], $queued['payload']);
-        $prf = null;
-        if (getenv('T_PRFO') !== false) {
-            $prf = ['wait' => 0.0, 'proc' => 0.0, 'ev' => 0, 'loops' => 0, 'w0' => hrtime(true)];
-            register_shutdown_function(function () use (&$prf): void {
-                if ($prf !== null) {
-                    $prf['wall'] = (hrtime(true) - $prf['w0']) / 1e9;
-                    unset($prf['w0']);
-                    file_put_contents(__DIR__ . '/tmp_prf_out_' . getmypid() . '.json', json_encode($prf));
-                }
-            });
-        }
         try {
             while (true) {
                 // 反压：乱序重排队列达软上限后，连续序号已在队列中则本轮不读（整轮消费会迅速释放积压）；
@@ -108,10 +97,7 @@ final class HlsOutputWorkerServer
                     continue;
                 }
                 $except = null;
-                $__tW = $prf !== null ? hrtime(true) : 0;
-                $__sel = @stream_select($read, $write, $except, 0, 2000);
-                if ($prf !== null) { $prf['loops']++; if ($__sel === 0) $prf['wait'] += (hrtime(true) - $__tW) / 1e9; }
-                if ($__sel === false) continue;
+                if (@stream_select($read, $write, $except, 0, 2000) === false) continue;
                 if ($ctrlServer !== null && in_array($ctrlServer, $read, true)) {
                     $conn = @stream_socket_accept($ctrlServer, 0);
                     if ($conn !== false) {
@@ -177,14 +163,8 @@ final class HlsOutputWorkerServer
                         for ($i = 0; $i < $workers; $i++) $outputs[$i] .= $frame;
                         $finished = true;
                     } elseif ($event['type'] === HlsPipelineProtocol::EVENT) {
-                        //$eventStart = microtime(true);
-                        //if ($drainStarted > 0.0) fwrite(STDERR, sprintf("[收尾-编码] 开始处理 sequence=%d payload=%.2fMB\n", $event['sequence'], strlen($event['payload']) / 1048576));
-                        $__tP = $prf !== null ? hrtime(true) : 0;
                         if ($pool !== null) $pool->push($event, $this->profiles, $replay);
                         else $generator->processPipelineEvent($event['metadata'], $event['payload']);
-                        if ($prf !== null) { $prf['proc'] += (hrtime(true) - $__tP) / 1e9; $prf['ev']++; }
-                        //$eventElapsed = microtime(true) - $eventStart;
-                        //if ($drainStarted > 0.0) fwrite(STDERR, sprintf("[收尾-编码] 完成处理 sequence=%d 耗时=%.2fs\n", $event['sequence'], $eventElapsed));
                     } else throw new RuntimeException('编码进程收到未知事件');
                     $expected++;
                 }

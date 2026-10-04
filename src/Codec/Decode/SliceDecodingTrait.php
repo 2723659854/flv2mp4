@@ -281,11 +281,7 @@ trait SliceDecodingTrait
                     $mbSkipRun = $this->reader->readUe();
                 }
                 if ($mbSkipRun--) {
-                    static $__prfOnS = null;
-                    if ($__prfOnS === null) $__prfOnS = getenv('T_PRF') !== false;
-                    $__tS = $__prfOnS ? hrtime(true) : 0;
                     $this->decodePSkip($mbX, $mbY);
-                    if ($__prfOnS) $this->prf['skip'] += hrtime(true) - $__tS;
                     if ($this->deblockInfoEnabled) {
                         $this->mbTypeForDeblock[$mbIdx] = 0;
                         $this->mbQpForDeblock[$mbIdx] = $qp;
@@ -300,11 +296,7 @@ trait SliceDecodingTrait
             $this->mvTopLeft = [$nextMvTopLeft, $nextMvTopLeft, $nextMvTopLeft, $nextMvTopLeft];
         }
         if ($this->deblockInfoEnabled) {
-            static $__prfOnD = null;
-            if ($__prfOnD === null) $__prfOnD = getenv('T_PRF') !== false;
-            $__tD = $__prfOnD ? hrtime(true) : 0;
             $this->applyDeblockingFilter();
-            if ($__prfOnD) $this->prf['dbk'] += hrtime(true) - $__tD;
         }
     }
 }

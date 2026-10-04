@@ -107,12 +107,21 @@ class Flv2HlsCompact
     /** @var array<int,string> 各解码worker回报缓冲 */
     private array $plIn = [];
     private array $plDead = [];
-    private array $plBusy = [];
-    private array $plGopQueue = [];
-    private array $plCurrentGop = [];
+    /** @var array<int,int> 各worker在途加权负载（保留帧权重2/抽掉帧权重1） */
+    private array $plLoad = [];
+    /** @var array<int,int> GOP序号→派发worker */
+    private array $plGopWorker = [];
+    /** @var array<int,int> GOP序号→权重（READY时从该worker负载中扣减） */
+    private array $plGopWeight = [];
+    /** 已派发但未收到READY的GOP数量 */
+    private int $plInflightGops = 0;
+    /** 收尾时最后一个GOP是否已补gopEnd */
+    private bool $plGopClosed = false;
     private string $plConfigFrame = '';
     private int $plSeq = 0;
+    /** 下一个GOP序号（0表示首个视频GOP尚未开始） */
     private int $plGopSeq = 0;
+    /** 当前GOP派发的worker（首个IDR之前的音频走worker0） */
     private int $plCurrentWorker = 0;
     private bool $plFinishing = false;
     private int $plFinished = 0;
@@ -559,7 +568,7 @@ class Flv2HlsCompact
             ]);
             $this->plOut[$i] = '';
             $this->plIn[$i] = '';
-            $this->plBusy[$i] = false;
+            $this->plLoad[$i] = 0;
         }
 
         // 连接所有解码worker（媒体+控制）及输出worker控制连接（冷启动并发轮询等待就绪）
@@ -666,10 +675,12 @@ class Flv2HlsCompact
             $pendingInput = $this->readBuffer !== '';
             foreach ($this->plOut as $buf) if ($buf !== '') { $pendingInput = true; break; }
             if (!$this->plEndSent && ($this->endReceived || ($this->stopSignaled && !$pendingInput))) {
-                if ($this->plCurrentGop !== []) $this->queueGop();
-                $this->dispatchGops();
-                $allIdle = $this->plGopQueue === [] && !in_array(true, $this->plBusy, true);
-                if ($allIdle) $this->sendPipelineFinish();
+                // GOP帧已随拉流实时派发；先为最后一个GOP补边界，所有GOP均READY后再finish
+                if (!$this->plGopClosed) {
+                    $this->plCloseCurrentGop();
+                    $this->plGopClosed = true;
+                }
+                if ($this->plInflightGops === 0) $this->sendPipelineFinish();
             }
             if ($this->plEndSent && $this->plFinished >= $this->decodeWorkers) {
                 $this->running = false;
@@ -695,8 +706,14 @@ class Flv2HlsCompact
                 case HlsPipelineProtocol::PROGRESS:
                     break;
                 case HlsPipelineProtocol::READY:
-                    $this->plBusy[$id] = false;
-                    $this->dispatchGops();
+                    // worker启动时也会发一个无gop的READY，忽略；GOP的READY按映射回扣负载
+                    $g = $event['metadata']['gop'] ?? null;
+                    if ($g !== null && isset($this->plGopWorker[$g])) {
+                        $w = $this->plGopWorker[$g];
+                        $this->plLoad[$w] -= $this->plGopWeight[$g];
+                        unset($this->plGopWorker[$g], $this->plGopWeight[$g]);
+                        $this->plInflightGops--;
+                    }
                     break;
                 case HlsPipelineProtocol::FINISHED:
                     $this->plFinished++;
@@ -708,9 +725,10 @@ class Flv2HlsCompact
     }
 
     /**
-     * 拉流tag按GOP轮询分发到解码worker（与文件流水线同构）：
+     * 拉流tag实时派发到解码worker（帧到达即下发，不等GOP结束，消除整GOP约2秒的派发延迟）：
      * 视频序列头：worker0收EVENT，全体收CONTROL config；
-     * IDR：新GOP轮转worker，前一worker补gopEnd；音频随当前GOP worker走。
+     * IDR：新GOP立即按在途加权负载选定worker，前一GOP向其worker补gopEnd；
+     * 音频随当前GOP worker立即下发。
      */
     private function plEnqueueTag(int $tagType, string $body, int $timestamp): void
     {
@@ -719,8 +737,7 @@ class Flv2HlsCompact
         if ($tagType === 9 && strlen($body) >= 2 && (ord($body[0]) & 0x0f) === 7) {
             $packetType = ord($body[1]);
             if ($packetType === 0) {
-                $frame = HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $this->plSeq++, ['tagType' => 9, 'timestamp' => $timestamp], $body);
-                $this->plOut[0] .= $frame;
+                $this->plOut[0] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $this->plSeq++, ['tagType' => 9, 'timestamp' => $timestamp], $body);
                 $this->plConfigFrame = HlsPipelineProtocol::frame(HlsPipelineProtocol::CONTROL, 0, ['cmd' => 'config'], $body);
                 for ($i = 0; $i < $this->decodeWorkers; $i++) $this->plOut[$i] .= $this->plConfigFrame;
                 return;
@@ -733,38 +750,54 @@ class Flv2HlsCompact
                     $drop = $timestamp - $this->lastEncodedVideoTimestamp < 1000 / $this->targetFps;
                     if (!$drop) $this->lastEncodedVideoTimestamp = $timestamp;
                 } else $this->lastEncodedVideoTimestamp = $timestamp;
-                if ($isKey) {
-                    if ($this->plGopSeq > 0 && $this->plCurrentGop !== []) $this->queueGop();
-                    $this->plGopSeq++;
-                }
+                if ($isKey) $this->plStartGop();
                 $metadata = ['tagType' => 9, 'timestamp' => $timestamp];
                 if ($drop) $metadata['drop'] = true;
-                $this->plCurrentGop[] = HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $this->plSeq++, $metadata, $body);
+                $this->plOut[$this->plCurrentWorker] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $this->plSeq++, $metadata, $body);
+                // 在途加权负载：抽掉帧只解码维持参考链（权重1），保留帧全链路（权重2）
+                $weight = $drop ? 1 : 2;
+                $this->plLoad[$this->plCurrentWorker] += $weight;
+                $this->plGopWeight[$this->plGopSeq - 1] += $weight;
                 return;
             }
         }
-        $this->plCurrentGop[] = HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $this->plSeq++, ['tagType' => $tagType, 'timestamp' => $timestamp], $body);
+        // 音频等非视频tag：随当前GOP的worker立即下发（首个IDR之前走worker0）
+        $this->plOut[$this->plCurrentWorker] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $this->plSeq++, ['tagType' => $tagType, 'timestamp' => $timestamp], $body);
     }
 
-    private function queueGop(): void
+    /**
+     * IDR到达：先为上一GOP补边界标记（其全部帧已实时写入对应worker），
+     * 再把新GOP派给在途加权负载最小的worker；首个GOP固定worker0（序列头只投递给它）。
+     */
+    private function plStartGop(): void
     {
-        $gop = $this->plGopSeq - 1;
-        $this->plGopQueue[] = [$gop, $this->plCurrentGop];
-        $this->plCurrentGop = [];
-        $this->dispatchGops();
-    }
-
-    private function dispatchGops(): void
-    {
-        foreach ($this->plGopQueue as $index => [$gop, $frames]) {
-            $worker = array_search(false, $this->plBusy, true);
-            if ($worker === false) break;
-            $this->plBusy[$worker] = true;
-            foreach ($frames as $frame) $this->plOut[$worker] .= $frame;
-            $this->plOut[$worker] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::CONTROL, 0, ['cmd' => 'gopEnd', 'gop' => $gop]);
-            unset($this->plGopQueue[$index]);
+        if ($this->plGopSeq > 0) {
+            $prev = $this->plGopSeq - 1;
+            $this->plOut[$this->plGopWorker[$prev]] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::CONTROL, 0, ['cmd' => 'gopEnd', 'gop' => $prev]);
         }
-        $this->plGopQueue = array_values($this->plGopQueue);
+        $gop = $this->plGopSeq;
+        $worker = 0;
+        if ($gop > 0) {
+            for ($i = 1; $i < $this->decodeWorkers; $i++) {
+                if ($this->plLoad[$i] < $this->plLoad[$worker]) $worker = $i;
+            }
+        }
+        $this->plGopWorker[$gop] = $worker;
+        $this->plGopWeight[$gop] = 0;
+        $this->plCurrentWorker = $worker;
+        $this->plInflightGops++;
+        $this->plGopSeq++;
+    }
+
+    /** 收尾：为最后一个GOP补边界标记，worker冲刷末帧后回READY */
+    private function plCloseCurrentGop(): void
+    {
+        if ($this->plGopSeq > 0) {
+            $gop = $this->plGopSeq - 1;
+            if (isset($this->plGopWorker[$gop])) {
+                $this->plOut[$this->plGopWorker[$gop]] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::CONTROL, 0, ['cmd' => 'gopEnd', 'gop' => $gop]);
+            }
+        }
     }
 
     /**
