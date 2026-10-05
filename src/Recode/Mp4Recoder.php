@@ -1019,8 +1019,10 @@ class Mp4Recoder
             $this->firstVideoDtsMs = $dtsMs;
         }
         $relativeTime = $dtsMs - $this->firstVideoDtsMs;
+        // 关键帧一律保留（关键帧对齐抽帧），其余按相对首关键帧时间轴选择
         $shouldOutput = !$this->dropFrames
             || $outputCount === 0
+            || $isKeyFrame
             || $relativeTime * $this->effectiveTargetFps >= $outputCount * 1000;
         if (!$shouldOutput) {
             return null;

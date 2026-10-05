@@ -288,7 +288,9 @@ final class FlvPipelineClient
                 if (!$isKey) $drop = true;
                 else $baseTimestamp = $timestamp;
             }
-            if (!$drop && $dropFrames && $selected > 0 && ($timestamp - $baseTimestamp) * $targetFps < $selected * 1000) {
+            // 关键帧永不参与抽帧丢弃：GOP worker 在 gopEnd 已重置编码器参考与 frameNum，
+            // 若边界 IDR 被丢，该 GOP 首帧会以非 IDR I-slice 输出，破坏 frame_num/参考标记语义
+            if (!$drop && !$isKey && $dropFrames && $selected > 0 && ($timestamp - $baseTimestamp) * $targetFps < $selected * 1000) {
                 $drop = true;
             }
             if (!$drop) $selected++;
@@ -360,14 +362,14 @@ final class FlvPipelineClient
             $gopSeq++;
         }
 
-        // 抽帧选帧（口径与旧路径 dispatchVideoTag 完全一致）
+        // 抽帧选帧（口径与旧路径 dispatchVideoTag 一致），但关键帧永不丢弃
         $drop = false;
         if ($configured) {
             if ($baseTimestamp < 0) {
                 if (!$isKey) $drop = true;
                 else $baseTimestamp = $timestamp;
             }
-            if (!$drop && $dropFrames && $selected > 0 && ($timestamp - $baseTimestamp) * $targetFps < $selected * 1000) {
+            if (!$drop && !$isKey && $dropFrames && $selected > 0 && ($timestamp - $baseTimestamp) * $targetFps < $selected * 1000) {
                 $drop = true;
             }
             if (!$drop) $selected++;

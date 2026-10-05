@@ -127,7 +127,9 @@ final class Mp4PipelineClient
                                 if (empty($sample['keyframe'])) $drop = true;
                                 else $baseTimestamp = $timestamp;
                             }
-                            if (!$drop && $dropFrames && $selected > 0 && ($timestamp - $baseTimestamp) * $targetFps < $selected * 1000) {
+                            // 关键帧永不参与抽帧丢弃：GOP worker 在 gopEnd 已重置编码器参考与 frameNum，
+                            // 边界 IDR 被丢会导致该 GOP 首帧以非 IDR I-slice 输出，破坏码流语义
+                            if (!$drop && empty($sample['keyframe']) && $dropFrames && $selected > 0 && ($timestamp - $baseTimestamp) * $targetFps < $selected * 1000) {
                                 $drop = true;
                             }
                             if (!$drop) $selected++;

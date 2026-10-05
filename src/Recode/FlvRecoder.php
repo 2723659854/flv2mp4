@@ -601,9 +601,10 @@ class FlvRecoder
 
         // 在途帧虽未写出，但输出槽位已保留
         $reservedCount = $this->outputVideoFrameCount + ($this->pendingVideoJob !== null ? 1 : 0);
-        // 相对首关键帧时间轴选择，无浮点累积误差；首个输出固定为关键帧。
+        // 相对首关键帧时间轴选择，无浮点累积误差；首个输出固定为关键帧，关键帧一律保留（关键帧对齐抽帧）
         $shouldOutput = !$this->dropFrames
             || $reservedCount === 0
+            || $isKeyFrame
             || $relativeTime * $this->effectiveTargetFps >= $reservedCount * 1000;
         if (!$shouldOutput) return null;
 
