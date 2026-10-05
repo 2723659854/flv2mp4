@@ -33,6 +33,13 @@ final class FlvDecoderWorkerServer
      * 输出进程的反压闸门依赖"每路连接序号严格递增"，不能让后续帧在同路连接上反超在途帧。
      */
     private string $deferredOutput = '';
+    /**
+     * fastMotion 快速路径：与直播流水线同款——
+     * 启动/GOP边界向主进程回报 READY，主进程只向 READY worker 投递完整 GOP；
+     * 输入按 1MB + 已闭合GOP数门控（频闪小帧压缩后字节小但解码昂贵）。
+     * 关闭时保持旧路径行为（48MB 字节门控、无 READY 回报）。
+     */
+    private bool $fast = false;
 
     public function __construct(private array $config)
     {
@@ -41,7 +48,10 @@ final class FlvDecoderWorkerServer
         // 编码在 GOP worker 内完成：每个 worker 独立编码器 + 独立运动估计子进程（GOP边界只重置状态不重建）
         $this->encoder = new H264Encoder();
         $this->encoder->motionWorkers = max(1, (int)($config['motionWorkers'] ?? 8));
-        if (!empty($config['fastMotion'])) $this->encoder->setFastMotion(true);
+        if (!empty($config['fastMotion'])) {
+            $this->encoder->setFastMotion(true);
+            $this->fast = true;
+        }
     }
 
     public function run(string $listenAddress, string $outputAddress): void
@@ -54,11 +64,28 @@ final class FlvDecoderWorkerServer
         stream_set_blocking($upstream, false); stream_set_blocking($downstream, false);
         // 立即拉起运动估计子进程，让冷启动与主进程派发其它 worker/读取文件并行（与中央编码器同策略）
         $this->encoder->warmupMotionWorkers();
-        $input = ''; $output = ''; $response = ''; $ended = false;
+        $input = ''; $output = ''; $response = ''; $upOutput = ''; $ended = false;
+        // 快速路径：输入中"已闭合但尚未处理完"的GOP数（口径同 HlsDecoderWorkerServer）
+        $queuedGops = 0;
+        if ($this->fast) {
+            // 启动即报告空闲，主进程只向 READY worker 投递完整 GOP
+            $upOutput .= HlsPipelineProtocol::frame(HlsPipelineProtocol::READY, 0, ['worker' => true]);
+        }
         try {
             while (true) {
-                $read = [$downstream]; if (!$ended && strlen($input) < HlsPipelineProtocol::HIGH_WATERMARK && strlen($output) < HlsPipelineProtocol::HIGH_WATERMARK) $read[] = $upstream;
-                $write = $output === '' ? [] : [$downstream]; $except = null; @stream_select($read, $write, $except, 0, 2000);
+                $read = [$downstream];
+                if (!$ended) {
+                    if ($this->fast) {
+                        // 1MB + GOP 双门控：把每 worker 在途算力限制为当前GOP+1个完整GOP
+                        if (strlen($input) < HlsPipelineProtocol::INPUT_HIGH_WATERMARK
+                            && $queuedGops < HlsPipelineProtocol::INPUT_MAX_QUEUED_GOPS) $read[] = $upstream;
+                    } elseif (strlen($input) < HlsPipelineProtocol::HIGH_WATERMARK && strlen($output) < HlsPipelineProtocol::HIGH_WATERMARK) {
+                        $read[] = $upstream;
+                    }
+                }
+                $write = $output === '' ? [] : [$downstream];
+                if ($upOutput !== '') $write[] = $upstream;
+                $except = null; @stream_select($read, $write, $except, 0, 2000);
                 if (in_array($upstream, $read, true)) {
                     while (true) {
                         $chunk = @fread($upstream, 65536);
@@ -67,6 +94,24 @@ final class FlvDecoderWorkerServer
                         $input .= $chunk; if (strlen($input) > HlsPipelineProtocol::MAX_BUFFER_LENGTH) throw new RuntimeException('解码进程输入缓冲超限');
                         if (strlen($chunk) < 65536) break;
                     }
+                }
+                if ($this->fast) {
+                    // 长度前缀快扫统计缓冲内未处理 gopEnd（不解析/不搬运媒体负载）
+                    $off = 0; $scanTotal = strlen($input); $bufferedGopEnds = 0;
+                    while ($off + 4 <= $scanTotal) {
+                        $frameLen = (int)unpack('N', substr($input, $off, 4))[1];
+                        if ($frameLen < 9 || $frameLen > HlsPipelineProtocol::MAX_FRAME_LENGTH) break;
+                        if ($off + 4 + $frameLen > $scanTotal) break;
+                        if (ord($input[$off + 4]) === HlsPipelineProtocol::CONTROL) {
+                            $metaLen = (int)unpack('N', substr($input, $off + 9, 4))[1];
+                            if ($metaLen <= $frameLen - 9) {
+                                $meta = json_decode(substr($input, $off + 13, $metaLen), true);
+                                if (is_array($meta) && ($meta['cmd'] ?? '') === 'gopEnd') $bufferedGopEnds++;
+                            }
+                        }
+                        $off += 4 + $frameLen;
+                    }
+                    $queuedGops = $bufferedGopEnds;
                 }
                 // 单次 select 唤醒（Windows 下粒度约 10~15ms）批量解码全部已缓冲事件，
                 // 下游输出积压到高水位时停止，让反压继续向上游传播，避免长文件下缓冲超限
@@ -79,8 +124,14 @@ final class FlvDecoderWorkerServer
                         if ($cmd === 'config') $this->parseConfiguration(substr($event['payload'], 5));
                         elseif ($cmd === 'gopEnd') {
                             // 先冲刷在途帧再重置：保证 GOP 最后一帧正常输出且不跨 GOP 残留流水线状态
+                            $gop = (int)($event['metadata']['gop'] ?? -1);
                             $output .= $this->flushEncodedFrame();
                             $this->resetGopState();
+                            if ($this->fast) {
+                                // 快速路径：回报该 GOP 完成并重新声明空闲，主进程据此派发下一个完整 GOP
+                                $upOutput .= HlsPipelineProtocol::frame(HlsPipelineProtocol::PROGRESS, 0, ['gop' => $gop]);
+                                $upOutput .= HlsPipelineProtocol::frame(HlsPipelineProtocol::READY, 0, ['gop' => $gop]);
+                            }
                         }
                     } elseif ($event['type'] === HlsPipelineProtocol::END) {
                         // 末帧在途：收尾后再转发 END，输出进程必然先收齐全部媒体再看到 END
@@ -101,6 +152,16 @@ final class FlvDecoderWorkerServer
                         if ($n < 262144) break;
                     }
                 }
+                // 快速路径：READY/PROGRESS 经媒体上行连接回报主进程（FINISHED 亦在此通道，顺序天然一致）
+                if (in_array($upstream, $write, true) && $upOutput !== '') {
+                    while ($upOutput !== '') {
+                        $n = @fwrite($upstream, substr($upOutput, 0, 262144));
+                        if ($n === false || ($n === 0 && feof($upstream))) break;
+                        if ($n === 0) break;
+                        $upOutput = substr($upOutput, $n);
+                        if ($n < 262144) break;
+                    }
+                }
                 if (in_array($downstream, $read, true)) {
                     $chunk = @fread($downstream, 65536);
                     if ($chunk === false || ($chunk === '' && feof($downstream))) throw new RuntimeException('输出进程响应连接意外关闭');
@@ -109,6 +170,11 @@ final class FlvDecoderWorkerServer
                 foreach (HlsPipelineProtocol::take($response, 4) as $event) {
                     if ($event['type'] === HlsPipelineProtocol::ERROR) throw new RuntimeException($event['metadata']['message'] ?? '输出进程失败');
                     if ($event['type'] === HlsPipelineProtocol::FINISHED) {
+                        // 必须排在尚未发完的 READY/PROGRESS 之后，避免同一连接上帧序颠倒
+                        if ($this->fast && $upOutput !== '') {
+                            $this->writeAll($upstream, $upOutput);
+                            $upOutput = '';
+                        }
                         $this->writeAll($upstream, HlsPipelineProtocol::frame(HlsPipelineProtocol::FINISHED, $event['sequence']));
                         return;
                     }

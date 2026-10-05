@@ -65,6 +65,19 @@ final class FlvPipelineClient
             $outbound = array_fill(0, $workerCount, '');
             $inbound = array_fill(0, $workerCount, '');
             $alive = array_fill(0, $workerCount, true);
+            // fastMotion 快速路径：READY 门控 + hold 缓冲 + EMA 加权派发（与直播主流水线一致）
+            $fast = !empty($config['fastMotion']);
+            $hold = '';
+            $ready = array_fill(0, $workerCount, false);
+            $load = array_fill(0, $workerCount, 0);
+            $ema = array_fill(0, $workerCount, 0.0);
+            /** @var array<int,int> GOP序号 => worker（-1=等待空闲worker） */
+            $gopWorkerMap = [];
+            /** @var array<int,int> GOP序号 => 加权负载 */
+            $gopWeightMap = [];
+            /** @var array<int,int> GOP序号 => 派发时刻 hrtime */
+            $gopDispatchAt = [];
+            $lastGopClosed = false;
             $tags = $this->readFlvTags($flvFile);
             $exhausted = false;
             $stopReading = false;
@@ -73,22 +86,47 @@ final class FlvPipelineClient
 
             while (true) {
                 if (!$stopReading) {
-                    while (!$exhausted && $this->bufferedBytes($outbound) < $workerCount * self::PER_WORKER_SOFT_LIMIT) {
+                    // 快速路径下 hold 非空（新GOP暂无空闲worker）时必须停止取 tag，
+                    // 否则同一批后续 IDR 会让未派发 GOP 的边界标记写错通道
+                    while (!$exhausted && $hold === '' && $this->bufferedBytes($outbound) < $workerCount * self::PER_WORKER_SOFT_LIMIT) {
                         if (!$tags->valid()) { $exhausted = true; break; }
                         $tag = $tags->current(); $tags->next();
                         $frameCount++;
                         if ($tag['tagType'] === 8) {
-                            $outbound[$currentWorker] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $sequence++, [
+                            $audioFrame = HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $sequence++, [
                                 'tagType' => $tag['tagType'], 'timestamp' => $tag['timestamp'], 'sourceFps' => $sourceFps,
                             ], $tag['body']);
+                            // 音频随当前GOP worker；快速路径下当前GOP等待派发时进 hold 保序
+                            if ($fast && $currentWorker < 0) $hold .= $audioFrame;
+                            else $outbound[$currentWorker] .= $audioFrame;
                         } elseif ($tag['tagType'] === 9) {
                             $videoCount++;
-                            $this->dispatchVideoTag($tag, $sequence, $workerCount, $gopSeq, $currentWorker, $configured, $baseTimestamp, $selected, $targetFps, $dropFrames, $sourceFps, $outbound);
+                            if ($fast) {
+                                $this->dispatchVideoTagFast($tag, $sequence, $gopSeq, $currentWorker, $configured, $baseTimestamp, $selected, $targetFps, $dropFrames, $sourceFps, $workerCount, $ready, $load, $ema, $gopWorkerMap, $gopWeightMap, $gopDispatchAt, $hold, $outbound);
+                            } else {
+                                $this->dispatchVideoTag($tag, $sequence, $workerCount, $gopSeq, $currentWorker, $configured, $baseTimestamp, $selected, $targetFps, $dropFrames, $sourceFps, $outbound);
+                            }
                             if ($this->maxFrames !== null && $videoCount >= $this->maxFrames) { echo "Reached max frames limit ({$this->maxFrames}), stopping...\n"; $stopReading = true; break; }
                         }
                         if ($frameCount % 50 === 0) echo "Processed {$frameCount} frames ({$videoCount} video)\n";
                     }
-                    if (($exhausted || $stopReading) && !$endEnqueued) {
+                    if ($fast) {
+                        // 快速路径收尾：hold 先排空，再为最后一个GOP补边界，最后广播 END。
+                        // gopEnd/END 顺序追加在各 worker 媒体末尾，worker 必然先收完媒体再收尾。
+                        if (($exhausted || $stopReading) && $hold === '' && !$lastGopClosed) {
+                            if ($gopSeq > 0 && isset($gopWorkerMap[$gopSeq - 1])) {
+                                $lastGop = $gopSeq - 1;
+                                $outbound[$gopWorkerMap[$lastGop]] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::CONTROL, 0, ['cmd' => 'gopEnd', 'gop' => $lastGop]);
+                            }
+                            $lastGopClosed = true;
+                        }
+                        if (($exhausted || $stopReading) && $lastGopClosed && !$endEnqueued) {
+                            for ($i = 0; $i < $workerCount; $i++) {
+                                $outbound[$i] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::END, $sequence++);
+                            }
+                            $endEnqueued = true;
+                        }
+                    } elseif (($exhausted || $stopReading) && !$endEnqueued) {
                         // END 必须广播给每个解码 worker：各 worker 排空自己通道内的媒体后各自转发 END，
                         // 输出 worker 需收齐 workerCount 个 END 才收尾并回 FINISHED（与 HLS 流水线一致）。
                         // END 追加在各 worker 媒体末尾，天然保证"先收完媒体再收尾"的顺序。
@@ -133,7 +171,25 @@ final class FlvPipelineClient
                 foreach ($inbound as $id => $buffer) {
                     foreach (HlsPipelineProtocol::take($inbound[$id], PHP_INT_MAX) as $event) {
                         if ($event['type'] === HlsPipelineProtocol::ERROR) throw new RuntimeException($event['metadata']['message'] ?? '流水线失败');
-                        if ($event['type'] === HlsPipelineProtocol::FINISHED) $finishedCount++;
+                        if ($event['type'] === HlsPipelineProtocol::FINISHED) { $finishedCount++; continue; }
+                        if ($fast && $event['type'] === HlsPipelineProtocol::READY) {
+                            $g = $event['metadata']['gop'] ?? null;
+                            if ($g === null) {
+                                $ready[$id] = true; // worker 启动空闲回报
+                            } elseif (isset($gopWorkerMap[$g])) {
+                                $w = $gopWorkerMap[$g];
+                                $ready[$w] = true;
+                                if (isset($gopWeightMap[$g])) $load[$w] -= $gopWeightMap[$g];
+                                $gw = $gopWeightMap[$g] ?? 0;
+                                if ($gw > 0 && isset($gopDispatchAt[$g])) {
+                                    $perWeight = (hrtime(true) - $gopDispatchAt[$g]) / 1e6 / $gw;
+                                    $ema[$w] = $ema[$w] <= 0.0 ? $perWeight : $ema[$w] * 0.5 + $perWeight * 0.5;
+                                }
+                                unset($gopWorkerMap[$g], $gopWeightMap[$g], $gopDispatchAt[$g]);
+                            }
+                            $this->dispatchFastHold($gopSeq, $currentWorker, $ready, $load, $ema, $gopWorkerMap, $gopWeightMap, $gopDispatchAt, $hold, $outbound);
+                        }
+                        // PROGRESS 在快速路径仅作进度信号，记账以随后的 READY 为准
                     }
                     if (strlen($inbound[$id]) > HlsPipelineProtocol::MAX_BUFFER_LENGTH) throw new RuntimeException('主进程响应缓冲超限');
                 }
@@ -154,7 +210,11 @@ final class FlvPipelineClient
     /**
      * 按 GOP 数量自适应规划进程布局，返回 [解码worker数, 每worker运动估计进程数]
      *
-     * 实测（640x360/fastMotion，PHP 纯实现）：每 worker 的运动进程 M=2 为甜点——
+     * fastMotion 快速路径（与直播流水线同款布局，1080p 源实测较旧 4×2 布局提速约 1/3）：
+     *   每 GOP worker 仅 1 个运动进程（fastMotion 已缩小搜索，第 2 个运动进程只增争用），
+     *   解码 worker 扩张到 decode_workers（按 GOP 数收敛，多余 worker 只会空转）。
+     *
+     * 旧路径（fastMotion 关闭）：每 worker 的运动进程 M=2 为甜点——
      * 帧内条带并行超过 2 路后，运动计算已不是瓶颈，多出的子进程只增加冷启动/调度开销
      * （90帧片段 2x2=10.4s vs 2x4=12.4s；387帧片段 4x2=22.2s vs 4x4=25.4s）。
      * 因此运动预算 motion_budget 全部用于扩张解码 worker（GOP 并行）：
@@ -168,6 +228,9 @@ final class FlvPipelineClient
     private function planWorkers(int $gopCount): array
     {
         $decodeMax = max(1, min(8, (int)($this->config['decode_workers'] ?? 4)));
+        if (!empty($this->config['fastMotion'])) {
+            return [$gopCount > 0 ? min($decodeMax, $gopCount) : $decodeMax, 1];
+        }
         $configuredMotion = max(1, (int)($this->config['motionWorkers'] ?? 2));
         if ($gopCount <= 0) {
             return [$decodeMax, $configuredMotion];
@@ -234,6 +297,144 @@ final class FlvPipelineClient
         $meta = ['tagType' => 9, 'timestamp' => $timestamp, 'sourceFps' => $sourceFps];
         if ($drop) $meta['drop'] = true;
         $outbound[$currentWorker] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $sequence++, $meta, $body);
+    }
+
+    /**
+     * 快速路径视频派发（fastMotion，与直播主流水线 plStartGop/plRoute 同构）：
+     * IDR 到达时为上一GOP补 gopEnd，并把新GOP派给 READY worker 中 EMA×在途权重最小者；
+     * 无空闲 worker 时 currentWorker=-1，本GOP全部帧（含其间音频）进 hold 保序暂存，
+     * 待 READY 回报后由 dispatchFastHold() 整体放行。
+     */
+    private function dispatchVideoTagFast(
+        array $tag,
+        int &$sequence,
+        int &$gopSeq,
+        int &$currentWorker,
+        bool &$configured,
+        int &$baseTimestamp,
+        int &$selected,
+        int $targetFps,
+        bool $dropFrames,
+        ?float $sourceFps,
+        int $workerCount,
+        array &$ready,
+        array &$load,
+        array &$ema,
+        array &$gopWorkerMap,
+        array &$gopWeightMap,
+        array &$gopDispatchAt,
+        string &$hold,
+        array &$outbound
+    ): void {
+        $body = $tag['body'];
+        $packetType = strlen($body) >= 2 ? ord($body[1]) : -1;
+        if ($packetType === 0) {
+            // AVCC 序列头：worker 0 透传给输出进程，全体 worker 各自解析 SPS/PPS
+            $outbound[0] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $sequence++, [
+                'tagType' => 9, 'timestamp' => $tag['timestamp'], 'sourceFps' => $sourceFps,
+            ], $body);
+            $control = HlsPipelineProtocol::frame(HlsPipelineProtocol::CONTROL, 0, ['cmd' => 'config'], $body);
+            for ($i = 0; $i < $workerCount; $i++) $outbound[$i] .= $control;
+            $configured = true;
+            return;
+        }
+
+        $timestamp = (int)$tag['timestamp'];
+        $isKey = (ord($body[0]) >> 4) === 1 && $this->containsIdrNal($body);
+        if ($isKey) {
+            if ($gopSeq > 0 && isset($gopWorkerMap[$gopSeq - 1])) {
+                $prev = $gopSeq - 1;
+                $outbound[$gopWorkerMap[$prev]] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::CONTROL, 0, ['cmd' => 'gopEnd', 'gop' => $prev]);
+            }
+            $gop = $gopSeq;
+            $worker = $gop === 0
+                ? ($ready[0] ? 0 : -1)
+                : $this->pickFastReadyWorker($ready, $load, $ema, $workerCount);
+            $gopWorkerMap[$gop] = $worker;
+            $gopWeightMap[$gop] = 0;
+            $currentWorker = $worker;
+            if ($worker >= 0) {
+                $ready[$worker] = false;
+                $gopDispatchAt[$gop] = hrtime(true);
+            }
+            $gopSeq++;
+        }
+
+        // 抽帧选帧（口径与旧路径 dispatchVideoTag 完全一致）
+        $drop = false;
+        if ($configured) {
+            if ($baseTimestamp < 0) {
+                if (!$isKey) $drop = true;
+                else $baseTimestamp = $timestamp;
+            }
+            if (!$drop && $dropFrames && $selected > 0 && ($timestamp - $baseTimestamp) * $targetFps < $selected * 1000) {
+                $drop = true;
+            }
+            if (!$drop) $selected++;
+        }
+
+        $meta = ['tagType' => 9, 'timestamp' => $timestamp, 'sourceFps' => $sourceFps];
+        if ($drop) $meta['drop'] = true;
+        $frame = HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $sequence++, $meta, $body);
+        // 首 IDR 之前的丢弃视频帧直通 worker0，不属于任何 GOP，不参与负载记账
+        if ($gopSeq === 0) {
+            $outbound[0] .= $frame;
+            return;
+        }
+        $weight = $drop ? 1 : 2;
+        if ($currentWorker < 0) {
+            $hold .= $frame;
+        } else {
+            $outbound[$currentWorker] .= $frame;
+            $load[$currentWorker] += $weight;
+        }
+        $gopWeightMap[$gopSeq - 1] = ($gopWeightMap[$gopSeq - 1] ?? 0) + $weight;
+    }
+
+    /** READY 后把 hold 中等待的GOP整体派给最优空闲 worker（首GOP固定 worker0）。 */
+    private function dispatchFastHold(
+        int &$gopSeq,
+        int &$currentWorker,
+        array &$ready,
+        array &$load,
+        array &$ema,
+        array &$gopWorkerMap,
+        array &$gopWeightMap,
+        array &$gopDispatchAt,
+        string &$hold,
+        array &$outbound
+    ): void {
+        if ($hold === '') return;
+        $gop = $gopSeq - 1;
+        if ($gop < 0 || ($gopWorkerMap[$gop] ?? -1) !== -1) return;
+        $worker = $gop === 0
+            ? ($ready[0] ? 0 : -1)
+            : $this->pickFastReadyWorker($ready, $load, $ema, count($outbound));
+        if ($worker < 0) return;
+        $gopWorkerMap[$gop] = $worker;
+        $ready[$worker] = false;
+        $currentWorker = $worker;
+        $gopDispatchAt[$gop] = hrtime(true);
+        $load[$worker] += $gopWeightMap[$gop] ?? 0;
+        $outbound[$worker] .= $hold;
+        $hold = '';
+    }
+
+    /** 选择 READY worker 中"在途权重×单位权重耗时EMA"最小者；无空闲返回 -1。 */
+    private function pickFastReadyWorker(array $ready, array $load, array $ema, int $workerCount): int
+    {
+        $worker = -1;
+        $best = null;
+        for ($i = 0; $i < $workerCount; $i++) {
+            if (empty($ready[$i])) continue;
+            $e = $ema[$i] ?? 0.0;
+            $score = $load[$i] * ($e > 0.0 ? $e : 1.0);
+            if ($best === null || $score < $best) {
+                $best = $score;
+                $worker = $i;
+            }
+        }
+        return $worker;
     }
 
     /**

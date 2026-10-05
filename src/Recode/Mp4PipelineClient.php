@@ -54,8 +54,12 @@ final class Mp4PipelineClient
             $dropFrames = !empty($streamMetadata['dropFrames']);
             $targetFps = isset($streamMetadata['effectiveTargetFps']) ? (float)$streamMetadata['effectiveTargetFps'] : 0.0;
 
+            // fastMotion 快速路径：READY 门控 + hold 缓冲 + EMA 加权派发（与直播/FLV 流水线一致）
+            $fast = !empty($this->config['fastMotion']);
             $sequence = 0;
             $gopSeq = 0;
+            // 首关键帧之前的样本（通常仅音频）直通 worker 0（配置随 pipeline 元数据下发，
+            // 不存在 FLV 那样的序列头顺序问题）；首个 IDR 起 currentWorker 由 READY 门控决定
             $currentWorker = 0;
             $baseTimestamp = -1;
             $selected = 0;
@@ -65,25 +69,53 @@ final class Mp4PipelineClient
             $outbound = array_fill(0, $workerCount, '');
             $inbound = array_fill(0, $workerCount, '');
             $alive = array_fill(0, $workerCount, true);
+            $hold = '';
+            $ready = array_fill(0, $workerCount, false);
+            $load = array_fill(0, $workerCount, 0);
+            $ema = array_fill(0, $workerCount, 0.0);
+            /** @var array<int,int> GOP序号 => worker（-1=等待空闲worker） */
+            $gopWorkerMap = [];
+            /** @var array<int,int> GOP序号 => 加权负载 */
+            $gopWeightMap = [];
+            /** @var array<int,int> GOP序号 => 派发时刻 hrtime */
+            $gopDispatchAt = [];
             $allEnqueued = false;
             $endEnqueued = false;
+            $lastGopClosed = false;
             $finishedCount = 0;
 
             while (true) {
                 if (!$allEnqueued) {
-                    while ($index < $total && $this->bufferedBytes($outbound) < $workerCount * self::PER_WORKER_SOFT_LIMIT) {
+                    // 快速路径下 hold 非空（新GOP暂无空闲worker）时必须停止取样本，
+                    // 否则后续关键帧会让未派发 GOP 的边界标记写错通道
+                    while ($index < $total && (!$fast || $hold === '') && $this->bufferedBytes($outbound) < $workerCount * self::PER_WORKER_SOFT_LIMIT) {
                         $sample = $samples[$index++];
                         if ($sample['type'] === 'video') {
                             $videoCount++;
                             if (!empty($sample['keyframe'])) {
-                                // 每个关键帧开启一个独立GOP，轮询分配给解码worker
-                                if ($gopSeq > 0) {
+                                if ($gopSeq > 0 && isset($gopWorkerMap[$gopSeq - 1])) {
                                     // GOP 边界标记：worker 完成上一 GOP 后重置解码参考链与编码器状态
-                                    $prevWorker = ($gopSeq - 1) % $workerCount;
-                                    $outbound[$prevWorker] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::CONTROL, 0, ['cmd' => 'gopEnd', 'gop' => $gopSeq - 1]);
+                                    $outbound[$gopWorkerMap[$gopSeq - 1]] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::CONTROL, 0, ['cmd' => 'gopEnd', 'gop' => $gopSeq - 1]);
                                 }
-                                $currentWorker = $gopSeq % $workerCount;
-                                $gopSeq++;
+                                if ($fast) {
+                                    $gop = $gopSeq;
+                                    $worker = $gop === 0
+                                        ? ($ready[0] ? 0 : -1)
+                                        : $this->pickFastReadyWorker($ready, $load, $ema, $workerCount);
+                                    $gopWorkerMap[$gop] = $worker;
+                                    $gopWeightMap[$gop] = 0;
+                                    $currentWorker = $worker;
+                                    if ($worker >= 0) {
+                                        $ready[$worker] = false;
+                                        $gopDispatchAt[$gop] = hrtime(true);
+                                        // 首关键帧之前的直通样本（通常为音频）随之放行，保持文件顺序
+                                        if ($hold !== '') { $outbound[$worker] .= $hold; $hold = ''; }
+                                    }
+                                    $gopSeq++;
+                                } else {
+                                    $currentWorker = $gopSeq % $workerCount;
+                                    $gopSeq++;
+                                }
                             }
                             $meta = [
                                 'sampleType' => 'video', 'dtsMs' => $sample['dtsMs'],
@@ -100,19 +132,51 @@ final class Mp4PipelineClient
                             }
                             if (!$drop) $selected++;
                             if ($drop) $meta['drop'] = true;
-                            $outbound[$currentWorker] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $sequence++, $meta, $sample['data']);
+                            $frame = HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $sequence++, $meta, $sample['data']);
+                            // 首关键帧之前的丢弃视频直通 worker0，不属于任何 GOP，不参与负载记账
+                            if ($fast && $gopSeq === 0) {
+                                $outbound[0] .= $frame;
+                            } elseif ($fast) {
+                                $weight = $drop ? 1 : 2;
+                                if ($currentWorker < 0) {
+                                    $hold .= $frame;
+                                } else {
+                                    $outbound[$currentWorker] .= $frame;
+                                    $load[$currentWorker] += $weight;
+                                }
+                                $gopWeightMap[$gopSeq - 1] = ($gopWeightMap[$gopSeq - 1] ?? 0) + $weight;
+                            } else {
+                                $outbound[$currentWorker] .= $frame;
+                            }
                             if ($this->maxFrames !== null && $videoCount >= $this->maxFrames) { echo "Reached max frames limit ({$this->maxFrames}), stopping...\n"; $allEnqueued = true; break; }
                             if ($videoCount % 10 === 0) echo "Processed {$videoCount} video frames\n";
                         } else {
                             if ($this->maxFrames !== null && $videoCount >= $this->maxFrames) continue;
-                            $outbound[$currentWorker] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $sequence++, [
+                            $frame = HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $sequence++, [
                                 'sampleType' => 'audio', 'dtsMs' => $sample['dtsMs'],
                                 'ctsMs' => $sample['ctsMs'], 'keyframe' => $sample['keyframe'],
                             ], $sample['data']);
+                            // 快速路径：首关键帧前或GOP等待派发时音频进 hold 保序（音频直通不计加权负载）
+                            if ($fast && $currentWorker < 0) $hold .= $frame;
+                            else $outbound[$currentWorker] .= $frame;
                         }
                     }
-                    if ($index >= $total) $allEnqueued = true;
-                    if ($allEnqueued && !$endEnqueued) {
+                    if ($index >= $total || $allEnqueued) $allEnqueued = true;
+                    if ($fast) {
+                        // 快速路径收尾：hold 排空 → 最后一个GOP补边界 → 广播 END
+                        if ($allEnqueued && $hold === '' && !$lastGopClosed) {
+                            if ($gopSeq > 0 && isset($gopWorkerMap[$gopSeq - 1])) {
+                                $outbound[$gopWorkerMap[$gopSeq - 1]] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::CONTROL, 0, ['cmd' => 'gopEnd', 'gop' => $gopSeq - 1]);
+                            }
+                            $lastGopClosed = true;
+                        }
+                        if ($allEnqueued && $lastGopClosed && !$endEnqueued) {
+                            for ($i = 0; $i < $workerCount; $i++) {
+                                $outbound[$i] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::END, $sequence++);
+                            }
+                            $endEnqueued = true;
+                        }
+                    } elseif ($allEnqueued && !$endEnqueued) {
                         // END 广播给每个解码 worker，输出 worker 收齐 workerCount 个 END 才收尾
                         for ($i = 0; $i < $workerCount; $i++) {
                             $outbound[$i] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::END, $sequence++);
@@ -155,7 +219,25 @@ final class Mp4PipelineClient
                 foreach ($inbound as $id => $buffer) {
                     foreach (HlsPipelineProtocol::take($inbound[$id], PHP_INT_MAX) as $event) {
                         if ($event['type'] === HlsPipelineProtocol::ERROR) throw new RuntimeException($event['metadata']['message'] ?? 'MP4 流水线失败');
-                        if ($event['type'] === HlsPipelineProtocol::FINISHED) $finishedCount++;
+                        if ($event['type'] === HlsPipelineProtocol::FINISHED) { $finishedCount++; continue; }
+                        if ($fast && $event['type'] === HlsPipelineProtocol::READY) {
+                            $g = $event['metadata']['gop'] ?? null;
+                            if ($g === null) {
+                                $ready[$id] = true; // worker 启动空闲回报
+                            } elseif (isset($gopWorkerMap[$g])) {
+                                $w = $gopWorkerMap[$g];
+                                $ready[$w] = true;
+                                if (isset($gopWeightMap[$g])) $load[$w] -= $gopWeightMap[$g];
+                                $gw = $gopWeightMap[$g] ?? 0;
+                                if ($gw > 0 && isset($gopDispatchAt[$g])) {
+                                    $perWeight = (hrtime(true) - $gopDispatchAt[$g]) / 1e6 / $gw;
+                                    $ema[$w] = $ema[$w] <= 0.0 ? $perWeight : $ema[$w] * 0.5 + $perWeight * 0.5;
+                                }
+                                unset($gopWorkerMap[$g], $gopWeightMap[$g], $gopDispatchAt[$g]);
+                            }
+                            $this->dispatchFastHold($gopSeq, $currentWorker, $ready, $load, $ema, $gopWorkerMap, $gopWeightMap, $gopDispatchAt, $hold, $outbound);
+                        }
+                        // PROGRESS 在快速路径仅作进度信号，记账以随后的 READY 为准
                     }
                     if (strlen($inbound[$id]) > HlsPipelineProtocol::MAX_BUFFER_LENGTH) throw new RuntimeException('主进程响应缓冲超限');
                 }
@@ -189,6 +271,12 @@ final class Mp4PipelineClient
     {
         $decodeMax = max(1, min(8, (int)($this->config['decode_workers'] ?? 4)));
         $configuredMotion = max(1, (int)($this->config['motionWorkers'] ?? 2));
+        // fastMotion 快速路径：与直播流水线同款布局——
+        // 每个解码 worker 只带 1 个运动子进程，运动预算全部用于扩张 GOP 并行度
+        if (!empty($this->config['fastMotion'])) {
+            $d = $gopCount > 0 ? min($decodeMax, $gopCount) : $decodeMax;
+            return [$d, 1];
+        }
         if ($gopCount <= 0) {
             return [$decodeMax, $configuredMotion];
         }
@@ -196,6 +284,52 @@ final class Mp4PipelineClient
         $m = min(2, $configuredMotion);
         $d = min($decodeMax, $gopCount, max(1, intdiv($budget, $m)));
         return [$d, $m];
+    }
+
+    /** READY 后把 hold 中等待的GOP整体派给最优空闲 worker（首GOP固定 worker0）。 */
+    private function dispatchFastHold(
+        int &$gopSeq,
+        int &$currentWorker,
+        array &$ready,
+        array &$load,
+        array &$ema,
+        array &$gopWorkerMap,
+        array &$gopWeightMap,
+        array &$gopDispatchAt,
+        string &$hold,
+        array &$outbound
+    ): void {
+        if ($hold === '') return;
+        $gop = $gopSeq - 1;
+        if ($gop < 0 || ($gopWorkerMap[$gop] ?? -1) !== -1) return;
+        $worker = $gop === 0
+            ? ($ready[0] ? 0 : -1)
+            : $this->pickFastReadyWorker($ready, $load, $ema, count($outbound));
+        if ($worker < 0) return;
+        $gopWorkerMap[$gop] = $worker;
+        $ready[$worker] = false;
+        $currentWorker = $worker;
+        $gopDispatchAt[$gop] = hrtime(true);
+        $load[$worker] += $gopWeightMap[$gop] ?? 0;
+        $outbound[$worker] .= $hold;
+        $hold = '';
+    }
+
+    /** 选择 READY worker 中"在途权重×单位权重耗时EMA"最小者；无空闲返回 -1。 */
+    private function pickFastReadyWorker(array $ready, array $load, array $ema, int $workerCount): int
+    {
+        $worker = -1;
+        $best = null;
+        for ($i = 0; $i < $workerCount; $i++) {
+            if (empty($ready[$i])) continue;
+            $e = $ema[$i] ?? 0.0;
+            $score = $load[$i] * ($e > 0.0 ? $e : 1.0);
+            if ($best === null || $score < $best) {
+                $best = $score;
+                $worker = $i;
+            }
+        }
+        return $worker;
     }
 
     private function bufferedBytes(array $buffers): int
