@@ -5,25 +5,29 @@ ini_set('memory_limit', '2048M');
 
 /** -----提示：仅支持baseline profile级别的h264 + aac 格式的flv/mp4/hls重编码------ */
 $config = [
-    'width' => 640,
+    'width' => 360,
     'height' => 360,
-    'bitrate' => 300000,
+    'bitrate' => 0,
     'fps' => 10,
     'audioBitrate' => 48000,
-    'qp' => 0,
+    'qp' => 30,
     'watermark'=>false,
     'watermark_file'=> __DIR__."/watermark_80x16.yuv",
-    // GOP分布式架构（与直播 liveRtmpCompact.php 同构）：decode_workers 个GOP worker
-    // 按IDR分组并行完成"解码+缩放+编码"，每个GOP worker内部仅携带1个运动估计子进程，
-    // 避免按 6×6 过量创建进程；fastMotion 缩小运动搜索并跳过四分之一像素。
+    // GOP分布式架构：decode_workers 个 GOP worker 按 IDR 分组并行完成"解码+缩放+编码"。
+    // FLV/MP4 文件重编码按 GOP 数量自适应进程布局（motion_budget 为运动估计进程总预算）：
+    //   实测每worker 2个运动进程为甜点（更多只增冷启动开销），预算用于扩张解码worker：
+    //   GOP少 → 解码worker自动减少（多了也空转）；例 budget=8：GOP=1→1×2，GOP=2→2×2，GOP≥4→4×2
+    // motionWorkers 为 HLS/直播每 worker 的固定运动进程数，以及无法统计 GOP 时的回退值。
+    // fastMotion 缩小运动搜索并跳过四分之一像素。
     'fastMotion'     => true,
-    'motionWorkers'  => 1,
+    'motionWorkers'  => 2,
+    'motion_budget'  => 8,
     'decode_workers' => 6,
     'segmentDuration'=> 3,
 ];
 
-$flvFile = __DIR__ . '/test.flv';
-$mp4File = __DIR__ . '/test.mp4';
+$flvFile = __DIR__ . '/index.flv';
+$mp4File = __DIR__ . '/index.mp4';
 
 // 用法：php829 recode.php [flv|mp4|hls|all]，默认 flv（压缩重编码走 GOP 分布式 + 每 worker 1 个运动估计子进程）
 $mode = $argv[1] ?? 'flv';
