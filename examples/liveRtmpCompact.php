@@ -14,7 +14,7 @@ ini_set('memory_limit', '2048M');
  */
 
 // ======================== 拉流配置 ========================
-$pullUrl = 'rtmp://192.168.110.72:1935/a/b'; // RTMP直播地址（rtmp://host:port/app/流名，与liveCompact.php同一源）
+$pullUrl = 'rtmp://127.0.0.1:1935/a/b'; // RTMP直播地址（rtmp://host:port/app/流名，与liveCompact.php同一源）
 
 // ======================== 转码压缩配置 ========================
 $config = [
