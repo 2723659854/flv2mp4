@@ -1046,15 +1046,19 @@ class Flv2HlsCompact
 
     private function printStats(): void
     {
-        $elapsed = microtime(true) - $this->processStartMicrotime;
-        $pullElapsed = ($this->pullEndMicrotime > 0.0 ? $this->pullEndMicrotime : microtime(true)) - $this->pullStartMicrotime;
+        $endMicrotime = microtime(true);
+        $elapsed = $endMicrotime - $this->processStartMicrotime;
+        $pullEndMicrotime = $this->pullEndMicrotime > 0.0 ? $this->pullEndMicrotime : $endMicrotime;
+        $initElapsed = max(0.0, $this->pullStartMicrotime - $this->processStartMicrotime);
+        $pullElapsed = max(0.0, $pullEndMicrotime - $this->pullStartMicrotime);
+        $tailElapsed = max(0.0, $endMicrotime - $pullEndMicrotime);
         $pullStart = $this->pullStartUnix > 0 ? date('Y-m-d H:i:s', $this->pullStartUnix) : '-';
         $pullEnd = $this->pullEndUnix > 0 ? date('Y-m-d H:i:s', $this->pullEndUnix) : '-';
 
         $this->log('========================================');
         $this->log('转码结束统计');
         $this->log("开始拉流: {$pullStart}，结束拉流: {$pullEnd}");
-        $this->log(sprintf('拉流时长: %.1fs，收尾转码耗时: %.1fs', $pullElapsed,  max(0.0, $elapsed - $pullElapsed)));
+        $this->log(sprintf('初始化耗时: %.1fs，拉流时长: %.1fs，收尾转码耗时: %.1fs', $initElapsed, $pullElapsed, $tailElapsed));
         $this->log('总耗时: ' . round($elapsed, 1) . "s，送转码tag: {$this->tagsFed} (视频{$this->videoTags}/音频{$this->audioTags})");
         $this->log("播放列表: {$this->streamDir}index.m3u8");
         $this->log('========================================');
