@@ -79,6 +79,8 @@ class Flv2HlsCompact
     // ===== IPC帧读取缓冲 =====
     private string $readBuffer = '';
     private bool $endReceived = false;
+    /** 拉流IPC已到EOF，readBuffer尾部残帧已不可能再补齐 */
+    private bool $pullerIpcEnded = false;
 
     // ===== 信用回报（拉流端按消费节拍发数据，防止落后量堆积在内核管道看不见） =====
     private string $creditBuffer = '';
@@ -475,7 +477,10 @@ class Flv2HlsCompact
     {
         $chunk = @fread($this->ipc, 65536);
         if ($chunk === false || ($chunk === '' && feof($this->ipc))) {
-            // 拉流子进程关闭：重连耗尽时END帧会先到；异常退出时按停止收尾
+            // 拉流子进程关闭：先消费所有完整帧，再丢弃无法补齐的尾部残帧。
+            // 主动停止时若保留残帧，流水线会一直认为仍有待处理输入而无法发送finish。
+            $this->drainFrames($pipeline);
+            $this->pullerIpcEnded = true;
             $this->stopSignaled = true;
             $this->running = false;
             return;
@@ -680,7 +685,9 @@ class Flv2HlsCompact
             // 正确链条：照常读入IDR→为上一GOP补发gopEnd→无空闲worker时新GOP帧进入plHold
             // 并停止继续读IPC（反压沿信用窗传导上游）→worker收尾GOP回READY→hold派发。
             // 端到端在途≈每worker 1个GOP+IDR前残留（≤约2s内容）。
-            $canReadPuller = !$this->plEndSent && !$this->stopSignaled && $outBytes < self::PIPELINE_OUTPUT_MAX_BYTES
+            // 主动停止后仍继续读取拉流IPC，直至被终止的拉流进程关闭连接。
+            // 否则readBuffer可能停在半个IPC帧上，永远无法满足收尾条件。
+            $canReadPuller = !$this->plEndSent && !$this->pullerIpcEnded && $outBytes < self::PIPELINE_OUTPUT_MAX_BYTES
                 && $this->plHold === '' && is_resource($this->ipc);
 
             $read = [];
@@ -725,6 +732,9 @@ class Flv2HlsCompact
                 $beforeLen = strlen($this->readBuffer);
                 $this->drainFrames(true);
                 if (strlen($this->readBuffer) >= $beforeLen) break;
+            }
+            if ($this->pullerIpcEnded && $this->plHold === '' && $this->readBuffer !== '') {
+                $this->readBuffer = '';
             }
 
             if ($this->stopSignaled && is_resource($this->process)) $this->stopPuller();
