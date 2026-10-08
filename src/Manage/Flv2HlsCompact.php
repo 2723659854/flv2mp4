@@ -94,6 +94,7 @@ class Flv2HlsCompact
     private ?int $lastMediaTimestamp = null;
     private ?int $firstVideoTimestamp = null;
     private ?int $lastVideoTimestamp = null;
+    private float $processStartMicrotime;
     private float $startMicrotime;
     private float $pullStartMicrotime;
     private float $pullEndMicrotime = 0.0;
@@ -264,10 +265,11 @@ class Flv2HlsCompact
      */
     public function run(): void
     {
-        $this->startMicrotime = microtime(true);
-        $this->pullStartMicrotime = $this->startMicrotime;
+        $this->processStartMicrotime = microtime(true);
+        $this->startMicrotime = $this->processStartMicrotime;
+        $this->pullStartMicrotime = $this->processStartMicrotime;
         $this->pullStartUnix = time();
-        $this->lastStatsMicrotime = $this->startMicrotime;
+        $this->lastStatsMicrotime = $this->processStartMicrotime;
         $this->log('========================================');
         $this->log('FLV拉流转码HLS客户端 v2.0（拉流/转码双进程）');
         $this->log("拉流地址: {$this->pullUrl}");
@@ -291,6 +293,11 @@ class Flv2HlsCompact
                 $this->spawnPuller($port);
             }
             $this->acceptPuller($port);
+            // duration 从拉流IPC建立后开始计算，不包含跨平台差异较大的worker冷启动耗时。
+            $this->startMicrotime = microtime(true);
+            $this->pullStartMicrotime = $this->startMicrotime;
+            $this->pullStartUnix = time();
+            $this->lastStatsMicrotime = $this->startMicrotime;
             if ($parallel) $this->pipelineLoop();
             else $this->transcodeLoop();
         } catch (\Throwable $e) {
@@ -1039,7 +1046,7 @@ class Flv2HlsCompact
 
     private function printStats(): void
     {
-        $elapsed = microtime(true) - $this->startMicrotime;
+        $elapsed = microtime(true) - $this->processStartMicrotime;
         $pullElapsed = ($this->pullEndMicrotime > 0.0 ? $this->pullEndMicrotime : microtime(true)) - $this->pullStartMicrotime;
         $pullStart = $this->pullStartUnix > 0 ? date('Y-m-d H:i:s', $this->pullStartUnix) : '-';
         $pullEnd = $this->pullEndUnix > 0 ? date('Y-m-d H:i:s', $this->pullEndUnix) : '-';
