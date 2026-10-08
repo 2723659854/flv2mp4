@@ -310,96 +310,38 @@ php forward.php
 ### 🔥 H.264 解码 + 缩放 + 重编码
 
 支持 Baseline Profile 的 H.264 解码、缩放、重新编码，为以下场景提供核心能力：
-
-通过 Composer 安装后无需手动运行 Opus/HLS/FLV/MP4 Worker；程序会使用当前 PHP CLI 和宿主 `vendor/autoload.php` 自动启动。多进程模式要求启用 `proc_open`，建议在 CLI 环境运行。
-
-| 应用场景 | 说明 |
-|----------|------|
-| **多码率 HLS** | 将单路 FLV 转码为多分辨率 HLS 切片（自适应码率） |
-| **FLV 重编码** | 修改分辨率、码率后重新输出为 FLV |
-| **MP4 重编码** | 修改分辨率、码率后重新输出为 MP4 |
-| **格式转换** | FLV ↔ MP4 转换时重新编码（而非仅封装） |
-| **水印叠加** | 解码 YUV → 叠加 PNG/文字水印 → 重新编码输出 |
-| **画质增强** | 解码后应用滤镜（锐化、降噪等）→ 重新编码 |
-| **分辨率适配** | 将高分辨率视频降采样为多档分辨率输出 |
-| **码率控制** | 将高码率视频重新编码为指定目标码率 |
-
 **技术定位**：这是一个完整的 **H.264 像素处理管道**（解码 → 处理 → 编码），不依赖 FFmpeg，纯 PHP 实现。
 
 ---
-####  flv->hls
-以下为flv转码多码率hls示例：
+####  flv/mp4/hls压缩转码
+以下是示例代码：
 ```php
-<?php
-
 require_once __DIR__ . '/vendor/autoload.php';
 ini_set('memory_limit', '2048M');
-$profiles = [
-    // 不同码率分别配置
-    '240p' => [
-        'width' => 426,      // 或 424，保持 16:9 比例即可
-        'height' => 240,
-        'bitrate' => 300000, // 300 Kbps（视频码率）
-        'fps' => 24,
-        'audioBitrate' => 48000, // 48 Kbps
-        'qp' => 30,          // 保持 30 以确保稳定性
-        'watermark'=>true,     // 是否添加水印
-        'watermark_file'=> __DIR__."/src/Static/watermark_80x16.yuv",// 水印文件
-    ]
-];
-// 如果重编码质量要求高，那么开启多进程加速，低码率则不需要加速
-$generator = new \Xiaosongshu\Flv2mp4\Recode\PurePhpHlsGenerator($profiles, __DIR__ . '/hls/output',true);
-$generator->processFlv(__DIR__ . '/input.flv');
-echo "索引地址: hls/output/master.m3u8\n";
-echo "所有处理完成！\n";
-```
-#### flv->flv
-将flv使用新的码率编码
-```php
-<?php
-require_once __DIR__ . '/vendor/autoload.php';
-ini_set('memory_limit', '2048M');
-
 $config = [
-    'width' => 320,        // 目标宽度，0 = 保持原分辨率
-    'height' => 180,       // 目标高度，0 = 保持原分辨率
-    'bitrate' => 150000,   // 目标码率（bps），0 = 使用 QP 模式
-    'fps' => 15,           // 目标帧率
-    'qp' => 30,            // QP 质量参数（码率为 0 时生效）
-    'watermark'=>true,     // 是否添加水印
-    'watermark_file'=> __DIR__."/src/Static/watermark_80x16.yuv",// 水印文件
+    'width' => 360,
+    'height' => 360,
+    'bitrate' => 0,
+    'fps' => 15,
+    'audioBitrate' => 48000,
+    'qp' => 30,
+    'watermark'=>false,
+    'watermark_file'=> __DIR__."/watermark_80x16.yuv",
+    'fastMotion'     => true,
+    'motionWorkers'  => 2,
+    'motion_budget'  => 8,
+    'decode_workers' => 6,
+    'segmentDuration'=> 3,
 ];
-// 如果重编码质量要求高，那么开启多进程加速，低码率则不需要加速
-$recoder = new \Xiaosongshu\Flv2mp4\Recode\FlvRecoder($config,true);
-$recoder->setMaxFrames(50);  // 可选：限制处理帧数
-$recoder->processFlv(__DIR__ . '/input.flv', __DIR__.'/output.flv');
-echo "flv重编码完成\r\n";
+# flv -> hls
+(new \Xiaosongshu\Flv2mp4\Recode\PurePhpHlsGenerator($config,__DIR__ . '/hls/output',true,))->processFlv(__DIR__ . '/test.flv');
+# flv -> flv
+(new \Xiaosongshu\Flv2mp4\Recode\FlvRecoder($config, true))->processFlv(__DIR__ . '/test.flv', __DIR__.'/output.flv');
+# mp4 -> mp4
+(new \Xiaosongshu\Flv2mp4\Recode\Mp4Recoder($config, true))->processMp4($mp4File, __DIR__ . '/output1.mp4');
 ```
-#### mp4->mp4
-将mp4文件使用新的码率编码
-```php
-<?php
-require_once __DIR__ . '/vendor/autoload.php';
-ini_set('memory_limit', '2048M');
-
-$config = [
-    'width' => 320,        // 目标宽度，0 = 保持原分辨率
-    'height' => 180,       // 目标高度，0 = 保持原分辨率
-    'bitrate' => 150000,   // 目标码率（bps），0 = 使用 QP 模式
-    'fps' => 15,           // 目标帧率
-    'qp' => 30,            // QP 质量参数（码率为 0 时生效）
-    'watermark'=>true,     // 是否添加水印
-    'watermark_file'=> __DIR__."/src/Static/watermark_80x16.yuv",// 水印文件
-];
-// 如果重编码质量要求高，那么开启多进程加速，低码率则不需要加速
-$recoder = new \Xiaosongshu\Flv2mp4\Recode\Mp4Recoder($config,true);
-$recoder->setMaxFrames(50); // 可选：限制处理帧数
-$recoder->processMp4(__DIR__ . '/input.mp4', __DIR__ . '/output.mp4');
-echo "mp4重编码完成\r\n";
-```
-- 添加水印的时候，需要使用yuv格式文件，并且文件名称如上面的示例所示，必须包含水印文件的宽高（watermark_{width}x{height}.yuv）。工具会自动从文件名解析宽高（如 `watermark_80x16.yuv` → 宽 80，高 16），请确保文件名格式准确。
+- 添加水印的时候，文件名格式：（watermark_{width}x{height}.yuv）。
 - 重编码模块提供了 **YUV 像素级操作接口**，你可以基于此实现自定义功能，如添加字幕、画中画、视频拼接等。
-- h264详细使用方法见<a href="./src/Codec/README.md">README</a>。
 
 ---
 
@@ -407,50 +349,36 @@ echo "mp4重编码完成\r\n";
 本项目支持将直播flv流压缩并转码hls，以适配移动端弱网络场景。示例代码如下：
 ```php
 <?php
-
 require_once __DIR__ . '/vendor/autoload.php';
 ini_set('memory_limit', '2048M');
-
-// ======================== 拉流配置 支持（http/https/ws/wss/rtmp） ========================
-$pullUrl = 'ws://127.0.0.1:8501/live/stream.flv';
-
-// ======================== 转码压缩配置 ========================
+$pullUrl = 'rtmp://127.0.0.1:1935/a/b';
 $config = [
-    // —— 目标规格（width/height 必须同时给，0=保持源尺寸）——
-    'width'        => 640,
-    'height'       => 360,
-    'bitrate'      => 800000,  // 目标视频码率 bps
-    'fps'          => 0,       // 目标帧率；0=保持源帧率。
-    'qp'           => 10,      // 量化参数 0-51
-    'audioBitrate' => 64000,   // 音频码率 bps
-
-    // —— 重编码配置 ——
-    'motionWorkers'   => 12,   // 运动估计子进程数
-    'decodeWorkers'   => 2,    // 解码+缩放worker进程数（缩放在此并行完成，勿置0走串行）
-    'segmentDuration' => 3,    // HLS切片时长（秒）
-    'watermark'       => false, // 是否加水印
-    'watermark_file'  => __DIR__ . '/watermark_80x16.yuv', //水印文件
-
-    // —— 输出目录与流名 ——
-    'outputDir'  => __DIR__ . '/hls/live/',
-
-    // ======================== 拉流客户端配置 ========================
-    'maxRetries'    => 5,      // 断线重连次数
-    'retryDelay'    => 3,      // 重连间隔（秒）
-    'connectTimeout'=> 10,     // 连接/握手超时（秒）
-    'idleTimeout'   => 30,     // 连续无数据判定断流（秒）
-    'queueMaxBytes' => 8388608,  // 转码落后容忍8MB；超限时跳过非关键帧，等待下一个 IDR 帧重新同步
-    'duration'   => 0,      // 限定运行秒数，0=不限
-    'tlsVerify'  => false,  // https/wss 自签证书时关闭校验
+    'width'        => 480,
+    'height'       => 270,
+    'bitrate'      => 0,
+    'fps'          => 15,
+    'qp'           => 30,
+    'audioBitrate' => 64000,
+    'motionWorkers'   => 1,
+    'decodeWorkers'   => 6,
+    'segmentDuration' => 3,
+    'fastMotion' => true,
+    'outputDir'  => __DIR__ . '/hls/live_rtmp/',
+    'maxRetries'    => 5,
+    'retryDelay'    => 3,
+    'connectTimeout'=> 10,
+    'idleTimeout'   => 30,
+    'queueMaxBytes' => 8388608,
+    'duration'   => 120,
+    'tlsVerify'  => false,
 ];
-// 启动压缩转码服务
 (new \Xiaosongshu\Flv2mp4\Manage\Flv2HlsCompact($pullUrl, $config))->run();
 
 ```
 
-- 当前项目直播压缩转码，支持多分辨率，满足直播需求，具体性能与服务器性能密切相关，你可以根据自己的服务器配置调整以上参数。
-- `motionWorkers`和`decodeWorkers`输入分辨率越高，越应增加 decodeWorkers；输出分辨率越高，越应增加 motionWorkers。两者之和不要超过服务器逻辑处理器数。
-- 测试使用 OBS 推流：输入 1920×1080、10fps、每 4 秒一个关键帧、Baseline Profile、H.264 + AAC；输出 640×360、10fps、HLS 切片 3 秒。连续运行 30 分钟无跳帧、无积压。
+- 当前项目直播压缩转码，实测无延迟，满足直播需求，具体性能与服务器性能密切相关，你可以根据自己的服务器配置调整以上参数。
+- `motionWorkers`和`decodeWorkers`输入分辨率越高，越应增加 decodeWorkers；输出分辨率越高，越应增加 motionWorkers。两者之和不要超过服务器逻辑处理器数（运动估计进程是解码进程的子进程）。
+- 测试使用 OBS 推流：输入 960×540、30fps、每 1 秒一个关键帧、Baseline Profile、H.264 + AAC；输出 480×270、15fps、HLS 切片 3 秒。连续运行 30 分钟无跳帧、无积压。
 - ⚠️ 直播压缩转码仅支持 CLI 模式运行，请勿在 FPM 请求中直接调用，否则会阻塞 Web 服务的 worker 进程。
 
 ----
@@ -474,82 +402,12 @@ $config = [
 - generateFromText()	生成文字水印 YUV，	GD 扩展优先，无 GD 时自动降级为点阵字体,**内置点阵字体仅支持 ASCII 字符（英文字母、数字、英文标点）**
 - generateFromImage()	从图片生成水印 YUV，需要 GD 扩展，支持png/jpg
 
-#### 使用文字生成水印文件
-
 ```php
 <?php
 require_once __DIR__ . '/vendor/autoload.php';
-
 use Xiaosongshu\Flv2mp4\Codec\WatermarkUtil;
-
-echo "=== 测试 WatermarkUtil ===\n\n";
-
-// 测试1：生成文字水印
-echo "1. 生成文字水印 (xiaosongshu, 80x16)...\n";
-$outputFile1 = __DIR__ . '/test_wm_text.yuv';
-$start = microtime(true);
-$result = WatermarkUtil::generateFromText(
-    'xiaosongshu',
-    $outputFile1,
-    80,
-    16,
-
-    [
-        'fontSize' => 5, // 内置字体大小 1-5 `fontSize` 取值范围 1-5（数字越大字体越大），内置点阵字体仅支持 ASCII 字符。
-        'fontColor' => [255, 255, 255],
-        'bgColor' => [0, 0, 0],
-    ]
-);
-$cost = round(microtime(true) - $start, 3);
-if ($result && file_exists($outputFile1)) {
-    $size = filesize($outputFile1);
-    $expectedSize = 80 * 16 + (80 * 16 >> 1);
-    echo "   成功! 文件大小: {$size} 字节 (期望: {$expectedSize}) - 耗时: {$cost}s\n";
-    if ($size === $expectedSize) {
-        echo "   ✅ 文件尺寸正确\n";
-    } else {
-        echo "   ❌ 文件尺寸不匹配\n";
-    }
-} else {
-    echo "   ❌ 生成失败\n";
-}
-```
-#### 使用图片生成水印文件
-
-- 需要php安装gd扩展
-
-```php
-<?php
-
-require_once __DIR__ . '/vendor/autoload.php';
-
-use Xiaosongshu\Flv2mp4\Codec\WatermarkUtil;
-
-echo "=== 测试 WatermarkUtil ===\n\n";
-
-// 测试1：从图片生成水印
-echo "1. 从图片生成水印 (xiaosongshu, 80x16)...\n";
-$outputFile1 = __DIR__ . '/test_wm_copy_80x16.yuv';
-$start = microtime(true);
-$result = WatermarkUtil::generateFromImage(
-    __DIR__."/watermark_80x16.png",
-    $outputFile1,
-    80,
-    16,
-);
-$cost = round(microtime(true) - $start, 3);
-if ($result && file_exists($outputFile1)) {
-    $size = filesize($outputFile1);
-    $expectedSize = 80 * 16 + (80 * 16 >> 1);
-    echo "   成功! 文件大小: {$size} 字节 (期望: {$expectedSize}) - 耗时: {$cost}s\n";
-    if ($size === $expectedSize) {
-        echo "   ✅ 文件尺寸正确\n";
-    } else {
-        echo "   ❌ 文件尺寸不匹配\n";
-    }
-} else {
-    echo "   ❌ 生成失败\n";
-}
+WatermarkUtil::generateFromText('xiaosongshu',__DIR__ . '/test_wm_text.yuv',80,16,['fontSize' => 5,'fontColor' => [255, 255, 255],'bgColor' => [0, 0, 0],]);
+WatermarkUtil::generateFromImage(__DIR__."/watermark_80x16.png",__DIR__ . '/test_wm_copy_80x16.yuv',80,16);
 ```
 ---
 
@@ -579,35 +437,36 @@ if ($result && file_exists($outputFile1)) {
 
 ### 长视频测试（7 分 5 秒视频）
 
-| 平台 | 重编码耗时 | 耗时倍率 |
-| :--- | :--- | :--- |
-| **Windows** | **488 秒（8 分 08 秒）** | 约 1.15 倍 |
-| **Linux (Docker)** | **335 秒（5 分 35 秒）** | 约 0.79 倍 |
+| 平台 | 重编码耗时               | 耗时倍率     |
+| :--- |:--------------------|:---------|
+| **Windows** | **240 秒** | 约 0.56 倍 |
+| **Linux (Docker)** | **146 秒** | 约 0.34 倍 |
 
 
 ### 历史优化记录
 
-| 优化阶段 | FLV | MP4 | HLS | 备注 |
-| :--- | :--- | :--- | :--- | :--- |
-| **初始版本** | ~91 秒 | ~60 秒（旧版） | **135 秒** | 串行，无优化 |
-| **算法级优化** | 60 秒 | — | 97 秒 | DCT 蝶形展开、字符串切片、减少 array_fill、量化+Zigzag 合并 |
-| **多进程运动估计（4 进程）** | 51 秒 | — | 73 秒 | 首次引入分布式并行 |
-| **HLS 封装 I/O 优化** | — | — | 69 秒 | 批量写入、减少文件操作 |
-| **编码核心优化** | 44 秒 | 44 秒 | 67 秒 | 全零块跳过、I/P 帧 QP 策略 |
-| **解码缓存优化** | 41 秒 | 42 秒 | 64 秒 | 复用重复计算 |
-| **开启 OPcache + JIT** | 39 秒 | 39 秒 | 60 秒 | 运行时环境加速 |
-| **多进程模型优化（select 等）** | 33 秒 | — | — | 事件驱动、进程通信优化 |
-| **继续微调** | 32 秒 | — | — | 未明确具体手段 |
-| **极限优化（Windows）** | 28 秒 | 29 秒 | 37 秒 | Windows + PHP 8.4.3 + JIT |
-| **Linux Docker 部署** | 23 秒 | 24 秒 | 31 秒 | Linux + PHP 8.1.24，未开启 OPcache |
-| **GOP 分布式多进程解码（Windows）** | 22 秒 | 22 秒 | 22 秒 | Windows 平台 |
-| **GOP 分布式多进程解码（Linux）** | 17 秒 | 17 秒 | 17 秒 | Linux 平台 |
-| **去除参考帧重复 SHA256 + 静止块 ME 早退（Windows）** | 19 秒 | 19 秒 | 20 秒 | Windows 平台 |
-| **去除参考帧重复 SHA256 + 静止块 ME 早退（Linux）** | 16 秒 | 16 秒 | 17 秒 | Linux 平台 |
-| **零区域跳过 + 解码/滤波深度优化（Windows）** | 18 秒 | 18 秒 | 19 秒 | 6 抽头滑动递推、Bs 全零跳过、滤波结果未变跳过写、CBP=0 整块跳过、DPB 懒加载、`chr()` 查表化、按需 unpack + 缓存 |
-| **零区域跳过 + 解码/滤波深度优化（Linux）** | 14 秒 | 14 秒 | 15 秒 | 同上 |
-| **抽帧跳过去块滤波 + BitReader 快速路径 + 平面整数数组（Windows）** | **16 秒** | **16 秒** | **17 秒** | 本次优化 |
-| **抽帧跳过去块滤波 + BitReader 快速路径 + 平面整数数组（Linux）** | **9 秒** | **9 秒** | **10 秒** | 当前最新成绩 |
+| 优化阶段                                            | FLV      | MP4       | HLS       | 备注                                                                       |
+|:------------------------------------------------|:---------|:----------|:----------|:-------------------------------------------------------------------------|
+| **初始版本**                                        | ~91 秒    | ~60 秒（旧版） | **135 秒** | 串行，无优化                                                                   |
+| **算法级优化**                                       | 60 秒     | —         | 97 秒      | DCT 蝶形展开、字符串切片、减少 array_fill、量化+Zigzag 合并                                |
+| **多进程运动估计（4 进程）**                               | 51 秒     | —         | 73 秒      | 首次引入分布式并行                                                                |
+| **HLS 封装 I/O 优化**                               | —        | —         | 69 秒      | 批量写入、减少文件操作                                                              |
+| **编码核心优化**                                      | 44 秒     | 44 秒      | 67 秒      | 全零块跳过、I/P 帧 QP 策略                                                        |
+| **解码缓存优化**                                      | 41 秒     | 42 秒      | 64 秒      | 复用重复计算                                                                   |
+| **开启 OPcache + JIT**                            | 39 秒     | 39 秒      | 60 秒      | 运行时环境加速                                                                  |
+| **多进程模型优化（select 等）**                           | 33 秒     | —         | —         | 事件驱动、进程通信优化                                                              |
+| **继续微调**                                        | 32 秒     | —         | —         | 未明确具体手段                                                                  |
+| **极限优化（Windows）**                               | 28 秒     | 29 秒      | 37 秒      | Windows + PHP 8.4.3 + JIT                                                |
+| **Linux Docker 部署**                             | 23 秒     | 24 秒      | 31 秒      | Linux + PHP 8.1.24，未开启 OPcache                                           |
+| **GOP 分布式多进程解码（Windows）**                       | 22 秒     | 22 秒      | 22 秒      | Windows 平台                                                               |
+| **GOP 分布式多进程解码（Linux）**                         | 17 秒     | 17 秒      | 17 秒      | Linux 平台                                                                 |
+| **去除参考帧重复 SHA256 + 静止块 ME 早退（Windows）**         | 19 秒     | 19 秒      | 20 秒      | Windows 平台                                                               |
+| **去除参考帧重复 SHA256 + 静止块 ME 早退（Linux）**           | 16 秒     | 16 秒      | 17 秒      | Linux 平台                                                                 |
+| **零区域跳过 + 解码/滤波深度优化（Windows）**                  | 18 秒     | 18 秒      | 19 秒      | 6 抽头滑动递推、Bs 全零跳过、滤波结果未变跳过写、CBP=0 整块跳过、DPB 懒加载、`chr()` 查表化、按需 unpack + 缓存 |
+| **零区域跳过 + 解码/滤波深度优化（Linux）**                    | 14 秒     | 14 秒      | 15 秒      | 同上                                                                       |
+| **抽帧跳过去块滤波 + BitReader 快速路径 + 平面整数数组（Windows）** | **16 秒** | **16 秒**  | **17 秒**  | 本次优化                                                                     |
+| **抽帧跳过去块滤波 + BitReader 快速路径 + 平面整数数组（Linux）**   | **9 秒**  | **9 秒**   | **10 秒**  | 当前最新成绩                                                                   |
+| **gop流式分发 +  缩小搜索并跳过 1/4 像素**                                  | -        | -         | -         | 提升了直播和长视频压缩效率                                                            |
 
 **说明：**
 - 测试素材：`test.flv`，3.02 秒，720×742，30fps；输出规格：360×360，10fps。
@@ -616,7 +475,6 @@ if ($result && file_exists($outputFile1)) {
 - “—”表示该阶段未单独测试该格式。
 - GOP 分布式多进程解码为最新优化，Windows 和 Linux 下均取得显著提升。
 - **平台差异**：Linux 下 9 秒 vs Windows 下 16 秒，差距主要来自进程调度效率与系统调用开销。
-
 
 ---
 

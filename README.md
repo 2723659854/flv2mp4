@@ -42,7 +42,7 @@ Supports FLV, FMP4, MP4, HLS mutual conversion, live streaming gateway, pushing,
     - [FLV → FLV Re-encoding Example](#flv2flv)
     - [MP4 → MP4 Re-encoding Example](#mp42mp4)
     - [Live Stream Compression & Transcoding](#live-stream-compression--transcoding)
-    - [Watermark Generator](#watermark-generator)
+    - [Watermark Generator](#watermark-generation-tool)
     - [Performance Test Report](#performance-test-report)
 - [Encoding/Decoding for AAC-MP3-OPUS-WAV](#encodingdecoding-for-aac-mp3-opus-wav)
 - [Technical Notes](#-technical-notes)
@@ -324,267 +324,108 @@ php forward.php
 - **Multi‑bitrate HLS**: Pure PHP H.264 re‑encoding to generate adaptive‑bitrate HLS.
 
 ---
+### 🔥 H.264 Decoding + Scaling + Re-encoding
 
-## 🔥 H.264 Decoding + Scaling + Re-encoding
+Supports Baseline Profile H.264 decoding, scaling, and re-encoding, providing core capabilities for the following scenarios:
+**Technical positioning**: This is a complete **H.264 pixel processing pipeline** (decode → process → encode), implemented in pure PHP without FFmpeg.
 
-Supports Baseline Profile H.264 decoding, scaling, and re‑encoding, enabling the following capabilities:
-
-| Use case | Description |
-| :--- | :--- |
-| **Multi‑bitrate HLS** | Convert a single FLV into multiple resolution HLS streams (adaptive bitrate) |
-| **FLV re‑encoding** | Change resolution/bitrate and output as FLV |
-| **MP4 re‑encoding** | Change resolution/bitrate and output as MP4 |
-| **Format conversion** | Re‑encode during FLV ↔ MP4 conversion (not just remuxing) |
-| **Watermark overlay** | Decode YUV → overlay PNG/text watermark → re‑encode output |
-| **Image enhancement** | Apply filters (sharpen, denoise) after decoding → re‑encode |
-| **Resolution adaptation** | Downsample high‑resolution video to multiple output resolutions |
-| **Bitrate control** | Transcode high‑bitrate videos to target bitrate |
-
-This is a complete **H.264 pixel processing pipeline** (decode → process → encode), implemented entirely in PHP without FFmpeg.
+---
+#### FLV/MP4/HLS Compression Transcoding
+Example code:
+```php
+require_once __DIR__ . '/vendor/autoload.php';
+ini_set('memory_limit', '2048M');
+$config = [
+    'width' => 360,
+    'height' => 360,
+    'bitrate' => 0,
+    'fps' => 15,
+    'audioBitrate' => 48000,
+    'qp' => 30,
+    'watermark'=>false,
+    'watermark_file'=> __DIR__."/watermark_80x16.yuv",
+    'fastMotion'     => true,
+    'motionWorkers'  => 2,
+    'motion_budget'  => 8,
+    'decode_workers' => 6,
+    'segmentDuration'=> 3,
+];
+# flv -> hls
+(new \Xiaosongshu\Flv2mp4\Recode\PurePhpHlsGenerator($config,__DIR__ . '/hls/output',true,))->processFlv(__DIR__ . '/test.flv');
+# flv -> flv
+(new \Xiaosongshu\Flv2mp4\Recode\FlvRecoder($config, true))->processFlv(__DIR__ . '/test.flv', __DIR__.'/output.flv');
+# mp4 -> mp4
+(new \Xiaosongshu\Flv2mp4\Recode\Mp4Recoder($config, true))->processMp4($mp4File, __DIR__ . '/output1.mp4');
+```
+- When adding a watermark, the file name format is: `watermark_{width}x{height}.yuv`.
+- The re-encoding module provides a **YUV pixel-level operation interface**, which you can use to implement custom features such as subtitles, picture-in-picture, video stitching, etc.
 
 ---
 
-### FLV2HLS
-
-Example for multi‑bitrate HLS generation:
-
-```php
-<?php
-
-require_once __DIR__ . '/vendor/autoload.php';
-ini_set('memory_limit', '2048M');
-$profiles = [
-    '240p' => [
-        'width' => 426,
-        'height' => 240,
-        'bitrate' => 300000, // 300 Kbps video
-        'fps' => 24,
-        'audioBitrate' => 48000, // 48 Kbps
-        'qp' => 30,
-        'watermark'=>true,
-        'watermark_file'=> __DIR__."/src/Static/watermark_80x16.yuv",
-    ]
-];
-// Enable multi-process acceleration for high-quality re-encoding; not needed for low bitrate.
-$generator = new \Xiaosongshu\Flv2mp4\Recode\PurePhpHlsGenerator($profiles, __DIR__ . '/hls/output', true);
-$generator->processFlv(__DIR__ . '/input.flv');
-echo "Master playlist: hls/output/master.m3u8\n";
-echo "All done!\n";
-```
-
-### FLV2FLV
-
-Re‑encode a FLV file with new bitrate/resolution:
-
+### Live Stream Compression Transcoding
+This project supports compressing live FLV streams and transcoding them to HLS, adapting to weak network scenarios on mobile devices. Example code:
 ```php
 <?php
 require_once __DIR__ . '/vendor/autoload.php';
 ini_set('memory_limit', '2048M');
-
+$pullUrl = 'rtmp://127.0.0.1:1935/a/b';
 $config = [
-    'width' => 320,
-    'height' => 180,
-    'bitrate' => 150000,
-    'fps' => 15,
-    'qp' => 30,
-    'watermark'=>true,
-    'watermark_file'=> __DIR__."/src/Static/watermark_80x16.yuv",
+    'width'        => 480,
+    'height'       => 270,
+    'bitrate'      => 0,
+    'fps'          => 15,
+    'qp'           => 30,
+    'audioBitrate' => 64000,
+    'motionWorkers'   => 1,
+    'decodeWorkers'   => 6,
+    'segmentDuration' => 3,
+    'fastMotion' => true,
+    'outputDir'  => __DIR__ . '/hls/live_rtmp/',
+    'maxRetries'    => 5,
+    'retryDelay'    => 3,
+    'connectTimeout'=> 10,
+    'idleTimeout'   => 30,
+    'queueMaxBytes' => 8388608,
+    'duration'   => 120,
+    'tlsVerify'  => false,
 ];
-// Enable multi-process acceleration for high-quality re-encoding; not needed for low bitrate.
-$recoder = new \Xiaosongshu\Flv2mp4\Recode\FlvRecoder($config, true);
-$recoder->setMaxFrames(50);
-$recoder->processFlv(__DIR__ . '/input.flv', __DIR__.'/output.flv');
-echo "FLV re‑encoding done.\n";
-```
-
-### MP42MP4
-
-Re‑encode a MP4 file:
-
-```php
-<?php
-require_once __DIR__ . '/vendor/autoload.php';
-ini_set('memory_limit', '2048M');
-
-$config = [
-    'width' => 320,
-    'height' => 180,
-    'bitrate' => 150000,
-    'fps' => 15,
-    'qp' => 30,
-    'watermark'=>true,
-    'watermark_file'=> __DIR__."/src/Static/watermark_80x16.yuv",
-];
-// Enable multi-process acceleration for high-quality re-encoding; not needed for low bitrate.
-$recoder = new \Xiaosongshu\Flv2mp4\Recode\Mp4Recoder($config, true);
-$recoder->setMaxFrames(50);
-$recoder->processMp4(__DIR__ . '/input.mp4', __DIR__ . '/output.mp4');
-echo "MP4 re‑encoding done.\n";
-```
-
-**Notes for watermarking:**
-
-- Watermark files must be in YUV format, and the filename **must** include its dimensions (e.g., `watermark_{width}x{height}.yuv`).
-- The tool parses width and height from the filename automatically (e.g., `watermark_80x16.yuv` → width 80, height 16).
-- The re‑encoding module exposes a **YUV pixel‑level interface**, which can be used to implement custom features like subtitles, picture‑in‑picture, video stitching, etc.
-- For detailed H.264 usage, see <a href="./src/Codec/README.md">src/Codec/README.md</a>.
-
-----
-
-### Live Stream Compression & Transcoding
-
-This project supports compressing a live FLV stream and transcoding it to HLS, making it suitable for mobile users on weak networks. Example code:
-
-```php
-<?php
-
-require_once __DIR__ . '/vendor/autoload.php';
-ini_set('memory_limit', '2048M');
-
-// ======================== Pull configuration (supports http/https/ws/wss/rtmp) ========================
-$pullUrl = 'ws://127.0.0.1:8501/live/stream.flv';
-
-// ======================== Transcoding compression configuration ========================
-$config = [
-    // —— Target specs (width/height must be provided together; 0 = keep source size) ——
-    'width'        => 640,
-    'height'       => 360,
-    'bitrate'      => 800000,  // Target video bitrate (bps)
-    'fps'          => 0,       // Target frame rate; 0 = keep source frame rate
-    'qp'           => 10,      // Quantization parameter, 0-51
-    'audioBitrate' => 64000,   // Audio bitrate (bps)
-
-    // —— Re-encoding configuration ——
-    'motionWorkers'   => 12,   // Number of motion estimation sub-processes
-    'decodeWorkers'   => 2,    // Number of decode + scale workers (scaling is parallelized here; do not set to 0 to force serial mode)
-    'segmentDuration' => 3,    // HLS segment duration (seconds)
-    'watermark'       => false, // Whether to add a watermark
-    'watermark_file'  => __DIR__ . '/watermark_80x16.yuv', // Watermark file
-
-    // —— Output directory and stream name ——
-    'outputDir'  => __DIR__ . '/hls/live/',
-
-    // ======================== Pull client configuration ========================
-    'maxRetries'    => 5,      // Number of reconnection attempts
-    'retryDelay'    => 3,      // Reconnection interval (seconds)
-    'connectTimeout'=> 10,     // Connection/handshake timeout (seconds)
-    'idleTimeout'   => 30,     // Consecutive no-data time before considering the stream dead (seconds)
-    'queueMaxBytes' => 8388608,  // Tolerance for transcoding lag: 8 MB; when exceeded, skip non-keyframes and wait for the next IDR frame to resync
-    'duration'   => 0,      // Run duration in seconds; 0 = unlimited
-    'tlsVerify'  => false,  // Disable verification for self-signed https/wss certificates
-];
-// Start the compression transcoding service
 (new \Xiaosongshu\Flv2mp4\Manage\Flv2HlsCompact($pullUrl, $config))->run();
 
 ```
 
-- The project supports live compression transcoding with multiple resolutions to meet live streaming requirements. Actual performance depends heavily on server configuration. Adjust the parameters above according to your server resources.
-- `motionWorkers` and `decodeWorkers`: the higher the input resolution, the more you should increase `decodeWorkers`; the higher the output resolution, the more you should increase `motionWorkers`. The sum of both should not exceed the number of logical processors on the server.
-- Tested with OBS push: input 1920×1080, 10 fps, one keyframe every 4 seconds, Baseline Profile, H.264 + AAC; output 640×360, 10 fps, 3-second HLS segments. Ran continuously for 30 minutes with no dropped frames and no backlog.
-- ⚠️ Live compression transcoding only supports CLI mode. Do not call it directly in an FPM request, otherwise it will block the web service worker processes.
+- The current project supports live stream compression transcoding with no measured latency, meeting live streaming requirements. Actual performance depends heavily on server configuration; adjust the parameters above according to your server resources.
+- `motionWorkers` and `decodeWorkers`: the higher the input resolution, the more you should increase `decodeWorkers`; the higher the output resolution, the more you should increase `motionWorkers`. The sum of both should not exceed the number of logical processors on the server (motion estimation processes are child processes of decoding processes).
+- Tested with OBS push: input 960×540, 30 fps, one keyframe per second, Baseline Profile, H.264 + AAC; output 480×270, 15 fps, 3-second HLS segments. Ran continuously for 30 minutes with no dropped frames and no backlog.
+- ⚠️ Live stream compression transcoding only supports CLI mode. Do not call it directly in an FPM request, otherwise it will block the web service worker processes.
 
----
+----
 
-### Supported Re‑encoding Features
+### Supported Re-encoding Features
 
-- [x] **I‑frame decode & encode** (100% exact, INF dB)
-- [x] **P‑frame decode & encode** (Baseline Profile)
-- [x] **Intra prediction**: 4×4 (9 modes) + 16×16 (4 modes)
-- [x] **Inter prediction**: P‑frame motion estimation (diamond search optimized)
-- [x] **1/4‑pixel precision** (6‑tap filter interpolation)
+- [x] **I-frame decoding and encoding** (fully exact, INF dB)
+- [x] **P-frame decoding and encoding** (Baseline Profile)
+- [x] **Intra prediction**: 4x4 (9 modes) + 16x16 (4 modes)
+- [x] **Inter prediction**: P-frame motion estimation (diamond search optimized)
+- [x] **1/4-pixel precision**: 6-tap filter interpolation
 - [x] **CAVLC entropy coding** (Baseline Profile)
-- [x] **Resolution scaling** (YUV scaling after decode → re‑encode)
+- [x] **Resolution scaling** (YUV scaling after decoding → re-encoding)
 - [x] **Bitrate control** (via QP parameter)
-- [ ] **B‑frame support** (planned, requires Main Profile with bidirectional prediction)
-- [ ] **CABAC entropy coding** (planned, Main Profile)
-
-> ⚠️ **Performance note**: The H.264 re‑encoding module is pure PHP and is intended for **short‑duration videos (≤ 10 seconds)** for offline processing or functional verification. For long videos or high‑resolution transcoding, professional tools like FFmpeg are recommended.
-
+- [ ] **B-frame support** (planned, requires extension to Main Profile with bidirectional prediction)
+- [ ] **CABAC entropy coding** (planned, Main Profile support)
 ---
 
-### Watermark Generator
-
-Provides PHP functions to generate YUV watermark files. Uses GD extension if available, otherwise falls back to built‑in bitmap font.
-
-- `generateFromText()` – generates text watermark YUV. Uses GD if available; otherwise falls back to bitmap font (**ASCII characters only**).
-- `generateFromImage()` – generates watermark YUV from PNG/JPG images (requires GD extension).
-
-#### Generate text watermark
+### Watermark Generation Tool
+This project provides PHP functions to generate YUV watermarks. GD extension is preferred; if unavailable, it automatically falls back to a bitmap font.
+- `generateFromText()` generates a text watermark YUV. GD extension preferred; falls back to bitmap font if unavailable. **The built-in bitmap font only supports ASCII characters (English letters, digits, English punctuation).**
+- `generateFromImage()` generates a watermark YUV from an image. Requires GD extension. Supports png/jpg.
 
 ```php
 <?php
 require_once __DIR__ . '/vendor/autoload.php';
-
 use Xiaosongshu\Flv2mp4\Codec\WatermarkUtil;
-
-echo "=== Testing WatermarkUtil ===\n\n";
-
-echo "1. Generate text watermark (xiaosongshu, 80x16)...\n";
-$outputFile1 = __DIR__ . '/test_wm_text.yuv';
-$start = microtime(true);
-$result = WatermarkUtil::generateFromText(
-    'xiaosongshu',
-    $outputFile1,
-    80,
-    16,
-    [
-        'fontSize' => 5, // 1–5, built‑in font; ASCII only
-        'fontColor' => [255, 255, 255],
-        'bgColor' => [0, 0, 0],
-    ]
-);
-$cost = round(microtime(true) - $start, 3);
-if ($result && file_exists($outputFile1)) {
-    $size = filesize($outputFile1);
-    $expectedSize = 80 * 16 + (80 * 16 >> 1);
-    echo "   Success! Size: {$size} bytes (expected: {$expectedSize}) - time: {$cost}s\n";
-    if ($size === $expectedSize) {
-        echo "   ✅ File size correct\n";
-    } else {
-        echo "   ❌ File size mismatch\n";
-    }
-} else {
-    echo "   ❌ Generation failed\n";
-}
+WatermarkUtil::generateFromText('xiaosongshu',__DIR__ . '/test_wm_text.yuv',80,16,['fontSize' => 5,'fontColor' => [255, 255, 255],'bgColor' => [0, 0, 0],]);
+WatermarkUtil::generateFromImage(__DIR__."/watermark_80x16.png",__DIR__ . '/test_wm_copy_80x16.yuv',80,16);
 ```
-
-#### Generate from image
-
-Requires GD extension.
-
-```php
-<?php
-
-require_once __DIR__ . '/vendor/autoload.php';
-
-use Xiaosongshu\Flv2mp4\Codec\WatermarkUtil;
-
-echo "=== Testing WatermarkUtil ===\n\n";
-
-echo "1. Generate watermark from image (xiaosongshu, 80x16)...\n";
-$outputFile1 = __DIR__ . '/test_wm_copy_80x16.yuv';
-$start = microtime(true);
-$result = WatermarkUtil::generateFromImage(
-    __DIR__."/watermark_80x16.png",
-    $outputFile1,
-    80,
-    16,
-);
-$cost = round(microtime(true) - $start, 3);
-if ($result && file_exists($outputFile1)) {
-    $size = filesize($outputFile1);
-    $expectedSize = 80 * 16 + (80 * 16 >> 1);
-    echo "   Success! Size: {$size} bytes (expected: {$expectedSize}) - time: {$cost}s\n";
-    if ($size === $expectedSize) {
-        echo "   ✅ File size correct\n";
-    } else {
-        echo "   ❌ File size mismatch\n";
-    }
-} else {
-    echo "   ❌ Generation failed\n";
-}
-```
-
 ---
 
 ## Performance Test Report
@@ -615,14 +456,14 @@ if ($result && file_exists($outputFile1)) {
 
 | Platform | Re-encoding Time | Time Ratio |
 | :--- | :--- | :--- |
-| **Windows** | **488 s (8 min 08 s)** | ~1.15× |
-| **Linux (Docker)** | **335 s (5 min 35 s)** | ~0.79× |
+| **Windows** | **240 s** | ~0.56× |
+| **Linux (Docker)** | **146 s** | ~0.34× |
 
 
 ### Optimization History
 
 | Optimization Stage | FLV | MP4 | HLS | Notes |
-| :--- | :--- | :--- | :--- | :--- |
+|:---|:---|:---|:---|:---|
 | **Initial Version** | ~91 s | ~60 s (old) | **135 s** | Serial, no optimization |
 | **Algorithm-Level Optimization** | 60 s | — | 97 s | DCT butterfly unrolling, string slicing, reduced array_fill, quantization + Zigzag merged |
 | **Multi-Process Motion Estimation (4 processes)** | 51 s | — | 73 s | First introduction of distributed parallelism |
@@ -642,6 +483,7 @@ if ($result && file_exists($outputFile1)) {
 | **Zero-Region Skip + Deep Decoding/Filtering Optimization (Linux)** | 14 s | 14 s | 15 s | Same as above |
 | **Dropped-Frame Deblock Skip + BitReader Fast Path + Integer Plane Arrays (Windows)** | **16 s** | **16 s** | **17 s** | This optimization round |
 | **Dropped-Frame Deblock Skip + BitReader Fast Path + Integer Plane Arrays (Linux)** | **9 s** | **9 s** | **10 s** | Current best results |
+| **GOP Streaming Distribution + Reduced Search and Skip 1/4 Pixel** | - | - | - | Improved live streaming and long video compression efficiency |
 
 **Notes:**
 - Test clip: `test.flv`, 3.02 s, 720×742, 30 fps; Output specs: 360×360, 10 fps.
