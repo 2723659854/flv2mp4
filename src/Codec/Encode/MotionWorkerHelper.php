@@ -26,6 +26,8 @@ final class MotionWorkerHelper
     public int $mbAlignedWidth;
     public int $mbAlignedHeight;
     public int $qp;
+    /** chroma_qp_index_offset：与 H264Encoder 保持同名同默认值，InterPredTrait 读取 */
+    public int $chromaQpIndexOffset = 0;
     public array $dequant4Table = [];
     public $refInts = null;
     /** early-skip 开关：静止宏块提前跳过精搜（量化死区内残差归零，不影响正确性） */
