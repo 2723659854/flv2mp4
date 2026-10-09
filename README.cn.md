@@ -438,8 +438,8 @@ WatermarkUtil::generateFromImage(__DIR__."/watermark_80x16.png",__DIR__ . '/test
 
 | 平台 | 重编码耗时               | 耗时倍率     |
 | :--- |:--------------------|:---------|
-| **Windows** | **240 秒** | 约 0.56 倍 |
-| **Linux (Docker)** | **146 秒** | 约 0.34 倍 |
+| **Windows** | **179 秒** | 约 0.56 倍 |
+| **Linux (Docker)** | **133 秒** | 约 0.34 倍 |
 
 
 ### 历史优化记录
