@@ -58,10 +58,10 @@ final class MotionWorkerServer
                             $connections[$connectionId]['frames'] = [$seq => [$width, $height, $aw, $ah, $refY, $refU, $refV]];
                             continue;
                         }
-                        [, $seq, $request, $qp, $blocks] = $message;
+                        [, $seq, $request, $qp, $blocks, $hasChroma] = $message;
                         if (!isset($connections[$connectionId]['frames'][$seq])) throw new RuntimeException('Unknown motion worker reference seq');
                         [$width, $height, $aw, $ah, $refY, $refU, $refV] = $connections[$connectionId]['frames'][$seq];
-                        $helper = new MotionWorkerHelper($width, $height, $aw, $ah, $qp, $refY, $refU, $refV);
+                        $helper = new MotionWorkerHelper($width, $height, $aw, $ah, $qp, $refY, $refU, $refV, $hasChroma);
                         $result = [];
                         foreach ($blocks as $index => $block) $result[$index] = $helper->prepare($block);
                         $connections[$connectionId]['output'] .= MotionWorkerProtocol::response($request, $result);

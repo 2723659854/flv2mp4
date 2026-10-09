@@ -17,6 +17,7 @@ final class MotionWorkerHelper
     private const INTERP_TAP5 = 1;
     use MotionTrait, TransformTrait, InterPredTrait;
     private const DEQUANT4_COEFF_INIT = [[10,13,16],[11,14,18],[13,16,20],[14,18,23],[16,20,25],[18,23,29]];
+    private const CHROMA_QP_TABLE = \Xiaosongshu\Flv2mp4\Codec\H264Encoder::CHROMA_QP_TABLE;
     private const QUANT_MF = \Xiaosongshu\Flv2mp4\Codec\H264Encoder::QUANT_MF;
     private const QUANT_INTER_FF = \Xiaosongshu\Flv2mp4\Codec\H264Encoder::QUANT_INTER_FF;
     private const ZIGZAG_SCAN_4X4 = \Xiaosongshu\Flv2mp4\Codec\H264Encoder::ZIGZAG_SCAN_4X4;
@@ -29,15 +30,18 @@ final class MotionWorkerHelper
     public $refInts = null;
     /** early-skip 开关：静止宏块提前跳过精搜（量化死区内残差归零，不影响正确性） */
     public bool $earlySkip = true;
+    /** P帧色度残差快速开关：true=色度残差强制为零（与 H264Encoder 同名，InterPredTrait 读取） */
+    public bool $zeroChromaResidual = false;
     private static ?array $sharedDequantTable = null;
 
-    public function __construct(int $width, int $height, int $aw, int $ah, int $qp, private string $refY, private string $refU, private string $refV)
+    public function __construct(int $width, int $height, int $aw, int $ah, int $qp, private string $refY, private string $refU, private string $refV, bool $encodeChroma = true)
     {
         $this->width = $width;
         $this->height = $height;
         $this->mbAlignedWidth = $aw;
         $this->mbAlignedHeight = $ah;
         $this->qp = $qp;
+        $this->zeroChromaResidual = !$encodeChroma;
         if (self::$sharedDequantTable === null) {
             $positionClass = [0,1,0,1,1,2,1,2,0,1,0,1,1,2,1,2];
             $table = array_fill(0, 6, array_fill(0, 52, array_fill(0, 16, 0)));
@@ -53,6 +57,6 @@ final class MotionWorkerHelper
 
     public function prepare(array $job): array
     {
-        return $this->preparePMacroblock($job[0], $job[1], $job[2], $this->refY, $this->refU, $this->refV, $job[3]);
+        return $this->preparePMacroblock($job[0], $job[1], $job[2], $job[4] ?? '', $job[5] ?? '', $this->refY, $this->refU, $this->refV, $job[3]);
     }
 }

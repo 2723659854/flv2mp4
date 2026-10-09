@@ -46,9 +46,12 @@ final class MotionWorkerClient
         string $refU,
         string $refV,
         string $curY,
+        string $curU,
+        string $curV,
         int $mbWidth,
         int $mbHeight,
-        array $jobs
+        array $jobs,
+        bool $encodeChroma = true
     ): void {
         if ($this->pending !== null) throw new RuntimeException('Motion worker batch already in flight');
         $this->connectAll();
@@ -67,6 +70,7 @@ final class MotionWorkerClient
 
         $total = count($jobs);
         if ($total !== $mbWidth * $mbHeight) throw new RuntimeException('Motion worker jobs must cover every macroblock');
+        $cw = intdiv($aw, 2);
         $ids = [];
         $referenceFrame = null;
         // 按宏块行连续分片：worker w 取连续键区间（=连续宏块行），
@@ -82,6 +86,15 @@ final class MotionWorkerClient
             $stripOffset = $firstY;
             $stripCount = $lastY - $firstY + 1;
             $strips = substr($curY, $stripOffset * 16 * $aw, $stripCount * 16 * $aw);
+            // 色度条带：每宏块行 8 行 U 紧接 8 行 V
+            $chromaStrips = '';
+            if ($encodeChroma) {
+                for ($r = 0; $r < $stripCount; $r++) {
+                    $cy = ($stripOffset + $r) * 8;
+                    $chromaStrips .= substr($curU, $cy * $cw, 8 * $cw);
+                    $chromaStrips .= substr($curV, $cy * $cw, 8 * $cw);
+                }
+            }
 
             $id = $this->id++;
             $ids[$worker] = $id;
@@ -90,7 +103,7 @@ final class MotionWorkerClient
                 $this->outputs[$worker] .= $referenceFrame;
                 $this->workerSeq[$worker] = $seq;
             }
-            $this->outputs[$worker] .= MotionWorkerProtocol::batch($id, $seq, $qp, $chunk, $strips, $stripOffset, $stripCount, $aw);
+            $this->outputs[$worker] .= MotionWorkerProtocol::batch($id, $seq, $qp, $chunk, $strips, $stripOffset, $stripCount, $aw, $encodeChroma, $chromaStrips);
         }
         $this->pending = ['ids' => $ids, 'total' => $total];
         // 尽力立即把请求刷出去，剩余部分由 collect 的 event loop 排空
@@ -151,11 +164,14 @@ final class MotionWorkerClient
         string $refU,
         string $refV,
         string $curY,
+        string $curU,
+        string $curV,
         int $mbWidth,
         int $mbHeight,
-        array $jobs
+        array $jobs,
+        bool $encodeChroma = true
     ): array {
-        $this->dispatch($width, $height, $aw, $ah, $qp, $refY, $refU, $refV, $curY, $mbWidth, $mbHeight, $jobs);
+        $this->dispatch($width, $height, $aw, $ah, $qp, $refY, $refU, $refV, $curY, $curU, $curV, $mbWidth, $mbHeight, $jobs, $encodeChroma);
         return $this->collect();
     }
 

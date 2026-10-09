@@ -52,6 +52,10 @@ final class FlvDecoderWorkerServer
             $this->encoder->setFastMotion(true);
             $this->fast = true;
         }
+        // 色度残差快速档：true=P帧色度残差强制为零以提速（可能在亮度静止而色度渐变时偏色）
+        if (!empty($config['zeroChromaResidual'])) {
+            $this->encoder->zeroChromaResidual = true;
+        }
     }
 
     public function run(string $listenAddress, string $outputAddress): void

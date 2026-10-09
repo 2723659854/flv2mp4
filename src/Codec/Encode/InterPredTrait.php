@@ -12,6 +12,8 @@ trait InterPredTrait
         int $mbX,
         int $mbY,
         string $luma,
+        string $curU,
+        string $curV,
         string $refYPlane,
         string $refUPlane,
         string $refVPlane,
@@ -51,24 +53,39 @@ trait InterPredTrait
                 if ($alive === 0) break;
             }
             if ($alive === 16) {
+                // 亮度确定：MV=(0,0)、cbpLuma=0，reconY 与 (0,0) MC 完全一致
                 $reconY = '';
                 for ($y = 0; $y < 16; $y++) {
                     $reconY .= substr($refYPlane, ($oy + $y) * $stride + $ox, 16);
                 }
-                $chromaW = intdiv($stride, 2);
-                $cx = $mbX * 8;
-                $cy = $mbY * 8;
-                $reconU = '';
-                $reconV = '';
-                for ($y = 0; $y < 8; $y++) {
-                    $reconU .= substr($refUPlane, ($cy + $y) * $chromaW + $cx, 8);
-                    $reconV .= substr($refVPlane, ($cy + $y) * $chromaW + $cx, 8);
+                // 色度快速档：直接复制参考帧（老行为，省掉色度 DCT/量化）
+                if ($this->zeroChromaResidual) {
+                    $chromaW = intdiv($stride, 2);
+                    $cx = $mbX * 8;
+                    $cy = $mbY * 8;
+                    $reconU = '';
+                    $reconV = '';
+                    for ($y = 0; $y < 8; $y++) {
+                        $reconU .= substr($refUPlane, ($cy + $y) * $chromaW + $cx, 8);
+                        $reconV .= substr($refVPlane, ($cy + $y) * $chromaW + $cx, 8);
+                    }
+                    return [
+                        0, 0, $totalSad, 0,
+                        array_fill(0, 24, 0),
+                        [],
+                        $reconY, $reconU, $reconV,
+                    ];
                 }
+                // 色度正常档：亮度静止 ≠ 色度静止（渐变灯光/曝光），MV=0 下仍要算色度残差
+                $chr = $this->processChroma($mbX, $mbY, 0, 0, $refUPlane, $refVPlane, $curU, $curV);
+                $nzCache = array_fill(0, 16, 0);
+                for ($i = 0; $i < 8; $i++) $nzCache[16 + $i] = $chr['nzSeg'][$i];
                 return [
                     0, 0, $totalSad, 0,
-                    array_fill(0, 24, 0),
+                    $nzCache,
                     [],
-                    $reconY, $reconU, $reconV,
+                    $reconY, $chr['reconU'], $chr['reconV'],
+                    $chr['cbpChroma'], $chr['chromaDc'], $chr['chromaAc'],
                 ];
             }
         }
@@ -120,20 +137,196 @@ trait InterPredTrait
             }
         }
 
+        // 色度快速档：仅 MC 预测、残差强制为零
+        if ($this->zeroChromaResidual) {
+            $chromaW = intdiv($this->mbAlignedWidth, 2);
+            $chromaH = intdiv($this->mbAlignedHeight, 2);
+            $chromaRefX = $mbX * 64 + $mvX;
+            $chromaRefY = $mbY * 64 + $mvY;
+            $cbPred = $this->mcChromaBlock($refUPlane, $chromaRefX, $chromaRefY, $chromaW, $chromaH);
+            $crPred = $this->mcChromaBlock($refVPlane, $chromaRefX, $chromaRefY, $chromaW, $chromaH);
+            $reconU = str_repeat("\0", 64);
+            $reconV = str_repeat("\0", 64);
+            for ($y = 0; $y < 8; $y++) for ($x = 0; $x < 8; $x++) {
+                $reconU[$y * 8 + $x] = chr($cbPred[$y * 8 + $x]);
+                $reconV[$y * 8 + $x] = chr($crPred[$y * 8 + $x]);
+            }
+            return [$mvX, $mvY, $sad, $cbpLuma, $nzCache, $quantResidual, $reconY, $reconU, $reconV];
+        }
+
+        // 色度正常档：DCT + inter 量化 + 本地解码重建
+        $chr = $this->processChroma($mbX, $mbY, $mvX, $mvY, $refUPlane, $refVPlane, $curU, $curV);
+        for ($i = 0; $i < 8; $i++) $nzCache[16 + $i] = $chr['nzSeg'][$i];
+        return [
+            $mvX, $mvY, $sad, $cbpLuma, $nzCache, $quantResidual,
+            $reconY, $chr['reconU'], $chr['reconV'],
+            $chr['cbpChroma'], $chr['chromaDc'], $chr['chromaAc'],
+        ];
+    }
+
+    /**
+     * P帧色度残差处理（色度正常档）：
+     * 色度 MV 与亮度共用（P_16x16 单 MV），1/8 像素 MC 得预测 → 4 个 4x4 子块
+     * DCT → inter 色度量化；DC 收集后做 2x2 Hadamard → inter DC 量化；并做本地解码重建。
+     * 结构与 I 帧色度一致，区别：色度量化走 inter（FF 索引=QP），反量化 list 为 Cb=5、Cr=4。
+     *
+     * @return array{cbpChroma:int,nzSeg:array<int>,chromaDc:array<int>,chromaAc:array<int[]>,reconU:string,reconV:string}
+     */
+    private function processChroma(
+        int $mbX,
+        int $mbY,
+        int $mvX,
+        int $mvY,
+        string $refUPlane,
+        string $refVPlane,
+        string $curU,
+        string $curV
+    ): array {
         $chromaW = intdiv($this->mbAlignedWidth, 2);
         $chromaH = intdiv($this->mbAlignedHeight, 2);
         $chromaRefX = $mbX * 64 + $mvX;
         $chromaRefY = $mbY * 64 + $mvY;
         $cbPred = $this->mcChromaBlock($refUPlane, $chromaRefX, $chromaRefY, $chromaW, $chromaH);
         $crPred = $this->mcChromaBlock($refVPlane, $chromaRefX, $chromaRefY, $chromaW, $chromaH);
-        $reconU = str_repeat("\0", 64);
-        $reconV = str_repeat("\0", 64);
-        for ($y = 0; $y < 8; $y++) for ($x = 0; $x < 8; $x++) {
-            $reconU[$y * 8 + $x] = chr($cbPred[$y * 8 + $x]);
-            $reconV[$y * 8 + $x] = chr($crPred[$y * 8 + $x]);
+
+        $chromaQpIndex = max(0, min(51, $this->qp + $this->chromaQpIndexOffset));
+        $chromaQp = self::CHROMA_QP_TABLE[$chromaQpIndex];
+
+        $curCb = array_values(unpack('C*', $curU));
+        $curCr = array_values(unpack('C*', $curV));
+
+        $quantCb = array_fill(0, 4, array_fill(0, 16, 0));
+        $quantCr = array_fill(0, 4, array_fill(0, 16, 0));
+        $dcCb = [0, 0, 0, 0];
+        $dcCr = [0, 0, 0, 0];
+        $nzSeg = array_fill(0, 8, 0); // 0..3=Cb块, 4..7=Cr块 → nzCache[16..23]
+        for ($by = 0; $by < 2; $by++) {
+            for ($bx = 0; $bx < 2; $bx++) {
+                $blk = $by * 2 + $bx;
+                $blkU = array_fill(0, 4, array_fill(0, 4, 0));
+                $blkV = array_fill(0, 4, array_fill(0, 4, 0));
+                for ($y = 0; $y < 4; $y++) for ($x = 0; $x < 4; $x++) {
+                    $py = $by * 4 + $y;
+                    $px = $bx * 4 + $x;
+                    $flat = $py * 8 + $px;
+                    $blkU[$y][$x] = $curCb[$flat + 1] - $cbPred[$flat];
+                    $blkV[$y][$x] = $curCr[$flat + 1] - $crPred[$flat];
+                }
+                $dctU = $this->dct($blkU);
+                $dctV = $this->dct($blkV);
+                $dcCb[$blk] = $dctU[0][0];
+                $dcCr[$blk] = $dctV[0][0];
+                $qU = $this->quantizeChroma($dctU, $chromaQp, true);
+                $qV = $this->quantizeChroma($dctV, $chromaQp, true);
+                $nzU = 0;
+                $nzV = 0;
+                for ($yy = 0; $yy < 4; $yy++) for ($xx = 0; $xx < 4; $xx++) {
+                    $f = $yy * 4 + $xx;
+                    $quantCb[$blk][$f] = $qU[$yy][$xx];
+                    $quantCr[$blk][$f] = $qV[$yy][$xx];
+                    if ($f !== 0) {
+                        if ($qU[$yy][$xx] !== 0) $nzU++;
+                        if ($qV[$yy][$xx] !== 0) $nzV++;
+                    }
+                }
+                $nzSeg[$blk] = min(15, $nzU);
+                $nzSeg[4 + $blk] = min(15, $nzV);
+            }
         }
 
-        return [$mvX, $mvY, $sad, $cbpLuma, $nzCache, $quantResidual, $reconY, $reconU, $reconV];
+        $hadCb = $this->forwardChromaHadamard2x2($dcCb);
+        $hadCr = $this->forwardChromaHadamard2x2($dcCr);
+        $qCbDc = $this->quantizeChromaDC($hadCb, $chromaQp, true);
+        $qCrDc = $this->quantizeChromaDC($hadCr, $chromaQp, true);
+
+        $hasChromaDc = false;
+        for ($i = 0; $i < 4; $i++) {
+            if ($qCbDc[$i] !== 0 || $qCrDc[$i] !== 0) { $hasChromaDc = true; break; }
+        }
+        $hasChromaAc = false;
+        for ($i = 0; $i < 8; $i++) if ($nzSeg[$i] > 0) { $hasChromaAc = true; break; }
+        // 标准无色度"仅AC"状态：只要有AC，cbpChroma必须为2（DC块即使全0也要在码流中发出）；
+        // 否则DC非零为1。原"DC优先"判定在 AC非零但DC全量化为0时错判0，丢失AC且nz残留污染后续nC。
+        $cbpChroma = $hasChromaAc ? 2 : ($hasChromaDc ? 1 : 0);
+
+        // === 色度本地解码重建（反量化 list：Cb=5、Cr=4）===
+        $cbQmul = $this->dequant4Table[5][$chromaQp][0];
+        $crQmul = $this->dequant4Table[4][$chromaQp][0];
+        $cbDcResult = $this->chromaDcDequantIdct($qCbDc, $cbQmul);
+        $crDcResult = $this->chromaDcDequantIdct($qCrDc, $crQmul);
+
+        $reconU = str_repeat("\0", 64);
+        $reconV = str_repeat("\0", 64);
+        for ($by = 0; $by < 2; $by++) {
+            for ($bx = 0; $bx < 2; $bx++) {
+                $blk = $by * 2 + $bx;
+                $cbDcResidual = $cbDcResult[$blk];
+                $crDcResidual = $crDcResult[$blk];
+                if ($cbpChroma >= 2) {
+                    // AC 存在：DC 放入[0] 一起 IDCT
+                    $cbAcDequant = $this->dequantize4x4($quantCb[$blk], 5, $chromaQp);
+                    $crAcDequant = $this->dequantize4x4($quantCr[$blk], 4, $chromaQp);
+                    $cbAcDequant[0] = $cbDcResidual;
+                    $crAcDequant[0] = $crDcResidual;
+                    $cbBlock = array_fill(0, 4, array_fill(0, 4, 0));
+                    $crBlock = array_fill(0, 4, array_fill(0, 4, 0));
+                    for ($y = 0; $y < 4; $y++) for ($x = 0; $x < 4; $x++) {
+                        $cbBlock[$y][$x] = $cbAcDequant[$y * 4 + $x];
+                        $crBlock[$y][$x] = $crAcDequant[$y * 4 + $x];
+                    }
+                    $cbIdct = $this->idct4x4($cbBlock);
+                    $crIdct = $this->idct4x4($crBlock);
+                    for ($y = 0; $y < 4; $y++) for ($x = 0; $x < 4; $x++) {
+                        $py = $by * 4 + $y;
+                        $px = $bx * 4 + $x;
+                        $f = $py * 8 + $px;
+                        $vu = $cbPred[$f] + $cbIdct[$y][$x];
+                        $vv = $crPred[$f] + $crIdct[$y][$x];
+                        $reconU[$f] = chr(max(0, min(255, $vu)));
+                        $reconV[$f] = chr(max(0, min(255, $vv)));
+                    }
+                } elseif ($cbpChroma === 1) {
+                    // DC-only: (DC + 32) >> 6
+                    $cbDcAdd = ($cbDcResidual + 32) >> 6;
+                    $crDcAdd = ($crDcResidual + 32) >> 6;
+                    for ($y = 0; $y < 4; $y++) for ($x = 0; $x < 4; $x++) {
+                        $py = $by * 4 + $y;
+                        $px = $bx * 4 + $x;
+                        $f = $py * 8 + $px;
+                        $vu = $cbPred[$f] + $cbDcAdd;
+                        $vv = $crPred[$f] + $crDcAdd;
+                        $reconU[$f] = chr(max(0, min(255, $vu)));
+                        $reconV[$f] = chr(max(0, min(255, $vv)));
+                    }
+                } else {
+                    // cbpChroma=0：直接用预测值
+                    for ($y = 0; $y < 4; $y++) for ($x = 0; $x < 4; $x++) {
+                        $py = $by * 4 + $y;
+                        $px = $bx * 4 + $x;
+                        $f = $py * 8 + $px;
+                        $reconU[$f] = chr(max(0, min(255, $cbPred[$f])));
+                        $reconV[$f] = chr(max(0, min(255, $crPred[$f])));
+                    }
+                }
+            }
+        }
+
+        // 协议载荷：色度 DC（Cb4+Cr4）、色度 AC（Cb4块+Cr4块）
+        $chromaDc = array_merge($qCbDc, $qCrDc);
+        $chromaAc = [];
+        for ($i = 0; $i < 4; $i++) {
+            $chromaAc[$i] = $quantCb[$i];
+            $chromaAc[4 + $i] = $quantCr[$i];
+        }
+
+        return [
+            'cbpChroma' => $cbpChroma,
+            'nzSeg' => array_values($nzSeg),
+            'chromaDc' => $chromaDc,
+            'chromaAc' => $chromaAc,
+            'reconU' => $reconU,
+            'reconV' => $reconV,
+        ];
     }
 
     /**
@@ -163,6 +356,10 @@ trait InterPredTrait
             throw new \RuntimeException("缺少 P 宏块 Worker 结果 ({$mbX},{$mbY})");
         }
         [$mvX, $mvY, $sad, $cbpLuma, $nzCache, $quantResidual, $workerReconY, $workerReconU, $workerReconV] = $prepared;
+        $cbpChroma = $prepared[9] ?? 0;
+        $chromaDc = $prepared[10] ?? [];   // 8 个量化 Hadamard DC：Cb4 + Cr4
+        $chromaAc = $prepared[11] ?? [];  // 8 块量化系数：Cb0-3 + Cr0-3
+
         //$reconStride = $this->mbAlignedWidth;
 
         // === 计算P_Skip的MVP（与解码器predictMvPSkip一致） ===
@@ -174,13 +371,13 @@ trait InterPredTrait
         //$chromaH = intdiv($this->mbAlignedHeight, 2);
         $reconStride = $this->mbAlignedWidth;
 
-        // P_Skip条件：cbpLuma=0 且 MV等于skipMVP（MVD=0）
+        // P_Skip条件：CBP（亮度+色度）全为0 且 MV等于skipMVP（MVD=0）
         // 这样解码器用MV=skipMVP做MC，与编码器本地解码一致
-        if ($cbpLuma == 0 && $mvX == $skipMvpX && $mvY == $skipMvpY) {
+        if ($cbpLuma == 0 && $cbpChroma == 0 && $mvX == $skipMvpX && $mvY == $skipMvpY) {
             $this->lastMbWasSkip = true;
 
-            // 更新邻居nz缓存
-            for ($by = 0; $by < 4; $by++) {
+            // 更新邻居nz缓存（亮度 + 色度全部清零）
+            for ($by = 0; $by < 8; $by++) {
                 $leftNz[$by] = 0;
             }
             for ($bx = 0; $bx < 4; $bx++) {
@@ -188,6 +385,14 @@ trait InterPredTrait
                 if ($topBlkX < count($topNzLuma)) {
                     $topNzLuma[$topBlkX] = 0;
                 }
+            }
+            $topCbx0 = $mbX * 2;
+            $topCbx1 = $mbX * 2 + 1;
+            if ($topCbx1 < count($topNzCb)) {
+                $topNzCb[$topCbx0] = 0;
+                $topNzCb[$topCbx1] = 0;
+                $topNzCr[$topCbx0] = 0;
+                $topNzCr[$topCbx1] = 0;
             }
 
             // 保存MV供后续宏块预测（MV=skipMVP, refIdx=0）
@@ -232,14 +437,14 @@ trait InterPredTrait
             14, 6, 9, 31, 35, 37, 42, 44, 33, 34, 36, 40, 39, 43, 45, 46,
             17, 18, 20, 24, 19, 21, 26, 28, 23, 27, 29, 30, 22, 25, 38, 41,
         ];
-        // 查找cbp对应的codeNum
-        $cbpFull = $cbpLuma;
+        // 查找完整CBP（亮度低4位 | 色度高2位）对应的codeNum
+        $cbpFull = ($cbpLuma & 0x0F) | (($cbpChroma & 0x03) << 4);
         $cbpCode = array_search($cbpFull, $interCbpMap);
         if ($cbpCode === false) $cbpCode = 0;
         $bits .= $this->ue($cbpCode);
 
-        // mb_qp_delta
-        if ($cbpLuma > 0) {
+        // mb_qp_delta：CBP（含色度）非零时解码器必读取，delta=0 表示沿用 slice QP
+        if ($cbpFull > 0) {
             $bits .= $this->se(0);
         }
 
@@ -267,7 +472,30 @@ trait InterPredTrait
             }
         }
 
-        // 更新邻居nz缓存
+        // 编码色度残差：Cb DC → Cr DC → Cb AC(块序16-19) → Cr AC(块序20-23)
+        // 与解码器 decodeResidualAndAdd 的读取顺序、I帧色度写码结构完全一致
+        if ($cbpChroma > 0) {
+            $bits .= $this->writeBlockResidualCavlc(array_slice($chromaDc, 0, 4), 3, true, -1);
+            $bits .= $this->writeBlockResidualCavlc(array_slice($chromaDc, 4, 4), 3, true, -1);
+            if ($cbpChroma >= 2) {
+                for ($i = 0; $i < 4; $i++) {
+                    $blockIdx = 16 + $i;
+                    $cby = intdiv($i, 2);
+                    $cbx = $i % 2;
+                    $acNc = $this->computeNC($blockIdx, $mbX, $cbx, $cby, $leftAvailable, $leftNz, $topAvailable, $topNzCb, $nzCache);
+                    $bits .= $this->writeBlockResidualCavlc($this->scan4x4Ac($chromaAc[$i]), 14, false, $acNc);
+                }
+                for ($i = 0; $i < 4; $i++) {
+                    $blockIdx = 20 + $i;
+                    $cby = intdiv($i, 2);
+                    $cbx = $i % 2;
+                    $acNc = $this->computeNC($blockIdx, $mbX, $cbx, $cby, $leftAvailable, $leftNz, $topAvailable, $topNzCr, $nzCache);
+                    $bits .= $this->writeBlockResidualCavlc($this->scan4x4Ac($chromaAc[4 + $i]), 14, false, $acNc);
+                }
+            }
+        }
+
+        // 更新亮度邻居nz缓存
         for ($by = 0; $by < 4; $by++) {
             $leftNz[$by] = $nzCache[$by * 4 + 3];
         }
@@ -276,6 +504,21 @@ trait InterPredTrait
             if ($topBlkX < count($topNzLuma)) {
                 $topNzLuma[$topBlkX] = $nzCache[$bx + 12];
             }
+        }
+
+        // 更新色度邻居nz缓存（照搬I帧映射；无色度残差时 nzCache[16-23] 本就为0）
+        for ($by = 0; $by < 2; $by++) {
+            $cbBlk = $by * 2 + 1;
+            $leftNz[4 + $by] = $nzCache[16 + $cbBlk];
+            $leftNz[6 + $by] = $nzCache[20 + $cbBlk];
+        }
+        $topCbx0 = $mbX * 2;
+        $topCbx1 = $mbX * 2 + 1;
+        if ($topCbx1 < count($topNzCb)) {
+            $topNzCb[$topCbx0] = $nzCache[18];
+            $topNzCb[$topCbx1] = $nzCache[19];
+            $topNzCr[$topCbx0] = $nzCache[22];
+            $topNzCr[$topCbx1] = $nzCache[23];
         }
 
         // 保存当前MV供后续宏块预测（与解码器saveMvForPrediction一致）

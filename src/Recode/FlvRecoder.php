@@ -112,6 +112,7 @@ class FlvRecoder
         $this->encoder = new H264Encoder();
         $this->encoder->motionWorkers = max(1, (int)($config['motionWorkers'] ?? 8));
         if (!empty($config['fastMotion'])) $this->encoder->setFastMotion(true);
+        if (!empty($config['zeroChromaResidual'])) $this->encoder->zeroChromaResidual = true;
         $this->scaler = new VideoScaler();
     }
 
@@ -218,6 +219,7 @@ class FlvRecoder
         $this->encoder = new H264Encoder();
         $this->encoder->motionWorkers = max(1, (int)($this->config['motionWorkers'] ?? 8));
         if (!empty($this->config['fastMotion'])) $this->encoder->setFastMotion(true);
+        if (!empty($this->config['zeroChromaResidual'])) $this->encoder->zeroChromaResidual = true;
         $this->srcWidth = 0;
         $this->srcHeight = 0;
         $this->srcInitialized = false;

@@ -315,9 +315,12 @@ trait SliceEncodeTrait
             $this->refUPlane,
             $this->refVPlane,
             $ctx['yPlane'],
+            $ctx['uPlane'],
+            $ctx['vPlane'],
             $mbWidth,
             $mbHeight,
-            $jobs
+            $jobs,
+            !$this->zeroChromaResidual
         );
     }
 

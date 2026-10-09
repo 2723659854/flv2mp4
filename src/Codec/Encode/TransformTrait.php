@@ -218,11 +218,12 @@ trait TransformTrait
 
     /**
      * 4x4 chroma AC系数量化
+     * inter=true（P帧）FF索引=QP；默认 intra（I帧）FF索引=QP+6
      */
-    public function quantizeChroma(array $block, int $qp): array
+    public function quantizeChroma(array $block, int $qp, bool $inter = false): array
     {
         $mf = self::QUANT_MF[$qp];
-        $ff = self::QUANT_INTER_FF[$qp + 6];
+        $ff = self::QUANT_INTER_FF[$inter ? $qp : $qp + 6];
         $out = array_fill(0, 4, array_fill(0, 4, 0));
         for ($y = 0; $y < 4; $y++) {
             for ($x = 0; $x < 4; $x++) {
@@ -263,11 +264,12 @@ trait TransformTrait
     /**
      * 2x2 chroma DC量化
      * DC使用: iFF = pFF[0] << 1, iMF = pMF[0] >> 1
+     * inter=true（P帧）FF索引=chromaQp；默认 intra 用 chromaQp+6
      */
-    public function quantizeChromaDC(array $coeffs, int $chromaQp): array
+    public function quantizeChromaDC(array $coeffs, int $chromaQp, bool $inter = false): array
     {
         $mf0 = self::QUANT_MF[$chromaQp][0];
-        $ff0 = self::QUANT_INTER_FF[$chromaQp + 6][0];
+        $ff0 = self::QUANT_INTER_FF[$inter ? $chromaQp : $chromaQp + 6][0];
         $iFF = $ff0 << 1;
         $iMF = $mf0 >> 1;
         $output = [];
