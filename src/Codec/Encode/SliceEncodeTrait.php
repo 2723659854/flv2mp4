@@ -319,8 +319,7 @@ trait SliceEncodeTrait
             $ctx['vPlane'],
             $mbWidth,
             $mbHeight,
-            $jobs,
-            !$this->zeroChromaResidual
+            $jobs
         );
     }
 

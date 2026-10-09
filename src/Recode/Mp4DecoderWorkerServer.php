@@ -42,7 +42,6 @@ final class Mp4DecoderWorkerServer
             $this->encoder->setFastMotion(true);
             $this->fast = true;
         }
-        if (!empty($config['zeroChromaResidual'])) $this->encoder->zeroChromaResidual = true;
     }
 
     public function run(string $listenAddress, string $outputAddress): void

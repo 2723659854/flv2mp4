@@ -30,18 +30,15 @@ final class MotionWorkerHelper
     public $refInts = null;
     /** early-skip 开关：静止宏块提前跳过精搜（量化死区内残差归零，不影响正确性） */
     public bool $earlySkip = true;
-    /** P帧色度残差快速开关：true=色度残差强制为零（与 H264Encoder 同名，InterPredTrait 读取） */
-    public bool $zeroChromaResidual = false;
     private static ?array $sharedDequantTable = null;
 
-    public function __construct(int $width, int $height, int $aw, int $ah, int $qp, private string $refY, private string $refU, private string $refV, bool $encodeChroma = true)
+    public function __construct(int $width, int $height, int $aw, int $ah, int $qp, private string $refY, private string $refU, private string $refV)
     {
         $this->width = $width;
         $this->height = $height;
         $this->mbAlignedWidth = $aw;
         $this->mbAlignedHeight = $ah;
         $this->qp = $qp;
-        $this->zeroChromaResidual = !$encodeChroma;
         if (self::$sharedDequantTable === null) {
             $positionClass = [0,1,0,1,1,2,1,2,0,1,0,1,1,2,1,2];
             $table = array_fill(0, 6, array_fill(0, 52, array_fill(0, 16, 0)));

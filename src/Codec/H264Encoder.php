@@ -501,14 +501,6 @@ class H264Encoder
     public array $motionWorkerResults = [];
 
     /**
-     * P帧色度残差快速开关（直播速度优先档）：
-     *  - true：P帧色度残差强制为零，色度仅靠运动补偿预测，省去色度 DCT/量化/比特，编码更快；
-     *    代价是"亮度基本静止但色度发生变化"（渐变灯光/滤镜/曝光过渡）时色度被冻结，可能偏色。
-     *  - false（默认）：正常编码色度残差，颜色正确。
-     */
-    public bool $zeroChromaResidual = false;
-
-    /**
      * 预热运动估计子进程：在首批 P 帧到来之前完成 PHP 冷启动与建链，
      * 避免把启动开销计入首帧等待（仅多进程 worker 入口调用）。
      */

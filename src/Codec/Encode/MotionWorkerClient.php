@@ -50,8 +50,7 @@ final class MotionWorkerClient
         string $curV,
         int $mbWidth,
         int $mbHeight,
-        array $jobs,
-        bool $encodeChroma = true
+        array $jobs
     ): void {
         if ($this->pending !== null) throw new RuntimeException('Motion worker batch already in flight');
         $this->connectAll();
@@ -86,14 +85,12 @@ final class MotionWorkerClient
             $stripOffset = $firstY;
             $stripCount = $lastY - $firstY + 1;
             $strips = substr($curY, $stripOffset * 16 * $aw, $stripCount * 16 * $aw);
-            // 色度条带：每宏块行 8 行 U 紧接 8 行 V
+            // 色度条带：每宏块行 8 行 U 紧接 8 行 V（色度始终正常编码）
             $chromaStrips = '';
-            if ($encodeChroma) {
-                for ($r = 0; $r < $stripCount; $r++) {
-                    $cy = ($stripOffset + $r) * 8;
-                    $chromaStrips .= substr($curU, $cy * $cw, 8 * $cw);
-                    $chromaStrips .= substr($curV, $cy * $cw, 8 * $cw);
-                }
+            for ($r = 0; $r < $stripCount; $r++) {
+                $cy = ($stripOffset + $r) * 8;
+                $chromaStrips .= substr($curU, $cy * $cw, 8 * $cw);
+                $chromaStrips .= substr($curV, $cy * $cw, 8 * $cw);
             }
 
             $id = $this->id++;
@@ -103,7 +100,7 @@ final class MotionWorkerClient
                 $this->outputs[$worker] .= $referenceFrame;
                 $this->workerSeq[$worker] = $seq;
             }
-            $this->outputs[$worker] .= MotionWorkerProtocol::batch($id, $seq, $qp, $chunk, $strips, $stripOffset, $stripCount, $aw, $encodeChroma, $chromaStrips);
+            $this->outputs[$worker] .= MotionWorkerProtocol::batch($id, $seq, $qp, $chunk, $strips, $stripOffset, $stripCount, $aw, $chromaStrips);
         }
         $this->pending = ['ids' => $ids, 'total' => $total];
         // 尽力立即把请求刷出去，剩余部分由 collect 的 event loop 排空
@@ -168,10 +165,9 @@ final class MotionWorkerClient
         string $curV,
         int $mbWidth,
         int $mbHeight,
-        array $jobs,
-        bool $encodeChroma = true
+        array $jobs
     ): array {
-        $this->dispatch($width, $height, $aw, $ah, $qp, $refY, $refU, $refV, $curY, $curU, $curV, $mbWidth, $mbHeight, $jobs, $encodeChroma);
+        $this->dispatch($width, $height, $aw, $ah, $qp, $refY, $refU, $refV, $curY, $curU, $curV, $mbWidth, $mbHeight, $jobs);
         return $this->collect();
     }
 

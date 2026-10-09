@@ -5,7 +5,7 @@ use InvalidArgumentException;
 use UnexpectedValueException;
 
 /**
- * @purpose 运动模块分布式计算-协议（v5：请求/响应支持色度条带与色度残差）
+ * @purpose 运动模块分布式计算-协议（v6：色度条带恒定携带，移除色度快速档标志）
  * @author yanglong
  */
 final class MotionWorkerProtocol
@@ -13,7 +13,7 @@ final class MotionWorkerProtocol
     public const MAX_BODY_LENGTH = 16777216;
     public const LOAD_REFERENCE = 1;
     public const JOB_BATCH = 2;
-    private const REQUEST_MAGIC = 'MWR5';
+    private const REQUEST_MAGIC = 'MWR6';
     private const RESPONSE_MAGIC = 'MWS3';
     private const SEQ_LENGTH = 4;
     private const JOB_META_LENGTH = 16;
@@ -51,8 +51,8 @@ final class MotionWorkerProtocol
     }
 
     /**
-     * BATCH 请求（v5）：
-     * 亮度按宏块行发送连续的 16 行条带；$hasChroma=true 时额外发送色度条带，
+     * BATCH 请求（v6）：
+     * 亮度按宏块行发送连续的 16 行条带；色度条带恒定携带，
      * 布局为每宏块行 8 行 U 紧接 8 行 V（各 8*cw 字节，cw=aw/2），总长 stripCount*8*aw。
      *
      * @param array  $jobs         job 索引 => [x, y, range]（y 为全帧绝对宏块行）
@@ -60,25 +60,21 @@ final class MotionWorkerProtocol
      * @param int    $stripOffset  首条带对应的绝对宏块行
      * @param int    $stripCount   条带数
      * @param int    $aw           宏块对齐宽度（条带跨距）
-     * @param bool   $hasChroma    是否携带当前帧色度条带（false=色度残差强制为零的快速档）
      * @param string $chromaStrips 色度条带拼接串（stripCount*8*aw 字节）
      */
-    public static function batch(int $id, int $seq, int $qp, array $jobs, string $strips, int $stripOffset, int $stripCount, int $aw, bool $hasChroma, string $chromaStrips): string
+    public static function batch(int $id, int $seq, int $qp, array $jobs, string $strips, int $stripOffset, int $stripCount, int $aw, string $chromaStrips): string
     {
         self::validateSeq($seq);
         if ($stripCount < 0 || $stripOffset < 0 || $aw <= 0 || strlen($strips) !== $stripCount * 16 * $aw) {
             throw new InvalidArgumentException('Invalid motion worker strips');
         }
         $chromaStripsLength = $stripCount * 8 * $aw;
-        if ($hasChroma && strlen($chromaStrips) !== $chromaStripsLength) {
+        if (strlen($chromaStrips) !== $chromaStripsLength) {
             throw new InvalidArgumentException('Invalid motion worker chroma strips');
         }
-        if (!$hasChroma && $chromaStrips !== '') {
-            throw new InvalidArgumentException('Unexpected chroma strips while chroma disabled');
-        }
         $body = self::REQUEST_MAGIC . chr(self::JOB_BATCH) . "\0\0\0" . pack('N', $seq)
-            . pack('N7', $id, $qp, count($jobs), $stripOffset, $stripCount, $aw, $hasChroma ? 1 : 0) . $strips;
-        if ($hasChroma) $body .= $chromaStrips;
+            . pack('N6', $id, $qp, count($jobs), $stripOffset, $stripCount, $aw) . $strips;
+        $body .= $chromaStrips;
         // job 元数据批量打包（index,x,y,range），避免每 job 一次 pack 调用
         $flat = [];
         foreach ($jobs as $index => $job) {
@@ -110,27 +106,26 @@ final class MotionWorkerProtocol
             $refV = substr($body, $offset + $chromaLength, $chromaLength);
             return [$type, $seq, $header['width'], $header['height'], $header['aw'], $header['ah'], $refY, $refU, $refV];
         }
-        if ($type !== self::JOB_BATCH || strlen($body) < 40) throw new UnexpectedValueException('Invalid motion worker request type');
-        $header = unpack('Nid/Nqp/Ncount/NstripOffset/NstripCount/Naw/NhasChroma', substr($body, 12, 28));
+        if ($type !== self::JOB_BATCH || strlen($body) < 36) throw new UnexpectedValueException('Invalid motion worker request type');
+        $header = unpack('Nid/Nqp/Ncount/NstripOffset/NstripCount/Naw', substr($body, 12, 24));
         $count = $header['count'];
         $stripOffset = $header['stripOffset'];
         $stripCount = $header['stripCount'];
         $aw = $header['aw'];
-        $hasChroma = $header['hasChroma'] === 1;
         if ($count < 0 || $stripCount < 0 || $stripOffset < 0 || $aw <= 0) throw new UnexpectedValueException('Invalid motion worker batch header');
         $cw = intdiv($aw, 2);
         $stripsLength = $stripCount * 16 * $aw;
-        $chromaStripsLength = $hasChroma ? $stripCount * 16 * $cw : 0; // 每宏块行 8行U+8行V
-        if (strlen($body) !== 40 + $stripsLength + $chromaStripsLength + $count * self::JOB_META_LENGTH) {
+        $chromaStripsLength = $stripCount * 16 * $cw; // 每宏块行 8行U+8行V
+        if (strlen($body) !== 36 + $stripsLength + $chromaStripsLength + $count * self::JOB_META_LENGTH) {
             throw new UnexpectedValueException('Invalid motion worker batch length');
         }
         // 条带只保留引用（零拷贝），块提取按 job 所在宏块行惰性切片
-        $strips = $stripCount > 0 ? substr($body, 40, $stripsLength) : '';
-        $chromaStrips = $hasChroma ? substr($body, 40 + $stripsLength, $chromaStripsLength) : '';
+        $strips = $stripCount > 0 ? substr($body, 36, $stripsLength) : '';
+        $chromaStrips = substr($body, 36 + $stripsLength, $chromaStripsLength);
         $blocks = [];
-        $offset = 40 + $stripsLength + $chromaStripsLength;
+        $offset = 36 + $stripsLength + $chromaStripsLength;
         $stripRows = $stripCount > 0 ? [] : null;
-        $cStripRows = $hasChroma && $stripCount > 0 ? [] : null;
+        $cStripRows = $stripCount > 0 ? [] : null;
         for ($i = 0; $i < $count; $i++) {
             $job = unpack('Nindex/Nx/Ny/Nrange', substr($body, $offset, 16));
             $stripIndex = $job['y'] - $stripOffset;
@@ -142,19 +137,17 @@ final class MotionWorkerProtocol
             for ($row = 0; $row < 16; $row++) $luma .= substr($strip, $row * $aw + $base, 16);
             $cu = '';
             $cv = '';
-            if ($hasChroma) {
-                // 色度条带：前 8*cw 为 U 条，后 8*cw 为 V 条
-                $cstrip = $cStripRows[$stripIndex] ??= substr($chromaStrips, $stripIndex * 16 * $cw, 16 * $cw);
-                $cbase = $job['x'] * 8;
-                for ($row = 0; $row < 8; $row++) {
-                    $cu .= substr($cstrip, $row * $cw + $cbase, 8);
-                    $cv .= substr($cstrip, 8 * $cw + $row * $cw + $cbase, 8);
-                }
+            // 色度条带：前 8*cw 为 U 条，后 8*cw 为 V 条
+            $cstrip = $cStripRows[$stripIndex] ??= substr($chromaStrips, $stripIndex * 16 * $cw, 16 * $cw);
+            $cbase = $job['x'] * 8;
+            for ($row = 0; $row < 8; $row++) {
+                $cu .= substr($cstrip, $row * $cw + $cbase, 8);
+                $cv .= substr($cstrip, 8 * $cw + $row * $cw + $cbase, 8);
             }
             $blocks[$job['index']] = [$job['x'], $job['y'], $luma, $job['range'], $cu, $cv];
             $offset += self::JOB_META_LENGTH;
         }
-        return [$type, $seq, $header['id'], $header['qp'], $blocks, $hasChroma];
+        return [$type, $seq, $header['id'], $header['qp'], $blocks, true];
     }
 
     public static function response(int $id, array $results): string

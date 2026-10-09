@@ -41,7 +41,6 @@ final class HlsDecoderWorkerServer
             $encoder = new H264Encoder();
             $encoder->motionWorkers = max(1, (int)($profile['motionWorkers'] ?? 8));
             if (!empty($profile['fastMotion'])) $encoder->setFastMotion(true);
-            if (!empty($profile['zeroChromaResidual'])) $encoder->zeroChromaResidual = true;
             $this->encoders[$name] = $encoder;
         }
         // 每个 GOP worker 独立完成缩放/水印，避免输出端再次处理视频帧。

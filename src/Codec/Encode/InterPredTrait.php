@@ -58,25 +58,7 @@ trait InterPredTrait
                 for ($y = 0; $y < 16; $y++) {
                     $reconY .= substr($refYPlane, ($oy + $y) * $stride + $ox, 16);
                 }
-                // 色度快速档：直接复制参考帧（老行为，省掉色度 DCT/量化）
-                if ($this->zeroChromaResidual) {
-                    $chromaW = intdiv($stride, 2);
-                    $cx = $mbX * 8;
-                    $cy = $mbY * 8;
-                    $reconU = '';
-                    $reconV = '';
-                    for ($y = 0; $y < 8; $y++) {
-                        $reconU .= substr($refUPlane, ($cy + $y) * $chromaW + $cx, 8);
-                        $reconV .= substr($refVPlane, ($cy + $y) * $chromaW + $cx, 8);
-                    }
-                    return [
-                        0, 0, $totalSad, 0,
-                        array_fill(0, 24, 0),
-                        [],
-                        $reconY, $reconU, $reconV,
-                    ];
-                }
-                // 色度正常档：亮度静止 ≠ 色度静止（渐变灯光/曝光），MV=0 下仍要算色度残差
+                // 亮度静止 ≠ 色度静止（渐变灯光/曝光），MV=0 下仍要正常编码色度残差
                 $chr = $this->processChroma($mbX, $mbY, 0, 0, $refUPlane, $refVPlane, $curU, $curV);
                 $nzCache = array_fill(0, 16, 0);
                 for ($i = 0; $i < 8; $i++) $nzCache[16 + $i] = $chr['nzSeg'][$i];
@@ -137,24 +119,7 @@ trait InterPredTrait
             }
         }
 
-        // 色度快速档：仅 MC 预测、残差强制为零
-        if ($this->zeroChromaResidual) {
-            $chromaW = intdiv($this->mbAlignedWidth, 2);
-            $chromaH = intdiv($this->mbAlignedHeight, 2);
-            $chromaRefX = $mbX * 64 + $mvX;
-            $chromaRefY = $mbY * 64 + $mvY;
-            $cbPred = $this->mcChromaBlock($refUPlane, $chromaRefX, $chromaRefY, $chromaW, $chromaH);
-            $crPred = $this->mcChromaBlock($refVPlane, $chromaRefX, $chromaRefY, $chromaW, $chromaH);
-            $reconU = str_repeat("\0", 64);
-            $reconV = str_repeat("\0", 64);
-            for ($y = 0; $y < 8; $y++) for ($x = 0; $x < 8; $x++) {
-                $reconU[$y * 8 + $x] = chr($cbPred[$y * 8 + $x]);
-                $reconV[$y * 8 + $x] = chr($crPred[$y * 8 + $x]);
-            }
-            return [$mvX, $mvY, $sad, $cbpLuma, $nzCache, $quantResidual, $reconY, $reconU, $reconV];
-        }
-
-        // 色度正常档：DCT + inter 量化 + 本地解码重建
+        // 色度：1/8 MC + DCT + inter 量化 + 本地解码重建（始终保证色度质量）
         $chr = $this->processChroma($mbX, $mbY, $mvX, $mvY, $refUPlane, $refVPlane, $curU, $curV);
         for ($i = 0; $i < 8; $i++) $nzCache[16 + $i] = $chr['nzSeg'][$i];
         return [
