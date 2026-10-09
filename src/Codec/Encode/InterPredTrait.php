@@ -209,8 +209,8 @@ trait InterPredTrait
                     $py = $by * 4 + $y;
                     $px = $bx * 4 + $x;
                     $flat = $py * 8 + $px;
-                    $blkU[$y][$x] = $curCb[$flat + 1] - $cbPred[$flat];
-                    $blkV[$y][$x] = $curCr[$flat + 1] - $crPred[$flat];
+                    $blkU[$y][$x] = $curCb[$flat] - $cbPred[$flat];
+                    $blkV[$y][$x] = $curCr[$flat] - $crPred[$flat];
                 }
                 $dctU = $this->dct($blkU);
                 $dctV = $this->dct($blkV);
