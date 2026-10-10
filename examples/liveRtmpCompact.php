@@ -25,7 +25,7 @@ $config = [
     'width'        => 480,
     'height'       => 270,
     'bitrate'      => 0,  // 目标视频码率 bps
-    'fps'          => 15,       // 目标帧率；流水线按时间间隔抽帧，0=不抽帧
+    'fps'          => 10,       // 目标帧率；流水线按时间间隔抽帧，0=不抽帧
     'qp'           => 30,      // 量化参数 0-51
     'audioBitrate' => 64000,   // 音频码率 bps
 
@@ -33,7 +33,7 @@ $config = [
     // 每个decodeWorker现在是一个独立GOP worker：解码+缩放+编码。
     // motionWorkers是每个GOP worker内部的运动估计进程数，避免按6×12过量创建进程。
     'motionWorkers'   => 1,    // 每个GOP worker的运动估计进程数
-    'decodeWorkers'   => 6,    // GOP worker数：按IDR分组后动态轮询分发
+    'decodeWorkers'   => 10,    // GOP worker数：按IDR分组后动态轮询分发 最佳解码进程10
     'segmentDuration' => 3,    // HLS切片时长（秒）
     'fastMotion' => true,      // 快速运动估计：缩小搜索并跳过四分之一像素
     // —— 输出目录与流名（默认 项目根/hls/<URL末段>/）——
