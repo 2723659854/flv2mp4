@@ -443,20 +443,27 @@ WatermarkUtil::generateFromImage(__DIR__."/watermark_80x16.png",__DIR__ . '/test
 | **Encoding Settings** | H.264 Constrained Baseline, AAC 128 kbps | Same as left |
 
 
-### Cross-Platform Performance Comparison
+### Cross-Platform Test Results Comparison
 
-| Output Format | Windows Time | Linux (Docker) Time | Performance Gain |
+| Output Format | Platform | Re-encoding Time | Time Ratio |
 | :--- | :--- | :--- | :--- |
-| **FLV Re-encoding** | 16 s | **9 s** | **↓ 43.8%** |
-| **MP4 Re-encoding** | 16 s | **9 s** | **↓ 43.8%** |
-| **HLS (mpegts + m3u8)** | 17 s | **10 s** | **↓ 41.2%** |
+| **FLV Re-encoding** | Windows | 13 s | **~4.33×** |
+| **FLV Re-encoding** | Linux (Docker) | **7 s** | **~2.33×** |
+| **MP4 Re-encoding** | Windows | 13 s | **~4.33×** |
+| **MP4 Re-encoding** | Linux (Docker) | **8 s** | **~2.67×** |
+| **HLS (mpegts + m3u8)** | Windows | 13 s | **~4.33×** |
+| **HLS (mpegts + m3u8)** | Linux (Docker) | **8 s** | **~2.67×** |
+
+**Note**: Test clip duration is 3.02 s; Time Ratio = Re-encoding Time ÷ 3.02 s.
 
 ### Long Video Test (7 min 5 s video)
 
 | Platform | Re-encoding Time | Time Ratio |
 | :--- | :--- | :--- |
-| **Windows** | **240 s** | ~0.56× |
-| **Linux (Docker)** | **146 s** | ~0.34× |
+| **Windows** | **179 s (2 min 59 s)** | **~0.42×** |
+| **Linux (Docker)** | **133 s (2 min 13 s)** | **~0.31×** |
+
+**Note**: Video duration is 425 s; Time Ratio = Re-encoding Time ÷ 425 s.
 
 
 ### Optimization History
