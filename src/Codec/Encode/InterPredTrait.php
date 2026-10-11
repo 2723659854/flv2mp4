@@ -149,49 +149,79 @@ trait InterPredTrait
     ): array {
         $chromaW = intdiv($this->mbAlignedWidth, 2);
         $chromaH = intdiv($this->mbAlignedHeight, 2);
-        $chromaRefX = $mbX * 64 + $mvX;
-        $chromaRefY = $mbY * 64 + $mvY;
-        $cbPred = $this->mcChromaBlock($refUPlane, $chromaRefX, $chromaRefY, $chromaW, $chromaH);
-        $crPred = $this->mcChromaBlock($refVPlane, $chromaRefX, $chromaRefY, $chromaW, $chromaH);
 
         $chromaQpIndex = max(0, min(51, $this->qp + $this->chromaQpIndexOffset));
         $chromaQp = self::CHROMA_QP_TABLE[$chromaQpIndex];
 
-        $curCb = array_values(unpack('C*', $curU));
-        $curCr = array_values(unpack('C*', $curV));
+        // 前向分析结果：$dctU/$dctV 为各块 4x4 整数变换矩阵（逐块等价于 dct()）
+        $dcCb = [0, 0, 0, 0];
+        $dcCr = [0, 0, 0, 0];
+        $zeroU = [false, false, false, false]; // 该块15个AC系数量化必为0（位级判定）
+        $zeroV = [false, false, false, false];
+
+        if ($mvX === 0 && $mvY === 0 && $this->earlySkip) {
+            // MV=0 快速前向：残差→水平半边蝶形（缓存中间值）→粗判→精确补完；
+            // 直接证出 cbpChroma=0 时整段量化/Hadamard/IDCT 全跳过。
+            $cbPred = $crPred = null;
+            $dctU = $dctV = [];
+            $fastResult = $this->chromaMv0Fast(
+                $mbX, $mbY, $refUPlane, $refVPlane, $curU, $curV,
+                $chromaW, $chromaH, $chromaQp,
+                $cbPred, $crPred, $dctU, $dctV, $zeroU, $zeroV, $dcCb, $dcCr
+            );
+            if ($fastResult !== null) return $fastResult;
+        } else {
+            $chromaRefX = $mbX * 64 + $mvX;
+            $chromaRefY = $mbY * 64 + $mvY;
+            $cbPred = $this->mcChromaBlock($refUPlane, $chromaRefX, $chromaRefY, $chromaW, $chromaH);
+            $crPred = $this->mcChromaBlock($refVPlane, $chromaRefX, $chromaRefY, $chromaW, $chromaH);
+
+            $curCb = array_values(unpack('C*', $curU));
+            $curCr = array_values(unpack('C*', $curV));
+            $dctU = [];
+            $dctV = [];
+            for ($by = 0; $by < 2; $by++) {
+                for ($bx = 0; $bx < 2; $bx++) {
+                    $blk = $by * 2 + $bx;
+                    $blkU = array_fill(0, 4, array_fill(0, 4, 0));
+                    $blkV = array_fill(0, 4, array_fill(0, 4, 0));
+                    for ($y = 0; $y < 4; $y++) for ($x = 0; $x < 4; $x++) {
+                        $py = $by * 4 + $y;
+                        $px = $bx * 4 + $x;
+                        $flat = $py * 8 + $px;
+                        $blkU[$y][$x] = $curCb[$flat] - $cbPred[$flat];
+                        $blkV[$y][$x] = $curCr[$flat] - $crPred[$flat];
+                    }
+                    $dctU[$blk] = $this->dct($blkU);
+                    $dctV[$blk] = $this->dct($blkV);
+                    $dcCb[$blk] = $dctU[$blk][0][0];
+                    $dcCr[$blk] = $dctV[$blk][0][0];
+                }
+            }
+        }
 
         $quantCb = array_fill(0, 4, array_fill(0, 16, 0));
         $quantCr = array_fill(0, 4, array_fill(0, 16, 0));
-        $dcCb = [0, 0, 0, 0];
-        $dcCr = [0, 0, 0, 0];
         $nzSeg = array_fill(0, 8, 0); // 0..3=Cb块, 4..7=Cr块 → nzCache[16..23]
         for ($by = 0; $by < 2; $by++) {
             for ($bx = 0; $bx < 2; $bx++) {
                 $blk = $by * 2 + $bx;
-                $blkU = array_fill(0, 4, array_fill(0, 4, 0));
-                $blkV = array_fill(0, 4, array_fill(0, 4, 0));
-                for ($y = 0; $y < 4; $y++) for ($x = 0; $x < 4; $x++) {
-                    $py = $by * 4 + $y;
-                    $px = $bx * 4 + $x;
-                    $flat = $py * 8 + $px;
-                    $blkU[$y][$x] = $curCb[$flat] - $cbPred[$flat];
-                    $blkV[$y][$x] = $curCr[$flat] - $crPred[$flat];
-                }
-                $dctU = $this->dct($blkU);
-                $dctV = $this->dct($blkV);
-                $dcCb[$blk] = $dctU[0][0];
-                $dcCr[$blk] = $dctV[0][0];
-                $qU = $this->quantizeChroma($dctU, $chromaQp, true);
-                $qV = $this->quantizeChroma($dctV, $chromaQp, true);
                 $nzU = 0;
                 $nzV = 0;
-                for ($yy = 0; $yy < 4; $yy++) for ($xx = 0; $xx < 4; $xx++) {
-                    $f = $yy * 4 + $xx;
-                    $quantCb[$blk][$f] = $qU[$yy][$xx];
-                    $quantCr[$blk][$f] = $qV[$yy][$xx];
-                    if ($f !== 0) {
-                        if ($qU[$yy][$xx] !== 0) $nzU++;
-                        if ($qV[$yy][$xx] !== 0) $nzV++;
+                if (!$zeroU[$blk]) {
+                    $qU = $this->quantizeChroma($dctU[$blk], $chromaQp, true);
+                    for ($yy = 0; $yy < 4; $yy++) for ($xx = 0; $xx < 4; $xx++) {
+                        $f = $yy * 4 + $xx;
+                        $quantCb[$blk][$f] = $qU[$yy][$xx];
+                        if ($f !== 0 && $qU[$yy][$xx] !== 0) $nzU++;
+                    }
+                }
+                if (!$zeroV[$blk]) {
+                    $qV = $this->quantizeChroma($dctV[$blk], $chromaQp, true);
+                    for ($yy = 0; $yy < 4; $yy++) for ($xx = 0; $xx < 4; $xx++) {
+                        $f = $yy * 4 + $xx;
+                        $quantCr[$blk][$f] = $qV[$yy][$xx];
+                        if ($f !== 0 && $qV[$yy][$xx] !== 0) $nzV++;
                     }
                 }
                 $nzSeg[$blk] = min(15, $nzU);
@@ -292,6 +322,175 @@ trait InterPredTrait
             'reconU' => $reconU,
             'reconV' => $reconV,
         ];
+    }
+
+    /**
+     * MV=(0,0) 色度前向快速分析（位级等价，仅在 earlySkip 时启用）
+     *
+     * 色度预测即同址参考像素（色度平面均按 MB 对齐，无越界）。对 Cb/Cr 共 8 个 4x4 块：
+     *  1) 一次遍历取残差并只做整数变换的水平半边蝶形，缓存 16 个中间值；
+     *  2) 粗判：对中间值用三角不等式给垂直变换输出严格上界，对照 inter 量化死区，
+     *     过界证明全 AC 必为 0 —— 垂直半边蝶形/量化直接免做；
+     *  3) 精判：粗判不过的块用缓存中间值补完垂直半边蝶形（不重算水平），
+     *     逐系数对照死区做位级精确判定；
+     *  4) 4 个块 DC 为精确值，2x2 Hadamard 后对照 DC 死区。
+     * 全部为 0 时直接返回 cbpChroma=0 结果（跳过量化/Hadamard/IDCT，recon 直接复用同址参考）。
+     * 否则通过引用输出预测数组与已算好的精确 DCT 矩阵，供量化尾段复用，无任何重复计算。
+     *
+     * @return array|null cbp=0 的完整结果；null=需走量化尾段（输出参数已填好）
+     */
+    private function chromaMv0Fast(
+        int $mbX,
+        int $mbY,
+        string $refUPlane,
+        string $refVPlane,
+        string $curU,
+        string $curV,
+        int $chromaW,
+        int $chromaH,
+        int $chromaQp,
+        ?array &$predUOut,
+        ?array &$predVOut,
+        array &$dctUOut,
+        array &$dctVOut,
+        array &$zeroUOut,
+        array &$zeroVOut,
+        array &$dcUOut,
+        array &$dcVOut
+    ): ?array {
+        static $boundCache = [];
+        if (!isset($boundCache[$chromaQp])) {
+            $mf = self::QUANT_MF[$chromaQp];
+            $ff = self::QUANT_INTER_FF[$chromaQp];
+            $zc = [];
+            for ($j = 0; $j < 8; $j++) $zc[$j] = intdiv(65535, $mf[$j]) - $ff[$j];
+            $iMF = $mf[0] >> 1;
+            $iFF = $ff[0] << 1;
+            $boundCache[$chromaQp] = [$zc, $iMF > 0 ? intdiv(65535, $iMF) - $iFF : 0];
+        }
+        [$zc, $dcZc] = $boundCache[$chromaQp];
+
+        $ox = $mbX * 8;
+        $oy = $mbY * 8;
+
+        // 同址参考（=MV0色度预测），拼成 8x8 字符串：cbp=0 时直接作为 recon，否则解包为数组
+        $predUStr = '';
+        $predVStr = '';
+        for ($y = 0; $y < 8; $y++) {
+            $r = ($oy + $y) * $chromaW + $ox;
+            $predUStr .= substr($refUPlane, $r, 8);
+            $predVStr .= substr($refVPlane, $r, 8);
+        }
+
+        $dctUOut = [];
+        $dctVOut = [];
+        $zeroUOut = [false, false, false, false];
+        $zeroVOut = [false, false, false, false];
+        $dcUOut = [0, 0, 0, 0];
+        $dcVOut = [0, 0, 0, 0];
+        $allAcZero = true;
+
+        $components = [[true, $curU, $refUPlane], [false, $curV, $refVPlane]];
+        foreach ($components as $compInfo) {
+            [$isU, $cur, $refPlane] = $compInfo;
+            for ($by = 0; $by < 2; $by++) {
+                for ($bx = 0; $bx < 2; $bx++) {
+                    $blk = $by * 2 + $bx;
+                    // === 残差 + 水平半边蝶形（缓存 h[16]） ===
+                    $h = [];
+                    for ($y = 0; $y < 4; $y++) {
+                        $py = $by * 4 + $y;
+                        $cBase = $py * 8 + $bx * 4;
+                        $rBase = ($oy + $py) * $chromaW + $ox + $bx * 4;
+                        $r0 = ord($cur[$cBase]) - ord($refPlane[$rBase]);
+                        $r1 = ord($cur[$cBase + 1]) - ord($refPlane[$rBase + 1]);
+                        $r2 = ord($cur[$cBase + 2]) - ord($refPlane[$rBase + 2]);
+                        $r3 = ord($cur[$cBase + 3]) - ord($refPlane[$rBase + 3]);
+                        $s03 = $r0 + $r3;
+                        $s12 = $r1 + $r2;
+                        $d03 = $r0 - $r3;
+                        $d12 = $r1 - $r2;
+                        $h[$y * 4] = $s03 + $s12;
+                        $h[$y * 4 + 1] = 2 * $d03 + $d12;
+                        $h[$y * 4 + 2] = $s03 - $s12;
+                        $h[$y * 4 + 3] = $d03 - 2 * $d12;
+                    }
+                    $dc = $h[0] + $h[4] + $h[8] + $h[12];
+                    if ($isU) $dcUOut[$blk] = $dc; else $dcVOut[$blk] = $dc;
+
+                    // === 粗判：垂直输出三角不等式界（含位置(2,0)，DC(0,0)由精确值判） ===
+                    $boundOk = true;
+                    for ($l = 0; $l < 4; $l++) {
+                        $a0 = abs($h[$l]);
+                        $a1 = abs($h[4 + $l]);
+                        $a2 = abs($h[8 + $l]);
+                        $a3 = abs($h[12 + $l]);
+                        // k=1 行 j=4+l；k=3 行 j=(12+l)&7
+                        if (2 * $a0 + $a1 + $a2 + 2 * $a3 > $zc[4 + $l]) { $boundOk = false; break; }
+                        if ($a0 + 2 * $a1 + 2 * $a2 + $a3 > $zc[(12 + $l) & 7]) { $boundOk = false; break; }
+                        // k=0/k=2 行 j=l；l=0 时 k=0 是 DC（粗判误伤仅多算一次精判，不漏判）
+                        if ($a0 + $a1 + $a2 + $a3 > $zc[$l]) { $boundOk = false; break; }
+                    }
+                    if ($boundOk) {
+                        if ($isU) { $zeroUOut[$blk] = true; $dctUOut[$blk] = null; }
+                        else { $zeroVOut[$blk] = true; $dctVOut[$blk] = null; }
+                        continue;
+                    }
+
+                    // === 精判：用缓存水平值补完垂直半边蝶形，逐系数对照死区 ===
+                    $m = array_fill(0, 4, array_fill(0, 4, 0));
+                    $acZero = true;
+                    for ($l = 0; $l < 4; $l++) {
+                        $s03 = $h[$l] + $h[12 + $l];
+                        $s12 = $h[4 + $l] + $h[8 + $l];
+                        $d03 = $h[$l] - $h[12 + $l];
+                        $d12 = $h[4 + $l] - $h[8 + $l];
+                        $v0 = $s03 + $s12;
+                        $v1 = 2 * $d03 + $d12;
+                        $v2 = $s03 - $s12;
+                        $v3 = $d03 - 2 * $d12;
+                        $m[0][$l] = $v0;
+                        $m[1][$l] = $v1;
+                        $m[2][$l] = $v2;
+                        $m[3][$l] = $v3;
+                        // AC 位置：除 (0,0) 外的 15 个，j=(行*4+l)&7
+                        if ($l !== 0 && abs($v0) > $zc[$l]) $acZero = false;
+                        if (abs($v1) > $zc[4 + $l]) $acZero = false;
+                        if (abs($v2) > $zc[$l]) $acZero = false;
+                        if (abs($v3) > $zc[(12 + $l) & 7]) $acZero = false;
+                    }
+                    if ($isU) { $dctUOut[$blk] = $m; $zeroUOut[$blk] = $acZero; }
+                    else { $dctVOut[$blk] = $m; $zeroVOut[$blk] = $acZero; }
+                    if (!$acZero) $allAcZero = false;
+                }
+            }
+        }
+
+        // === DC 精确 2x2 Hadamard 死区判定 ===
+        $dcZero = true;
+        foreach ([$dcUOut, $dcVOut] as $dcFour) {
+            foreach ($this->forwardChromaHadamard2x2($dcFour) as $v) {
+                if (abs($v) > $dcZc) { $dcZero = false; break 2; }
+            }
+        }
+
+        if ($allAcZero && $dcZero) {
+            // cbpChroma=0 位级确定：recon 同址参考；量化载荷全 0
+            $zeroAc = [array_fill(0, 16, 0), array_fill(0, 16, 0), array_fill(0, 16, 0), array_fill(0, 16, 0)];
+            return [
+                'cbpChroma' => 0,
+                'nzSeg' => [0, 0, 0, 0, 0, 0, 0, 0],
+                'chromaDc' => [0, 0, 0, 0, 0, 0, 0, 0],
+                'chromaAc' => $zeroAc,
+                'reconU' => $predUStr,
+                'reconV' => $predVStr,
+            ];
+        }
+
+        // 非零块尾段复用：预测数组 + 已算好的精确 DCT（粗判零块标记为零，尾段跳过量算）
+        $predUOut = array_values(unpack('C*', $predUStr));
+        $predVOut = array_values(unpack('C*', $predVStr));
+        return null;
     }
 
     /**

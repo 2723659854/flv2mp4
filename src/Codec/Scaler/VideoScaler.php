@@ -56,34 +56,41 @@ class VideoScaler
     }
 
     /**
-     * 16位大端字（高字节a、低字节b）→ a+b 的查找表（2:1下采样专用，惰性初始化）
-     * @var int[]|null
-     */
-    private static ?array $halfPairSumLut = null;
-
-    /**
-     * 精确 2:1 下采样：2x2 盒平均（(a+b+c+d+2)>>2）。
-     * 每行用 unpack('n*') 一次取出相邻字节对（C层完成逐字节读取），
-     * 再经双字节和LUT求值，比逐像素4次ord快约28%（960x540 Y平面实测）。
+     * 精确 2:1 下采样：2x2 盒平均（(a+b+c+d+2)>>2），SWAR 双车道实现。
      */
     private function scalePlaneHalf2x(string $data, int $srcW, int $srcH, int $dstW, int $dstH): string
     {
-        if (self::$halfPairSumLut === null) {
-            $lut = [];
-            for ($w = 0; $w < 65536; $w++) $lut[$w] = ($w >> 8) + ($w & 255);
-            self::$halfPairSumLut = $lut;
-        }
-        $lut = self::$halfPairSumLut;
+        // SWAR 双车道：一个 32 位字含两个相邻字节对，两条 16 位车道独立求和
+        // （车道内最大 255+255=510 不进位）；两行求和+2 舍入后各车道右移2位，
+        // 合成 16 位大端字，一次 pack 出两个结果像素。与盒平均逐字节等价。
         $rows = [];
+        $fullWords = $srcW >> 2;     // 每行完整 32 位字数
+        $hasTail = ($srcW & 2) !== 0;
         for ($y = 0; $y < $dstH; $y++) {
             $r0 = $y * 2 * $srcW;
-            $w0 = unpack('n*', substr($data, $r0, $srcW));
-            $w1 = unpack('n*', substr($data, $r0 + $srcW, $srcW));
-            $vals = [];
-            for ($x = 1; $x <= $dstW; $x++) {
-                $vals[] = ($lut[$w0[$x]] + $lut[$w1[$x]] + 2) >> 2;
+            $wa = unpack('N*', substr($data, $r0, $fullWords * 4));
+            $wb = unpack('N*', substr($data, $r0 + $srcW, $fullWords * 4));
+            $outWords = [];
+            for ($i = 1; $i <= $fullWords; $i++) {
+                $a = $wa[$i];
+                $b = $wb[$i];
+                $p0 = (($a & 0xFF00FF00) >> 8) + ($a & 0x00FF00FF);
+                $p1 = (($b & 0xFF00FF00) >> 8) + ($b & 0x00FF00FF);
+                $r = $p0 + $p1 + 0x00020002;
+                // 必须分车道取字节，不能整体移位（高车道会污染低车道）
+                $v0 = ($r & 0xFFFF) >> 2;
+                $v1 = ($r >> 18) & 0xFF;
+                $outWords[] = ($v1 << 8) | $v0;
             }
-            $rows[] = pack('C*', ...$vals);
+            $row = pack('n*', ...$outWords);
+            if ($hasTail) {
+                // srcW%4==2：末尾剩一对，标量兜底
+                $o = $fullWords * 4;
+                $s0 = (ord($data[$r0 + $o]) + ord($data[$r0 + $o + 1]));
+                $s1 = (ord($data[$r0 + $srcW + $o]) + ord($data[$r0 + $srcW + $o + 1]));
+                $row .= chr(($s0 + $s1 + 2) >> 2);
+            }
+            $rows[] = $row;
         }
         return implode('', $rows);
     }
