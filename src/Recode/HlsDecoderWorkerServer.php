@@ -41,6 +41,7 @@ final class HlsDecoderWorkerServer
             $encoder = new H264Encoder();
             $encoder->motionWorkers = max(1, (int)($profile['motionWorkers'] ?? 8));
             if (!empty($profile['fastMotion'])) $encoder->setFastMotion(true);
+            if (!empty($profile['fastIntraPrune'])) $encoder->fastIntraPrune = true;
             $this->encoders[$name] = $encoder;
         }
         // 每个 GOP worker 独立完成缩放/水印，避免输出端再次处理视频帧。
@@ -104,7 +105,7 @@ final class HlsDecoderWorkerServer
                 $write = $output === '' ? [] : [$downstream];
                 if ($upOutput !== '') $write[] = $upstream;
                 $except = null;
-                @stream_select($read, $write, $except, 0, 2000);
+                @stream_select($read, $write, $except, 0, 10);
                 if ($ctrlServer !== null && in_array($ctrlServer, $read, true)) {
                     $conn = @stream_socket_accept($ctrlServer, 0);
                     if ($conn !== false) {
@@ -165,10 +166,13 @@ final class HlsDecoderWorkerServer
                     $queuedGops = $bufferedGopEnds;
                     if ($foundAt >= 0) $triggerFinish();
                 }
-                // 单次 select 唤醒（Windows 下粒度约 10~15ms）批量解码全部已缓冲事件，
-                // 下游输出积压到高水位时停止，让反压继续向下游传播，避免长文件下缓冲超限。
+                // 单次 select 唤醒（Windows 下粒度约 10~15ms）最多处理 2 个事件即返回 select 循环：
+                // 防止 GOP 边界多帧背靠背同步阻塞（IDR encodeSliceBody 或 P 帧 collect 均可能阻塞 300ms-2s），
+                // 期间 upstream/downstream I/O 完全冻结 → 反压级联导致 tags/s 归零。
+                // 下游 output 积压到高水位时停止，让反压继续向下游传播，避免长文件下缓冲超限。
                 // finish 仅停止接收新数据；已进入 input 的媒体必须全部解码并转发。
-                while (strlen($output) < HlsPipelineProtocol::HIGH_WATERMARK) {
+                $eventBudget = 2;
+                while ($eventBudget-- > 0 && strlen($output) < HlsPipelineProtocol::HIGH_WATERMARK) {
                     $events = HlsPipelineProtocol::take($input, 1);
                     if ($events === []) break;
                     $event = $events[0];
@@ -373,6 +377,11 @@ final class HlsDecoderWorkerServer
             $this->height = $this->decoder->getHeight();
         }
         foreach ($this->encoders as $encoder) $encoder->resetGopState();
+        // 每个 GOP 边界主动收一次 cycle GC：把 GC 开销从随机热时刻挪到已知空闲点。
+        // PHP 默认 GC root buffer = 10K roots，帧内宏块数组/变换结果堆到 60s 左右触发 full collection。
+        // 12 个 decoder worker 可能因同步启动时间戳接近而近似同步 GC pause — 在 GOP 边界做一次显式收集
+        // 既能清空上一个 GOP 残留的参考帧/变换数组，又把下一个 GOP 的 GC 压力打散。
+        gc_collect_cycles();
     }
 
     private function resetEncoders(): void

@@ -484,18 +484,17 @@ trait IntraPredTrait
                 $dcResidual = $dcResultRecon[$rasterIdx];
 
                 if ($cbpLuma > 0) {
-                    // AC存在: 反量化AC, 将DC放入[0], 一起做IDCT
-                    $acDequant = $this->dequantize4x4($quant4x4Luma[$rasterIdx], 0, $this->qp);
-                    $acDequant[0] = $dcResidual;
-                    $acBlock = array_fill(0, 4, array_fill(0, 4, 0));
-                    for ($y = 0; $y < 4; $y++) for ($x = 0; $x < 4; $x++) $acBlock[$y][$x] = $acDequant[$y * 4 + $x];
-                    $idctResult = $this->idct4x4($acBlock);
+                    // AC存在: 反量化AC, 将DC放入[0], 做原地IDCT（省 2D flatten/expand）
+                    $ac = $quant4x4Luma[$rasterIdx];
+                    $this->dequantize4x4($ac, 0, $this->qp);
+                    $ac[0] = $dcResidual;
+                    $this->idctFlat($ac);
 
                     for ($y = 0; $y < 4; $y++) {
                         for ($x = 0; $x < 4; $x++) {
                             $py = $mbY * 16 + $by * 4 + $y;
                             $px = $mbX * 16 + $bx * 4 + $x;
-                            $val = $predPixels[$by * 4 + $y][$bx * 4 + $x] + $idctResult[$y][$x];
+                            $val = $predPixels[$by * 4 + $y][$bx * 4 + $x] + $ac[$y * 4 + $x];
                             $val = max(0, min(255, $val));
                             $this->reconYPlane[$py * $reconStride + $px] = chr($val);
                         }
@@ -530,26 +529,22 @@ trait IntraPredTrait
                 $crDcResidual = $crDcResult[$blk];
 
                 if ($cbpChroma >= 2) {
-                    // AC存在: DC放入[0], 一起IDCT
-                    $cbAcDequant = $this->dequantize4x4($quantCb4x4[$blk], 1, $chromaQp);
-                    $crAcDequant = $this->dequantize4x4($quantCr4x4[$blk], 2, $chromaQp);
-                    $cbAcDequant[0] = $cbDcResidual;
-                    $crAcDequant[0] = $crDcResidual;
-                    $cbBlock = array_fill(0, 4, array_fill(0, 4, 0));
-                    $crBlock = array_fill(0, 4, array_fill(0, 4, 0));
-                    for ($y = 0; $y < 4; $y++) for ($x = 0; $x < 4; $x++) {
-                        $cbBlock[$y][$x] = $cbAcDequant[$y * 4 + $x];
-                        $crBlock[$y][$x] = $crAcDequant[$y * 4 + $x];
-                    }
-                    $cbIdct = $this->idct4x4($cbBlock);
-                    $crIdct = $this->idct4x4($crBlock);
+                    // AC存在: DC放入[0], 原地IDCT
+                    $cbAc = $quantCb4x4[$blk];
+                    $crAc = $quantCr4x4[$blk];
+                    $this->dequantize4x4($cbAc, 1, $chromaQp);
+                    $this->dequantize4x4($crAc, 2, $chromaQp);
+                    $cbAc[0] = $cbDcResidual;
+                    $crAc[0] = $crDcResidual;
+                    $this->idctFlat($cbAc);
+                    $this->idctFlat($crAc);
 
                     for ($y = 0; $y < 4; $y++) {
                         for ($x = 0; $x < 4; $x++) {
                             $py = $mbY * 8 + $by * 4 + $y;
                             $px = $mbX * 8 + $bx * 4 + $x;
-                            $vu = $chromaPredU[$by * 4 + $y][$bx * 4 + $x] + $cbIdct[$y][$x];
-                            $vv = $chromaPredV[$by * 4 + $y][$bx * 4 + $x] + $crIdct[$y][$x];
+                            $vu = $chromaPredU[$by * 4 + $y][$bx * 4 + $x] + $cbAc[$y * 4 + $x];
+                            $vv = $chromaPredV[$by * 4 + $y][$bx * 4 + $x] + $crAc[$y * 4 + $x];
                             $idx = $py * $chromaW + $px;
                             $this->reconUPlane[$idx] = chr(max(0, min(255, $vu)));
                             $this->reconVPlane[$idx] = chr(max(0, min(255, $vv)));
@@ -708,6 +703,11 @@ trait IntraPredTrait
                 $bestMode = 2;
                 $bestCost = PHP_INT_MAX;
                 for ($mode = 0; $mode <= 8; $mode++) {
+                    // fastIntraPrune: 只评估 DC(2)/Vertical(0)/Horizontal(1)/DiagonalDownLeft(3) 四种常用模式
+                    // 原来的完整 9 模式评估代码（case 0-8 switch）全部保留，剪枝仅在此处 continue 跳过
+                    if (!empty($this->fastIntraPrune) && !in_array($mode, [0, 1, 2, 3], true)) {
+                        continue;
+                    }
                     if (!$topAvail && ($mode === 0 || $mode === 3 || $mode === 4 || $mode === 5 || $mode === 7 || $mode === 8)) {
                         continue;
                     }

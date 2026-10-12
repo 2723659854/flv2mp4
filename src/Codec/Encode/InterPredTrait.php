@@ -90,8 +90,9 @@ trait InterPredTrait
                         $res[] = $curFlat[$row * 16 + $bx * 4 + $x] - $predBlock[$row * 16 + $bx * 4 + $x];
                     }
                 }
-                [$quantBlock, $nz] = $this->quantizeFlatInter($this->dctFlat($res));
-                $quantResidual[$blkIdx] = $quantBlock;
+                $this->dctFlat($res);
+                $nz = $this->quantizeFlatInter($res);
+                $quantResidual[$blkIdx] = $res;
                 $nzCache[$blkIdx] = min(15, $nz);
                 if ($nz > 0) $cbpLuma |= 1 << (intdiv($by, 2) * 2 + intdiv($bx, 2));
             }
@@ -106,14 +107,21 @@ trait InterPredTrait
             for ($bx = 0; $bx < 4; $bx++) {
                 $blkIdx = $by * 4 + $bx;
                 $block8x8Idx = intdiv($by, 2) * 2 + intdiv($bx, 2);
-                $idctResult = null;
                 if ($cbpLuma & (1 << $block8x8Idx)) {
-                    $idctResult = $this->idctFlat($this->dequantize4x4($quantResidual[$blkIdx], 0, $this->qp));
-                }
-                for ($y = 0; $y < 4; $y++) {
-                    for ($x = 0; $x < 4; $x++) {
-                        $value = $predBlock[($by * 4 + $y) * 16 + $bx * 4 + $x] + ($idctResult[$y * 4 + $x] ?? 0);
-                        $reconY[($by * 4 + $y) * 16 + $bx * 4 + $x] = chr(max(0, min(255, $value)));
+                    $blk = $quantResidual[$blkIdx];
+                    $this->dequantize4x4($blk, 0, $this->qp);
+                    $this->idctFlat($blk);
+                    for ($y = 0; $y < 4; $y++) {
+                        for ($x = 0; $x < 4; $x++) {
+                            $value = $predBlock[($by * 4 + $y) * 16 + $bx * 4 + $x] + $blk[$y * 4 + $x];
+                            $reconY[($by * 4 + $y) * 16 + $bx * 4 + $x] = chr(max(0, min(255, $value)));
+                        }
+                    }
+                } else {
+                    for ($y = 0; $y < 4; $y++) {
+                        for ($x = 0; $x < 4; $x++) {
+                            $reconY[($by * 4 + $y) * 16 + $bx * 4 + $x] = chr(max(0, min(255, $predBlock[($by * 4 + $y) * 16 + $bx * 4 + $x])));
+                        }
                     }
                 }
             }
@@ -228,25 +236,21 @@ trait InterPredTrait
                 $cbDcResidual = $cbDcResult[$blk];
                 $crDcResidual = $crDcResult[$blk];
                 if ($cbpChroma >= 2) {
-                    // AC 存在：DC 放入[0] 一起 IDCT
-                    $cbAcDequant = $this->dequantize4x4($quantCb[$blk], 5, $chromaQp);
-                    $crAcDequant = $this->dequantize4x4($quantCr[$blk], 4, $chromaQp);
+                    // AC 存在：DC 放入[0] 一起 IDCT（直接调 idctFlat，省掉 2D flatten/expand）
+                    $cbAcDequant = $quantCb[$blk];
+                    $crAcDequant = $quantCr[$blk];
+                    $this->dequantize4x4($cbAcDequant, 5, $chromaQp);
+                    $this->dequantize4x4($crAcDequant, 4, $chromaQp);
                     $cbAcDequant[0] = $cbDcResidual;
                     $crAcDequant[0] = $crDcResidual;
-                    $cbBlock = array_fill(0, 4, array_fill(0, 4, 0));
-                    $crBlock = array_fill(0, 4, array_fill(0, 4, 0));
-                    for ($y = 0; $y < 4; $y++) for ($x = 0; $x < 4; $x++) {
-                        $cbBlock[$y][$x] = $cbAcDequant[$y * 4 + $x];
-                        $crBlock[$y][$x] = $crAcDequant[$y * 4 + $x];
-                    }
-                    $cbIdct = $this->idct4x4($cbBlock);
-                    $crIdct = $this->idct4x4($crBlock);
+                    $this->idctFlat($cbAcDequant);
+                    $this->idctFlat($crAcDequant);
                     for ($y = 0; $y < 4; $y++) for ($x = 0; $x < 4; $x++) {
                         $py = $by * 4 + $y;
                         $px = $bx * 4 + $x;
                         $f = $py * 8 + $px;
-                        $vu = $cbPred[$f] + $cbIdct[$y][$x];
-                        $vv = $crPred[$f] + $crIdct[$y][$x];
+                        $vu = $cbPred[$f] + $cbAcDequant[$y * 4 + $x];
+                        $vv = $crPred[$f] + $crAcDequant[$y * 4 + $x];
                         $reconU[$f] = chr(max(0, min(255, $vu)));
                         $reconV[$f] = chr(max(0, min(255, $vv)));
                     }
@@ -395,17 +399,20 @@ trait InterPredTrait
         $bits .= $this->se($mvdX);
         $bits .= $this->se($mvdY);
 
-        // CBP编码（P帧使用Inter映射表）
+        // CBP编码（P帧使用Inter映射表）——预建反向查找表，省掉每宏块 array_search O(n)
         // Inter模式CBP映射表 (codeNum -> cbp)，必须与解码器GOLOMB_TO_INTER_CBP完全一致
-        $interCbpMap = [
-            0, 16, 1, 2, 4, 8, 32, 3, 5, 10, 12, 15, 47, 7, 11, 13,
-            14, 6, 9, 31, 35, 37, 42, 44, 33, 34, 36, 40, 39, 43, 45, 46,
-            17, 18, 20, 24, 19, 21, 26, 28, 23, 27, 29, 30, 22, 25, 38, 41,
-        ];
+        static $cbpFullToCode = null;
+        if ($cbpFullToCode === null) {
+            $interCbpMap = [
+                0, 16, 1, 2, 4, 8, 32, 3, 5, 10, 12, 15, 47, 7, 11, 13,
+                14, 6, 9, 31, 35, 37, 42, 44, 33, 34, 36, 40, 39, 43, 45, 46,
+                17, 18, 20, 24, 19, 21, 26, 28, 23, 27, 29, 30, 22, 25, 38, 41,
+            ];
+            $cbpFullToCode = array_flip($interCbpMap);
+        }
         // 查找完整CBP（亮度低4位 | 色度高2位）对应的codeNum
         $cbpFull = ($cbpLuma & 0x0F) | (($cbpChroma & 0x03) << 4);
-        $cbpCode = array_search($cbpFull, $interCbpMap);
-        if ($cbpCode === false) $cbpCode = 0;
+        $cbpCode = $cbpFullToCode[$cbpFull] ?? 0;
         $bits .= $this->ue($cbpCode);
 
         // mb_qp_delta：CBP（含色度）非零时解码器必读取，delta=0 表示沿用 slice QP

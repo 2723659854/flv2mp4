@@ -265,14 +265,22 @@ trait MotionTrait
         $bufW = $blockW + 12;
 
         $xs = [];
-        for ($x = -8; $x <= $blockW + 8; $x++) {
-            $rx = $baseX + $x;
-            $xs[$x + 8] = $rx < 0 ? 0 : ($rx >= $stride ? $stride - 1 : $rx);
-        }
         $ys = [];
-        for ($y = -8; $y <= $blockH + 8; $y++) {
-            $ry = $baseY + $y;
-            $ys[$y + 8] = $ry < 0 ? 0 : ($ry >= $height ? $height - 1 : $ry);
+        static $spCache = [];
+        $spKey = "sp{$stride},{$height},{$baseX},{$baseY},{$blockW},{$blockH}";
+        if (isset($spCache[$spKey])) {
+            $xs = $spCache[$spKey]['xs'];
+            $ys = $spCache[$spKey]['ys'];
+        } else {
+            for ($x = -8; $x <= $blockW + 8; $x++) {
+                $rx = $baseX + $x;
+                $xs[$x + 8] = $rx < 0 ? 0 : ($rx >= $stride ? $stride - 1 : $rx);
+            }
+            for ($y = -8; $y <= $blockH + 8; $y++) {
+                $ry = $baseY + $y;
+                $ys[$y + 8] = $ry < 0 ? 0 : ($ry >= $height ? $height - 1 : $ry);
+            }
+            $spCache[$spKey] = ['xs' => $xs, 'ys' => $ys];
         }
 
         $hFull = $skipQuarter ? null : [];
@@ -446,12 +454,20 @@ trait MotionTrait
         $sad = 0;
 
         $xs = [];
-        for ($x = -2; $x < $blockW + 3; $x++) {
-            $xs[$x + 2] = max(0, min($stride - 1, $intX + $x));
-        }
         $ys = [];
-        for ($y = -2; $y < $blockH + 3; $y++) {
-            $ys[$y + 2] = max(0, min($height - 1, $intY + $y));
+        static $coordCache = [];
+        $cacheKey = "mc{$stride},{$height},{$intX},{$intY},{$blockW},{$blockH}";
+        if (isset($coordCache[$cacheKey])) {
+            $xs = $coordCache[$cacheKey]['xs'];
+            $ys = $coordCache[$cacheKey]['ys'];
+        } else {
+            for ($x = -2; $x < $blockW + 3; $x++) {
+                $xs[$x + 2] = max(0, min($stride - 1, $intX + $x));
+            }
+            for ($y = -2; $y < $blockH + 3; $y++) {
+                $ys[$y + 2] = max(0, min($height - 1, $intY + $y));
+            }
+            $coordCache[$cacheKey] = ['xs' => $xs, 'ys' => $ys];
         }
 
         $h = [];

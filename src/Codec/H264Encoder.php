@@ -498,6 +498,8 @@ class H264Encoder
     public int $motionWorkers = 4;
     public int $motionRange = 32;
     public bool $fastMotion = false;
+    /** I4x4 帧内模式剪枝：只评估常用 4 种 (DC/Vertical/Horizontal/DiagonalDownLeft)，跳过 5-8 角模式 */
+    public bool $fastIntraPrune = false;
     public array $motionWorkerResults = [];
 
     /**
