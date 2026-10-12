@@ -58,7 +58,7 @@ final class HlsScaleWorkerServer
                 foreach ($upstreamOutputs as $id => $buffer) if ($buffer !== '') $write[] = $upstreams[$id];
                 foreach ($downstreams as $name => $socket) if ($outputs[$name] !== '') $write[] = $socket;
                 $except = null;
-                @stream_select($read, $write, $except, 0, 2000);
+                @stream_select($read, $write, $except, 0, 1);
 
                 foreach ($upstreams as $id => $socket) {
                     if (!in_array($socket, $read, true)) continue;

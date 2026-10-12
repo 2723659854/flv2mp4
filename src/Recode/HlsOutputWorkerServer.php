@@ -95,7 +95,7 @@ final class HlsOutputWorkerServer
                     continue;
                 }
                 $except = null;
-                if (@stream_select($read, $write, $except, 0, 2000) === false) continue;
+                if (@stream_select($read, $write, $except, 0, 1) === false) continue;
                 if ($ctrlServer !== null && in_array($ctrlServer, $read, true)) {
                     $conn = @stream_socket_accept($ctrlServer, 0);
                     if ($conn !== false) {

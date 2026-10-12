@@ -60,7 +60,7 @@ final class HlsDecoderWorkerServer
             stream_set_blocking($ctrlServer, false);
         }
         $downstream = $this->connect($outputAddress);
-        $upstream = @stream_socket_accept($server, 15);
+        $upstream = @stream_socket_accept($server, 5);
         fclose($server);
         if ($upstream === false) throw new RuntimeException('解码进程等待主进程连接超时');
         stream_set_blocking($upstream, false);
@@ -105,7 +105,7 @@ final class HlsDecoderWorkerServer
                 $write = $output === '' ? [] : [$downstream];
                 if ($upOutput !== '') $write[] = $upstream;
                 $except = null;
-                @stream_select($read, $write, $except, 0, 10);
+                @stream_select($read, $write, $except, 0, 1);
                 if ($ctrlServer !== null && in_array($ctrlServer, $read, true)) {
                     $conn = @stream_socket_accept($ctrlServer, 0);
                     if ($conn !== false) {
