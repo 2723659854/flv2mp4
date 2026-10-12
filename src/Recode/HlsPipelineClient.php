@@ -24,10 +24,9 @@ final class HlsPipelineClient
 
     public function process(string $flvFile): void
     {
-        $workerCount = max(1, min(8, $this->decodeWorkers));
+        // 严格按配置值创建解码 worker，不再按 GOP 数收敛或 min(8,...) 硬上限
+        $workerCount = max(1, $this->decodeWorkers);
         $sourceInfo = $this->scanSource($flvFile);
-        $gopCount = $sourceInfo['gopCount'];
-        if ($gopCount > 0) $workerCount = max(1, min($workerCount, $gopCount));
         // 抽帧目标帧率：各 profile fps>0 的最小值（多 profile 共享一路解码，只能按最低帧率抽一次）；
         // fps=0 表示该 profile 保持源帧率；仅当目标帧率低于源帧率时才抽帧（不升帧）
         $targetFps = 0.0;

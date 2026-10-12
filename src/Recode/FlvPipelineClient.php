@@ -208,36 +208,20 @@ final class FlvPipelineClient
     }
 
     /**
-     * 按 GOP 数量自适应规划进程布局，返回 [解码worker数, 每worker运动估计进程数]
+     * 进程布局：严格按配置值创建，不再自适应规划。
+     * 配置多少解码 worker 就起多少，每个 worker 的运动进程数：
+     *   fastMotion=true → 1（已缩小搜索范围到 8px，第 2 个运动进程只增争用）
+     *   fastMotion=false → motionWorkers 配置值
      *
-     * fastMotion 快速路径（与直播流水线同款布局，1080p 源实测较旧 4×2 布局提速约 1/3）：
-     *   每 GOP worker 仅 1 个运动进程（fastMotion 已缩小搜索，第 2 个运动进程只增争用），
-     *   解码 worker 扩张到 decode_workers（按 GOP 数收敛，多余 worker 只会空转）。
-     *
-     * 旧路径（fastMotion 关闭）：每 worker 的运动进程 M=2 为甜点——
-     * 帧内条带并行超过 2 路后，运动计算已不是瓶颈，多出的子进程只增加冷启动/调度开销
-     * （90帧片段 2x2=10.4s vs 2x4=12.4s；387帧片段 4x2=22.2s vs 4x4=25.4s）。
-     * 因此运动预算 motion_budget 全部用于扩张解码 worker（GOP 并行）：
-     *   M = min(2, 配置motionWorkers)
-     *   D = min(decode_workers上限, GOP数, floor(budget / M))
-     * 例（budget=8）：GOP=1 → 1×2；GOP=2 → 2×2；GOP≥4 → 4×2。
-     * 无法统计 GOP（gopCount<=0）时退回配置原值。
-     *
-     * @return array{0:int,1:int}
+     * @return array{0:int,1:int} [解码worker数, 每worker运动估计进程数]
      */
     private function planWorkers(int $gopCount): array
     {
-        $decodeMax = max(1, min(8, (int)($this->config['decodeWorkers'] ?? 4)));
+        $d = max(1, (int)($this->config['decodeWorkers'] ?? 4));
         if (!empty($this->config['fastMotion'])) {
-            return [$gopCount > 0 ? min($decodeMax, $gopCount) : $decodeMax, 1];
+            return [$d, 1];
         }
-        $configuredMotion = max(1, (int)($this->config['motionWorkers'] ?? 2));
-        if ($gopCount <= 0) {
-            return [$decodeMax, $configuredMotion];
-        }
-        $budget = max(1, (int)($this->config['motionBudget'] ?? 8));
-        $m = min(2, $configuredMotion);
-        $d = min($decodeMax, $gopCount, max(1, intdiv($budget, $m)));
+        $m = max(1, (int)($this->config['motionWorkers'] ?? 2));
         return [$d, $m];
     }
 
