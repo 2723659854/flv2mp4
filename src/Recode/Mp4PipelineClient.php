@@ -257,19 +257,16 @@ final class Mp4PipelineClient
     }
 
     /**
-     * 进程布局：严格按配置值创建，不再自适应规划。
-     * 配置多少解码 worker 就起多少，每个 worker 的运动进程数：
-     *   fastMotion=true → 1（已缩小搜索范围到 8px，第 2 个运动进程只增争用）
-     *   fastMotion=false → motionWorkers 配置值
+     * 进程布局：严格按配置值创建。
+     * 配置多少解码 worker 就起多少，每 worker 的运动进程数 = motionWorkers 配置值。
+     * fastMotion 只负责缩小运动搜索范围到 8px（已在 H264Encoder.setFastMotion 里执行），
+     * 不干预每 worker 的运动进程数——用户配 motionWorkers=2 就是每个解码 worker 带 2 个运动进程。
      *
      * @return array{0:int,1:int} [解码worker数, 每worker运动估计进程数]
      */
     private function planWorkers(int $gopCount): array
     {
         $d = max(1, (int)($this->config['decodeWorkers'] ?? 4));
-        if (!empty($this->config['fastMotion'])) {
-            return [$d, 1];
-        }
         $m = max(1, (int)($this->config['motionWorkers'] ?? 2));
         return [$d, $m];
     }

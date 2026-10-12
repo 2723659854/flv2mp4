@@ -280,14 +280,9 @@ class PurePhpHlsGenerator
     {
         if (!file_exists($flvFile)) throw new \Exception("FLV file not found: {$flvFile}");
         if ($this->multi) {
-            // fastMotion 快速路径：与直播/FLV/MP4 流水线同款布局——
-            // 每个解码 worker 仅 1 个运动子进程（fastMotion 已缩小搜索，第 2 个只增大小核争用），
-            // 并行度全部交给 decode_workers 个 GOP worker。关闭时沿用 profile 原 motionWorkers。
-            $pipelineProfiles = $this->profiles;
-            foreach ($pipelineProfiles as $name => $profile) {
-                if (!empty($profile['fastMotion'])) $pipelineProfiles[$name]['motionWorkers'] = 1;
-            }
-            (new HlsPipelineClient($pipelineProfiles, $this->outputDir, $this->maxFrames, $this->decodeWorkers))->process($flvFile);
+            // 严格按配置值创建——motionWorkers 配置多少就是每解码 worker 带多少运动进程。
+            // fastMotion 只在 H264Encoder.setFastMotion 里缩小运动搜索范围到 8px，不干预进程数。
+            (new HlsPipelineClient($this->profiles, $this->outputDir, $this->maxFrames, $this->decodeWorkers))->process($flvFile);
             return;
         }
 
