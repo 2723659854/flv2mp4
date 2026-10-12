@@ -328,7 +328,6 @@ $config = [
     'watermarkFile'  => __DIR__."/watermark_80x16.yuv",
     'fastMotion'     => true,
     'motionWorkers'  => 1,
-    'motionBudget'   => 8,
     'decodeWorkers'  => 12,
     'segmentDuration'=> 3,
 ];
