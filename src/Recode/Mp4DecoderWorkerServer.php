@@ -75,7 +75,7 @@ final class Mp4DecoderWorkerServer
                 }
                 $write = $output === '' ? [] : [$downstream];
                 if ($upOutput !== '') $write[] = $upstream;
-                $except = null; @stream_select($read, $write, $except, 0, 2000);
+                $except = null; @stream_select($read, $write, $except, 0, 1);
                 if (in_array($upstream, $read, true)) {
                     while (true) {
                         $chunk = @fread($upstream, 65536);
@@ -103,9 +103,11 @@ final class Mp4DecoderWorkerServer
                     }
                     $queuedGops = $bufferedGopEnds;
                 }
-                // 单次 select 唤醒（Windows 下粒度约 10~15ms）批量解码全部已缓冲事件，
-                // 下游输出积压到高水位时停止，让反压继续向上游传播，避免长文件下缓冲超限
-                while (strlen($output) < HlsPipelineProtocol::HIGH_WATERMARK) {
+                // 单次 select 唤醒最多处理 2 个事件即返回 select 循环（与 HlsDecoderWorkerServer 同策略）：
+                // 防止 GOP 边界多帧背靠背同步阻塞（IDR encodeSliceBody 或 P 帧 collect 均可能阻塞数百ms），
+                // 期间 upstream/downstream I/O 冻结 → 反压级联导致 tags/s 归零。
+                $eventBudget = 2;
+                while ($eventBudget-- > 0 && strlen($output) < HlsPipelineProtocol::HIGH_WATERMARK) {
                     $events = HlsPipelineProtocol::take($input, 1);
                     if ($events === []) break;
                     $event = $events[0];
@@ -270,6 +272,8 @@ final class Mp4DecoderWorkerServer
         $this->deferredOutput = '';
         $this->decoder = new H264Decoder();
         $this->encoder->resetGopState();
+        // 每个 GOP 边界主动收一次 cycle GC（与 HlsDecoderWorkerServer 同策略）
+        gc_collect_cycles();
     }
 
     private function extractNals(string $data): array
