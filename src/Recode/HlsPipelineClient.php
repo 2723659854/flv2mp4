@@ -24,9 +24,15 @@ final class HlsPipelineClient
 
     public function process(string $flvFile): void
     {
-        // 严格按配置值创建解码 worker，不再按 GOP 数收敛或 min(8,...) 硬上限
-        $workerCount = max(1, $this->decodeWorkers);
+        // 静态文件自动规划：解码进程数 = min(GOP数, CPU逻辑核心数, 配置上限)
+        // 基准实测（test.flv GOP=2 / test1.flv GOP=7）：解码进程数 = GOP 数时耗时最短，超过无收益
         $sourceInfo = $this->scanSource($flvFile);
+        $gopCount = $sourceInfo['gopCount'] ?? 0;
+        $cpuCores = $this->detectCpuCores();
+        $configMax = max(1, $this->decodeWorkers);
+        $workerCount = $gopCount > 0
+            ? min($gopCount, $cpuCores, $configMax)
+            : min($cpuCores, $configMax);
         // 抽帧目标帧率：各 profile fps>0 的最小值（多 profile 共享一路解码，只能按最低帧率抽一次）；
         // fps=0 表示该 profile 保持源帧率；仅当目标帧率低于源帧率时才抽帧（不升帧）
         $targetFps = 0.0;
@@ -289,6 +295,23 @@ final class HlsPipelineClient
             $off += $length;
         }
         return false;
+    }
+
+    /** 跨平台 CPU 逻辑核心数检测，失败回退 4 */
+    private function detectCpuCores(): int
+    {
+        static $cores = null;
+        if ($cores !== null) return $cores;
+        if (PHP_OS_FAMILY === 'Windows') {
+            $cores = max(1, (int)(getenv('NUMBER_OF_PROCESSORS') ?: 4));
+        } elseif (PHP_OS_FAMILY === 'Darwin') {
+            $out = @shell_exec('sysctl -n hw.logicalcpu 2>/dev/null');
+            $cores = $out ? max(1, (int)trim($out)) : 4;
+        } else {
+            $out = @shell_exec('nproc 2>/dev/null');
+            $cores = $out ? max(1, (int)trim($out)) : 4;
+        }
+        return $cores;
     }
 
     /**

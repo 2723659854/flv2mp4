@@ -208,18 +208,39 @@ final class FlvPipelineClient
     }
 
     /**
-     * 进程布局：严格按配置值创建。
-     * 配置多少解码 worker 就起多少，每 worker 的运动进程数 = motionWorkers 配置值。
-     * fastMotion 只负责缩小运动搜索范围到 8px（已在 H264Encoder.setFastMotion 里执行），
-     * 不干预每 worker 的运动进程数——用户配 motionWorkers=2 就是每个解码 worker 带 2 个运动进程。
+     * 静态文件自动规划：解码进程数 = min(GOP数, CPU逻辑核心数, 配置上限)。
+     * 基准实测（test.flv GOP=2 / test1.flv GOP=7）：解码进程数 = GOP 数时耗时最短，
+     * 超过 GOP 数无收益。配置 decodeWorkers 仅作上限保护（用户想给别的进程留 CPU 时用）。
+     * motionWorkers 按配置值，每解码 worker 各带 motionWorkers 个运动子进程。
      *
      * @return array{0:int,1:int} [解码worker数, 每worker运动估计进程数]
      */
     private function planWorkers(int $gopCount): array
     {
-        $d = max(1, (int)($this->config['decodeWorkers'] ?? 4));
+        $cpuCores = $this->detectCpuCores();
+        $configMax = max(1, (int)($this->config['decodeWorkers'] ?? $cpuCores));
+        $d = $gopCount > 0
+            ? min($gopCount, $cpuCores, $configMax)
+            : min($cpuCores, $configMax);
         $m = max(1, (int)($this->config['motionWorkers'] ?? 2));
         return [$d, $m];
+    }
+
+    /** 跨平台 CPU 逻辑核心数检测，失败回退 4 */
+    private function detectCpuCores(): int
+    {
+        static $cores = null;
+        if ($cores !== null) return $cores;
+        if (PHP_OS_FAMILY === 'Windows') {
+            $cores = max(1, (int)(getenv('NUMBER_OF_PROCESSORS') ?: 4));
+        } elseif (PHP_OS_FAMILY === 'Darwin') {
+            $out = @shell_exec('sysctl -n hw.logicalcpu 2>/dev/null');
+            $cores = $out ? max(1, (int)trim($out)) : 4;
+        } else {
+            $out = @shell_exec('nproc 2>/dev/null');
+            $cores = $out ? max(1, (int)trim($out)) : 4;
+        }
+        return $cores;
     }
 
     private function dispatchVideoTag(
