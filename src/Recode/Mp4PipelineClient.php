@@ -271,7 +271,7 @@ final class Mp4PipelineClient
      */
     private function planWorkers(int $gopCount): array
     {
-        $decodeMax = max(1, min(8, (int)($this->config['decode_workers'] ?? 4)));
+        $decodeMax = max(1, min(8, (int)($this->config['decodeWorkers'] ?? 4)));
         $configuredMotion = max(1, (int)($this->config['motionWorkers'] ?? 2));
         // fastMotion 快速路径：与直播流水线同款布局——
         // 每个解码 worker 只带 1 个运动子进程，运动预算全部用于扩张 GOP 并行度
@@ -282,7 +282,7 @@ final class Mp4PipelineClient
         if ($gopCount <= 0) {
             return [$decodeMax, $configuredMotion];
         }
-        $budget = max(1, (int)($this->config['motion_budget'] ?? 8));
+        $budget = max(1, (int)($this->config['motionBudget'] ?? 8));
         $m = min(2, $configuredMotion);
         $d = min($decodeMax, $gopCount, max(1, intdiv($budget, $m)));
         return [$d, $m];

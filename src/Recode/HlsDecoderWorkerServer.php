@@ -41,7 +41,6 @@ final class HlsDecoderWorkerServer
             $encoder = new H264Encoder();
             $encoder->motionWorkers = max(1, (int)($profile['motionWorkers'] ?? 8));
             if (!empty($profile['fastMotion'])) $encoder->setFastMotion(true);
-            if (!empty($profile['fastIntraPrune'])) $encoder->fastIntraPrune = true;
             $this->encoders[$name] = $encoder;
         }
         // 每个 GOP worker 独立完成缩放/水印，避免输出端再次处理视频帧。
@@ -286,7 +285,7 @@ final class HlsDecoderWorkerServer
             $targetHeight = ($profile['height'] ?? 0) > 0 ? (int)$profile['height'] : $this->height;
             $variant = ($targetWidth !== $this->width || $targetHeight !== $this->height)
                 ? $this->scaler->scaleYUV420P($frame['data'], $this->width, $this->height, $targetWidth, $targetHeight) : $frame['data'];
-            if (!empty($profile['watermark']) && !empty($profile['watermark_file'])) $variant = $this->applyWatermark($variant, $targetWidth, $targetHeight, $profile['watermark_file']);
+            if (!empty($profile['watermark']) && !empty($profile['watermarkFile'])) $variant = $this->applyWatermark($variant, $targetWidth, $targetHeight, $profile['watermarkFile']);
             $encoder = $this->encoders[$name];
             $encoder->setResolution($targetWidth, $targetHeight);
             $encoder->setBitrate((int)($profile['bitrate'] ?? 500000));

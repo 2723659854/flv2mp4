@@ -95,9 +95,9 @@ class Mp4Recoder
         $this->targetQp = $config['qp'] ?? 26;
         $this->validateConfig();
 
-        if (!empty($config['watermark']) && !empty($config['watermark_file'])) {
+        if (!empty($config['watermark']) && !empty($config['watermarkFile'])) {
             $this->watermarkEnabled = true;
-            $this->watermarkFile = $config['watermark_file'];
+            $this->watermarkFile = $config['watermarkFile'];
             $this->loadWatermark();
         }
 

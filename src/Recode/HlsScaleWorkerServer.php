@@ -177,7 +177,7 @@ final class HlsScaleWorkerServer
                     ? $yuv : $this->scaler->scaleYUV420P($yuv, $sourceWidth, $sourceHeight, $width, $height);
             }
             $variant = $scaledCache[$key];
-            if (!empty($profile['watermark']) && !empty($profile['watermark_file'])) $variant = $this->applyWatermark($variant, $width, $height, $profile['watermark_file']);
+            if (!empty($profile['watermark']) && !empty($profile['watermarkFile'])) $variant = $this->applyWatermark($variant, $width, $height, $profile['watermarkFile']);
             $profileMeta = $meta;
             $profileMeta['variants'] = [$name => ['offset' => 0, 'length' => strlen($variant), 'width' => $width, 'height' => $height]];
             $result[$name] = HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $profileMeta, pack('N', strlen($body)) . $body . $variant);

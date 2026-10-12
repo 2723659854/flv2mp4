@@ -509,7 +509,12 @@ class H264Encoder
     public function setFastMotion(bool $enabled = true): void
     {
         $this->fastMotion = $enabled;
-        if ($enabled) $this->motionRange = min($this->motionRange, 8);
+        if ($enabled) {
+            $this->motionRange = min($this->motionRange, 8);
+            // 快速编码 = fastMotion + fastIntraPrune 联合生效：composer 包对外只暴露一个开关，
+            // 内部同时收缩运动范围到 8px + 帧内跳过 5-8 角模式，保证速度-画质平衡的甜点。
+            $this->fastIntraPrune = true;
+        }
     }
 
     public function warmupMotionWorkers(): void

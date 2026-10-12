@@ -199,7 +199,7 @@ final class Mp4DecoderWorkerServer
         $srcW = (int)$pipeline['srcWidth']; $srcH = (int)$pipeline['srcHeight'];
         $outW = (int)$pipeline['outputWidth']; $outH = (int)$pipeline['outputHeight'];
         $yuv = ($srcW === $outW && $srcH === $outH) ? $frame['data'] : $this->scaler->scaleYUV420P($frame['data'], $srcW, $srcH, $outW, $outH);
-        if (!empty($this->config['watermark']) && !empty($this->config['watermark_file'])) $yuv = $this->applyWatermark($yuv, $outW, $outH, $this->config['watermark_file']);
+        if (!empty($this->config['watermark']) && !empty($this->config['watermarkFile'])) $yuv = $this->applyWatermark($yuv, $outW, $outH, $this->config['watermarkFile']);
         // GOP worker 内直接完成编码（运动估计走本 worker 的子进程），输出侧只做封装
         $this->encoder->setResolution($outW, $outH);
         if ((int)($this->config['bitrate'] ?? 0) > 0) $this->encoder->setBitrate((int)$this->config['bitrate']);

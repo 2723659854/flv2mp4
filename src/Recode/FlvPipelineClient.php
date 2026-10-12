@@ -227,7 +227,7 @@ final class FlvPipelineClient
      */
     private function planWorkers(int $gopCount): array
     {
-        $decodeMax = max(1, min(8, (int)($this->config['decode_workers'] ?? 4)));
+        $decodeMax = max(1, min(8, (int)($this->config['decodeWorkers'] ?? 4)));
         if (!empty($this->config['fastMotion'])) {
             return [$gopCount > 0 ? min($decodeMax, $gopCount) : $decodeMax, 1];
         }
@@ -235,7 +235,7 @@ final class FlvPipelineClient
         if ($gopCount <= 0) {
             return [$decodeMax, $configuredMotion];
         }
-        $budget = max(1, (int)($this->config['motion_budget'] ?? 8));
+        $budget = max(1, (int)($this->config['motionBudget'] ?? 8));
         $m = min(2, $configuredMotion);
         $d = min($decodeMax, $gopCount, max(1, intdiv($budget, $m)));
         return [$d, $m];

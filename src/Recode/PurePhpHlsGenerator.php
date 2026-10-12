@@ -94,7 +94,7 @@ class PurePhpHlsGenerator
      *
      * 支持两种配置形态：
      * 1. 一维单路配置（与 FlvRecoder/Mp4Recoder 同形，推荐）：
-     *    ['width'=>..,'height'=>..,'bitrate'=>..,'fps'=>..,'qp'=>..,'decode_workers'=>6,'motionWorkers'=>6,...]
+     *    ['width'=>..,'height'=>..,'bitrate'=>..,'fps'=>..,'qp'=>..,'decodeWorkers'=>6,'motionWorkers'=>6,...]
      *    分片与 index.m3u8 直接输出到 outputDir 根部，不生成 master.m3u8；
      *    decode_workers 从配置读取，避免与 recode 入口配置不一致。
      * 2. 多码率 profile map（向后兼容）：['360p' => [...], '240p' => [...]]
@@ -111,7 +111,7 @@ class PurePhpHlsGenerator
         // 一维配置：所有值均为标量；profile map：值均为数组
         if ($configOrProfiles !== [] && count(array_filter($configOrProfiles, 'is_array')) === 0) {
             $this->singleProfile = true;
-            $decodeWorkers = (int)($configOrProfiles['decode_workers'] ?? $decodeWorkers);
+            $decodeWorkers = (int)($configOrProfiles['decodeWorkers'] ?? $decodeWorkers);
             $this->profiles = ['' => $configOrProfiles];
         } else {
             $this->profiles = $configOrProfiles;
@@ -128,7 +128,6 @@ class PurePhpHlsGenerator
             $this->encoders[$name] = new H264Encoder();
             $this->encoders[$name]->motionWorkers = max(1, (int)($profile['motionWorkers'] ?? 8));
             if (!empty($profile['fastMotion'])) $this->encoders[$name]->setFastMotion(true);
-            if (!empty($profile['fastIntraPrune'])) $this->encoders[$name]->fastIntraPrune = true;
             $dir = $this->profileDir($name) . '/';
             if (!is_dir($dir)) mkdir($dir, 0777, true);
 
@@ -144,8 +143,8 @@ class PurePhpHlsGenerator
             $this->lastDts[$name] = -1;
             $this->segmentFirstFrame[$name] = true;
 
-            if (!empty($profile['watermark']) && !empty($profile['watermark_file'])) {
-                $this->profileWatermark[$name] = $this->loadWatermarkFile($profile['watermark_file']);
+            if (!empty($profile['watermark']) && !empty($profile['watermarkFile'])) {
+                $this->profileWatermark[$name] = $this->loadWatermarkFile($profile['watermarkFile']);
             } else {
                 $this->profileWatermark[$name] = null;
             }

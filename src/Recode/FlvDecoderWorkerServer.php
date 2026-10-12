@@ -209,7 +209,7 @@ final class FlvDecoderWorkerServer
         $h = ($this->config['height'] ?? 0) > 0 ? (int)$this->config['height'] : $this->height;
         $needTranscode = ($w !== $this->width || $h !== $this->height)
             || (int)($this->config['bitrate'] ?? 0) > 0 || $dropFrames
-            || (!empty($this->config['watermark']) && !empty($this->config['watermark_file']));
+            || (!empty($this->config['watermark']) && !empty($this->config['watermarkFile']));
         // 无需转码（纯直通）时原封不动转发，输出侧同样判定为直通
         if (!$needTranscode) return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, $body);
         // 抽帧丢弃的帧仍需解码以维持 GOP 内 P 链参考，否则后续保留帧会参考错误画面出现马赛克
@@ -222,7 +222,7 @@ final class FlvDecoderWorkerServer
         $frame = $this->decoder->decode($nals, false, true, false);
         if (!$frame || empty($frame['data'])) { unset($meta['drop']); return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, $body); }
         $yuv = ($w === $this->width && $h === $this->height) ? $frame['data'] : $this->scaler->scaleYUV420P($frame['data'], $this->width, $this->height, $w, $h);
-        if (!empty($this->config['watermark']) && !empty($this->config['watermark_file'])) $yuv = $this->applyWatermark($yuv, $w, $h, $this->config['watermark_file']);
+        if (!empty($this->config['watermark']) && !empty($this->config['watermarkFile'])) $yuv = $this->applyWatermark($yuv, $w, $h, $this->config['watermarkFile']);
         // GOP worker 内直接完成编码（运动估计走本 worker 的子进程），输出侧只做封装
         $this->encoder->setResolution($w, $h);
         if ((int)($this->config['bitrate'] ?? 0) > 0) $this->encoder->setBitrate((int)$this->config['bitrate']);
