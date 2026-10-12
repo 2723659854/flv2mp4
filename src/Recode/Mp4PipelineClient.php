@@ -151,7 +151,7 @@ final class Mp4PipelineClient
                                 $outbound[$currentWorker] .= $frame;
                             }
                             if ($this->maxFrames !== null && $videoCount >= $this->maxFrames) { echo "Reached max frames limit ({$this->maxFrames}), stopping...\n"; $allEnqueued = true; break; }
-                            if ($videoCount % 10 === 0) echo "Processed {$videoCount} video frames\n";
+                            if ($videoCount % 50 === 0) echo "Processed {$videoCount} video frames\n";
                         } else {
                             if ($this->maxFrames !== null && $videoCount >= $this->maxFrames) continue;
                             $frame = HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $sequence++, [

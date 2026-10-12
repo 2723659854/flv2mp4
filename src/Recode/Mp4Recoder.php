@@ -730,7 +730,7 @@ class Mp4Recoder
                     echo "Reached max frames limit ({$this->maxFrames})\n";
                     break;
                 }
-                if ($videoCount % 10 === 0) {
+                if ($videoCount % 50 === 0) {
                     echo "Processed {$videoCount} video frames\n";
                 }
             } else {
