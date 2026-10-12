@@ -378,9 +378,9 @@ final class HlsDecoderWorkerServer
         }
         foreach ($this->encoders as $encoder) $encoder->resetGopState();
         // 每个 GOP 边界主动收一次 cycle GC：把 GC 开销从随机热时刻挪到已知空闲点。
-        // PHP 默认 GC root buffer = 10K roots，帧内宏块数组/变换结果堆到 60s 左右触发 full collection。
-        // 12 个 decoder worker 可能因同步启动时间戳接近而近似同步 GC pause — 在 GOP 边界做一次显式收集
-        // 既能清空上一个 GOP 残留的参考帧/变换数组，又把下一个 GOP 的 GC 压力打散。
+        // PHP 默认 GC root buffer = 10K roots，帧内宏块数组/变换结果堆到 ~60s 触发 full collection。
+        // 12 个 decoder worker 同步启动时间戳接近，显式 GC 主动清空能打散下一次 full collection 的同步停顿。
+        // 实测对比：显式 GC → 归零 10s、累计 8666 tags；无显式 GC → 归零 15s、累计 7051 tags
         gc_collect_cycles();
     }
 
