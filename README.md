@@ -430,75 +430,70 @@ WatermarkUtil::generateFromImage(__DIR__."/watermark_80x16.png",__DIR__ . '/test
 
 ## Performance Test Report
 
-### Test Environment
+###  Test Environment
 
-| Item | Windows Environment | Linux Environment (Docker) |
+| Item | Windows Environment | Linux (Docker) Environment |
 | :--- | :--- | :--- |
-| **Operating System** | Windows | Linux (Docker) |
-| **CPU** | 16 cores (physical) | 14 cores (physical) |
-| **Memory** | 15.8 GB (available) | 4 GB (available) |
-| **Worker Processes** | 8 ME sub-processes | 8 ME sub-processes |
-| **PHP Version** | 8.4.3 (CLI) | 8.1.24 (CLI) |
-| **Test Clip** | `test.flv`, 3.02 s, 720×742, 30 fps | Same as left |
-| **Output Specs** | `output.flv`, 360×360, 10 fps | Same as left |
-| **Encoding Settings** | H.264 Constrained Baseline, AAC 128 kbps | Same as left |
+| **CPU** | Intel Core i5-14400 (10 cores, 16 threads, 6P+4E) | Intel Core i5-14400 (10 cores, 16 threads, 6P+4E) |
+| **Memory** | 31.7 GB | 16 GB |
+| **PHP Version** | **8.1.3 (CLI)** | **8.1.24 (CLI)** |
+| **Run Mode** | Pure PHP CLI, GOP distributed multi-process | Pure PHP CLI, GOP distributed multi-process |
 
+> Note: The Linux environment is a Docker container running on the same i5-14400 physical machine.
 
-### Cross-Platform Test Results Comparison
+---
 
-| Output Format | Platform | Re-encoding Time | Time Ratio |
-| :--- | :--- | :--- | :--- |
-| **FLV Re-encoding** | Windows | 13 s | **~4.33×** |
-| **FLV Re-encoding** | Linux (Docker) | **7 s** | **~2.33×** |
-| **MP4 Re-encoding** | Windows | 13 s | **~4.33×** |
-| **MP4 Re-encoding** | Linux (Docker) | **8 s** | **~2.67×** |
-| **HLS (mpegts + m3u8)** | Windows | 13 s | **~4.33×** |
-| **HLS (mpegts + m3u8)** | Linux (Docker) | **8 s** | **~2.67×** |
+###  Test File Information
 
-**Note**: Test clip duration is 3.02 s; Time Ratio = Re-encoding Time ÷ 3.02 s.
+| File Name | Duration | Resolution | Frame Rate | Video Codec | Audio Codec | Video Bitrate | Audio Bitrate | Total Bitrate |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| `base3.flv` | 3.02 s | 960×540 | 30 fps | H.264 Constrained Baseline | AAC LC 48 kHz stereo | 1024 kb/s | 163 kb/s | 1152 kb/s |
+| `base.flv` | 48.49 s | 960×540 | 30 fps | H.264 Constrained Baseline | AAC LC 48 kHz stereo | 1024 kb/s | 163 kb/s | 1176 kb/s |
+| `fast.flv` | 410.94 s | 960×540 | 30 fps | H.264 Constrained Baseline | AAC LC 48 kHz stereo | 1024 kb/s | 163 kb/s | 1116 kb/s |
 
-### Long Video Test (7 min 5 s video)
+---
 
-| Platform | Re-encoding Time | Time Ratio |
-| :--- | :--- | :--- |
-| **Windows** | **179 s (2 min 59 s)** | **~0.42×** |
-| **Linux (Docker)** | **133 s (2 min 13 s)** | **~0.31×** |
+###  Transcoding Configuration
 
-**Note**: Video duration is 425 s; Time Ratio = Re-encoding Time ÷ 425 s.
+| Parameter | Value |
+| :--- | :--- |
+| **Output Resolution** | 480×270 |
+| **Output Frame Rate** | 15 fps |
+| **Video Bitrate** | 0 (QP mode) |
+| **QP** | 30 |
+| **Audio Bitrate** | 48 kb/s |
+| **Encoding Format** | H.264 Constrained Baseline + AAC |
+| **Distributed Mode** | GOP distributed multi-process |
+| **decodeWorkers** | 12 decoding processes |
+| **motionWorkers** | 1 (each decoding worker has 1 embedded motion estimation sub-process) |
+| **fastMotion** | true |
+| **segmentDuration** | 3 s (HLS only) |
 
+---
 
-### Optimization History
+###  Test Results
 
-| Optimization Stage | FLV | MP4 | HLS | Notes |
-|:---|:---|:---|:---|:---|
-| **Initial Version** | ~91 s | ~60 s (old) | **135 s** | Serial, no optimization |
-| **Algorithm-Level Optimization** | 60 s | — | 97 s | DCT butterfly unrolling, string slicing, reduced array_fill, quantization + Zigzag merged |
-| **Multi-Process Motion Estimation (4 processes)** | 51 s | — | 73 s | First introduction of distributed parallelism |
-| **HLS Muxing I/O Optimization** | — | — | 69 s | Batch writes, fewer file operations |
-| **Encoding Core Optimization** | 44 s | 44 s | 67 s | All-zero block skip, I/P frame QP strategy |
-| **Decoding Cache Optimization** | 41 s | 42 s | 64 s | Reuse of repeated calculations |
-| **OPcache + JIT Enabled** | 39 s | 39 s | 60 s | Runtime environment acceleration |
-| **Multi-Process Model Optimization (select, etc.)** | 33 s | — | — | Event-driven, process communication optimization |
-| **Further Fine-Tuning** | 32 s | — | — | Specific method not specified |
-| **Extreme Optimization (Windows)** | 28 s | 29 s | 37 s | Windows + PHP 8.4.3 + JIT |
-| **Linux Docker Deployment** | 23 s | 24 s | 31 s | Linux + PHP 8.1.24, OPcache disabled |
-| **GOP Distributed Multi-Process Decoding (Windows)** | 22 s | 22 s | 22 s | Windows platform |
-| **GOP Distributed Multi-Process Decoding (Linux)** | 17 s | 17 s | 17 s | Linux platform |
-| **Removed Repeated SHA256 for Reference Frames + Static Block ME Early Exit (Windows)** | 19 s | 19 s | 20 s | Windows platform |
-| **Removed Repeated SHA256 for Reference Frames + Static Block ME Early Exit (Linux)** | 16 s | 16 s | 17 s | Linux platform |
-| **Zero-Region Skip + Deep Decoding/Filtering Optimization (Windows)** | 18 s | 18 s | 19 s | 6-tap sliding recursion, Bs all-zero fast skip, skip memory write when filter result unchanged, CBP=0 whole-block skip, DPB lazy loading, `chr()` table lookup, on-demand unpack + cache |
-| **Zero-Region Skip + Deep Decoding/Filtering Optimization (Linux)** | 14 s | 14 s | 15 s | Same as above |
-| **Dropped-Frame Deblock Skip + BitReader Fast Path + Integer Plane Arrays (Windows)** | **16 s** | **16 s** | **17 s** | This optimization round |
-| **Dropped-Frame Deblock Skip + BitReader Fast Path + Integer Plane Arrays (Linux)** | **9 s** | **9 s** | **10 s** | Current best results |
-| **GOP Streaming Distribution + Reduced Search and Skip 1/4 Pixel** | - | - | - | Improved live streaming and long video compression efficiency |
+####  Windows Platform (PHP 8.1.3)
 
-**Notes:**
-- Test clip: `test.flv`, 3.02 s, 720×742, 30 fps; Output specs: 360×360, 10 fps.
-- Encoding settings: H.264 Constrained Baseline, AAC 128 kbps.
-- Best stable values taken from multiple test runs.
-- “—” indicates the format was not separately tested at this stage.
-- GOP distributed multi-process decoding is the latest optimization, achieving significant improvements on both Windows and Linux.
-- **Platform difference**: Linux 9 s vs Windows 16 s; the gap mainly comes from process scheduling efficiency and system call overhead.
+| File | Duration | FLV | MP4 | HLS |
+| :--- | :--- | :--- | :--- | :--- |
+| `base3.flv` | 3.02 s | 8 s (~2.65×) | 8 s (~2.65×) | 8 s (~2.65×) |
+| `base.flv` | 48.49 s | 40 s (~0.83×) | 40 s (~0.83×) | 40 s (~0.83×) |
+| `fast.flv` | 410.94 s | 249 s (~0.61×) | 256 s (~0.62×) | 253 s (~0.62×) |
+
+> Time Ratio = Re-encoding Time ÷ Video Duration.
+
+####  Linux (Docker) Platform (PHP 8.1.24)
+
+| File | Duration | FLV | MP4 | HLS |
+| :--- | :--- | :--- | :--- | :--- |
+| `base3.flv` | 3.02 s | 3 s (~0.99×) | 3 s (~0.99×) | 3 s (~0.99×) |
+| `base.flv` | 48.49 s | 26 s (~0.54×) | 26 s (~0.54×) | 26 s (~0.54×) |
+| `fast.flv` | 410.94 s | 186 s (~0.45×) | 189 s (~0.46×) | 191 s (~0.46×) |
+
+> Time Ratio = Re-encoding Time ÷ Video Duration.
+
+- Test results are affected by video complexity, computer hardware performance, and system load. Please refer to actual test results.
 
 ---
 
