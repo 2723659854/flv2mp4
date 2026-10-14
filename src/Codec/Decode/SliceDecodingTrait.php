@@ -25,6 +25,7 @@ trait SliceDecodingTrait
         $frameNumBits = $this->log2MaxFrameNumMinus4 + 4;
         $frameNum = $this->reader->readU($frameNumBits);
         $this->currFrameNum = $frameNum;
+
         if (!$this->frameMbsOnlyFlag) {
             $fieldPicFlag = $this->reader->readU(1);
             if ($fieldPicFlag) {
@@ -54,11 +55,13 @@ trait SliceDecodingTrait
             $redPicCnt = $this->reader->readUe();
         }
         if ($sliceType === 1) {
-            $this->reader->skip(1);
+            $this->directSpatialMvPred = (bool)$this->reader->readU(1);
         }
 
         $numRefIdxL0Active = $this->numRefIdxL0DefaultActive;
         $numRefIdxL1Active = $this->numRefIdxL1DefaultActive;
+        $this->numRefIdxL0Active = $numRefIdxL0Active;
+        $this->numRefIdxL1Active = $numRefIdxL1Active;
 
         if ($sliceType !== 2 && $sliceType !== 4) {
             $numRefIdxActiveOverrideFlag = $this->reader->readU(1);
@@ -68,29 +71,13 @@ trait SliceDecodingTrait
                 $this->numRefIdxL0Active = $numRefIdxL0Active;
                 if ($sliceType === 1) {
                     $numRefIdxL1Active = $this->reader->readUe() + 1;
+                    $this->numRefIdxL1Active = $numRefIdxL1Active;
                 }
-            } else {
-                $this->numRefIdxL0Active = $this->numRefIdxL0DefaultActive;
             }
         }
         
         if (!$isIDR) {
-            $maxFrameNum = 1 << ($this->log2MaxFrameNumMinus4 + 4);
-            $shortTermRefs = [];
-            foreach ($this->dpb as $entry) {
-                if (!$entry['isLongTerm']) {
-                    $fn = $entry['frameNum'];
-                    $fnWrap = ($fn > $this->currFrameNum) ? $fn - $maxFrameNum : $fn;
-                    $shortTermRefs[] = ['fnWrap' => $fnWrap, 'entry' => $entry];
-                }
-            }
-            usort($shortTermRefs, function($a, $b) {
-                return $b['fnWrap'] - $a['fnWrap'];
-            });
-            $this->refPicList0 = [];
-            foreach ($shortTermRefs as $ref) {
-                $this->refPicList0[] = $ref['entry'];
-            }
+            $this->buildRefPicLists();
         }
 
         if ($sliceType !== 2 && $sliceType !== 4) {
@@ -195,6 +182,14 @@ trait SliceDecodingTrait
             $this->sliceBetaOffset = 0;
         }
 
+        // CABAC: cabac_alignment_one_bit + rbsp_alignment_zero_bit
+        if ($this->entropyCodingModeFlag) {
+            $this->reader->readU(1); // cabac_alignment_one_bit
+            while ($this->reader->getPos() % 8 !== 0) {
+                $this->reader->readU(1); // rbsp_alignment_zero_bit
+            }
+        }
+
         $mbWidth = $this->picWidthInMbs;
         $mbHeight = $this->picHeightInMbs;
         $totalMbs = $mbWidth * $mbHeight;
@@ -202,24 +197,10 @@ trait SliceDecodingTrait
         $endMbIdx = $totalMbs;
 
         if (!$isIDR) {
-            $maxFrameNum = 1 << ($this->log2MaxFrameNumMinus4 + 4);
-            $shortTermRefs = [];
-            foreach ($this->dpb as $entry) {
-                if (!$entry['isLongTerm']) {
-                    $fn = $entry['frameNum'];
-                    $fnWrap = ($fn > $this->currFrameNum) ? $fn - $maxFrameNum : $fn;
-                    $shortTermRefs[] = ['fnWrap' => $fnWrap, 'entry' => $entry];
-                }
-            }
-            usort($shortTermRefs, function($a, $b) {
-                return $b['fnWrap'] - $a['fnWrap'];
-            });
-            $this->refPicList0 = [];
-            foreach ($shortTermRefs as $ref) {
-                $this->refPicList0[] = $ref['entry'];
-            }
+            $this->buildRefPicLists();
         } else {
             $this->refPicList0 = [];
+            $this->refPicList1 = [];
         }
 
         if (!empty($this->refPicList0)) {
@@ -246,6 +227,21 @@ trait SliceDecodingTrait
         // 初始化运动向量缓存（4x4子块粒度，每宏块4个，所以mvTopRow大小为mbWidth*4）
         $this->mvTopRow = array_fill(0, $mbWidth * 4, null);
         $this->mvLeftCol = array_fill(0, 4, null);
+        // B slice: 分离 L0/L1 MV 缓存防止互相污染
+        $this->mvTopRowL0 = array_fill(0, $mbWidth * 4, null);
+        $this->mvLeftColL0 = array_fill(0, 4, null);
+        $this->mvTopRowL1 = array_fill(0, $mbWidth * 4, null);
+        $this->mvLeftColL1 = array_fill(0, 4, null);
+
+        // CABAC 语法元素邻居：top 行每帧重置，left 在每行开头重置
+        if ($this->entropyCodingModeFlag) {
+            $this->cabacTopCbpRow = array_fill(0, $mbWidth, 0);
+            $this->cabacChromaModeTopRow = array_fill(0, $mbWidth, 0);
+            $this->cabacIntra16TopRow = array_fill(0, $mbWidth, false);
+            $this->cabacLeftCbp = 0;
+            $this->cabacLeftChromaMode = 0;
+            $this->cabacLeftIntra16 = false;
+        }
 
         if ($this->deblockInfoEnabled) {
             // 初始化去块滤波所需的宏块信息
@@ -262,6 +258,12 @@ trait SliceDecodingTrait
 
         $mbSkipRun = -1;
 
+        // CABAC: 初始化算术解码器
+        if ($this->entropyCodingModeFlag) {
+            $headerBitPos = $this->reader->getPos();
+            $this->cabacInitDecoder($rbsp, $cabacInitIdc ?? 0, $sliceType, $qp, $headerBitPos);
+        }
+
         //$isPSlice = ($sliceType === 0 || $sliceType === 5);
         for ($mbIdx = $startMbIdx; $mbIdx < $endMbIdx; $mbIdx++) {
             $mbX = $mbIdx % $mbWidth;
@@ -272,7 +274,14 @@ trait SliceDecodingTrait
                 $this->nzLeftColChroma = array_fill(0, 4, 0);
                 $this->intra4x4LeftModes = array_fill(0, 4, -1);
                 $this->mvLeftCol = array_fill(0, 4, null);
+                $this->mvLeftColL0 = array_fill(0, 4, null);
+                $this->mvLeftColL1 = array_fill(0, 4, null);
                 $this->mvTopLeft = array_fill(0, 4, null);
+                if ($this->entropyCodingModeFlag) {
+                    $this->cabacLeftCbp = 0;
+                    $this->cabacLeftChromaMode = 0;
+                    $this->cabacLeftIntra16 = false;
+                }
             }
             $nextMvTopLeft = $this->mvTopRow[$mbX * 4 + 3] ?? null;
 
@@ -294,6 +303,10 @@ trait SliceDecodingTrait
             $qp = max(0, min(51, $qp + $mbQpDelta));
             if ($this->deblockInfoEnabled) $this->mbQpForDeblock[$mbIdx] = $qp;
             $this->mvTopLeft = [$nextMvTopLeft, $nextMvTopLeft, $nextMvTopLeft, $nextMvTopLeft];
+        }
+        if ($this->entropyCodingModeFlag) {
+            $endTerm = $this->cabacGetTerminate();
+            error_log(sprintf('SLICE_END term=%d pos=%d rbspLen=%d low=0x%08X range=%d', $endTerm, $this->cabacPos, strlen($rbsp), $this->cabacLow, $this->cabacRange));
         }
         if ($this->deblockInfoEnabled) {
             $this->applyDeblockingFilter();

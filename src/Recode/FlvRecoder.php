@@ -310,17 +310,23 @@ class FlvRecoder
         $tags = FlvParse::getTags();
         $this->detectSourceFps($tags);
 
+        // === Phase 1.1: frameNum 序预解重排 ===
+        // FLV tag 按 PTS 序存储（I, B, B, P, B, B, P...），
+        // 但 H264 decoder 需要 frameNum 序解码（I, P, B, B, P, B, B...）。
+        // 预解后缓存 YUV，主循环直接从缓存读取，保证 DPB 正确。
+        $yuvCache = $this->predecodeVideoFrames($tags);
+
         $frameCount = 0;
         $videoCount = 0;
         //$hasAudio = false;
         //$hasVideo = false;
 
-        foreach ($tags as $tag) {
+        foreach ($tags as $tagIdx => $tag) {
             if (!property_exists($tag, 'tagType')) continue;
 
             if ($tag->tagType === 9) {
                 //$hasVideo = true;
-                $this->handleVideoFrame($tag);
+                $this->handleVideoFrame($tag, $yuvCache[$tagIdx] ?? null);
                 $videoCount++;
             } elseif ($tag->tagType === 8) {
                 //$hasAudio = true;
@@ -516,7 +522,7 @@ class FlvRecoder
         }
     }
 
-    private function handleVideoFrame(FlvTag $tag): void
+    private function handleVideoFrame(FlvTag $tag, ?string $predecodedYuv = null): void
     {
         $body = $tag->body ?? null;
         if ($body === null) return;
@@ -569,7 +575,7 @@ class FlvRecoder
             return;
         }
 
-        $job = $this->prepareTranscodeVideoFrame($tag, $avcData, $isKeyFrame, $timestamp, (bool)$this->pipelineEncoded);
+        $job = $this->prepareTranscodeVideoFrame($tag, $avcData, $isKeyFrame, $timestamp, (bool)$this->pipelineEncoded, $predecodedYuv);
         if ($job === null) return; // 首帧非关键帧 / 抽帧丢弃
 
         // 关键顺序：新帧已 startFrame（worker 在途）→ 此时 finish 上一帧，
@@ -589,7 +595,7 @@ class FlvRecoder
      * 解码/缩放/抽帧判定并 startFrame（预编码 GOP 样本直接挂 job）。
      * 返回待写出任务；null 表示该帧不输出。
      */
-    private function prepareTranscodeVideoFrame(FlvTag $tag, string $avcData, bool $isKeyFrame, int $timestamp, bool $hasPipelineEncoded): ?array
+    private function prepareTranscodeVideoFrame(FlvTag $tag, string $avcData, bool $isKeyFrame, int $timestamp, bool $hasPipelineEncoded, ?string $predecodedYuv = null): ?array
     {
         if ($this->baseTimestamp === null) {
             if (!$isKeyFrame) return null;
@@ -621,7 +627,8 @@ class FlvRecoder
         }
 
         // 多进程模式中输入 sample 已由 decoder worker 解码；单进程仍在此维持参考链。
-        $yuvData = $this->pipelineYuv ?? $this->decodeNaluToYuv($avcData);
+        // 如果有预解缓存（两遍式重排），直接用它代替 decodeNaluToYuv
+        $yuvData = $this->pipelineYuv ?? $predecodedYuv ?? $this->decodeNaluToYuv($avcData);
         if ($yuvData === null) return null;
 
         $targetW = $this->outputVideoWidth;
@@ -797,6 +804,110 @@ class FlvRecoder
                 $this->audioChannels = $channelConfig;
                 break;
         }
+    }
+
+    /**
+     * 两遍式预解重排 —— 解决 FLV PTS 序 vs H264 frameNum 序的冲突。
+     * 第一遍：按 frameNum 序重新排列所有 video NALU，喂 decoder 得到正确 DPB。
+     * 返回以 video tag 在主循环中的位置索引为 key 的 YUV 缓存。
+     *
+     * @param array $tags FlvTag 数组
+     * @return array<int, ?string> [videoCountIndex => yuvData]
+     */
+    private function predecodeVideoFrames(array $tags): array
+    {
+        $yuvCache = [];
+
+        // Step 1: 收集所有 video NALU tag 的 frameNum
+        // 同时初始化 SPS/PPS（parseAVCDecoderConfigurationRecord 的副作用）
+        $videoEntries = []; // [{origTagIdx, frameNum, sliceType, avcData}]
+
+        foreach ($tags as $tagIdx => $tag) {
+            if (!property_exists($tag, 'tagType') || $tag->tagType !== 9) continue;
+            if (!isset($tag->body) || strlen($tag->body) < 5) continue;
+
+            $body = $tag->body;
+            $videoData = $this->videoFrameDataRead($body);
+            if (!$videoData) continue;
+
+            $avc = $this->avcPacketRead($videoData['data']);
+            if (!$avc) continue;
+
+            if ($avc['avcPacketType'] === self::AVC_PACKET_TYPE_SEQUENCE_HEADER) {
+                // 初始化 SPS/PPS（parseAVCDecoderConfigurationRecord 是 private 但 $this 里可复用）
+                $this->parseAVCDecoderConfigurationRecord($avc['data']);
+                continue;
+            }
+
+            if ($avc['avcPacketType'] !== self::AVC_PACKET_TYPE_NALU) continue;
+
+            $avcData = $avc['data'];
+            $nalUnits = $this->extractNalUnitsFromAVCC($avcData);
+
+            // 找第一个 coded slice (type=1 或 5)，probe frameNum
+            $frameNum = null;
+            $sliceType = null;
+            foreach ($nalUnits as $nal) {
+                $nalType = $nal['type'] ?? 0;
+                if ($nalType === 1 || $nalType === 5) {
+                    // 确保 decoder 的 SPS 已设置（parseAVCC 应该已处理，但保险起见）
+                    if ($this->decoder->getWidth() <= 0 && $this->srcSpsData !== '') {
+                        $this->decoder->decode([['type' => 7, 'data' => $this->srcSpsData]], true);
+                        if ($this->srcPpsData !== '') {
+                            $this->decoder->decode([['type' => 8, 'data' => $this->srcPpsData]]);
+                        }
+                    }
+                    $probe = $this->decoder->probeSliceHeader($nal['data']);
+                    if ($probe) {
+                        $frameNum = $probe['frameNum'];
+                        $sliceType = $probe['sliceType'];
+                    }
+                    break;
+                }
+            }
+
+            if ($frameNum !== null) {
+                $videoEntries[] = [
+                    'origTagIdx' => $tagIdx,  // 用原始 tags 数组索引做 key
+                    'frameNum' => $frameNum,
+                    'sliceType' => $sliceType,
+                    'avcData' => $avcData,
+                ];
+            }
+        }
+
+        if (empty($videoEntries)) return $yuvCache;
+
+        // Step 2: 按 GOP 分组后组内排序
+        // GOP 定义：从一个 IDR (sliceType=2) 开始，到下一个 IDR 之前的所有帧
+        // 第一个 IDR 及之前的非 IDR 帧都属 GOP=0
+        $gopIndex = -1;
+        foreach ($videoEntries as &$e) {
+            if ($e['sliceType'] === 2) {
+                $gopIndex++; // 遇到 IDR → 开始新 GOP，IDR 自己也属于这个 GOP
+            }
+            if ($gopIndex < 0) $gopIndex = 0;
+            $e['gopIndex'] = $gopIndex;
+        }
+        unset($e);
+
+        usort($videoEntries, function ($a, $b) {
+            // 先按 GOP
+            if ($a['gopIndex'] !== $b['gopIndex']) return $a['gopIndex'] - $b['gopIndex'];
+            // GOP 内按 frameNum
+            $fnCmp = $a['frameNum'] - $b['frameNum'];
+            if ($fnCmp !== 0) return $fnCmp;
+            // 同 frameNum 内 P(0) < B(1) < I(2)
+            return $a['sliceType'] - $b['sliceType'];
+        });
+
+        // Step 3: 按 frameNum 序喂 decoder，key 是原始 tag 在 tags 数组里的位置
+        foreach ($videoEntries as $entry) {
+            $yuvData = $this->decodeNaluToYuv($entry['avcData']);
+            $yuvCache[$entry['origTagIdx']] = $yuvData;
+        }
+
+        return $yuvCache;
     }
 
     private function decodeNaluToYuv(string $avcData): ?string

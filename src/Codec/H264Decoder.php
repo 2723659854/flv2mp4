@@ -3,6 +3,7 @@
 namespace Xiaosongshu\Flv2mp4\Codec;
 
 use Xiaosongshu\Flv2mp4\Codec\Decode\BitReader;
+use Xiaosongshu\Flv2mp4\Codec\Decode\CabacDecodingTrait;
 use Xiaosongshu\Flv2mp4\Codec\Decode\DeblockingFilterTrait;
 use Xiaosongshu\Flv2mp4\Codec\Decode\IntraPredictionTrait;
 use Xiaosongshu\Flv2mp4\Codec\Decode\MacroblockDecodingTrait;
@@ -20,7 +21,7 @@ use Xiaosongshu\Flv2mp4\Codec\Decode\TransformTrait;
  */
 class H264Decoder
 {
-    use SpsPpsParsingTrait, SliceDecodingTrait, MacroblockDecodingTrait, IntraPredictionTrait, ResidualDecodingTrait, TransformTrait, DeblockingFilterTrait, MotionCompensationTrait, MotionVectorPredictionTrait;
+    use SpsPpsParsingTrait, SliceDecodingTrait, MacroblockDecodingTrait, IntraPredictionTrait, ResidualDecodingTrait, TransformTrait, DeblockingFilterTrait, MotionCompensationTrait, MotionVectorPredictionTrait, CabacDecodingTrait;
 
     const PART_NOT_AVAILABLE = -2;
     private const ALPHA_TABLE = [
@@ -73,6 +74,8 @@ class H264Decoder
     public bool $weightedPredFlag = false;
     public int $weightedBipredIdc = 0;
     public bool $entropyCodingModeFlag = false;
+    public bool $transform8x8ModeFlag = false;
+    public int $secondChromaQpIndexOffset = 0;
     public bool $deblockingFilterParametersPresent = false;
     public bool $redundantPicCntPresent = false;
     public bool $bottomFieldPicOrderInFramePresent = false;
@@ -119,11 +122,14 @@ class H264Decoder
     // P帧参考帧控制
     public bool $numRefIdxActiveOverrideFlag = false;
     public int $numRefIdxL0Active = 1;
+    public int $numRefIdxL1Active = 1;
 
     // DPB (Decoded Picture Buffer) - 多参考帧管理
     public array $dpb = [];
     public array $refPicList0 = [];
+    public array $refPicList1 = [];
     public int $maxNumRefFrames = 1;
+    public bool $directSpatialMvPred = true;
     public int $currFrameNum = 0;
 
     // 参考帧管理 - 保留兼容，现在作为refPicList0[0]的快捷访问
@@ -141,6 +147,11 @@ class H264Decoder
     public array $mvTopRow = [];      // 上方宏块行的运动向量，每宏块4个（4列4x4块）[colIdx] = [mvX, mvY, refIdx]
     public array $mvTopLeft = [];     // 当前宏块左上方 D 邻居；在覆盖 mvTopRow 前保存
     public array $mvLeftCol = [];     // 左方宏块列的运动向量，4行4x4块
+    // B slice 专用：L0/L1 各自独立的 MV 缓存（防止 L1 MV 污染 L0 MVP）
+    public array $mvTopRowL0 = [];
+    public array $mvLeftColL0 = [];
+    public array $mvTopRowL1 = [];
+    public array $mvLeftColL1 = [];
 
     public int $frameNum = 0;
 
@@ -257,6 +268,7 @@ class H264Decoder
         $this->vPlane = [];
         $this->dpb = [];
         $this->refPicList0 = [];
+        $this->refPicList1 = [];
         $this->refFrameY = null;
         $this->refFrameU = null;
         $this->refFrameV = null;
@@ -284,6 +296,46 @@ class H264Decoder
         $this->mbRefForDeblock = [];
     }
 
+    /**
+     * 从 DPB 构建 refPicList0（过去帧优先）和 refPicList1（未来帧优先）。
+     * 简化版：基于 frameNum 排序，等价于 pic_order_cnt_type=0 时按 POC 排序。
+     */
+    private function buildRefPicLists(): void
+    {
+        $maxFrameNum = 1 << ($this->log2MaxFrameNumMinus4 + 4);
+        $curr = $this->currFrameNum;
+
+        // 收集 ShortTerm refs
+        $shortTerm = [];
+        foreach ($this->dpb as $entry) {
+            if ($entry['isLongTerm']) continue;
+            $fn = $entry['frameNum'];
+            $fnWrap = ($fn > $curr) ? $fn - $maxFrameNum : $fn;
+            $shortTerm[] = ['fn' => $fn, 'fnWrap' => $fnWrap, 'entry' => $entry];
+        }
+
+        // List0: fnWrap 降序（最近过去帧优先）
+        usort($shortTerm, function ($a, $b) { return $b['fnWrap'] - $a['fnWrap']; });
+        $this->refPicList0 = array_map(fn($r) => $r['entry'], $shortTerm);
+
+        // List1: 未来帧(fn > curr) 按 fn 升序优先，再过去帧(fn < curr) 按 fn 降序
+        $future = [];
+        $past = [];
+        foreach ($shortTerm as $r) {
+            if ($r['fn'] > $curr) $future[] = $r;
+            elseif ($r['fn'] < $curr) $past[] = $r;
+        }
+        usort($future, function ($a, $b) { return $a['fn'] - $b['fn']; });
+        usort($past, function ($a, $b) { return $b['fn'] - $a['fn']; });
+        $combined = array_merge($future, $past);
+        $this->refPicList1 = array_map(fn($r) => $r['entry'], $combined);
+
+        // DIAG: 在 B slice 时打印
+        if ($this->currentSliceType === 1 || $this->currentSliceType === 6) {
+            // fwrite(STDERR, "[B-SLICE] currFrameNum={$curr}, DPB=".json_encode($dpbFns).", List1=".json_encode($l1Fns)."\n");
+        }
+    }
+
     public function initQuantMatrix(): void
     {
         // 当scaling_matrix_present_flag=0时，所有矩阵初始化为16（flat matrix）
@@ -300,16 +352,17 @@ class H264Decoder
 
         $posClass = [0, 1, 0, 1, 1, 2, 1, 2, 0, 1, 0, 1, 1, 2, 1, 2];
 
+        // dequant4Table 只存 H.264 标准反量化乘数: m[qp%6][scaleIdx] × scaling_matrix[pos]
+        // 完全不预乘 shift，反量化函数按标准公式正确做 shift
         $this->dequant4Table = array_fill(0, 6, array_fill(0, 52, array_fill(0, 16, 0)));
         for ($i = 0; $i < 6; $i++) {
             $sm = $scalingMatrices[$i];
             for ($q = 0; $q < 52; $q++) {
-                $shift = intdiv($q, 6) + 2;
                 $idx = $q % 6;
                 for ($x = 0; $x < 16; $x++) {
                     $scaleIdx = $posClass[$x];
                     $this->dequant4Table[$i][$q][$x] =
-                        (self::DEQUANT4_COEFF_INIT[$idx][$scaleIdx] * $sm[$x]) << $shift;
+                        self::DEQUANT4_COEFF_INIT[$idx][$scaleIdx] * $sm[$x];
                 }
             }
         }
@@ -366,116 +419,149 @@ class H264Decoder
         $ySize = $mbAlignedWidth * $mbAlignedHeight;
         $uvSize = (int)($ySize / 4);
 
-        // 第二轮：解码图像Slice — 每个Slice是一帧，各自初始化并输出
-        //$sliceCount = 0;
-        $outputData = '';
-        $this->frameNum = -1;
+        // 第二轮：聚合同帧多 Slice 后解码
+
+        // 收集所有 slice NAL（type 1 或 5），并 probe frame_num
+        $frameGroups = []; // frameNum => [nalUnits]
+        $frameOrder = [];  // 保持出现顺序
+        $frameIsIDR = [];
+        $frameIsRef = [];
         foreach ($nalUnits as $nal) {
             $nalType = $nal['type'];
-            if ($nalType === 1 || $nalType === 5) {
-                $nalHeader = ord($nal['raw'][0]);
-                $nalRefIdc = ($nalHeader >> 5) & 0x03;
-                //$sliceCount++;
-                $this->frameNum++;
-                // 每帧重新初始化像素平面（128 = H.264 规定的帧内预测默认值）
-                $this->yPlane = array_fill(0, $ySize, 128);
-                $this->uPlane = array_fill(0, $uvSize, 128);
-                $this->vPlane = array_fill(0, $uvSize, 128);
+            if ($nalType !== 1 && $nalType !== 5) continue;
+            $probe = $this->probeSliceHeader($nal['data']);
+            echo "DEBUG probe after: entropyCoding=" . ($this->entropyCodingModeFlag?1:0) . "\n";
+            if (!$probe) continue;
+            $fn = $probe['frameNum'];
+            if (!isset($frameGroups[$fn])) {
+                $frameGroups[$fn] = [];
+                $frameOrder[] = $fn;
+            }
+            $frameGroups[$fn][] = $nal;
+            $frameIsIDR[$fn] = $nalType === 5;
+            $nalHeader = ord($nal['raw'][0]);
+            $nalRefIdc = ($nalHeader >> 5) & 0x03;
+            $frameIsRef[$fn] = $nalRefIdc !== 0;
+        }
 
-                // 保存实际图像尺寸，临时使用宏块对齐的尺寸进行解码
-                $origWidth = $this->width;
-                $origHeight = $this->height;
-                $this->width = $mbAlignedWidth;
-                $this->height = $mbAlignedHeight;
+        $outputData = '';
+        foreach ($frameOrder as $fn) {
+            $slices = $frameGroups[$fn];
+            $isIDR = $frameIsIDR[$fn];
+            $firstNal = $slices[0];
+            $nalHeader = ord($firstNal['raw'][0]);
+            $nalRefIdc = ($nalHeader >> 5) & 0x03;
 
-                // IDR关键帧永不跳滤波（参考链重置点，且通常都保留输出）
-                $this->decodeSlice($nal['data'], $nalType === 5, $nalRefIdc, $skipDeblock && $nalType !== 5);
-                // 更新参考帧（用于P帧运动补偿）- 在恢复尺寸之前进行
-                if ($nalRefIdc !== 0 || $nalType === 5) {
-                    $dpbEntry = [
-                        'frameNum' => $this->currFrameNum,
-                        'isLongTerm' => false,
-                        // 平面本身即 0-based 整数数组，*Bytes 与平面共享同一 COW 副本
-                        // （参考帧只读不写，不会发生写时分离），ensureRefBytes 因此变为空操作
-                        'y' => $this->yPlane,
-                        'u' => $this->uPlane,
-                        'v' => $this->vPlane,
-                        'yBytes' => $this->yPlane,
-                        'uBytes' => $this->uPlane,
-                        'vBytes' => $this->vPlane,
-                        'strideY' => $mbAlignedWidth,
-                        'strideUv' => (int)($mbAlignedWidth / 2),
-                        'widthY' => $mbAlignedWidth,
-                        'heightY' => $mbAlignedHeight,
-                        'widthUv' => (int)($mbAlignedWidth / 2),
-                        'heightUv' => (int)($mbAlignedHeight / 2),
-                    ];
-                    $this->dpb[] = $dpbEntry;
+            // 每帧只初始化一次像素平面
+            $this->currFrameNum = $fn;
+            $this->yPlane = array_fill(0, $ySize, 128);
+            $this->uPlane = array_fill(0, $uvSize, 128);
+            $this->vPlane = array_fill(0, $uvSize, 128);
 
-                    $maxFrameNum = 1 << ($this->log2MaxFrameNumMinus4 + 4);
-                    $shortTermCount = 0;
+            // 保存实际图像尺寸
+            $origWidth = $this->width;
+            $origHeight = $this->height;
+            $this->width = $mbAlignedWidth;
+            $this->height = $mbAlignedHeight;
+
+            // 依次解码同帧所有 slice
+            foreach ($slices as $sliceIdx => $nal) {
+                $isIDRThis = ($nal['type'] === 5);
+                $nalH = ord($nal['raw'][0]);
+                $nridc = ($nalH >> 5) & 0x03;
+                // 只有该帧最后一个 slice 才做 deblocking（由最后一个 slice 的 decodeSlice 触发）
+                $isLastSlice = ($sliceIdx === count($slices) - 1);
+                if (!$isLastSlice) {
+                    // 非最后一个 slice：跳过去块滤波（deblockInfoEnabled=false）
+                    $this->decodeSlice($nal['data'], $isIDRThis, $nridc, true);
+                } else {
+                    $this->decodeSlice($nal['data'], $isIDRThis, $nridc, $skipDeblock && !$isIDRThis);
+                }
+            }
+
+            // 更新参考帧 DPB
+            if ($nalRefIdc !== 0 || $isIDR) {
+                $dpbEntry = [
+                    'frameNum' => $fn,
+                    'isLongTerm' => false,
+                    'y' => $this->yPlane,
+                    'u' => $this->uPlane,
+                    'v' => $this->vPlane,
+                    'yBytes' => $this->yPlane,
+                    'uBytes' => $this->uPlane,
+                    'vBytes' => $this->vPlane,
+                    'strideY' => $mbAlignedWidth,
+                    'strideUv' => (int)($mbAlignedWidth / 2),
+                    'widthY' => $mbAlignedWidth,
+                    'heightY' => $mbAlignedHeight,
+                    'widthUv' => (int)($mbAlignedWidth / 2),
+                    'heightUv' => (int)($mbAlignedHeight / 2),
+                ];
+                $this->dpb[] = $dpbEntry;
+
+                $maxFrameNum = 1 << ($this->log2MaxFrameNumMinus4 + 4);
+                $shortTermCount = 0;
+                $oldestKey = null;
+                $oldestFnWrap = null;
+                foreach ($this->dpb as $k => $entry) {
+                    if ($entry['isLongTerm']) continue;
+                    $shortTermCount++;
+                    $efn = $entry['frameNum'];
+                    $fnWrap = ($efn > $fn) ? $efn - $maxFrameNum : $efn;
+                    if ($oldestFnWrap === null || $fnWrap < $oldestFnWrap) {
+                        $oldestFnWrap = $fnWrap;
+                        $oldestKey = $k;
+                    }
+                }
+                while ($shortTermCount > $this->maxNumRefFrames) {
+                    if ($oldestKey !== null) {
+                        array_splice($this->dpb, $oldestKey, 1);
+                    }
+                    $shortTermCount--;
                     $oldestKey = null;
                     $oldestFnWrap = null;
                     foreach ($this->dpb as $k => $entry) {
                         if ($entry['isLongTerm']) continue;
-                        $shortTermCount++;
-                        $fn = $entry['frameNum'];
-                        $fnWrap = ($fn > $this->currFrameNum) ? $fn - $maxFrameNum : $fn;
+                        $efn = $entry['frameNum'];
+                        $fnWrap = ($efn > $fn) ? $efn - $maxFrameNum : $efn;
                         if ($oldestFnWrap === null || $fnWrap < $oldestFnWrap) {
                             $oldestFnWrap = $fnWrap;
                             $oldestKey = $k;
                         }
                     }
-                    while ($shortTermCount > $this->maxNumRefFrames) {
-                        if ($oldestKey !== null) {
-                            array_splice($this->dpb, $oldestKey, 1);
-                        }
-                        $shortTermCount--;
-                        $oldestKey = null;
-                        $oldestFnWrap = null;
-                        foreach ($this->dpb as $k => $entry) {
-                            if ($entry['isLongTerm']) continue;
-                            $fn = $entry['frameNum'];
-                            $fnWrap = ($fn > $this->currFrameNum) ? $fn - $maxFrameNum : $fn;
-                            if ($oldestFnWrap === null || $fnWrap < $oldestFnWrap) {
-                                $oldestFnWrap = $fnWrap;
-                                $oldestKey = $k;
-                            }
-                        }
-                    }
-
-                    $this->refFrameY = $dpbEntry['y'];
-                    $this->refFrameU = $dpbEntry['u'];
-                    $this->refFrameV = $dpbEntry['v'];
-                    $this->refStrideY = $dpbEntry['strideY'];
-                    $this->refStrideUv = $dpbEntry['strideUv'];
-                    $this->refWidthY = $dpbEntry['widthY'];
-                    $this->refHeightY = $dpbEntry['heightY'];
-                    $this->refWidthUv = $dpbEntry['widthUv'];
-                    $this->refHeightUv = $dpbEntry['heightUv'];
                 }
 
-                // 恢复实际图像尺寸
-                $this->width = $origWidth;
-                $this->height = $origHeight;
+                $this->refFrameY = $dpbEntry['y'];
+                $this->refFrameU = $dpbEntry['u'];
+                $this->refFrameV = $dpbEntry['v'];
+                $this->refStrideY = $dpbEntry['strideY'];
+                $this->refStrideUv = $dpbEntry['strideUv'];
+                $this->refWidthY = $dpbEntry['widthY'];
+                $this->refHeightY = $dpbEntry['heightY'];
+                $this->refWidthUv = $dpbEntry['widthUv'];
+                $this->refHeightUv = $dpbEntry['heightUv'];
+            }
 
-                // 将本帧转为二进制并追加到输出（裁剪到实际图像尺寸）
-                if ($buildOutput) {
-                    $yBin = '';
-                    for ($yy = 0; $yy < $this->height; $yy++) {
-                        $yBin .= pack('C*', ...array_slice($this->yPlane, $yy * $mbAlignedWidth, $this->width));
-                    }
-                    $uvMbAlignedWidth = (int)($mbAlignedWidth / 2);
-                    $uvWidth = (int)($this->width / 2);
-                    $uvHeight = (int)($this->height / 2);
-                    $uBin = '';
-                    $vBin = '';
-                    for ($yy = 0; $yy < $uvHeight; $yy++) {
-                        $uBin .= pack('C*', ...array_slice($this->uPlane, $yy * $uvMbAlignedWidth, $uvWidth));
-                        $vBin .= pack('C*', ...array_slice($this->vPlane, $yy * $uvMbAlignedWidth, $uvWidth));
-                    }
-                    $outputData .= $yBin . $uBin . $vBin;
+            // 恢复实际图像尺寸
+            $this->width = $origWidth;
+            $this->height = $origHeight;
+
+            // 输出 YUV
+            if ($buildOutput) {
+                $yBin = '';
+                for ($yy = 0; $yy < $this->height; $yy++) {
+                    $yBin .= pack('C*', ...array_slice($this->yPlane, $yy * $mbAlignedWidth, $this->width));
                 }
+                $uvMbAlignedWidth = (int)($mbAlignedWidth / 2);
+                $uvWidth = (int)($this->width / 2);
+                $uvHeight = (int)($this->height / 2);
+                $uBin = '';
+                $vBin = '';
+                for ($yy = 0; $yy < $uvHeight; $yy++) {
+                    $uBin .= pack('C*', ...array_slice($this->uPlane, $yy * $uvMbAlignedWidth, $uvWidth));
+                    $vBin .= pack('C*', ...array_slice($this->vPlane, $yy * $uvMbAlignedWidth, $uvWidth));
+                }
+                $outputData .= $yBin . $uBin . $vBin;
             }
         }
 
@@ -509,6 +595,46 @@ class H264Decoder
         [16, 20, 25],
         [18, 23, 29],
     ];
+
+    /**
+     * 轻量 probe：从 coded slice NALU 的 rbsp 数据里只解析 frameNum 和 sliceType。
+     * 不做任何宏块级解码，用于帧重排时快速判断依赖关系。
+     *
+     * slice header 前几个字段 (H.264 spec 7.3.3):
+     *   first_mb_in_slice        ue(v)
+     *   slice_type               ue(v)   → % 5 = slice_type (0-4)
+     *   pic_parameter_set_id     ue(v)
+     *   frame_num                u(v)   ← log2_max_frame_num_minus4 + 4 bits
+     *   ...
+     *
+     * @param string $rbsp 去除 NAL header 后的 rbsp 数据
+     * @return null|array{frameNum:int, sliceType:int}
+     */
+    public function probeSliceHeader(string $rbsp): ?array
+    {
+        if (strlen($rbsp) < 2) return null;
+
+        $reader = new \Xiaosongshu\Flv2mp4\Codec\Decode\BitReader($rbsp);
+
+        // first_mb_in_slice (ue_golomb)
+        $reader->readUe();
+
+        // slice_type (ue_golomb), % 5 就是实际 slice_type
+        $sliceTypeRaw = $reader->readUe();
+        $sliceType = $sliceTypeRaw % 5;
+
+        // pic_parameter_set_id (ue_golomb)
+        $reader->readUe();
+
+        // frame_num —— 需要 SPS 的 log2MaxFrameNumMinus4
+        $frameNumBits = ($this->log2MaxFrameNumMinus4 ?? 0) + 4;
+        $frameNum = 0;
+        for ($i = 0; $i < $frameNumBits; $i++) {
+            $frameNum = ($frameNum << 1) | ($reader->readU(1) & 1);
+        }
+
+        return ['frameNum' => $frameNum, 'sliceType' => $sliceType];
+    }
 
     public function getWidth()
     {

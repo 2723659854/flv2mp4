@@ -14,6 +14,7 @@ trait SpsPpsParsingTrait
      */
     public function parseSPS(string $rbsp): void
     {
+        echo "parseSPS: entropyCoding before=" . ($this->entropyCodingModeFlag?1:0) . "\n";
         $this->reader = new BitReader($rbsp);
 
         $this->profileIdc = $this->reader->readU(8);
@@ -67,6 +68,8 @@ trait SpsPpsParsingTrait
             $this->reader->readSe();
             $numRefFramesInPicOrderCntCycle = $this->reader->readUe();
             for ($j = 0; $j < $numRefFramesInPicOrderCntCycle; $j++) $this->reader->readSe();
+        } else {
+            $this->log2MaxPicOrderCntLsb = 0;
         }
 
         $this->maxNumRefFrames = $this->reader->readUe() + 1; // max_num_ref_frames
@@ -118,10 +121,17 @@ trait SpsPpsParsingTrait
      */
     public function parsePPS(string $rbsp): void
     {
+        echo "parsePPS: rbsp_len=" . strlen($rbsp) . " rbsp_hash=" . md5($rbsp) . " first_bytes=" . bin2hex(substr($rbsp, 0, 20)) . "\n";
         $this->reader = new BitReader($rbsp);
         $this->reader->readUe();
-        $spsId = $this->reader->readUe();
+        $this->reader->readUe();
+        $pos1 = $this->reader->getPos();
+        $rawBit = ord($rbsp[$pos1 >> 3]) >> (7 - ($pos1 & 7)) & 1;
+        echo "parsePPS: pos before entropyCodingModeFlag=$pos1 raw_bit_at_pos=$rawBit\n";
         $this->entropyCodingModeFlag = (bool)$this->reader->readU(1);
+        static $ppsonce = false;
+        if (!$ppsonce) { $ppsonce = true; echo "PPS: entropyCodingModeFlag=" . ($this->entropyCodingModeFlag?1:0) . "\n"; }
+        echo "parsePPS: entropyCoding set to " . ($this->entropyCodingModeFlag?1:0) . "\n";
         $this->bottomFieldPicOrderInFramePresent = (bool)$this->reader->readU(1);
         $this->reader->readUe();
         $this->numRefIdxL0DefaultActive = $this->reader->readUe() + 1;
@@ -141,5 +151,35 @@ trait SpsPpsParsingTrait
         $this->deblockingFilterParametersPresent = (bool)$this->reader->readU(1);
         $this->reader->skip(1); // constrained_intra_pred_flag
         $this->redundantPicCntPresent = (bool)$this->reader->readU(1);
+
+        // High profile PPS 扩展（H.264 7.3.2.2）：
+        // transform_8x8_mode_flag → pic_scaling_matrix_present_flag → 8 个 scaling list
+        // → second_chroma_qp_index_offset
+        $this->transform8x8ModeFlag = false;
+        $this->secondChromaQpIndexOffset = $this->chromaQpIndexOffset;
+        $isHighProfile = in_array($this->profileIdc, [100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135, 144]);
+        if ($isHighProfile) {
+            $this->transform8x8ModeFlag = (bool)$this->reader->readU(1);
+            $picScalingMatrixPresentFlag = $this->reader->readU(1);
+            if ($picScalingMatrixPresentFlag) {
+                // PPS: 8 个 list（前 4 个 16 项，后 4 个 64 项）
+                for ($i = 0; $i < 8; $i++) {
+                    $useScalingList = $this->reader->readU(1);
+                    if ($useScalingList) {
+                        $sizeOfScalingList = ($i < 4) ? 16 : 64;
+                        $lastScale = 8;
+                        $nextScale = 8;
+                        for ($j = 0; $j < $sizeOfScalingList; $j++) {
+                            if ($nextScale !== 0) {
+                                $deltaScale = $this->reader->readSe();
+                                $nextScale = ($lastScale + $deltaScale + 256) % 256;
+                            }
+                            $lastScale = $nextScale === 0 ? $lastScale : $nextScale;
+                        }
+                    }
+                }
+            }
+            $this->secondChromaQpIndexOffset = $this->reader->readSe();
+        }
     }
 }

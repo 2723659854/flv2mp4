@@ -879,8 +879,21 @@ trait ResidualDecodingTrait
      * 注意：对于 AC 系数，nC 通常根据上邻和左邻宏块的非零系数数量计算
      * 对于 DC 系数（luma DC 16/4 或 chroma DC 4），nC = -1
      */
-    public function decodeResidualBlock(int $maxCoef, int $nC = -1): array
+    /**
+     * @param int $maxCoef 最大系数数量（DC: 16 或 4, AC: 16 或 15）
+     * @param int $nC nC 值（DC 可能是 -1 或 >=0, AC 通常 >=0）
+     * @param bool $isDc true=DC 系数块, false=AC 系数块
+     */
+    public function decodeResidualBlock(int $maxCoef, int $nC = -1, bool $isDc = false): array
     {
+        // CABAC 残差已改为按 cat 分类的独立入口（cabacReadLuma4x4Block /
+        // cabacReadLuma16AcBlock / cabacReadLumaDcBlock / cabacReadChromaDcBlock /
+        // cabacReadChromaAcBlock），不再走本通用入口。
+        if (!empty($this->entropyCodingModeFlag)) {
+            throw new \LogicException('CABAC residual must be decoded via cat-specific cabacRead*Block methods');
+        }
+
+
         // Direct translation of Rust decode_residual (cavlc.rs:344-542)
         //$dbg = $this->debugResidual;
         $coeffs = array_fill(0, $maxCoef, 0);
