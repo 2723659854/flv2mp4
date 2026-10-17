@@ -484,6 +484,28 @@ trait DeblockingFilterTrait
         }
     }
 
+    private function bMotionBoundaryDiffers(
+        int $pRef0, array $pMv0, int $qRef0, array $qMv0,
+        int $pRef1, array $pMv1, int $qRef1, array $qMv1
+    ): bool {
+        $diff0 = $pRef0 !== $qRef0
+            || abs($pMv0[0] - $qMv0[0]) >= 4
+            || abs($pMv0[1] - $qMv0[1]) >= 4;
+        $diff1 = $pRef1 !== $qRef1
+            || abs($pMv1[0] - $qMv1[0]) >= 4
+            || abs($pMv1[1] - $qMv1[1]) >= 4;
+        if (!$diff0 && !$diff1) {
+            return false;
+        }
+        if ($pRef0 !== $qRef1 || $pRef1 !== $qRef0) {
+            return true;
+        }
+        return abs($pMv0[0] - $qMv1[0]) >= 4
+            || abs($pMv0[1] - $qMv1[1]) >= 4
+            || abs($pMv1[0] - $qMv0[0]) >= 4
+            || abs($pMv1[1] - $qMv0[1]) >= 4;
+    }
+
     private function computeBoundaryStrengths(int $mbX, int $mbY, array &$bsVertical, array &$bsHorizontal): void
     {
         $mbWidth = $this->picWidthInMbs;
@@ -492,13 +514,17 @@ trait DeblockingFilterTrait
         $curNnz = $this->mbNnzForDeblock[$mbIdx] ?? [];
         $curMv = $this->mbMvForDeblock[$mbIdx] ?? [];
         $curRef = $this->mbRefForDeblock[$mbIdx] ?? [];
+        $curMv1 = $this->mbMvL1ForDeblock[$mbIdx] ?? [];
+        $curRef1 = $this->mbRefL1ForDeblock[$mbIdx] ?? [];
         $sliceType = $this->currentSliceType;
         $isIslice = ($sliceType === 2 || $sliceType === 4);
         $isPslice = ($sliceType === 0 || $sliceType === 5);
+        $isBslice = ($sliceType === 1);
         $curIntra = $isIslice
             ? ($curType >= 0 && $curType <= 24)
-            : ($isPslice && $curType >= 5 && $curType <= 29);
-        $curIpcm = ($isIslice && $curType === 25) || ($isPslice && $curType === 30);
+            : ($isPslice ? ($curType >= 5 && $curType <= 29)
+                : ($isBslice && $curType >= 23 && $curType <= 48));
+        $curIpcm = ($isIslice && $curType === 25) || ($isPslice && $curType === 30) || ($isBslice && $curType === 48);
 
         $leftIntra = $curIntra;
         $leftIpcm = $curIpcm;
@@ -509,10 +535,13 @@ trait DeblockingFilterTrait
             $leftNnz = $this->mbNnzForDeblock[$leftIdx] ?? [];
             $leftMv = $this->mbMvForDeblock[$leftIdx] ?? [];
             $leftRef = $this->mbRefForDeblock[$leftIdx] ?? [];
+            $leftMv1 = $this->mbMvL1ForDeblock[$leftIdx] ?? [];
+            $leftRef1 = $this->mbRefL1ForDeblock[$leftIdx] ?? [];
             $leftIntra = $isIslice
                 ? ($leftType >= 0 && $leftType <= 24)
-                : ($isPslice && $leftType >= 5 && $leftType <= 29);
-            $leftIpcm = ($isIslice && $leftType === 25) || ($isPslice && $leftType === 30);
+                : ($isPslice ? ($leftType >= 5 && $leftType <= 29)
+                    : ($isBslice && $leftType >= 23 && $leftType <= 48));
+            $leftIpcm = ($isIslice && $leftType === 25) || ($isPslice && $leftType === 30) || ($isBslice && $leftType === 48);
         }
 
         $topIntra = $curIntra;
@@ -524,17 +553,20 @@ trait DeblockingFilterTrait
             $topNnz = $this->mbNnzForDeblock[$topIdx] ?? [];
             $topMv = $this->mbMvForDeblock[$topIdx] ?? [];
             $topRef = $this->mbRefForDeblock[$topIdx] ?? [];
+            $topMv1 = $this->mbMvL1ForDeblock[$topIdx] ?? [];
+            $topRef1 = $this->mbRefL1ForDeblock[$topIdx] ?? [];
             $topIntra = $isIslice
                 ? ($topType >= 0 && $topType <= 24)
-                : ($isPslice && $topType >= 5 && $topType <= 29);
-            $topIpcm = ($isIslice && $topType === 25) || ($isPslice && $topType === 30);
+                : ($isPslice ? ($topType >= 5 && $topType <= 29)
+                    : ($isBslice && $topType >= 23 && $topType <= 48));
+            $topIpcm = ($isIslice && $topType === 25) || ($isPslice && $topType === 30) || ($isBslice && $topType === 48);
         }
 
         // 快速路径（与规范判定逐位等价的充分条件）：当前 MB 及左/上邻块均为
         // 非 intra / 非 I_PCM，参与 BS 判定的 luma 4x4 块 nnz 全为 0，且当前 MB
         // 全部 16 块与左/上边界块的 MV 全等、参考索引相同 → 32 个边界强度均为 0。
         // 命中条件不满足时落回原逐对判定，结果完全一致。
-        if (!$curIntra && !$curIpcm
+        if (!$isBslice && !$curIntra && !$curIpcm
             && ($mbX === 0 || (!$leftIntra && !$leftIpcm))
             && ($mbY === 0 || (!$topIntra && !$topIpcm))
         ) {
@@ -647,7 +679,15 @@ trait DeblockingFilterTrait
                         $pMv = $edge === 0 ? ($leftMv[$pIdx] ?? $this->deblockZeroMv) : ($curMv[$pIdx] ?? $this->deblockZeroMv);
                         $qMv = $curMv[$qIdx] ?? $this->deblockZeroMv;
                         $pRef = $edge === 0 ? ($leftRef[$pIdx] ?? 0) : ($curRef[$pIdx] ?? 0);
-                        if ($pRef != ($curRef[$qIdx] ?? 0)
+                        if ($isBslice) {
+                            $pMv1 = $edge === 0 ? ($leftMv1[$pIdx] ?? $this->deblockZeroMv) : ($curMv1[$pIdx] ?? $this->deblockZeroMv);
+                            $qMv1 = $curMv1[$qIdx] ?? $this->deblockZeroMv;
+                            $pRef1 = $edge === 0 ? ($leftRef1[$pIdx] ?? 0) : ($curRef1[$pIdx] ?? 0);
+                            $qRef1 = $curRef1[$qIdx] ?? 0;
+                            if ($this->bMotionBoundaryDiffers($pRef, $pMv, $curRef[$qIdx] ?? 0, $qMv, $pRef1, $pMv1, $qRef1, $qMv1)) {
+                                $vertical[$pair] = 1;
+                            }
+                        } elseif ($pRef != ($curRef[$qIdx] ?? 0)
                             || abs($pMv[0] - $qMv[0]) >= 4
                             || abs($pMv[1] - $qMv[1]) >= 4) {
                             $vertical[$pair] = 1;
@@ -670,7 +710,15 @@ trait DeblockingFilterTrait
                         $pMv = $edge === 0 ? ($topMv[$pIdx] ?? $this->deblockZeroMv) : ($curMv[$pIdx] ?? $this->deblockZeroMv);
                         $qMv = $curMv[$qIdx] ?? $this->deblockZeroMv;
                         $pRef = $edge === 0 ? ($topRef[$pIdx] ?? 0) : ($curRef[$pIdx] ?? 0);
-                        if ($pRef != ($curRef[$qIdx] ?? 0)
+                        if ($isBslice) {
+                            $pMv1 = $edge === 0 ? ($topMv1[$pIdx] ?? $this->deblockZeroMv) : ($curMv1[$pIdx] ?? $this->deblockZeroMv);
+                            $qMv1 = $curMv1[$qIdx] ?? $this->deblockZeroMv;
+                            $pRef1 = $edge === 0 ? ($topRef1[$pIdx] ?? 0) : ($curRef1[$pIdx] ?? 0);
+                            $qRef1 = $curRef1[$qIdx] ?? 0;
+                            if ($this->bMotionBoundaryDiffers($pRef, $pMv, $curRef[$qIdx] ?? 0, $qMv, $pRef1, $pMv1, $qRef1, $qMv1)) {
+                                $horizontal[$pair] = 1;
+                            }
+                        } elseif ($pRef != ($curRef[$qIdx] ?? 0)
                             || abs($pMv[0] - $qMv[0]) >= 4
                             || abs($pMv[1] - $qMv[1]) >= 4) {
                             $horizontal[$pair] = 1;

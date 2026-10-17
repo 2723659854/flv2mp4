@@ -27,19 +27,19 @@ trait SpsPpsParsingTrait
         if ($isHighProfile) {
             $this->chromaFormatIdc = $this->reader->readUe();
             if ($this->chromaFormatIdc > 3) return;
-            if ($this->chromaFormatIdc === 3) $this->reader->skip(1);
+            if ($this->chromaFormatIdc === 3) $this->reader->skip(1); // separate_colour_plane_flag
             $this->reader->readUe(); // bit_depth_luma_minus8
             $this->reader->readUe(); // bit_depth_chroma_minus8
-            $this->reader->skip(1); // qpprime_y_zero_transform_bypass_flag
+            $this->transformBypass8x8 = (bool)$this->reader->readU(1); // qpprime_y_zero_transform_bypass_flag
 
             // seq_scaling_matrix_present_flag (必须先读取这个 flag)
             $seqScalingMatrixPresentFlag = $this->reader->readU(1);
             if ($seqScalingMatrixPresentFlag) {
-                $numScalingLists = ($this->chromaFormatIdc !== 3) ? 4 : 6;
+                $numScalingLists = ($this->chromaFormatIdc !== 3) ? 8 : 12;
                 for ($i = 0; $i < $numScalingLists; $i++) {
                     $useScalingList = $this->reader->readU(1);
                     if ($useScalingList) {
-                        $sizeOfScalingList = ($i < 4) ? 16 : 64;
+                        $sizeOfScalingList = ($i < 6) ? 16 : 64;
                         $lastScale = 8;
                         $nextScale = 8;
                         for ($j = 0; $j < $sizeOfScalingList; $j++) {
@@ -54,7 +54,11 @@ trait SpsPpsParsingTrait
             }
         } else {
             $this->chromaFormatIdc = 1;
+            $this->transformBypass8x8 = false;
         }
+
+        // baseline(66) 不含 B 帧，直接解码序输出；其它 profile 按 POC 重排
+        $this->reorderByPoc = ($this->profileIdc !== 66);
 
         $this->log2MaxFrameNumMinus4 = $this->reader->readUe();
         $this->picOrderCntType = $this->reader->readUe();
@@ -75,8 +79,8 @@ trait SpsPpsParsingTrait
         $picHeightInMapUnitsMinus1 = $this->reader->readUe();
         $this->frameMbsOnlyFlag = (bool)$this->reader->readU(1);
 
-        if (!$this->frameMbsOnlyFlag) $this->reader->skip(1);
-        $this->reader->skip(1);
+        if (!$this->frameMbsOnlyFlag) $this->reader->skip(1); // mb_adaptive_frame_field_flag
+        $this->direct8x8InferenceFlag = (bool)$this->reader->readU(1); // direct_8x8_inference_flag
 
         $frameCroppingFlag = $this->reader->readU(1);
         $cropLeft = 0; $cropRight = 0; $cropTop = 0; $cropBottom = 0;
@@ -141,5 +145,33 @@ trait SpsPpsParsingTrait
         $this->deblockingFilterParametersPresent = (bool)$this->reader->readU(1);
         $this->reader->skip(1); // constrained_intra_pred_flag
         $this->redundantPicCntPresent = (bool)$this->reader->readU(1);
+
+        // High profile PPS 扩展（7.3.2.2）
+        $isHighProfile = in_array($this->profileIdc, [100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135, 144]);
+        if ($isHighProfile) {
+            $this->transform8x8ModeFlag = (bool)$this->reader->readU(1);
+            $picScalingMatrixPresent = $this->reader->readU(1);
+            if ($picScalingMatrixPresent) {
+                // 8 个缩放列表：6 个 4x4 + 2 个 8x8（此处仅消费语法，解码器假定 flat=16）
+                for ($i = 0; $i < 8; $i++) {
+                    $useScalingList = $this->reader->readU(1);
+                    if ($useScalingList) {
+                        $size = ($i < 6) ? 16 : 64;
+                        $lastScale = 8;
+                        $nextScale = 8;
+                        for ($j = 0; $j < $size; $j++) {
+                            if ($nextScale !== 0) {
+                                $nextScale = ($lastScale + $this->reader->readSe() + 256) % 256;
+                            }
+                            $lastScale = $nextScale === 0 ? $lastScale : $nextScale;
+                        }
+                    }
+                }
+            }
+            $this->secondChromaQpIndexOffset = $this->reader->readSe();
+        } else {
+            $this->transform8x8ModeFlag = false;
+            $this->secondChromaQpIndexOffset = 0;
+        }
     }
 }

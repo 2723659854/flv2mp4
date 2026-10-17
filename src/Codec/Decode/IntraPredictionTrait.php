@@ -343,6 +343,243 @@ trait IntraPredictionTrait
     }
 
     /**
+     * Intra8x8 帧内预测（transform_8x8_flag=1 的 I8x8 宏块）
+     * 严格对照 FFmpeg h264pred_template.c 的 pred8x8l_* 系列：
+     * 邻居样值先经 [1 2 1]/4 滤波（l0..l7/t0..t15/lt），再按模式生成 8x8 预测。
+     * blkX/blkY ∈ {0,1}：8x8 块在宏块内的位置。
+     */
+    public function intra8x8Prediction(int $mbX, int $mbY, int $blkX, int $blkY, int $mode): array
+    {
+        if ($mode < 0 || $mode > 8) {
+            $mode = 2;
+        }
+        $x0 = $mbX * 16 + $blkX * 8;
+        $y0 = $mbY * 16 + $blkY * 8;
+        $w = $this->width;
+        $h = $this->height;
+
+        $topAvail = ($blkY > 0) || ($mbY > 0);
+        $leftAvail = ($blkX > 0) || ($mbX > 0);
+        // topRight：blkX=0 时与 top 同行（上邻底行右半或本 MB 块1底行，均已重建）；
+        // blkX=1 且 blkY=0 时为右上邻 MB 底行（帧内需存在）；blkX=1 且 blkY=1 时为右邻（未解码）
+        if ($blkX === 0) {
+            $topRightAvail = $topAvail;
+        } else {
+            $topRightAvail = ($blkY === 0) && $mbY > 0 && ($mbX + 1 < $this->picWidthInMbs);
+        }
+        $topLeftAvail = $topAvail && $leftAvail;
+
+        // 原始邻居样值（不可用时 128）
+        $st = array_fill(0, 16, 128); // p[x,-1], x=0..15
+        $sl = array_fill(0, 8, 128);  // p[-1,y], y=0..7
+        $slt = 128;                   // p[-1,-1]
+        if ($topAvail) {
+            $ry = $y0 - 1;
+            $lim = $topRightAvail ? 16 : 8;
+            for ($x = 0; $x < $lim; $x++) {
+                $px = $x0 + $x;
+                if ($px < $w && $ry < $h) {
+                    $st[$x] = $this->yPlane[$ry * $w + $px];
+                }
+            }
+            if (!$topRightAvail) {
+                for ($x = 8; $x < 16; $x++) {
+                    $st[$x] = $st[7];
+                }
+            }
+        }
+        if ($leftAvail) {
+            $rx = $x0 - 1;
+            for ($y = 0; $y < 8; $y++) {
+                $py = $y0 + $y;
+                if ($py < $h && $rx < $w) {
+                    $sl[$y] = $this->yPlane[$py * $w + $rx];
+                }
+            }
+        }
+        if ($topLeftAvail) {
+            $slt = $this->yPlane[($y0 - 1) * $w + ($x0 - 1)];
+        }
+
+        // [1 2 1]/4 滤波（FFmpeg PREDICT_8x8_LOAD_*）
+        $l = [];
+        $l[0] = (($topLeftAvail ? $slt : $sl[0]) + 2 * $sl[0] + $sl[1] + 2) >> 2;
+        for ($y = 1; $y <= 6; $y++) {
+            $l[$y] = ($sl[$y - 1] + 2 * $sl[$y] + $sl[$y + 1] + 2) >> 2;
+        }
+        $l[7] = ($sl[6] + 3 * $sl[7] + 2) >> 2;
+
+        $t = [];
+        $t[0] = (($topLeftAvail ? $slt : $st[0]) + 2 * $st[0] + $st[1] + 2) >> 2;
+        for ($x = 1; $x <= 6; $x++) {
+            $t[$x] = ($st[$x - 1] + 2 * $st[$x] + $st[$x + 1] + 2) >> 2;
+        }
+        $t[7] = (($topRightAvail ? $st[8] : $st[7]) + 2 * $st[7] + $st[6] + 2) >> 2;
+        if ($topRightAvail) {
+            for ($x = 8; $x <= 14; $x++) {
+                $t[$x] = ($st[$x - 1] + 2 * $st[$x] + $st[$x + 1] + 2) >> 2;
+            }
+            $t[15] = ($st[14] + 3 * $st[15] + 2) >> 2;
+        } else {
+            for ($x = 8; $x <= 15; $x++) {
+                $t[$x] = $st[7];
+            }
+        }
+        $lt = ($sl[0] + 2 * $slt + $st[0] + 2) >> 2;
+
+        $avg2 = fn($a, $b) => ($a + $b + 1) >> 1;
+        $avg3 = fn($a, $b, $c) => ($a + 2 * $b + $c + 2) >> 2;
+
+        $p = array_fill(0, 8, array_fill(0, 8, 128));
+        switch ($mode) {
+            case 0: // Vertical
+                for ($y = 0; $y < 8; $y++) {
+                    for ($x = 0; $x < 8; $x++) {
+                        $p[$y][$x] = $t[$x];
+                    }
+                }
+                break;
+            case 1: // Horizontal
+                for ($y = 0; $y < 8; $y++) {
+                    for ($x = 0; $x < 8; $x++) {
+                        $p[$y][$x] = $l[$y];
+                    }
+                }
+                break;
+            case 2: // DC（四变体）
+                if ($topAvail && $leftAvail) {
+                    $s = 8;
+                    for ($i = 0; $i < 8; $i++) {
+                        $s += $l[$i] + $t[$i];
+                    }
+                    $dc = $s >> 4;
+                } elseif ($leftAvail) {
+                    $dc = ($l[0] + $l[1] + $l[2] + $l[3] + $l[4] + $l[5] + $l[6] + $l[7] + 4) >> 3;
+                } elseif ($topAvail) {
+                    $dc = ($t[0] + $t[1] + $t[2] + $t[3] + $t[4] + $t[5] + $t[6] + $t[7] + 4) >> 3;
+                } else {
+                    $dc = 128;
+                }
+                for ($y = 0; $y < 8; $y++) {
+                    for ($x = 0; $x < 8; $x++) {
+                        $p[$y][$x] = $dc;
+                    }
+                }
+                break;
+            case 3: // Diagonal Down-Left
+                for ($y = 0; $y < 8; $y++) {
+                    for ($x = 0; $x < 8; $x++) {
+                        $k = $x + $y;
+                        if ($k < 14) {
+                            $p[$y][$x] = $avg3($t[$k], $t[$k + 1], $t[$k + 2]);
+                        } else {
+                            $p[$y][$x] = $avg3($t[14], $t[15], $t[15]);
+                        }
+                    }
+                }
+                break;
+            case 4: // Diagonal Down-Right（等值线 d=x-y）
+                for ($y = 0; $y < 8; $y++) {
+                    for ($x = 0; $x < 8; $x++) {
+                        $d = $x - $y;
+                        if ($d > 0) {
+                            $p[$y][$x] = $d === 1
+                                ? $avg3($lt, $t[0], $t[1])
+                                : $avg3($t[$d - 2], $t[$d - 1], $t[$d]);
+                        } elseif ($d < 0) {
+                            $k = -$d;
+                            $p[$y][$x] = $k === 1
+                                ? $avg3($l[1], $l[0], $lt)
+                                : $avg3($l[$k], $l[$k - 1], $l[$k - 2]);
+                        } else {
+                            $p[$y][$x] = $avg3($l[0], $lt, $t[0]);
+                        }
+                    }
+                }
+                break;
+            case 5: // Vertical-Right（等值线 zVR=2x-y，对照 pred8x8l_vertical_right）
+                for ($y = 0; $y < 8; $y++) {
+                    for ($x = 0; $x < 8; $x++) {
+                        $zVR = 2 * $x - $y;
+                        if ($zVR >= 0) {
+                            if (($zVR & 1) === 0) {
+                                $k = $zVR >> 1;
+                                $p[$y][$x] = $k === 0 ? $avg2($lt, $t[0]) : $avg2($t[$k - 1], $t[$k]);
+                            } else {
+                                $k = $zVR >> 1;
+                                $p[$y][$x] = $k === 0
+                                    ? $avg3($lt, $t[0], $t[1])
+                                    : $avg3($t[$k - 1], $t[$k], $t[$k + 1]);
+                            }
+                        } elseif ($zVR === -1) {
+                            $p[$y][$x] = $avg3($l[0], $lt, $t[0]);
+                        } else {
+                            $j = -$zVR - 2;
+                            $p[$y][$x] = $j === 0
+                                ? $avg3($l[1], $l[0], $lt)
+                                : $avg3($l[$j + 1], $l[$j], $l[$j - 1]);
+                        }
+                    }
+                }
+                break;
+            case 6: // Horizontal-Down（等值线 zHD=2y-x，对照 pred8x8l_horizontal_down）
+                for ($y = 0; $y < 8; $y++) {
+                    for ($x = 0; $x < 8; $x++) {
+                        $zHD = 2 * $y - $x;
+                        if ($zHD >= 0) {
+                            if (($zHD & 1) === 0) {
+                                $k = $zHD >> 1;
+                                $p[$y][$x] = $k === 0 ? $avg2($lt, $l[0]) : $avg2($l[$k - 1], $l[$k]);
+                            } else {
+                                $k = $zHD >> 1;
+                                $p[$y][$x] = $k === 0
+                                    ? $avg3($lt, $l[0], $l[1])
+                                    : $avg3($l[$k - 1], $l[$k], $l[$k + 1]);
+                            }
+                        } elseif ($zHD === -1) {
+                            $p[$y][$x] = $avg3($l[0], $lt, $t[0]);
+                        } else {
+                            $j = -$zHD - 2;
+                            $p[$y][$x] = $j === 0
+                                ? $avg3($lt, $t[0], $t[1])
+                                : $avg3($t[$j + 1], $t[$j], $t[$j - 1]);
+                        }
+                    }
+                }
+                break;
+            case 7: // Vertical-Left（等值线 zVL=2x+y，对照 pred8x8l_vertical_left）
+                for ($y = 0; $y < 8; $y++) {
+                    for ($x = 0; $x < 8; $x++) {
+                        $zVL = 2 * $x + $y;
+                        $k = $zVL >> 1;
+                        $p[$y][$x] = ($zVL & 1) === 0
+                            ? $avg2($t[$k], $t[$k + 1])
+                            : $avg3($t[$k], $t[$k + 1], $t[$k + 2]);
+                    }
+                }
+                break;
+            case 8: // Horizontal-Up（等值线 zHU=x+2y，对照 pred8x8l_horizontal_up）
+                for ($y = 0; $y < 8; $y++) {
+                    for ($x = 0; $x < 8; $x++) {
+                        $zHU = $x + 2 * $y;
+                        if ($zHU < 13) {
+                            $k = $zHU >> 1;
+                            $p[$y][$x] = ($zHU & 1) === 0
+                                ? $avg2($l[$k], $l[$k + 1])
+                                : $avg3($l[$k], $l[$k + 1], $l[$k + 2]);
+                        } elseif ($zHU === 13) {
+                            $p[$y][$x] = ($l[6] + 3 * $l[7] + 2) >> 2;
+                        } else {
+                            $p[$y][$x] = $l[7];
+                        }
+                    }
+                }
+                break;
+        }
+        return $p;
+    }
+
+    /**
      * Intra16x16 亮度预测
      */
     public function intra16x16Prediction(int $mbX, int $mbY, int $mode): array

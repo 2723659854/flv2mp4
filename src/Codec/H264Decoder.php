@@ -3,6 +3,8 @@
 namespace Xiaosongshu\Flv2mp4\Codec;
 
 use Xiaosongshu\Flv2mp4\Codec\Decode\BitReader;
+use Xiaosongshu\Flv2mp4\Codec\Decode\CabacDecodingTrait;
+use Xiaosongshu\Flv2mp4\Codec\Decode\CabacTablesTrait;
 use Xiaosongshu\Flv2mp4\Codec\Decode\DeblockingFilterTrait;
 use Xiaosongshu\Flv2mp4\Codec\Decode\IntraPredictionTrait;
 use Xiaosongshu\Flv2mp4\Codec\Decode\MacroblockDecodingTrait;
@@ -14,13 +16,13 @@ use Xiaosongshu\Flv2mp4\Codec\Decode\SpsPpsParsingTrait;
 use Xiaosongshu\Flv2mp4\Codec\Decode\TransformTrait;
 
 /**
- * @purpose H.264解码器 - 支持 baseline profile (I帧 + P帧)
+ * @purpose H.264解码器 - 支持 baseline/main/high profile (I/P/B帧, CAVLC/CABAC)
  * @author yanglong
  * @time 2026年7月23日14:41:47
  */
 class H264Decoder
 {
-    use SpsPpsParsingTrait, SliceDecodingTrait, MacroblockDecodingTrait, IntraPredictionTrait, ResidualDecodingTrait, TransformTrait, DeblockingFilterTrait, MotionCompensationTrait, MotionVectorPredictionTrait;
+    use SpsPpsParsingTrait, SliceDecodingTrait, MacroblockDecodingTrait, IntraPredictionTrait, ResidualDecodingTrait, TransformTrait, DeblockingFilterTrait, MotionCompensationTrait, MotionVectorPredictionTrait, CabacTablesTrait, CabacDecodingTrait;
 
     const PART_NOT_AVAILABLE = -2;
     private const ALPHA_TABLE = [
@@ -107,6 +109,8 @@ class H264Decoder
     public array $mbNnzForDeblock = [];
     public array $mbMvForDeblock = [];
     public array $mbRefForDeblock = [];
+    public array $mbMvL1ForDeblock = [];
+    public array $mbRefL1ForDeblock = [];
 
     /**
      * 当前帧是否需要为去块滤波收集宏块簿记（类型/QP/NZ/MV/参考索引）。
@@ -143,6 +147,84 @@ class H264Decoder
     public array $mvLeftCol = [];     // 左方宏块列的运动向量，4行4x4块
 
     public int $frameNum = 0;
+
+    // ===== B帧 / POC / CABAC / High profile 扩展 =====
+
+    // SPS high 扩展
+    public bool $direct8x8InferenceFlag = true;
+    public bool $transformBypass8x8 = false;
+
+    // PPS high 扩展
+    public bool $transform8x8ModeFlag = false;
+    public int $secondChromaQpIndexOffset = 0;
+
+    // POC (H.264 8.2.1, type0)
+    public int $prevPicOrderCntMsb = 0;
+    public int $prevPicOrderCntLsb = 0;
+    public int $currPicOrderCntLsb = 0;
+    public int $currPicOrderCntMsb = 0;
+    public int $currPicOrderCnt = 0;
+    public int $prevFrameNumForPoc = 0;
+    public int $prevFrameNumOffset = 0;
+    public int $frameNumOffset = 0;
+
+    // B 片参考表与片级状态
+    public array $refPicList1 = [];
+    public int $numRefIdxL1Active = 1;
+    public bool $directSpatialMvPred = true;
+    /** B 帧 MV 预测邻居缓存：[list] → topRow(mbWidth*4)/leftCol(4)/topLeft */
+    public array $bMvTopRow = [];
+    public array $bMvLeftCol = [];
+    public array $bMvTopLeft = [];
+    public int $cabacInitIdc = 0;
+    public int $lastQpDelta = 0;
+
+    // 显式加权预测 pred_weight_table
+    // [lumaShift, chromaShift, l0 => [ref=>[w,o,cw[3],co[3]]...], l1=>[...]]
+    public array $predWeightTable = [];
+
+    // direct 缩放/隐式权重（片级预计算）
+    // distScaleFactor[list][refIdx]；implicitW[l0][l1] = [wY,wC]
+    public array $distScaleFactor = [[], []];
+    public array $implicitWeight = [];
+
+    // ===== CABAC 引擎状态 =====
+    public string $cabacData = '';
+    public int $cabacPtr = 0;
+    public int $cabacEnd = 0;
+    public int $cabacLow = 0;
+    public int $cabacRange = 0;
+    public array $cabacStates = [];
+
+    // ===== 当前图像的全帧 4x4 块级状态（CABAC/B 帧邻域 + 同位帧存储）=====
+    // 每个宏块 16 个 4x4 亮度块（raster），色度 nz 块每 MB 8 个（16-19 Cb,20-23 Cr）
+    public int $mbCount = 0;
+    public array $picMv0 = [];       // mbCount*16 [x,y]
+    public array $picMv1 = [];       // mbCount*16 [x,y]
+    public array $picRef0 = [];      // mbCount*16 int, -1=未使用
+    public array $picRef1 = [];
+    public array $picMvd0 = [];      // mbCount*16 [x,y]
+    public array $picMvd1 = [];
+    public array $picIsSkip = [];    // mbCount 0/1（CABAC mb_skip_flag 上下文）
+    public array $picIsDirectMb = []; // mbCount 0/1（CABAC B mb_type/ref 上下文，仅 B_Direct_16x16/Skip）
+    public array $picDirectQ = [];   // mbCount*4 逐 8x8 象限 direct 标记（FFmpeg direct_table，B 片 ref ctx 排除用）
+    public array $picMbType = [];    // mbCount flags
+    public array $picSubType = [];   // mbCount*4 8x8 子类型 flags
+    public array $picCbp = [];       // mbCount
+    public array $picNz = [];        // mbCount*24
+    public array $picChromaPred = [];// mbCount
+    public array $picIntra4Mode = [];// mbCount*16
+    public array $picIs8x8Dct = [];  // mbCount
+    public array $picIsPcm = [];     // mbCount
+    // 同位帧 LongTerm 标记（DPB 条目内同步保存一份）
+    public bool $currentIsLongTerm = false;
+
+    // 显示序重排输出队列
+    // 是否按 POC 重排输出（baseline profile 直接解码序输出，零回归）
+    public bool $reorderByPoc = false;
+    public array $outputQueue = [];  // [seq,poc,epoch,isIdr,width,height,data]
+    public int $outputEpoch = 0;
+    public int $outputSeq = 0;
 
     // DC系数映射表：DC数组索引 -> 块索引
     public static array $dcCoeffIndex = [0, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15];
@@ -282,6 +364,140 @@ class H264Decoder
         $this->mbNnzForDeblock = [];
         $this->mbMvForDeblock = [];
         $this->mbRefForDeblock = [];
+        $this->mbMvL1ForDeblock = [];
+        $this->mbRefL1ForDeblock = [];
+        // B帧/POC/CABAC 扩展状态
+        $this->refPicList1 = [];
+        $this->prevPicOrderCntMsb = 0;
+        $this->prevPicOrderCntLsb = 0;
+        $this->prevFrameNumForPoc = 0;
+        $this->prevFrameNumOffset = 0;
+        $this->frameNumOffset = 0;
+        $this->currPicOrderCnt = 0;
+        $this->outputQueue = [];
+        $this->outputEpoch = 0;
+        $this->outputSeq = 0;
+        $this->resetPictureState();
+    }
+
+    /**
+     * 每帧解码前重置全帧 4x4 块级状态（CABAC 邻域与同位帧存储用）。
+     */
+    public function resetPictureState(): void
+    {
+        $n = $this->picWidthInMbs * $this->picHeightInMbs;
+        $this->mbCount = $n;
+        $this->picMv0 = array_fill(0, $n * 16, [0, 0]);
+        $this->picMv1 = array_fill(0, $n * 16, [0, 0]);
+        $this->picRef0 = array_fill(0, $n * 16, -1);
+        $this->picRef1 = array_fill(0, $n * 16, -1);
+        $this->picMvd0 = array_fill(0, $n * 16, [0, 0]);
+        $this->picMvd1 = array_fill(0, $n * 16, [0, 0]);
+        $this->picIsSkip = array_fill(0, $n, 0);
+        $this->picIsDirectMb = array_fill(0, $n, 0);
+        $this->picDirectQ = array_fill(0, $n * 4, 0);
+        $this->picMbType = array_fill(0, $n, 0);
+        $this->picSubType = array_fill(0, $n * 4, 0);
+        $this->picCbp = array_fill(0, $n, 0);
+        $this->picNz = array_fill(0, $n * 24, 0);
+        $this->picChromaPred = array_fill(0, $n, 0);
+        $this->picIntra4Mode = array_fill(0, $n * 16, 2);
+        $this->picIs8x8Dct = array_fill(0, $n, 0);
+        $this->picIsPcm = array_fill(0, $n, 0);
+        $this->currentIsLongTerm = false;
+        $this->dbgBStat = ['n' => 0, 'skip' => 0, 'direct' => 0, 'intra' => 0, 'inter' => 0, 'other' => 0];
+    }
+
+    // ===== POC 计算 (H.264 8.2.1.1) =====
+
+    /**
+     * 参考帧解码完成后更新 prev POC 状态。
+     */
+    public function updatePrevPocState(int $frameNum, int $maxFrameNum, bool $isIdr): void
+    {
+        if ($isIdr) {
+            $this->prevPicOrderCntMsb = 0;
+            $this->prevPicOrderCntLsb = 0;
+        } else {
+            $this->prevPicOrderCntMsb = $this->currPicOrderCntMsb;
+            $this->prevPicOrderCntLsb = $this->currPicOrderCntLsb;
+        }
+        $this->prevFrameNumForPoc = $frameNum;
+        $this->prevFrameNumOffset = 0;
+    }
+
+    // ===== 显示序重排输出 =====
+
+    /**
+     * 将解码完成的一帧入队，并按 POC 排出一帧（无可排出返回 null）。
+     */
+    public function enqueueAndDrainFrame(string $data, int $width, int $height, int $poc, bool $isIdr): ?array
+    {
+        if ($isIdr && !empty($this->outputQueue)) {
+            // 新 IDR 时代：旧帧必须先排出
+            $this->outputEpoch++;
+        }
+        $this->outputQueue[] = [
+            'seq' => $this->outputSeq++,
+            'poc' => $poc,
+            'epoch' => $this->outputEpoch,
+            'width' => $width,
+            'height' => $height,
+            'data' => $data,
+        ];
+        return $this->drainOneFrame($poc);
+    }
+
+    /**
+     * 排出规则：
+     *  1. 若存在旧 epoch 帧，按 (poc) 取最旧一帧；
+     *  2. 否则取 POC 严格小于当前已解码 POC 的最小 POC 帧。
+     */
+    private function drainOneFrame(int $curPoc): ?array
+    {
+        if (empty($this->outputQueue)) return null;
+        $curEpoch = $this->outputEpoch;
+        $pickKey = null;
+        $pickPoc = null;
+        $oldEpochExists = false;
+        foreach ($this->outputQueue as $k => $f) {
+            if ($f['epoch'] < $curEpoch) { $oldEpochExists = true; break; }
+        }
+        foreach ($this->outputQueue as $k => $f) {
+            if ($oldEpochExists) {
+                if ($f['epoch'] === $curEpoch) continue;
+            } else {
+                if ($f['poc'] >= $curPoc) continue;
+            }
+            if ($pickPoc === null || $f['poc'] < $pickPoc) {
+                $pickPoc = $f['poc'];
+                $pickKey = $k;
+            }
+        }
+        if ($pickKey === null) return null;
+        $f = $this->outputQueue[$pickKey];
+        array_splice($this->outputQueue, $pickKey, 1);
+        return ['data' => $f['data'], 'width' => $f['width'], 'height' => $f['height'], 'pix_fmt' => 'yuv420p'];
+    }
+
+    /**
+     * 流结束时冲洗输出队列（按 epoch、POC 升序）。
+     * @return array[] 帧结果数组
+     */
+    public function flushReorderQueue(): array
+    {
+        $frames = $this->outputQueue;
+        usort($frames, function ($a, $b) {
+            if ($a['epoch'] !== $b['epoch']) return $a['epoch'] <=> $b['epoch'];
+            if ($a['poc'] !== $b['poc']) return $a['poc'] <=> $b['poc'];
+            return $a['seq'] <=> $b['seq'];
+        });
+        $this->outputQueue = [];
+        $out = [];
+        foreach ($frames as $f) {
+            $out[] = ['data' => $f['data'], 'width' => $f['width'], 'height' => $f['height'], 'pix_fmt' => 'yuv420p'];
+        }
+        return $out;
     }
 
     public function initQuantMatrix(): void
@@ -381,6 +597,8 @@ class H264Decoder
                 $this->yPlane = array_fill(0, $ySize, 128);
                 $this->uPlane = array_fill(0, $uvSize, 128);
                 $this->vPlane = array_fill(0, $uvSize, 128);
+                // 重置全帧 4x4 块级状态（CABAC 邻域 / B帧同位 MV）
+                $this->resetPictureState();
 
                 // 保存实际图像尺寸，临时使用宏块对齐的尺寸进行解码
                 $origWidth = $this->width;
@@ -388,13 +606,30 @@ class H264Decoder
                 $this->width = $mbAlignedWidth;
                 $this->height = $mbAlignedHeight;
 
+                $isIdrNal = ($nalType === 5);
                 // IDR关键帧永不跳滤波（参考链重置点，且通常都保留输出）
-                $this->decodeSlice($nal['data'], $nalType === 5, $nalRefIdc, $skipDeblock && $nalType !== 5);
-                // 更新参考帧（用于P帧运动补偿）- 在恢复尺寸之前进行
+                $this->decodeSlice($nal['data'], $isIdrNal, $nalRefIdc, $skipDeblock && $nalType !== 5);
+                $framePoc = $this->currPicOrderCnt;
+                // B 片的解码序≠显示序，启用按 POC 重排输出
+                if ($this->currentSliceType === 1) {
+                    $this->reorderByPoc = true;
+                }
+                // 更新参考帧（用于P/B帧运动补偿）- 在恢复尺寸之前进行
                 if ($nalRefIdc !== 0 || $nalType === 5) {
                     $dpbEntry = [
                         'frameNum' => $this->currFrameNum,
-                        'isLongTerm' => false,
+                        'isLongTerm' => $this->currentIsLongTerm,
+                        'poc' => $framePoc,
+                        // 同位帧 4x4 运动信息（temporal direct / 邻域调试用）
+                        'mv0' => $this->picMv0,
+                        'mv1' => $this->picMv1,
+                        'ref0' => $this->picRef0,
+                        'ref1' => $this->picRef1,
+                        'mbType' => $this->picMbType,
+                        'subType' => $this->picSubType,
+                        // 本帧参考列表的 frameNum 快照（temporal direct 的 fill_colmap 匹配用）
+                        'refFns0' => array_map(function ($e) { return $e['frameNum']; }, $this->refPicList0),
+                        'refFns1' => array_map(function ($e) { return $e['frameNum']; }, $this->refPicList1),
                         // 平面本身即 0-based 整数数组，*Bytes 与平面共享同一 COW 副本
                         // （参考帧只读不写，不会发生写时分离），ensureRefBytes 因此变为空操作
                         'y' => $this->yPlane,
@@ -413,6 +648,8 @@ class H264Decoder
                     $this->dpb[] = $dpbEntry;
 
                     $maxFrameNum = 1 << ($this->log2MaxFrameNumMinus4 + 4);
+                    // 调试插桩：DPB_KEEP 环境变量覆盖参考帧保留数（勿提交）
+                    $maxRefDebug = getenv('DPB_KEEP') !== false ? (int)getenv('DPB_KEEP') : $this->maxNumRefFrames;
                     $shortTermCount = 0;
                     $oldestKey = null;
                     $oldestFnWrap = null;
@@ -426,7 +663,7 @@ class H264Decoder
                             $oldestKey = $k;
                         }
                     }
-                    while ($shortTermCount > $this->maxNumRefFrames) {
+                    while ($shortTermCount > $maxRefDebug) {
                         if ($oldestKey !== null) {
                             array_splice($this->dpb, $oldestKey, 1);
                         }
@@ -453,13 +690,16 @@ class H264Decoder
                     $this->refHeightY = $dpbEntry['heightY'];
                     $this->refWidthUv = $dpbEntry['widthUv'];
                     $this->refHeightUv = $dpbEntry['heightUv'];
+
+                    // POC 参考状态仅在参考帧后更新（H.264 8.2.1.1）
+                    $this->updatePrevPocState($this->currFrameNum, $maxFrameNum, $isIdrNal);
                 }
 
                 // 恢复实际图像尺寸
                 $this->width = $origWidth;
                 $this->height = $origHeight;
 
-                // 将本帧转为二进制并追加到输出（裁剪到实际图像尺寸）
+                // 将本帧转为二进制（裁剪到实际图像尺寸）
                 if ($buildOutput) {
                     $yBin = '';
                     for ($yy = 0; $yy < $this->height; $yy++) {
@@ -474,8 +714,24 @@ class H264Decoder
                         $uBin .= pack('C*', ...array_slice($this->uPlane, $yy * $uvMbAlignedWidth, $uvWidth));
                         $vBin .= pack('C*', ...array_slice($this->vPlane, $yy * $uvMbAlignedWidth, $uvWidth));
                     }
-                    $outputData .= $yBin . $uBin . $vBin;
+                    $frameBin = $yBin . $uBin . $vBin;
+                    if ($this->reorderByPoc) {
+                        // 按显示序(POC)延迟排出；流结束需调用 flushReorderQueue()
+                        $drained = $this->enqueueAndDrainFrame($frameBin, $this->width, $this->height, $framePoc, $isIdrNal);
+                        if ($drained !== null) {
+                            $outputData .= $drained['data'];
+                        }
+                    } else {
+                        $outputData .= $frameBin;
+                    }
                 }
+            }
+        }
+
+        // POC 重排：流尾冲洗残留在输出队列中的 B 帧（最多 bframes 帧）
+        if ($buildOutput && $this->reorderByPoc) {
+            foreach ($this->flushReorderQueue() as $f) {
+                $outputData .= $f['data'];
             }
         }
 

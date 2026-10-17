@@ -116,34 +116,39 @@ trait TransformTrait
 
     /**
      * 4x4 IDCT 整数逆变换（一维行优先输入输出）——原地
+     * 蝶形顺序与 FFmpeg ff_h264_idct_add / 解码器 idct4x4Flat 一致：
+     * 先列变换（stride 4）后行变换并 >>6。本地重建必须与解码端 bit-exact，
+     * 行列顺序互换会因 >>1 舍入产生 ±1 漂移。
      */
     public function idctFlat(array &$coeffs): void
     {
         $coeffs[0] += 32;
 
+        // 第一遍：列变换
         for ($i = 0; $i < 4; $i++) {
-            $row = $i << 2;
-            $z0 = $coeffs[$row] + $coeffs[$row + 2];
-            $z1 = $coeffs[$row] - $coeffs[$row + 2];
-            $z2 = ($coeffs[$row + 1] >> 1) - $coeffs[$row + 3];
-            $z3 = $coeffs[$row + 1] + ($coeffs[$row + 3] >> 1);
-
-            $coeffs[$row] = $z0 + $z3;
-            $coeffs[$row + 1] = $z1 + $z2;
-            $coeffs[$row + 2] = $z1 - $z2;
-            $coeffs[$row + 3] = $z0 - $z3;
-        }
-
-        for ($i = 0; $i < 4; $i++) {
-            $z0 = $coeffs[$i] + $coeffs[$i + 8];
-            $z1 = $coeffs[$i] - $coeffs[$i + 8];
+            $z0 = $coeffs[$i + 0] + $coeffs[$i + 8];
+            $z1 = $coeffs[$i + 0] - $coeffs[$i + 8];
             $z2 = ($coeffs[$i + 4] >> 1) - $coeffs[$i + 12];
             $z3 = $coeffs[$i + 4] + ($coeffs[$i + 12] >> 1);
 
-            $coeffs[$i] = ($z0 + $z3) >> 6;
-            $coeffs[$i + 4] = ($z1 + $z2) >> 6;
-            $coeffs[$i + 8] = ($z1 - $z2) >> 6;
-            $coeffs[$i + 12] = ($z0 - $z3) >> 6;
+            $coeffs[$i + 0] = $z0 + $z3;
+            $coeffs[$i + 4] = $z1 + $z2;
+            $coeffs[$i + 8] = $z1 - $z2;
+            $coeffs[$i + 12] = $z0 - $z3;
+        }
+
+        // 第二遍：行变换并 >>6
+        for ($i = 0; $i < 4; $i++) {
+            $row = $i << 2;
+            $z0 = $coeffs[$row + 0] + $coeffs[$row + 2];
+            $z1 = $coeffs[$row + 0] - $coeffs[$row + 2];
+            $z2 = ($coeffs[$row + 1] >> 1) - $coeffs[$row + 3];
+            $z3 = $coeffs[$row + 1] + ($coeffs[$row + 3] >> 1);
+
+            $coeffs[$row + 0] = ($z0 + $z3) >> 6;
+            $coeffs[$row + 1] = ($z1 + $z2) >> 6;
+            $coeffs[$row + 2] = ($z1 - $z2) >> 6;
+            $coeffs[$row + 3] = ($z0 - $z3) >> 6;
         }
     }
 
@@ -371,14 +376,12 @@ trait TransformTrait
             $z2 = $temp[4 + $j] - $temp[12 + $j];
             $z3 = $temp[4 + $j] + $temp[12 + $j];
 
-            $s0 = ($z0 + $z3) * $qmul + 128;
-            $s1 = ($z1 + $z2) * $qmul + 128;
-            $s2 = ($z1 - $z2) * $qmul + 128;
-            $s3 = ($z0 - $z3) * $qmul + 128;
-            $out[0 * 4 + $j] = ($s0 >= 0) ? ($s0 >> 8) : -((abs($s0)) >> 8);
-            $out[1 * 4 + $j] = ($s1 >= 0) ? ($s1 >> 8) : -((abs($s1)) >> 8);
-            $out[2 * 4 + $j] = ($s2 >= 0) ? ($s2 >> 8) : -((abs($s2)) >> 8);
-            $out[3 * 4 + $j] = ($s3 >= 0) ? ($s3 >> 8) : -((abs($s3)) >> 8);
+            // FFmpeg: (x*qmul + 128) >> 8，PHP >> 对负数为算术右移(floor)，与 C 一致。
+            // 不可用向0截断(-((abs)>>8))，否则本地重建与解码端漂移 ±1。
+            $out[0 * 4 + $j] = (($z0 + $z3) * $qmul + 128) >> 8;
+            $out[1 * 4 + $j] = (($z1 + $z2) * $qmul + 128) >> 8;
+            $out[2 * 4 + $j] = (($z1 - $z2) * $qmul + 128) >> 8;
+            $out[3 * 4 + $j] = (($z0 - $z3) * $qmul + 128) >> 8;
         }
         return $out;
     }

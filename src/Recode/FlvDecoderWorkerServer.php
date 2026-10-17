@@ -43,6 +43,7 @@ final class FlvDecoderWorkerServer
 
     public function __construct(private array $config)
     {
+        ini_set('memory_limit', (string)($config['memory_limit'] ?? '512M'));
         $this->decoder = new H264Decoder();
         $this->scaler = new VideoScaler();
         // 编码在 GOP worker 内完成：每个 worker 独立编码器 + 独立运动估计子进程（GOP边界只重置状态不重建）

@@ -48,6 +48,8 @@ trait MacroblockDecodingTrait
             $mbQpDelta = $this->decodeIntraMacroblock($mbX, $mbY, $mbType, $sliceQp);
         } elseif ($sliceType === 0 || $sliceType === 5) {
             $mbQpDelta = $this->decodePInterMacroblock($mbX, $mbY, $mbType, $sliceQp);
+        } elseif ($sliceType === 1) {
+            $mbQpDelta = $this->decodeBInterMacroblock($mbX, $mbY, $mbType, $sliceQp);
         } else {
             $this->fillMacroblockGray($mbX, $mbY);
         }
@@ -59,6 +61,12 @@ trait MacroblockDecodingTrait
      */
     private function decodeIntraMacroblock(int $mbX, int $mbY, int $mbType, int $sliceQp): int
     {
+        // 调试插桩（勿提交）：I 帧宏块入口日志
+        if (getenv('I_MB_DBG') !== false) {
+            file_put_contents('i_mb_debug.log', sprintf("MB %d %d t%d pos%d\n", $mbX, $mbY, $mbType, $this->reader->getPos()), FILE_APPEND);
+        }
+        // 同位帧存储：intra 标记（B 帧 direct 的 colZero 判定依赖）
+        $this->picMbType[$mbY * $this->picWidthInMbs + $mbX] |= 1;
 
         if ($mbType === 25) {
             $this->reader->alignToByte();
@@ -144,6 +152,10 @@ trait MacroblockDecodingTrait
                 $remMode = $this->reader->readU(3);
                 $mode = $remMode >= $predicted ? $remMode + 1 : $remMode;
             }
+            // 调试插桩（勿提交）：mode 原始读取序列
+            if (getenv('I4_DUMP') !== false && $mbX === 13 && $mbY === 2) {
+                file_put_contents('i4_dump.log', sprintf("scan%d pos%d prev%d rem%d pred%d mode%d\n", $scanIdx, $this->reader->getPos(), $prevFlag, $prevFlag ? -1 : $remMode ?? -1, $predicted, $mode), FILE_APPEND);
+            }
             $modeCache[$rasterIdx] = $mode;
             $modes[$rasterIdx] = $mode;
         }
@@ -168,6 +180,10 @@ trait MacroblockDecodingTrait
         $mbQpDelta = 0;
         if ($cbp > 0) {
             $mbQpDelta = $this->reader->readSe();
+        }
+        // 调试插桩（勿提交）：chromaPred/cbp/qpDelta 位位置与值
+        if (getenv('I4_DUMP') !== false && $mbX === 13 && ($mbY === 2 || $mbY === 3)) {
+            file_put_contents('i4_dump.log', sprintf("MB %d %d chromaPos%d chroma%d cbpPos%d cbpCode%d cbp%d qpDeltaPos%d delta%d\n", $mbX, $mbY, $this->reader->getPos(), $chromaPredMode, 0, $cbpCode, $cbp, 0, $mbQpDelta), FILE_APPEND);
         }
         $qp = max(0, min(51, $sliceQp + $mbQpDelta));
         $yCoeffs = array_fill(0, 16, array_fill(0, 16, 0));
@@ -309,6 +325,19 @@ trait MacroblockDecodingTrait
         // 色度DC逆哈达玛 + AC IDCT
         //   - AC存在 (chromaCbp>=2): DC放入coeffs[0], 一次IDCT (单一+32偏置, >>6)
         //   - DC-only (chromaCbp==1): dc_add = (dc + 32) >> 6, 加到所有像素
+        // 调试插桩（勿提交）：dump Intra4x4 详情
+        if (getenv('I4_DUMP') !== false && ($mbX === 13 && ($mbY === 2 || $mbY === 3))) {
+            $out = sprintf("MB %d %d cbp%d qp%d sliceQp%d qpDelta%d pos%d modes[%s]\n", $mbX, $mbY, $cbp, $qp, $sliceQp, $mbQpDelta, $this->reader->getPos(), implode(',', $modes));
+            for ($blk = 0; $blk < 16; $blk++) {
+                $by = intdiv($blk, 4); $bx = $blk % 4;
+                $out .= sprintf(" blk%d mode%d nz%d coeff[0..5]=%s pred00=%d res=%s\n",
+                    $blk, $modes[$blk], $yCoeffs[$blk][0] !== null ? 1 : 0,
+                    implode(',', array_slice($yCoeffs[$blk], 0, 6)),
+                    $this->intra4x4Prediction($mbX, $mbY, $bx, $by, $modes[$blk])[0][0],
+                    implode(',', array_slice($yPixels[$by * 4 + 0], $bx * 4, 4)));
+            }
+            file_put_contents('i4_dump.log', $out . "\n", FILE_APPEND);
+        }
         $uPixels = array_fill(0, 8, array_fill(0, 8, 0));
         $vPixels = array_fill(0, 8, array_fill(0, 8, 0));
 
@@ -919,6 +948,10 @@ trait MacroblockDecodingTrait
         $mvX = $predMvX;
         $mvY = $predMvY;
 
+        if (getenv('CAB_MV') !== false && $this->cabMbIdx <= 95) {
+            fwrite(STDERR, sprintf("MVP sl=%d mb=%d type=skip mv=(%d,%d)\n",
+                $this->cabSliceIdx, $this->cabMbIdx, $mvX, $mvY));
+        }
         $this->performMotionCompensation16x16($mbX, $mbY, $mvX, $mvY, $refIdx);
 
         $this->saveMvForPrediction($mbX, $mbY, $mvX, $mvY, $refIdx);
@@ -985,6 +1018,1142 @@ trait MacroblockDecodingTrait
 
     private static array $left8x16Blocks = [0, 1, 4, 5, 8, 9, 12, 13];
     private static array $right8x16Blocks = [2, 3, 6, 7, 10, 11, 14, 15];
+
+    // ====================== B 片宏块解码（CAVLC，main profile）======================
+
+    // B 片 mb_type 4-21 双分区规格：[layout(0=16x8,1=8x16), dir0, dir1]，dir: 0=L0/1=L1/2=Bi
+    // （FFmpeg h264data.c ff_h264_b_mb_type_info）
+    private static array $bPartSpecs = [
+        4 => [0, 0, 0], 5 => [1, 0, 0], 6 => [0, 1, 1], 7 => [1, 1, 1],
+        8 => [0, 0, 1], 9 => [1, 0, 1], 10 => [0, 1, 0], 11 => [1, 1, 0],
+        12 => [0, 0, 2], 13 => [1, 0, 2], 14 => [0, 1, 2], 15 => [1, 1, 2],
+        16 => [0, 2, 0], 17 => [1, 2, 0], 18 => [0, 2, 1], 19 => [1, 2, 1],
+        20 => [0, 2, 2], 21 => [1, 2, 2],
+    ];
+    // B sub_mb_type 0-12 的分区数（FFmpeg ff_h264_b_sub_mb_type_info）
+    private static array $bSubPartCount = [1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 4, 4, 4];
+    // B sub_mb_type 是否使用 L0/L1
+    private static array $bSubUsesL0 = [0, 1, 0, 1, 1, 1, 0, 0, 1, 1, 1, 0, 1];
+    private static array $bSubUsesL1 = [0, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 1, 1];
+
+    private function readRefIdxB(int $list): int
+    {
+        $numRef = $list === 0 ? $this->numRefIdxL0Active : $this->numRefIdxL1Active;
+        if ($numRef <= 1) {
+            return 0;
+        }
+        if ($numRef === 2) {
+            return $this->reader->readU(1) ^ 1;
+        }
+        return $this->reader->readUe();
+    }
+
+    private function getBRefPlanes(int $list, int $refIdx): array
+    {
+        $listArr = $list === 0 ? $this->refPicList0 : $this->refPicList1;
+        if (isset($listArr[$refIdx])) {
+            $ref = $listArr[$refIdx];
+            return [
+                'y' => $ref['y'], 'u' => $ref['u'], 'v' => $ref['v'],
+                'yBytes' => $ref['yBytes'], 'uBytes' => $ref['uBytes'], 'vBytes' => $ref['vBytes'],
+                'strideY' => $ref['strideY'], 'strideUv' => $ref['strideUv'],
+                'widthY' => $ref['widthY'], 'heightY' => $ref['heightY'],
+                'widthUv' => $ref['widthUv'], 'heightUv' => $ref['heightUv'],
+            ];
+        }
+        return [
+            'y' => $this->refFrameY, 'u' => $this->refFrameU, 'v' => $this->refFrameV,
+            'yBytes' => $this->refFrameY, 'uBytes' => $this->refFrameU, 'vBytes' => $this->refFrameV,
+            'strideY' => $this->refStrideY, 'strideUv' => $this->refStrideUv,
+            'widthY' => $this->refWidthY, 'heightY' => $this->refHeightY,
+            'widthUv' => $this->refWidthUv, 'heightUv' => $this->refHeightUv,
+        ];
+    }
+
+    private function ensureBRefBytes(int $list, int $refIdx, bool $needLuma, bool $needChroma): void
+    {
+        // L1 条目直接来自 DPB（构造时已共享 *Bytes），仅需处理 L0
+        if ($list !== 0 || !isset($this->refPicList0[$refIdx])) {
+            return;
+        }
+        $listEntry = $this->refPicList0[$refIdx];
+        $lumaOk = !$needLuma || $listEntry['yBytes'] !== null;
+        $chromaOk = !$needChroma || ($listEntry['uBytes'] !== null && $listEntry['vBytes'] !== null);
+        if ($lumaOk && $chromaOk) {
+            return;
+        }
+        foreach ($this->dpb as $k => $entry) {
+            if ($entry['frameNum'] !== $listEntry['frameNum'] || $entry['isLongTerm'] !== $listEntry['isLongTerm']) {
+                continue;
+            }
+            if ($needLuma && $entry['yBytes'] === null) $entry['yBytes'] = $entry['y'];
+            if ($needChroma && $entry['uBytes'] === null) $entry['uBytes'] = $entry['u'];
+            if ($needChroma && $entry['vBytes'] === null) $entry['vBytes'] = $entry['v'];
+            $this->dpb[$k] = $entry;
+            $this->refPicList0[$refIdx] = $entry;
+            return;
+        }
+        $entry = &$this->refPicList0[$refIdx];
+        if ($needLuma && $entry['yBytes'] === null) $entry['yBytes'] = $entry['y'];
+        if ($needChroma) {
+            if ($entry['uBytes'] === null) $entry['uBytes'] = $entry['u'];
+            if ($entry['vBytes'] === null) $entry['vBytes'] = $entry['v'];
+        }
+        unset($entry);
+    }
+
+    private function mcBBlockTo(int $dstX, int $dstY, int $blockW, int $blockH, int $mvX, int $mvY, int $list, int $refIdx): void
+    {
+        if ($this->refFrameY === null) {
+            return;
+        }
+        $lumaRefX = $dstX * 4 + $mvX;
+        $lumaRefY = $dstY * 4 + $mvY;
+        $needLuma = ($lumaRefX & 3) !== 0 || ($lumaRefY & 3) !== 0;
+        $needChroma = ($lumaRefX & 7) !== 0 || ($lumaRefY & 7) !== 0;
+        $this->ensureBRefBytes($list, $refIdx, $needLuma, $needChroma);
+        $ref = $this->getBRefPlanes($list, $refIdx);
+        $this->mcLumaTo(
+            $ref['y'], $ref['strideY'], $ref['widthY'], $ref['heightY'],
+            $lumaRefX, $lumaRefY, $blockW, $blockH,
+            $this->yPlane, $this->width, $dstX, $dstY, $ref['yBytes']
+        );
+        $chromaStride = intdiv($this->width, 2);
+        $this->mcChromaPairTo(
+            $ref['u'], $ref['v'], $ref['strideUv'], $ref['widthUv'], $ref['heightUv'],
+            $lumaRefX, $lumaRefY, intdiv($blockW, 2), intdiv($blockH, 2),
+            $this->uPlane, $this->vPlane, $chromaStride, intdiv($dstX, 2), intdiv($dstY, 2),
+            $ref['uBytes'], $ref['vBytes']
+        );
+    }
+
+    private function performBiPredBlock(int $dstX, int $dstY, int $blockW, int $blockH,
+                                        int $mv0X, int $mv0Y, int $refIdx0,
+                                        int $mv1X, int $mv1Y, int $refIdx1): void
+    {
+        if ($this->refFrameY === null) {
+            return;
+        }
+        // L0 直接写入当前平面；L1 写临时平面后按隐式权重合并（见下方合并循环）
+        $this->mcBBlockTo($dstX, $dstY, $blockW, $blockH, $mv0X, $mv0Y, 0, $refIdx0);
+        $tmpY = array_fill(0, $blockH * $blockW, 0);
+        $cw = intdiv($blockW, 2);
+        $ch = intdiv($blockH, 2);
+        $tmpU = array_fill(0, $ch * $cw, 0);
+        $tmpV = array_fill(0, $ch * $cw, 0);
+        $lumaRefX = $dstX * 4 + $mv1X;
+        $lumaRefY = $dstY * 4 + $mv1Y;
+        $needLuma = ($lumaRefX & 3) !== 0 || ($lumaRefY & 3) !== 0;
+        $needChroma = ($lumaRefX & 7) !== 0 || ($lumaRefY & 7) !== 0;
+        $this->ensureBRefBytes(1, $refIdx1, $needLuma, $needChroma);
+        $ref = $this->getBRefPlanes(1, $refIdx1);
+        $this->mcLumaTo(
+            $ref['y'], $ref['strideY'], $ref['widthY'], $ref['heightY'],
+            $lumaRefX, $lumaRefY, $blockW, $blockH,
+            $tmpY, $blockW, 0, 0, $ref['yBytes']
+        );
+        $this->mcChromaPairTo(
+            $ref['u'], $ref['v'], $ref['strideUv'], $ref['widthUv'], $ref['heightUv'],
+            $lumaRefX, $lumaRefY, $cw, $ch,
+            $tmpU, $tmpV, $cw, 0, 0,
+            $ref['uBytes'], $ref['vBytes']
+        );
+        // 隐式加权双预测（weightedBipredIdc==2，spec 8.4.3）：pred = (w0*p0 + w1*p1 + 32) >> 6
+        // w0==32 时公式退化为 (p0+p1+1)>>1，走原等权快路径
+        $w0 = 32;
+        if ($this->weightedBipredIdc === 2) {
+            $w0 = $this->getBImplicitWeight0($refIdx0, $refIdx1);
+        }
+        $dstStride = $this->width;
+        $chromaStride = intdiv($this->width, 2);
+        $dstCx = intdiv($dstX, 2);
+        $dstCy = intdiv($dstY, 2);
+        if ($w0 === 32) {
+            for ($y = 0; $y < $blockH; $y++) {
+                $row = ($y + $dstY) * $dstStride + $dstX;
+                $trow = $y * $blockW;
+                for ($x = 0; $x < $blockW; $x++) {
+                    $avg = ($this->yPlane[$row + $x] + $tmpY[$trow + $x] + 1) >> 1;
+                    $this->yPlane[$row + $x] = $avg > 255 ? 255 : $avg;
+                }
+            }
+            for ($y = 0; $y < $ch; $y++) {
+                $urow = ($y + $dstCy) * $chromaStride + $dstCx;
+                $trow = $y * $cw;
+                for ($x = 0; $x < $cw; $x++) {
+                    $avg = ($this->uPlane[$urow + $x] + $tmpU[$trow + $x] + 1) >> 1;
+                    $this->uPlane[$urow + $x] = $avg > 255 ? 255 : $avg;
+                    $avg = ($this->vPlane[$urow + $x] + $tmpV[$trow + $x] + 1) >> 1;
+                    $this->vPlane[$urow + $x] = $avg > 255 ? 255 : $avg;
+                }
+            }
+        } else {
+            $w1 = 64 - $w0;
+            for ($y = 0; $y < $blockH; $y++) {
+                $row = ($y + $dstY) * $dstStride + $dstX;
+                $trow = $y * $blockW;
+                for ($x = 0; $x < $blockW; $x++) {
+                    $avg = ($w0 * $this->yPlane[$row + $x] + $w1 * $tmpY[$trow + $x] + 32) >> 6;
+                    $this->yPlane[$row + $x] = $avg < 0 ? 0 : ($avg > 255 ? 255 : $avg);
+                }
+            }
+            for ($y = 0; $y < $ch; $y++) {
+                $urow = ($y + $dstCy) * $chromaStride + $dstCx;
+                $trow = $y * $cw;
+                for ($x = 0; $x < $cw; $x++) {
+                    $avg = ($w0 * $this->uPlane[$urow + $x] + $w1 * $tmpU[$trow + $x] + 32) >> 6;
+                    $this->uPlane[$urow + $x] = $avg < 0 ? 0 : ($avg > 255 ? 255 : $avg);
+                    $avg = ($w0 * $this->vPlane[$urow + $x] + $w1 * $tmpV[$trow + $x] + 32) >> 6;
+                    $this->vPlane[$urow + $x] = $avg < 0 ? 0 : ($avg > 255 ? 255 : $avg);
+                }
+            }
+        }
+    }
+
+    private function getB16x16MvPrediction(int $mbX, int $mbY, int $list, int $refIdx): array
+    {
+        $mbWidth = $this->picWidthInMbs;
+        $mvLeft = null;
+        $mvTop = null;
+        $mvC = null;
+        if ($mbX > 0) {
+            // FFmpeg pred_motion：A = mv_cache[scan8[0]-1] = 左 MB 块 3（索引 0）
+            if (isset($this->bMvLeftCol[$list][0])) {
+                $mvLeft = $this->bMvLeftCol[$list][0];
+            }
+        }
+        if ($mbY > 0) {
+            $mvTop = $this->bMvTopRow[$list][$mbX * 4] ?? null;
+            if ($mbX + 1 < $mbWidth) {
+                $mvC = $this->bMvTopRow[$list][($mbX + 1) * 4] ?? null;
+            }
+            if ($mvC === null && $mbX > 0) {
+                $mvC = $this->bMvTopLeft[$list] ?? null;
+            }
+        }
+        return $this->predictMvP16x16($mvLeft, $mvTop, $mvC, $refIdx);
+    }
+
+    private function getB16x8MvPrediction(int $mbX, int $mbY, int $partIdx, int $list, int $refIdx, ?array $mvPart0 = null): array
+    {
+        $mbWidth = $this->picWidthInMbs;
+
+        $mvLeft = null;
+        $mvTop = null;
+        $mvC = null;
+
+        if ($mbX > 0) {
+            $rowIdx = $partIdx * 2;
+            if (isset($this->bMvLeftCol[$list][$rowIdx])) {
+                $mvLeft = $this->bMvLeftCol[$list][$rowIdx];
+            }
+        }
+
+        if ($partIdx === 0) {
+            if ($mbY > 0) {
+                $mvTop = $this->bMvTopRow[$list][$mbX * 4] ?? null;
+            }
+            if ($mbX + 1 < $mbWidth && $mbY > 0) {
+                $mvC = $this->bMvTopRow[$list][($mbX + 1) * 4] ?? null;
+            }
+            if ($mvC === null && $mbX > 0 && $mbY > 0) {
+                $mvC = $this->bMvTopLeft[$list] ?? null;
+            }
+        } else {
+            $mvTop = $mvPart0;
+            if ($mbX > 0 && isset($this->bMvLeftCol[$list][1])) {
+                $mvC = $this->bMvLeftCol[$list][1];
+            }
+        }
+
+        if ($partIdx === 0) {
+            if ($mvTop !== null && $mvTop[2] >= 0 && $mvTop[2] === $refIdx) {
+                return [$mvTop[0], $mvTop[1]];
+            }
+        } else {
+            if ($mvLeft !== null && $mvLeft[2] >= 0 && $mvLeft[2] === $refIdx) {
+                return [$mvLeft[0], $mvLeft[1]];
+            }
+        }
+
+        $result = $this->predictMvP16x16($mvLeft, $mvTop, $mvC, $refIdx);
+        return $result;
+    }
+
+    private function getB8x16MvPrediction(int $mbX, int $mbY, int $partIdx, int $list, int $refIdx, ?array $mvPart0 = null): array
+    {
+        $mbWidth = $this->picWidthInMbs;
+
+        $mvLeft = null;
+        $mvTop = null;
+        $mvC = null;
+
+        if ($partIdx === 0) {
+            if ($mbX > 0) {
+                // FFmpeg pred_8x16 n=0：A = mv_cache[scan8[0]-1] = 左 MB 块 3（索引 0）
+                if (isset($this->bMvLeftCol[$list][0])) {
+                    $mvLeft = $this->bMvLeftCol[$list][0];
+                }
+            }
+            if ($mbY > 0) {
+                // B = top of blk(0,0) → blk(0,3) = mbX*4+0
+                $mvTop = $this->bMvTopRow[$list][$mbX * 4 + 0] ?? null;
+            }
+            // C = top-right of part0: blk(0+2,-1) = blk(2,-1) → mbX*4+2
+            if ($mbY > 0) {
+                $mvC = $this->bMvTopRow[$list][$mbX * 4 + 2] ?? null;
+            }
+            // D fallback: 当前宏块左上方 4x4 块
+            if ($mvC === null && $mbX > 0 && $mbY > 0) {
+                $mvC = $this->bMvTopLeft[$list] ?? null;
+            }
+        } else {
+            $mvLeft = $mvPart0;
+            if ($mbY > 0) {
+                // B = top of blk(2,0) → blk(2,3) = mbX*4+2
+                $mvTop = $this->bMvTopRow[$list][$mbX * 4 + 2] ?? null;
+            }
+            // C = 当前右分区右上角；画面右边界不可用时回退到左上角 D。
+            if ($mbX + 1 < $mbWidth && $mbY > 0) {
+                $mvC = $this->bMvTopRow[$list][($mbX + 1) * 4] ?? null;
+            }
+            if ($mvC === null && $mbY > 0) {
+                $mvC = $this->bMvTopRow[$list][$mbX * 4 + 1] ?? null;
+            }
+        }
+
+        if ($partIdx === 0) {
+            if ($mvLeft !== null && $mvLeft[2] === $refIdx) {
+                return [$mvLeft[0], $mvLeft[1]];
+            }
+        } else {
+            if ($mvC !== null && $mvC[2] === $refIdx) {
+                return [$mvC[0], $mvC[1]];
+            }
+        }
+
+        $pred = $this->predictMvP16x16($mvLeft, $mvTop, $mvC, $refIdx);
+        return $pred;
+    }
+
+    /**
+     * spatial direct 的 MB 级邻居预测（FFmpeg h264_direct.c pred_spatial_direct_motion L228-277）
+     * 每 list 独立：取邻居有效 ref 最小值 + 匹配中值 MV；无有效邻居 → ref=-1（该 list 丢弃）
+     * @return array [list => [ref, mvX, mvY]]
+     */
+    private function getBDirectNeighborPred(int $mbX, int $mbY): array
+    {
+        $mbWidth = $this->picWidthInMbs;
+        $result = [];
+        for ($list = 0; $list < 2; $list++) {
+            $left = null;
+            $top = null;
+            $c = null;
+            if ($mbX > 0) {
+                // FFmpeg pred_spatial_direct_motion：left_ref = mv_cache[scan8[0]-1] = 左 MB 块 3（索引 0）
+                if (isset($this->bMvLeftCol[$list][0])) {
+                    $left = $this->bMvLeftCol[$list][0];
+                }
+            }
+            if ($mbY > 0) {
+                $top = $this->bMvTopRow[$list][$mbX * 4] ?? null;
+                if ($mbX + 1 < $mbWidth) {
+                    $c = $this->bMvTopRow[$list][($mbX + 1) * 4] ?? null;
+                }
+                if ($c === null && $mbX > 0) {
+                    $c = $this->bMvTopLeft[$list] ?? null;
+                }
+            }
+            // 有效 ref 最小值（null/intra/不可用邻居忽略）
+            $minRef = -1;
+            foreach ([$left, $top, $c] as $n) {
+                if ($n !== null && $n[2] >= 0 && ($minRef < 0 || $n[2] < $minRef)) {
+                    $minRef = $n[2];
+                }
+            }
+            if ($minRef < 0) {
+                $result[$list] = [-1, 0, 0];
+            } else {
+                list($pmx, $pmy) = $this->predictMvP16x16($left, $top, $c, $minRef);
+                $result[$list] = [$minRef, $pmx, $pmy];
+            }
+        }
+        return $result;
+    }
+
+    /**
+     * 同位块（refPicList1[0] 同位置 8x8 子块）的运动信息
+     * mv0/mv1 = 8x8 顶左 4x4；mv0c/mv1c = 8x8 远角 4x4（FFmpeg h264_direct.c
+     * L454/L699：x8*3 + y8*3*b4_stride）——同位 16x8/8x16 时角点才落在自身分区
+     * @return array|null [isIntra, isLongTerm, mbFlags, ref0, mv0, ref1, mv1, mv0c, mv1c]
+     */
+    private function getColocatedBlockInfo(int $mbX, int $mbY, int $i8): ?array
+    {
+        $col = $this->refPicList1[0] ?? null;
+        if ($col === null) {
+            return null;
+        }
+        $colMbIdx = $mbY * $this->picWidthInMbs + $mbX;
+        $i4 = $colMbIdx * 16 + (($i8 >> 1) * 8 + ($i8 & 1) * 2);
+        $ic = $colMbIdx * 16 + (($i8 >> 1) * 3) * 4 + ($i8 & 1) * 3;
+        return [
+            // intra 标志：CABAC I4=0x01/I16=0x02/PCM=0x04；非 CABAC intra 一律 |=1。&7 覆盖两者
+            'isIntra' => (bool)($col['mbType'][$colMbIdx] & 7),
+            'isLongTerm' => (bool)$col['isLongTerm'],
+            'mbFlags' => $col['mbType'][$colMbIdx],
+            'ref0' => $col['ref0'][$i4],
+            'mv0' => $col['mv0'][$i4],
+            'ref1' => $col['ref1'][$i4],
+            'mv1' => $col['mv1'][$i4],
+            'mv0c' => $col['mv0'][$ic],
+            'mv1c' => $col['mv1'][$ic],
+        ];
+    }
+
+    /**
+     * colZero 判定：同位非 intra 且 MV 近零 → 置零 ref==0 方向的 MV
+     * （FFmpeg h264_direct.c L378-396 / L409-427 / L447-461；MV 幅度取远角 4x4，
+     * colocated 16x16/intra 时远角==顶左，16x8/8x16 时仅远角属于自身分区）
+     */
+    private function applyColZero(array $col, int &$ref, int &$mvX, int &$mvY): void
+    {
+        if ($col['isIntra'] || $col['isLongTerm']) {
+            return;
+        }
+        $colZero = ($col['ref0'] === 0 && abs($col['mv0c'][0]) <= 1 && abs($col['mv0c'][1]) <= 1)
+            || ($col['ref0'] < 0 && $col['ref1'] === 0 && abs($col['mv1c'][0]) <= 1 && abs($col['mv1c'][1]) <= 1);
+        if ($colZero && $ref === 0) {
+            $mvX = 0;
+            $mvY = 0;
+        }
+    }
+
+    /** temporal direct 的 dist_scale_factor 缓存（每片重置，key=L0 索引） */
+    private array $bDistScaleFactor = [];
+
+    /** 隐式加权双预测的 L0 权重缓存（1/64 单位，key=ref0*32+ref1，每片重置） */
+    private array $bImplicitWeight = [];
+
+    /**
+     * dist_scale_factor[L0[i]]（FFmpeg h264_direct.c get_scale_factor L37-58）
+     * td = clip8(L1[0].poc − L0[i].poc)；td==0 或长参考 → 256
+     * 否则 tb=clip8(curPoc−L0[i].poc)，tx=(16384+|td|/2)/td，结果 clip((tb*tx+32)>>6, -512, 511)
+     */
+    private function getbDistScaleFactor(int $i): int
+    {
+        if (isset($this->bDistScaleFactor[$i])) {
+            return $this->bDistScaleFactor[$i];
+        }
+        $l0 = $this->refPicList0[$i] ?? null;
+        $l1 = $this->refPicList1[0] ?? null;
+        if ($l0 === null || $l1 === null) {
+            return 256;
+        }
+        $poc0 = $l0['poc'];
+        $td = $l1['poc'] - $poc0;
+        if ($td > 127) $td = 127;
+        if ($td < -128) $td = -128;
+        if ($td === 0 || $l0['isLongTerm']) {
+            $s = 256;
+        } else {
+            $tb = $this->currPicOrderCnt - $poc0;
+            if ($tb > 127) $tb = 127;
+            if ($tb < -128) $tb = -128;
+            $tx = intdiv(16384 + (intdiv(abs($td), 2)), $td);
+            $s = ($tb * $tx + 32) >> 6;
+            if ($s > 511) $s = 511;
+            if ($s < -512) $s = -512;
+        }
+        $this->bDistScaleFactor[$i] = $s;
+        return $s;
+    }
+
+    /**
+     * 隐式模式双预测的 L0 权重（FFmpeg h264_slice.c implicit_weight_table L689-748）
+     * td = clip_int8(poc1−poc0)；tb = clip_int8(curPoc−poc0)
+     * tx = (16384+|td|/2)/td；dsf = (tb*tx+32)>>8；w0 = 64 − dsf（范围 [-64,128] 才生效）
+     * 长参考或 td==0 → 32；色度用同一权重（FFmpeg h264_mb.c L424-433）
+     */
+    private function getBImplicitWeight0(int $refIdx0, int $refIdx1): int
+    {
+        $key = $refIdx0 * 32 + $refIdx1;
+        if (isset($this->bImplicitWeight[$key])) {
+            return $this->bImplicitWeight[$key];
+        }
+        $l0 = $this->refPicList0[$refIdx0] ?? null;
+        $l1 = $this->refPicList1[$refIdx1] ?? null;
+        $w = 32;
+        if ($l0 !== null && $l1 !== null && empty($l0['isLongTerm']) && empty($l1['isLongTerm'])) {
+            $td = $l1['poc'] - $l0['poc'];
+            if ($td > 127) $td = 127;
+            if ($td < -128) $td = -128;
+            if ($td !== 0) {
+                $tb = $this->currPicOrderCnt - $l0['poc'];
+                if ($tb > 127) $tb = 127;
+                if ($tb < -128) $tb = -128;
+                $tx = intdiv(16384 + (abs($td) >> 1), $td);
+                $dsf = ($tb * $tx + 32) >> 8;
+                if ($dsf >= -64 && $dsf <= 128) {
+                    $w = 64 - $dsf;
+                }
+            }
+        }
+        $this->bImplicitWeight[$key] = $w;
+        return $w;
+    }
+
+    /**
+     * fill_colmap（FFmpeg h264_direct.c L82-118）：把同位帧参考列表的
+     * 第 refIdxCol 帧按 frame_num 匹配到当前 L0 的索引；未找到 → 0
+     */
+    private function mapColToList0(int $list, int $refIdxCol): int
+    {
+        if ($refIdxCol < 0) {
+            return 0;
+        }
+        $col = $this->refPicList1[0] ?? null;
+        if ($col === null) {
+            return 0;
+        }
+        $fns = $list === 0 ? ($col['refFns0'] ?? []) : ($col['refFns1'] ?? []);
+        $fn = $fns[$refIdxCol] ?? null;
+        if ($fn === null) {
+            return 0;
+        }
+        foreach ($this->refPicList0 as $j => $e) {
+            if ($e['frameNum'] === $fn) {
+                return $j;
+            }
+        }
+        return 0;
+    }
+
+    /**
+     * 单个 8x8 temporal direct 子块（FFmpeg h264_direct.c pred_temp_direct_motion L670-719）
+     * refL1 恒为 0；mvL0 = (scale*mvCol+128)>>8，mvL1 = mvL0 − mvCol
+     */
+    private function applyBDirect8x8Temporal(int $mbX, int $mbY, int $i8, array &$gridL0, array &$gridL1): void
+    {
+        $baseX = ($i8 & 1) * 2;
+        $baseY = ($i8 >> 1) * 2;
+        $col = $this->getColocatedBlockInfo($mbX, $mbY, $i8);
+        if ($col === null || $col['isIntra']) {
+            for ($j = 0; $j < 4; $j++) {
+                $bx = $baseX + ($j & 1);
+                $by = $baseY + ($j >> 1);
+                $gridL0[$by][$bx] = [0, 0, 0];
+                $gridL1[$by][$bx] = [0, 0, 0];
+            }
+            return;
+        }
+        $refIdxCol = $col['ref0'];
+        // temporal 缩放输入用 8x8 远角 4x4 的 MV（FFmpeg L699：x8*3+y8*3*b4_stride；
+        // colocated 16x16/intra 时远角==顶左，单 MV 路径 i8=0 不受影响）
+        $mvCol = $col['mv0c'];
+        $colList = 0;
+        if ($refIdxCol < 0) {
+            // 同位块未用 L0 → 用其 L1 信息（FFmpeg L688-694）
+            $refIdxCol = $col['ref1'];
+            $mvCol = $col['mv1c'];
+            $colList = 1;
+        }
+        if ($refIdxCol < 0) {
+            // 同位块两列表均未用（异常）→ 双零
+            for ($j = 0; $j < 4; $j++) {
+                $bx = $baseX + ($j & 1);
+                $by = $baseY + ($j >> 1);
+                $gridL0[$by][$bx] = [0, 0, 0];
+                $gridL1[$by][$bx] = [0, 0, 0];
+            }
+            return;
+        }
+        $ref0 = $this->mapColToList0($colList, $refIdxCol);
+        $scale = $this->getbDistScaleFactor($ref0);
+
+        if ($this->direct8x8InferenceFlag) {
+            // B_SUB_8x8：用同位 8x8 顶左 4x4 的 MV 填满整个 8x8（getColocatedBlockInfo 即顶左块）
+            $mvL0x = ($scale * $mvCol[0] + 128) >> 8;
+            $mvL0y = ($scale * $mvCol[1] + 128) >> 8;
+            $mvL1x = $mvL0x - $mvCol[0];
+            $mvL1y = $mvL0y - $mvCol[1];
+            for ($j = 0; $j < 4; $j++) {
+                $bx = $baseX + ($j & 1);
+                $by = $baseY + ($j >> 1);
+                $gridL0[$by][$bx] = [$mvL0x, $mvL0y, $ref0];
+                $gridL1[$by][$bx] = [$mvL1x, $mvL1y, 0];
+            }
+        } else {
+            // B_SUB_4x4：同位 4x4 逐块缩放（FFmpeg L707-718）
+            $colMbIdx = $mbY * $this->picWidthInMbs + $mbX;
+            $colBase = $colMbIdx * 16 + $baseY * 4 + $baseX;
+            for ($j = 0; $j < 4; $j++) {
+                $bx = $baseX + ($j & 1);
+                $by = $baseY + ($j >> 1);
+                $i4 = $colBase + ($j >> 1) * 4 + ($j & 1);
+                $mv4 = $colList === 0 ? $this->picMv0 : $this->picMv1;
+                $c4 = $mv4[$i4] ?? [0, 0];
+                $mvL0x = ($scale * $c4[0] + 128) >> 8;
+                $mvL0y = ($scale * $c4[1] + 128) >> 8;
+                $gridL0[$by][$bx] = [$mvL0x, $mvL0y, $ref0];
+                $gridL1[$by][$bx] = [$mvL0x - $c4[0], $mvL0y - $c4[1], 0];
+            }
+        }
+    }
+
+    /**
+     * 单个 8x8 直接子块：MB 级邻居预测 + 每子块 colZero（FFmpeg h264_direct.c L428-487）
+     */
+    private function applyBDirect8x8(int $mbX, int $mbY, int $i8, array $neighborPred, array &$gridL0, array &$gridL1): void
+    {
+        $ref0 = $neighborPred[0][0];
+        $mv0x = $neighborPred[0][1];
+        $mv0y = $neighborPred[0][2];
+        $ref1 = $neighborPred[1][0];
+        $mv1x = $neighborPred[1][1];
+        $mv1y = $neighborPred[1][2];
+        if ($ref0 < 0 && $ref1 < 0) {
+            $ref0 = $ref1 = 0;
+            $mv0x = $mv0y = $mv1x = $mv1y = 0;
+        }
+        $col = $this->getColocatedBlockInfo($mbX, $mbY, $i8);
+        if ($col !== null) {
+            $this->applyColZero($col, $ref0, $mv0x, $mv0y);
+            $this->applyColZero($col, $ref1, $mv1x, $mv1y);
+        }
+        $baseX = ($i8 & 1) * 2;
+        $baseY = ($i8 >> 1) * 2;
+        for ($j = 0; $j < 4; $j++) {
+            $bx = $baseX + ($j & 1);
+            $by = $baseY + ($j >> 1);
+            $gridL0[$by][$bx] = $ref0 >= 0 ? [$mv0x, $mv0y, $ref0] : [0, 0, -1];
+            $gridL1[$by][$bx] = $ref1 >= 0 ? [$mv1x, $mv1y, $ref1] : [0, 0, -1];
+        }
+    }
+
+    private function saveBListMvs(int $mbX, array $gridL0, array $gridL1): void
+    {
+        for ($y = 0; $y < 4; $y++) {
+            $this->bMvLeftCol[0][$y] = $gridL0[$y][3];
+            $this->bMvLeftCol[1][$y] = $gridL1[$y][3];
+        }
+        for ($x = 0; $x < 4; $x++) {
+            $this->bMvTopRow[0][$mbX * 4 + $x] = $gridL0[3][$x];
+            $this->bMvTopRow[1][$mbX * 4 + $x] = $gridL1[3][$x];
+        }
+    }
+
+    private function storeBPicBlocks(int $mbX, int $mbY, array $gridL0, array $gridL1, int $flags): void
+    {
+        $mbIdx = $mbY * $this->picWidthInMbs + $mbX;
+        $this->picMbType[$mbIdx] |= $flags;
+        $base = $mbIdx * 16;
+        for ($y = 0; $y < 4; $y++) {
+            for ($x = 0; $x < 4; $x++) {
+                $i4 = $base + $y * 4 + $x;
+                $l0 = $gridL0[$y][$x];
+                $l1 = $gridL1[$y][$x];
+                $this->picMv0[$i4] = [$l0[0], $l0[1]];
+                $this->picRef0[$i4] = $l0[2];
+                $this->picMv1[$i4] = [$l1[0], $l1[1]];
+                $this->picRef1[$i4] = $l1[2];
+            }
+        }
+    }
+
+    private function storeBDeblockInfo(int $mbX, int $mbY, array $gridL0, ?array $gridL1 = null): void
+    {
+        if (!$this->deblockInfoEnabled) {
+            return;
+        }
+        $mbIdx = $mbY * $this->picWidthInMbs + $mbX;
+        $mvArr0 = [];
+        $refArr0 = [];
+        $mvArr1 = [];
+        $refArr1 = [];
+        for ($y = 0; $y < 4; $y++) {
+            for ($x = 0; $x < 4; $x++) {
+                $g0 = $gridL0[$y][$x];
+                $g1 = $gridL1[$y][$x] ?? [0, 0, -1];
+                $i = $y * 4 + $x;
+                $mvArr0[$i] = [$g0[0], $g0[1]];
+                $refArr0[$i] = $g0[2];
+                $mvArr1[$i] = [$g1[0], $g1[1]];
+                $refArr1[$i] = $g1[2];
+            }
+        }
+        $this->mbMvForDeblock[$mbIdx] = $mvArr0;
+        $this->mbRefForDeblock[$mbIdx] = $refArr0;
+        $this->mbMvL1ForDeblock[$mbIdx] = $mvArr1;
+        $this->mbRefL1ForDeblock[$mbIdx] = $refArr1;
+    }
+
+    private function decodeBDirect16x16(int $mbX, int $mbY): void
+    {
+        $gridL0 = array_fill(0, 4, array_fill(0, 4, [0, 0, -1]));
+        $gridL1 = array_fill(0, 4, array_fill(0, 4, [0, 0, -1]));
+
+        $col = $this->getColocatedBlockInfo($mbX, $mbY, 0);
+        if (!$this->directSpatialMvPred) {
+            // temporal direct（FFmpeg pred_temp_direct_motion）
+            // colocated 16x16_OR_INTRA（flags: 0x08|intra 0x07）→ 整 MB 单一 MV
+            if ($col === null || ($col['mbFlags'] & 0x0F) !== 0) {
+                $tmpL0 = [];
+                $tmpL1 = [];
+                $this->applyBDirect8x8Temporal($mbX, $mbY, 0, $tmpL0, $tmpL1);
+                for ($y = 0; $y < 4; $y++) {
+                    for ($x = 0; $x < 4; $x++) {
+                        $gridL0[$y][$x] = $tmpL0[0][0];
+                        $gridL1[$y][$x] = $tmpL1[0][0];
+                    }
+                }
+            } else {
+                for ($i8 = 0; $i8 < 4; $i8++) {
+                    $this->applyBDirect8x8Temporal($mbX, $mbY, $i8, $gridL0, $gridL1);
+                }
+            }
+        } else {
+            $neighborPred = $this->getBDirectNeighborPred($mbX, $mbY);
+            $ref0 = $neighborPred[0][0];
+            $mv0x = $neighborPred[0][1];
+            $mv0y = $neighborPred[0][2];
+            $ref1 = $neighborPred[1][0];
+            $mv1x = $neighborPred[1][1];
+            $mv1y = $neighborPred[1][2];
+            if ($ref0 < 0 && $ref1 < 0) {
+                // 双 list 均无有效邻居 → ref=0, mv=0 双向（FFmpeg h264_direct.c L272-277）
+                $ref0 = $ref1 = 0;
+                $mv0x = $mv0y = $mv1x = $mv1y = 0;
+            }
+
+            // colZero 粒度跟随同位块分区（FFmpeg pred_spatial_direct_motion）：
+            // colocated 16x16_OR_INTRA → 当前保持 B_16x16，MB 级判定（L404-427，
+            // 顶左 4x4 == 角点(0,0)）；colocated 16x8/8x16/8x8 → 当前升级 per-8x8，
+            // 均匀填充后逐 8x8 独立判定（L428-487，远角 4x4 的 mv）
+            if ($col !== null && ($col['mbFlags'] & 0x0F) !== 0) {
+                $this->applyColZero($col, $ref0, $mv0x, $mv0y);
+                $this->applyColZero($col, $ref1, $mv1x, $mv1y);
+            }
+            for ($y = 0; $y < 4; $y++) {
+                for ($x = 0; $x < 4; $x++) {
+                    $gridL0[$y][$x] = $ref0 >= 0 ? [$mv0x, $mv0y, $ref0] : [0, 0, -1];
+                    $gridL1[$y][$x] = $ref1 >= 0 ? [$mv1x, $mv1y, $ref1] : [0, 0, -1];
+                }
+            }
+            if ($col !== null && ($col['mbFlags'] & 0x0F) === 0) {
+                for ($i8 = 0; $i8 < 4; $i8++) {
+                    $c8 = $this->getColocatedBlockInfo($mbX, $mbY, $i8);
+                    if ($c8 === null) {
+                        break;
+                    }
+                    $r0 = $ref0;
+                    $m0x = $mv0x;
+                    $m0y = $mv0y;
+                    $r1 = $ref1;
+                    $m1x = $mv1x;
+                    $m1y = $mv1y;
+                    $this->applyColZero($c8, $r0, $m0x, $m0y);
+                    $this->applyColZero($c8, $r1, $m1x, $m1y);
+                    if ($m0x !== $mv0x || $m0y !== $mv0y || $m1x !== $mv1x || $m1y !== $mv1y) {
+                        $bx8 = ($i8 & 1) * 2;
+                        $by8 = ($i8 >> 1) * 2;
+                        for ($y = $by8; $y < $by8 + 2; $y++) {
+                            for ($x = $bx8; $x < $bx8 + 2; $x++) {
+                                $gridL0[$y][$x] = [$m0x, $m0y, $r0];
+                                $gridL1[$y][$x] = [$m1x, $m1y, $r1];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 运动补偿（网格在每个 8x8 内一致）
+        for ($i8 = 0; $i8 < 4; $i8++) {
+            $bx = ($i8 & 1) * 2;
+            $by = ($i8 >> 1) * 2;
+            $l0 = $gridL0[$by][$bx];
+            $l1 = $gridL1[$by][$bx];
+            $dstX = $mbX * 16 + $bx * 4;
+            $dstY = $mbY * 16 + $by * 4;
+            if ($l0[2] >= 0 && $l1[2] >= 0) {
+                $this->performBiPredBlock($dstX, $dstY, 8, 8, $l0[0], $l0[1], $l0[2], $l1[0], $l1[1], $l1[2]);
+            } elseif ($l0[2] >= 0) {
+                $this->mcBBlockTo($dstX, $dstY, 8, 8, $l0[0], $l0[1], 0, $l0[2]);
+            } elseif ($l1[2] >= 0) {
+                $this->mcBBlockTo($dstX, $dstY, 8, 8, $l1[0], $l1[1], 1, $l1[2]);
+            }
+        }
+
+        $this->saveBListMvs($mbX, $gridL0, $gridL1);
+        $this->storeBPicBlocks($mbX, $mbY, $gridL0, $gridL1, 0x08);
+        $this->storeBDeblockInfo($mbX, $mbY, $gridL0, $gridL1);
+    }
+
+    private function decodeBInterMacroblock(int $mbX, int $mbY, int $mbType, int $sliceQp): int
+    {
+        if (getenv('B_MB_DBG') !== false) {
+            file_put_contents('b_mb_debug.log', sprintf("MB %d %d t%d\n", $mbX, $mbY, $mbType), FILE_APPEND);
+        }
+        if ($mbType >= 23 && $mbType <= 48) {
+            // B 片内嵌 Intra 宏块：mb_type-23 → I 片语义（FFmpeg h264_cavlc.c L706-713）
+            $mbQpDelta = $this->decodeIntraMacroblock($mbX, $mbY, $mbType - 23, $sliceQp);
+            // intra 邻居的 MV 标记为未使用（双 list 一致，镜像 P 片 intra 路径）
+            $intraMv = [0, 0, -1];
+            $this->bMvLeftCol[0] = [$intraMv, $intraMv, $intraMv, $intraMv];
+            $this->bMvLeftCol[1] = [$intraMv, $intraMv, $intraMv, $intraMv];
+            for ($i = 0; $i < 4; $i++) {
+                $this->bMvTopRow[0][$mbX * 4 + $i] = $intraMv;
+                $this->bMvTopRow[1][$mbX * 4 + $i] = $intraMv;
+            }
+            return $mbQpDelta;
+        }
+        switch ($mbType) {
+            case 0:
+                $this->decodeBDirect16x16($mbX, $mbY);
+                return $this->decodeBResidual($mbX, $mbY, $sliceQp);
+            case 1:
+                return $this->decodeBSingle16x16($mbX, $mbY, $sliceQp, 0);
+            case 2:
+                return $this->decodeBSingle16x16($mbX, $mbY, $sliceQp, 1);
+            case 3:
+                return $this->decodeBBi16x16($mbX, $mbY, $sliceQp);
+            case 22:
+                return $this->decodeB8x8($mbX, $mbY, $sliceQp);
+        }
+        if (isset(self::$bPartSpecs[$mbType])) {
+            return $this->decodeBBipart($mbX, $mbY, $mbType, $sliceQp);
+        }
+        $this->fillMacroblockGray($mbX, $mbY);
+        return 0;
+    }
+
+    private function decodeBSingle16x16(int $mbX, int $mbY, int $sliceQp, int $list): int
+    {
+        $refIdx = $this->readRefIdxB($list);
+        $mvdX = $this->reader->readSe();
+        $mvdY = $this->reader->readSe();
+        list($predX, $predY) = $this->getB16x16MvPrediction($mbX, $mbY, $list, $refIdx);
+        $mvX = $predX + $mvdX;
+        $mvY = $predY + $mvdY;
+        if (getenv('B_MB_DBG') !== false) {
+            file_put_contents('b_mb_debug.log', sprintf("MB %d %d single l%d ref%d mvd(%d,%d) pred(%d,%d) mv(%d,%d)\n",
+                $mbX, $mbY, $list, $refIdx, $mvdX, $mvdY, $predX, $predY, $mvX, $mvY), FILE_APPEND);
+        }
+
+        $this->mcBBlockTo($mbX * 16, $mbY * 16, 16, 16, $mvX, $mvY, $list, $refIdx);
+
+        $mv = [$mvX, $mvY, $refIdx];
+        $gridL0 = array_fill(0, 4, array_fill(0, 4, [0, 0, -1]));
+        $gridL1 = array_fill(0, 4, array_fill(0, 4, [0, 0, -1]));
+        if ($list === 0) {
+            for ($y = 0; $y < 4; $y++) {
+                for ($x = 0; $x < 4; $x++) $gridL0[$y][$x] = $mv;
+            }
+        } else {
+            for ($y = 0; $y < 4; $y++) {
+                for ($x = 0; $x < 4; $x++) $gridL1[$y][$x] = $mv;
+            }
+        }
+        $this->saveBListMvs($mbX, $gridL0, $gridL1);
+        $this->storeBPicBlocks($mbX, $mbY, $gridL0, $gridL1, 0x08);
+        $this->storeBDeblockInfo($mbX, $mbY, $gridL0, $gridL1);
+        return $this->decodeBResidual($mbX, $mbY, $sliceQp);
+    }
+
+    private function decodeBBi16x16(int $mbX, int $mbY, int $sliceQp): int
+    {
+        // 语法顺序：ref L0 → ref L1 → mvd L0 → mvd L1（FFmpeg h264_cavlc.c L921-949 list 主序）
+        $refIdx0 = $this->readRefIdxB(0);
+        $refIdx1 = $this->readRefIdxB(1);
+        list($predX0, $predY0) = $this->getB16x16MvPrediction($mbX, $mbY, 0, $refIdx0);
+        $mvd0X = $this->reader->readSe();
+        $mvd0Y = $this->reader->readSe();
+        $mv0X = $predX0 + $mvd0X;
+        $mv0Y = $predY0 + $mvd0Y;
+        list($predX1, $predY1) = $this->getB16x16MvPrediction($mbX, $mbY, 1, $refIdx1);
+        $mvd1X = $this->reader->readSe();
+        $mvd1Y = $this->reader->readSe();
+        $mv1X = $predX1 + $mvd1X;
+        $mv1Y = $predY1 + $mvd1Y;
+
+        $this->performBiPredBlock($mbX * 16, $mbY * 16, 16, 16, $mv0X, $mv0Y, $refIdx0, $mv1X, $mv1Y, $refIdx1);
+
+        $gridL0 = array_fill(0, 4, array_fill(0, 4, [$mv0X, $mv0Y, $refIdx0]));
+        $gridL1 = array_fill(0, 4, array_fill(0, 4, [$mv1X, $mv1Y, $refIdx1]));
+        $this->saveBListMvs($mbX, $gridL0, $gridL1);
+        $this->storeBPicBlocks($mbX, $mbY, $gridL0, $gridL1, 0x08);
+        $this->storeBDeblockInfo($mbX, $mbY, $gridL0, $gridL1);
+        return $this->decodeBResidual($mbX, $mbY, $sliceQp);
+    }
+
+    private function decodeBBipart(int $mbX, int $mbY, int $mbType, int $sliceQp): int
+    {
+        $spec = self::$bPartSpecs[$mbType];
+        $layout = $spec[0]; // 0=16x8, 1=8x16
+        // ref 读取：list 主序，未使用该 list 的分区填 -1；Bi(2) 分区两个 list 都读
+        // （FFmpeg h264_cavlc.c L951-1010：IS_DIR 对 Bi 分区双向为真）
+        $refs = [[-1, -1], [-1, -1]];
+        for ($list = 0; $list < 2; $list++) {
+            for ($p = 0; $p < 2; $p++) {
+                $dir = $spec[1 + $p];
+                if ($dir === $list || $dir === 2) {
+                    $refs[$list][$p] = $this->readRefIdxB($list);
+                }
+            }
+        }
+        // mvd 读取：list 主序，逐分区 pred + mvd
+        $mvs = [[null, null], [null, null]];
+        for ($list = 0; $list < 2; $list++) {
+            for ($p = 0; $p < 2; $p++) {
+                if ($refs[$list][$p] < 0) {
+                    continue;
+                }
+                if ($layout === 0) {
+                    list($px, $py) = $this->getB16x8MvPrediction($mbX, $mbY, $p, $list, $refs[$list][$p], $mvs[$list][0]);
+                } else {
+                    list($px, $py) = $this->getB8x16MvPrediction($mbX, $mbY, $p, $list, $refs[$list][$p], $mvs[$list][0]);
+                }
+                $mvdX = $this->reader->readSe();
+                $mvdY = $this->reader->readSe();
+                $mvs[$list][$p] = [$px + $mvdX, $py + $mvdY];
+            }
+        }
+        // MC + 网格
+        $gridL0 = array_fill(0, 4, array_fill(0, 4, [0, 0, -1]));
+        $gridL1 = array_fill(0, 4, array_fill(0, 4, [0, 0, -1]));
+        for ($p = 0; $p < 2; $p++) {
+            $dir = $spec[1 + $p];
+            if ($layout === 0) {
+                $bx0 = 0;
+                $by0 = $p * 2;
+                $cols = 4;
+                $rows = 2;
+            } else {
+                $bx0 = $p * 2;
+                $by0 = 0;
+                $cols = 2;
+                $rows = 4;
+            }
+            $mv0 = ($dir === 0 || $dir === 2) ? $mvs[0][$p] : null;
+            $mv1 = ($dir === 1 || $dir === 2) ? $mvs[1][$p] : null;
+            $dstX = $mbX * 16 + $bx0 * 4;
+            $dstY = $mbY * 16 + $by0 * 4;
+            $w = $cols * 4;
+            $h = $rows * 4;
+            if ($mv0 !== null && $mv1 !== null) {
+                $this->performBiPredBlock($dstX, $dstY, $w, $h, $mv0[0], $mv0[1], $refs[0][$p], $mv1[0], $mv1[1], $refs[1][$p]);
+            } elseif ($mv0 !== null) {
+                $this->mcBBlockTo($dstX, $dstY, $w, $h, $mv0[0], $mv0[1], 0, $refs[0][$p]);
+            } elseif ($mv1 !== null) {
+                $this->mcBBlockTo($dstX, $dstY, $w, $h, $mv1[0], $mv1[1], 1, $refs[1][$p]);
+            }
+            for ($y = $by0; $y < $by0 + $rows; $y++) {
+                for ($x = $bx0; $x < $bx0 + $cols; $x++) {
+                    $gridL0[$y][$x] = $mv0 !== null ? [$mv0[0], $mv0[1], $refs[0][$p]] : [0, 0, -1];
+                    $gridL1[$y][$x] = $mv1 !== null ? [$mv1[0], $mv1[1], $refs[1][$p]] : [0, 0, -1];
+                }
+            }
+        }
+        $this->saveBListMvs($mbX, $gridL0, $gridL1);
+        $this->storeBPicBlocks($mbX, $mbY, $gridL0, $gridL1, $layout === 0 ? 0x10 : 0x20);
+        $this->storeBDeblockInfo($mbX, $mbY, $gridL0, $gridL1);
+        return $this->decodeBResidual($mbX, $mbY, $sliceQp);
+    }
+
+    private function decodeB8x8(int $mbX, int $mbY, int $sliceQp): int
+    {
+        // sub_mb_type ×4 → ref（list 主序）→ mvd（list 主序）（FFmpeg h264_cavlc.c L811-914）
+        $subTypes = [];
+        $hasDirect = false;
+        for ($i = 0; $i < 4; $i++) {
+            $subTypes[$i] = $this->reader->readUe();
+            if ($subTypes[$i] === 0) {
+                $hasDirect = true;
+            }
+        }
+
+        $mbMvsL0 = array_fill(0, 4, array_fill(0, 4, null));
+        $mbMvsL1 = array_fill(0, 4, array_fill(0, 4, null));
+        $gridL0 = array_fill(0, 4, array_fill(0, 4, [0, 0, -1]));
+        $gridL1 = array_fill(0, 4, array_fill(0, 4, [0, 0, -1]));
+
+        if ($hasDirect) {
+            if (!$this->directSpatialMvPred) {
+                for ($i = 0; $i < 4; $i++) {
+                    if ($subTypes[$i] === 0) {
+                        $this->applyBDirect8x8Temporal($mbX, $mbY, $i, $gridL0, $gridL1);
+                    }
+                }
+            } else {
+                $neighborPred = $this->getBDirectNeighborPred($mbX, $mbY);
+                for ($i = 0; $i < 4; $i++) {
+                    if ($subTypes[$i] === 0) {
+                        $this->applyBDirect8x8($mbX, $mbY, $i, $neighborPred, $gridL0, $gridL1);
+                    }
+                }
+            }
+            // direct 子块 MV 同步进 mbMvs（FFmpeg pred_direct_motion 先行写入 mv_cache），
+            // 供同 MB 后续 inter 子块的 MV 预测作邻居
+            for ($i = 0; $i < 4; $i++) {
+                if ($subTypes[$i] !== 0) {
+                    continue;
+                }
+                $partX = ($i & 1) * 2;
+                $partY = ($i >> 1) * 2;
+                for ($y = $partY; $y < $partY + 2; $y++) {
+                    for ($x = $partX; $x < $partX + 2; $x++) {
+                        if ($gridL0[$y][$x][2] >= 0) {
+                            $mbMvsL0[$y][$x] = $gridL0[$y][$x];
+                        }
+                        if ($gridL1[$y][$x][2] >= 0) {
+                            $mbMvsL1[$y][$x] = $gridL1[$y][$x];
+                        }
+                    }
+                }
+            }
+        }
+
+        // ref 读取：list 主序，跳过 direct；不用该 list 的子块填 -1
+        $refs = [[-1, -1, -1, -1], [-1, -1, -1, -1]];
+        for ($list = 0; $list < 2; $list++) {
+            for ($i = 0; $i < 4; $i++) {
+                $st = $subTypes[$i];
+                if ($st === 0) {
+                    continue;
+                }
+                if ($st >= 0 && $st < 13 && (($list === 0 && self::$bSubUsesL0[$st]) || ($list === 1 && self::$bSubUsesL1[$st]))) {
+                    $refs[$list][$i] = $this->readRefIdxB($list);
+                }
+            }
+        }
+
+        // mvd 读取：list 主序，逐子块逐分区 pred + mvd
+        for ($list = 0; $list < 2; $list++) {
+            for ($i = 0; $i < 4; $i++) {
+                $st = $subTypes[$i];
+                if ($st === 0 || $refs[$list][$i] < 0) {
+                    continue;
+                }
+                $partCount = self::$bSubPartCount[$st];
+                $refIdx = $refs[$list][$i];
+                for ($j = 0; $j < $partCount; $j++) {
+                    list($bx, $by, $cols, $rows) = $this->bSubPartGeometry($st, $i, $j);
+                    list($px, $py) = $this->predictMvP8x8(
+                        $mbX, $mbY, $bx, $by, $cols,
+                        $list === 0 ? $mbMvsL0 : $mbMvsL1,
+                        $this->bMvTopRow[$list], $this->bMvLeftCol[$list], $refIdx
+                    );
+                    $mvdX = $this->reader->readSe();
+                    $mvdY = $this->reader->readSe();
+                    $mv = [$px + $mvdX, $py + $mvdY, $refIdx];
+                    if ($list === 0) {
+                        for ($yy = 0; $yy < $rows; $yy++) {
+                            for ($xx = 0; $xx < $cols; $xx++) $mbMvsL0[$by + $yy][$bx + $xx] = $mv;
+                        }
+                    } else {
+                        for ($yy = 0; $yy < $rows; $yy++) {
+                            for ($xx = 0; $xx < $cols; $xx++) $mbMvsL1[$by + $yy][$bx + $xx] = $mv;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 网格回填（direct 子块已在 grid 中，非 direct 从 mbMvs 回填）
+        for ($y = 0; $y < 4; $y++) {
+            for ($x = 0; $x < 4; $x++) {
+                if ($mbMvsL0[$y][$x] !== null) $gridL0[$y][$x] = $mbMvsL0[$y][$x];
+                if ($mbMvsL1[$y][$x] !== null) $gridL1[$y][$x] = $mbMvsL1[$y][$x];
+            }
+        }
+
+        // 运动补偿（此时双 list MV 均已就绪）
+        for ($i = 0; $i < 4; $i++) {
+            $st = $subTypes[$i];
+            if ($st < 0 || $st >= 13) {
+                continue;
+            }
+            $partCount = self::$bSubPartCount[$st];
+            for ($j = 0; $j < $partCount; $j++) {
+                list($bx, $by, $cols, $rows) = $this->bSubPartGeometry($st, $i, $j);
+                $l0 = $mbMvsL0[$by][$bx] ?? $gridL0[$by][$bx];
+                $l1 = $mbMvsL1[$by][$bx] ?? $gridL1[$by][$bx];
+                $dstX = $mbX * 16 + $bx * 4;
+                $dstY = $mbY * 16 + $by * 4;
+                $w = $cols * 4;
+                $h = $rows * 4;
+                if ($l0[2] >= 0 && $l1[2] >= 0) {
+                    $this->performBiPredBlock($dstX, $dstY, $w, $h, $l0[0], $l0[1], $l0[2], $l1[0], $l1[1], $l1[2]);
+                } elseif ($l0[2] >= 0) {
+                    $this->mcBBlockTo($dstX, $dstY, $w, $h, $l0[0], $l0[1], 0, $l0[2]);
+                } elseif ($l1[2] >= 0) {
+                    $this->mcBBlockTo($dstX, $dstY, $w, $h, $l1[0], $l1[1], 1, $l1[2]);
+                }
+            }
+        }
+
+        $this->saveBListMvs($mbX, $gridL0, $gridL1);
+        $this->storeBPicBlocks($mbX, $mbY, $gridL0, $gridL1, 0x40);
+        $this->storeBDeblockInfo($mbX, $mbY, $gridL0, $gridL1);
+        return $this->decodeBResidual($mbX, $mbY, $sliceQp);
+    }
+
+    /**
+     * B_8x8 子分区几何：[blkX, blkY, cols, rows]（4x4 子块单位；cols 同时是 predictMvP8x8 的 partWidth）
+     */
+    private function bSubPartGeometry(int $st, int $i8, int $j): array
+    {
+        $partX = ($i8 & 1) * 2;
+        $partY = ($i8 >> 1) * 2;
+        if ($st <= 3) {
+            return [$partX, $partY, 2, 2];                                 // 8x8
+        }
+        if ($st === 4 || $st === 6 || $st === 8) {
+            return [$partX, $partY + $j, 2, 1];                            // 8x4
+        }
+        if ($st === 5 || $st === 7 || $st === 9) {
+            return [$partX + $j, $partY, 1, 2];                            // 4x8
+        }
+        return [$partX + ($j & 1), $partY + ($j >> 1), 1, 1];              // 4x4（st 10-12）
+    }
+
+    private function decodeBResidual(int $mbX, int $mbY, int $sliceQp): int
+    {
+        $cbpCode = $this->reader->readUe();
+        $codedBlockPattern = self::GOLOMB_TO_INTER_CBP[$cbpCode] ?? 0;
+        $mbQpDelta = 0;
+        if (getenv('B_MB_DBG') !== false) {
+            file_put_contents('b_mb_debug.log', sprintf("MB %d %d res cbpcode%d cbp%d sliceQp%d",
+                $mbX, $mbY, $cbpCode, $codedBlockPattern, $sliceQp), FILE_APPEND);
+        }
+        if ($codedBlockPattern !== 0) {
+            $mbQpDelta = $this->reader->readSe();
+            $qp = $sliceQp + $mbQpDelta;
+            $qp = max(0, min(51, $qp));
+            if (getenv('B_MB_DBG') !== false) {
+                file_put_contents('b_mb_debug.log', sprintf(" qpDelta%d qp%d\n", $mbQpDelta, $qp), FILE_APPEND);
+            }
+            $this->decodeResidualAndAdd($mbX, $mbY, $codedBlockPattern, $qp, 0);
+        } else {
+            if (getenv('B_MB_DBG') !== false) {
+                file_put_contents('b_mb_debug.log', "\n", FILE_APPEND);
+            }
+            $this->updateNzCountZero($mbX, $mbY);
+        }
+        $this->updateInterMbIntraModes($mbX);
+        return $mbQpDelta;
+    }
+
+    private function decodeBSkip(int $mbX, int $mbY): void
+    {
+        if (getenv('B_MB_DBG') !== false) {
+            file_put_contents('b_mb_debug.log', sprintf("MB %d %d skip\n", $mbX, $mbY), FILE_APPEND);
+        }
+        // B_Skip = B_Direct_16x16 无残差（FFmpeg decode_mb_skip）
+        $this->decodeBDirect16x16($mbX, $mbY);
+        $this->updateNzCountZero($mbX, $mbY);
+        $this->updateInterMbIntraModes($mbX);
+    }
 
     /**
      * P_L0_16x16 宏块解码
@@ -1490,6 +2659,7 @@ trait MacroblockDecodingTrait
         }
         return [
             'y' => $this->refFrameY, 'u' => $this->refFrameU, 'v' => $this->refFrameV,
+            'yBytes' => $this->refFrameY, 'uBytes' => $this->refFrameU, 'vBytes' => $this->refFrameV,
             'strideY' => $this->refStrideY, 'strideUv' => $this->refStrideUv,
             'widthY' => $this->refWidthY, 'heightY' => $this->refHeightY,
             'widthUv' => $this->refWidthUv, 'heightUv' => $this->refHeightUv,
@@ -1839,6 +3009,15 @@ trait MacroblockDecodingTrait
         $this->mvTopRow[$mbX * 4 + 1] = $mv;
         $this->mvTopRow[$mbX * 4 + 2] = $mv;
         $this->mvTopRow[$mbX * 4 + 3] = $mv;
+        // 同位帧存储（B 帧 direct 判定）：16x16 → MB_TYPE_16x16
+        $mbIdx = $mbY * $this->picWidthInMbs + $mbX;
+        $this->picMbType[$mbIdx] |= 0x08;
+        $base = $mbIdx * 16;
+        $mvPair = [$mvX, $mvY];
+        for ($i = 0; $i < 16; $i++) {
+            $this->picMv0[$base + $i] = $mvPair;
+            $this->picRef0[$base + $i] = $refIdx;
+        }
     }
 
     /**
@@ -1854,6 +3033,20 @@ trait MacroblockDecodingTrait
         $this->mvTopRow[$mbX * 4 + 1] = $mvBottom;
         $this->mvTopRow[$mbX * 4 + 2] = $mvBottom;
         $this->mvTopRow[$mbX * 4 + 3] = $mvBottom;
+        // 同位帧存储：16x8 → MB_TYPE_16x8，上 2 行=mv0，下 2 行=mv1
+        $mbIdx = $mbY * $this->picWidthInMbs + $mbX;
+        $this->picMbType[$mbIdx] |= 0x10;
+        $base = $mbIdx * 16;
+        $pair0 = [$mv0X, $mv0Y];
+        $pair1 = [$mv1X, $mv1Y];
+        for ($y = 0; $y < 4; $y++) {
+            $pair = $y < 2 ? $pair0 : $pair1;
+            $ref = $y < 2 ? $refIdx0 : $refIdx1;
+            for ($x = 0; $x < 4; $x++) {
+                $this->picMv0[$base + $y * 4 + $x] = $pair;
+                $this->picRef0[$base + $y * 4 + $x] = $ref;
+            }
+        }
     }
 
     /**
@@ -1869,6 +3062,19 @@ trait MacroblockDecodingTrait
         $this->mvTopRow[$mbX * 4 + 1] = $mvLeft;
         $this->mvTopRow[$mbX * 4 + 2] = $mvRight;
         $this->mvTopRow[$mbX * 4 + 3] = $mvRight;
+        // 同位帧存储：8x16 → MB_TYPE_8x16，左 2 列=mv0，右 2 列=mv1
+        $mbIdx = $mbY * $this->picWidthInMbs + $mbX;
+        $this->picMbType[$mbIdx] |= 0x20;
+        $base = $mbIdx * 16;
+        $pair0 = [$mv0X, $mv0Y];
+        $pair1 = [$mv1X, $mv1Y];
+        for ($y = 0; $y < 4; $y++) {
+            for ($x = 0; $x < 4; $x++) {
+                $i4 = $base + $y * 4 + $x;
+                $this->picMv0[$i4] = $x < 2 ? $pair0 : $pair1;
+                $this->picRef0[$i4] = $x < 2 ? $refIdx0 : $refIdx1;
+            }
+        }
     }
 
     /**
@@ -1885,6 +3091,17 @@ trait MacroblockDecodingTrait
         $this->mvTopRow[$mbX * 4 + 1] = $mbMvs[3][1];
         $this->mvTopRow[$mbX * 4 + 2] = $mbMvs[3][2];
         $this->mvTopRow[$mbX * 4 + 3] = $mbMvs[3][3];
+        // 同位帧存储：8x8 → MB_TYPE_8x8，逐 4x4 块
+        $mbIdx = $mbY * $this->picWidthInMbs + $mbX;
+        $this->picMbType[$mbIdx] |= 0x40;
+        $base = $mbIdx * 16;
+        for ($y = 0; $y < 4; $y++) {
+            for ($x = 0; $x < 4; $x++) {
+                $m = $mbMvs[$y][$x] ?? [0, 0, -1];
+                $this->picMv0[$base + $y * 4 + $x] = [$m[0], $m[1]];
+                $this->picRef0[$base + $y * 4 + $x] = $m[2];
+            }
+        }
     }
 
     // ====================== 运动补偿辅助函数 ======================

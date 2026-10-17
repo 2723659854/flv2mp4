@@ -38,6 +38,7 @@ final class FlvPipelineClient
         $config['source_fps'] = $sourceFps;
         // 下发给 worker 的是"每 worker 运动进程数"（自适应结果），不改变主配置中 motionWorkers 的原有语义
         $config['motionWorkers'] = $motionPerWorker;
+        $config['memory_limit'] = '2048M';
         $encodedConfig = base64_encode(json_encode($config, JSON_THROW_ON_ERROR));
         $sockets = [];
         try {

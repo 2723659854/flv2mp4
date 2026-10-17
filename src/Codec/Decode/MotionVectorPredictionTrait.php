@@ -24,17 +24,23 @@ trait MotionVectorPredictionTrait
         if ($mvLeft === null) {
             $refA = self::PART_NOT_AVAILABLE;
             $mvA = [0, 0];
+        } elseif (!is_array($mvLeft)) {
+            $refA = -1;
+            $mvA = [0, 0];
         } else {
-            $refA = $mvLeft[2];
-            $mvA = [$mvLeft[0], $mvLeft[1]];
+            $refA = $mvLeft[2] ?? -1;
+            $mvA = [$mvLeft[0] ?? 0, $mvLeft[1] ?? 0];
         }
 
         if ($mvTop === null) {
             $refB = self::PART_NOT_AVAILABLE;
             $mvB = [0, 0];
+        } elseif (!is_array($mvTop)) {
+            $refB = -1;
+            $mvB = [0, 0];
         } else {
-            $refB = $mvTop[2];
-            $mvB = [$mvTop[0], $mvTop[1]];
+            $refB = $mvTop[2] ?? -1;
+            $mvB = [$mvTop[0] ?? 0, $mvTop[1] ?? 0];
         }
 
         if ($mvTopRight === null) {
@@ -86,8 +92,8 @@ trait MotionVectorPredictionTrait
      */
     public function predictMvPSkip(?array $mvLeft, ?array $mvTop, ?array $mvTopRight): array
     {
-        $refA = $mvLeft === null ? self::PART_NOT_AVAILABLE : $mvLeft[2];
-        $refB = $mvTop === null ? self::PART_NOT_AVAILABLE : $mvTop[2];
+        $refA = $mvLeft === null ? self::PART_NOT_AVAILABLE : ($mvLeft[2] ?? -1);
+        $refB = $mvTop === null ? self::PART_NOT_AVAILABLE : ($mvTop[2] ?? -1);
 
         if ($refA === self::PART_NOT_AVAILABLE) {
             return [0, 0];
@@ -228,24 +234,24 @@ trait MotionVectorPredictionTrait
             $refA = self::PART_NOT_AVAILABLE;
             $mvAv = [0, 0];
         } else {
-            $refA = $mvA[2];
-            $mvAv = [$mvA[0], $mvA[1]];
+            $refA = $mvA[2] ?? -1;
+            $mvAv = [$mvA[0] ?? 0, $mvA[1] ?? 0];
         }
 
         if ($mvB === null) {
             $refB = self::PART_NOT_AVAILABLE;
             $mvBv = [0, 0];
         } else {
-            $refB = $mvB[2];
-            $mvBv = [$mvB[0], $mvB[1]];
+            $refB = $mvB[2] ?? -1;
+            $mvBv = [$mvB[0] ?? 0, $mvB[1] ?? 0];
         }
 
         if ($mvC === null) {
             $refC = self::PART_NOT_AVAILABLE;
             $mvCv = [0, 0];
         } else {
-            $refC = $mvC[2];
-            $mvCv = [$mvC[0], $mvC[1]];
+            $refC = $mvC[2] ?? -1;
+            $mvCv = [$mvC[0] ?? 0, $mvC[1] ?? 0];
         }
 
         $matchCount = ($refA === $currRefIdx) + ($refB === $currRefIdx) + ($refC === $currRefIdx);

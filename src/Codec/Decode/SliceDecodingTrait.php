@@ -42,6 +42,26 @@ trait SliceDecodingTrait
             if ($this->bottomFieldPicOrderInFramePresent) {
                 $deltaBottom = $this->reader->readSe();
             }
+            $this->currPicOrderCntLsb = $pocLsb;
+            $maxPocLsb = 1 << $this->log2MaxPicOrderCntLsb;
+            if ($isIDR) {
+                $this->currPicOrderCntMsb = 0;
+            } else {
+                // spec 8.2.1.1（frame-only，无 frame_num 断档）
+                $lsbDiff = $pocLsb - $this->prevPicOrderCntLsb;
+                if ($lsbDiff > ($maxPocLsb >> 1)) {
+                    $lsbDiff -= $maxPocLsb;
+                } elseif ($lsbDiff <= -($maxPocLsb >> 1)) {
+                    $lsbDiff += $maxPocLsb;
+                }
+                $msb = $this->prevPicOrderCntMsb;
+                $sum = $msb + $this->prevPicOrderCntLsb + $lsbDiff;
+                if ($sum < 0 || $sum >= $maxPocLsb) {
+                    $msb += $lsbDiff < 0 ? $maxPocLsb : -$maxPocLsb;
+                }
+                $this->currPicOrderCntMsb = $msb;
+            }
+            $this->currPicOrderCnt = $this->currPicOrderCntMsb + $pocLsb;
         }
         if ($this->picOrderCntType === 1) {
             $delta0 = $this->reader->readSe();
@@ -49,12 +69,17 @@ trait SliceDecodingTrait
                 $delta1 = $this->reader->readSe();
             }
         }
+        if ($this->picOrderCntType === 2) {
+            // H.264 spec 8.2.1.2：pocType=2 无 pocLsb 字段，POC 直接由 frame_num 推导
+            // 参考帧 POC = 2*frame_num，非参考帧 POC = 2*frame_num - 1
+            $this->currPicOrderCnt = $isIDR ? 0 : ($nalRefIdc !== 0 ? 2 * $frameNum : 2 * $frameNum - 1);
+        }
 
         if ($this->redundantPicCntPresent) {
             $redPicCnt = $this->reader->readUe();
         }
         if ($sliceType === 1) {
-            $this->reader->skip(1);
+            $this->directSpatialMvPred = (bool)$this->reader->readU(1);
         }
 
         $numRefIdxL0Active = $this->numRefIdxL0DefaultActive;
@@ -72,25 +97,26 @@ trait SliceDecodingTrait
             } else {
                 $this->numRefIdxL0Active = $this->numRefIdxL0DefaultActive;
             }
+            $this->numRefIdxL1Active = $numRefIdxL1Active;
         }
         
         if (!$isIDR) {
-            $maxFrameNum = 1 << ($this->log2MaxFrameNumMinus4 + 4);
-            $shortTermRefs = [];
+            // L0 = 过去帧 POC 降序（最近优先）+ 未来帧 POC 升序（spec 8.2.4.2.3 / FFmpeg add_sorted）
+            // 注意：不能按 frame_num 排序——存在参考 B 帧时 frame_num 与 POC 顺序不一致
+            $pastRefs = [];
+            $futureRefs = [];
             foreach ($this->dpb as $entry) {
                 if (!$entry['isLongTerm']) {
-                    $fn = $entry['frameNum'];
-                    $fnWrap = ($fn > $this->currFrameNum) ? $fn - $maxFrameNum : $fn;
-                    $shortTermRefs[] = ['fnWrap' => $fnWrap, 'entry' => $entry];
+                    if ($entry['poc'] > $this->currPicOrderCnt) {
+                        $futureRefs[] = $entry;
+                    } else {
+                        $pastRefs[] = $entry;
+                    }
                 }
             }
-            usort($shortTermRefs, function($a, $b) {
-                return $b['fnWrap'] - $a['fnWrap'];
-            });
-            $this->refPicList0 = [];
-            foreach ($shortTermRefs as $ref) {
-                $this->refPicList0[] = $ref['entry'];
-            }
+            usort($pastRefs, function ($a, $b) { return $b['poc'] - $a['poc']; });
+            usort($futureRefs, function ($a, $b) { return $a['poc'] - $b['poc']; });
+            $this->refPicList0 = array_merge($pastRefs, $futureRefs);
         }
 
         if ($sliceType !== 2 && $sliceType !== 4) {
@@ -169,9 +195,15 @@ trait SliceDecodingTrait
         }
 
         if ($this->entropyCodingModeFlag && $sliceType !== 2 && $sliceType !== 4) {
-            $cabacInitIdc = $this->reader->readUe();
+            $this->cabacInitIdc = $this->reader->readUe();
+        } else {
+            $this->cabacInitIdc = 0;
         }
 
+        // 调试插桩（勿提交）：qp_delta 前位位置
+        if (getenv('SH_DBG') !== false) {
+            file_put_contents('sh_debug.log', sprintf("pos@qpdelta=%d\n", $this->reader->getPos()), FILE_APPEND);
+        }
         $sliceQpDelta = $this->reader->readSe();
         $qp = $this->picInitQp + $sliceQpDelta;
         $qp = max(0, min(51, $qp));
@@ -189,10 +221,22 @@ trait SliceDecodingTrait
                 $this->sliceAlphaC0Offset = $alphaOffset * 2;
                 $this->sliceBetaOffset = $betaOffset * 2;
             }
+            // 调试插桩（勿提交）：slice header 关键字段位位置
+            if (getenv('SH_DBG') !== false) {
+                file_put_contents('sh_debug.log', sprintf("pos@deblock=%d idc=%d\n", $this->reader->getPos(), $deblockingFilterIdc), FILE_APPEND);
+            }
         } else {
             $this->disableDeblockingFilterIdc = 0;
             $this->sliceAlphaC0Offset = 0;
             $this->sliceBetaOffset = 0;
+        }
+
+        // CABAC：slice header 后字节对齐，从对齐字节起初始化算术引擎（FFmpeg h264_slice.c）
+        if ($this->entropyCodingModeFlag) {
+            $this->reader->alignToByte();
+            $headerEndByte = intdiv($this->reader->getPos(), 8);
+            $sliceTypeNos = ($sliceType === 2 || $sliceType === 4) ? 2 : ($sliceType === 1 ? 1 : 0);
+            $this->cabacSliceBegin($rbsp, $headerEndByte, $qp, $sliceTypeNos);
         }
 
         $mbWidth = $this->picWidthInMbs;
@@ -202,22 +246,22 @@ trait SliceDecodingTrait
         $endMbIdx = $totalMbs;
 
         if (!$isIDR) {
-            $maxFrameNum = 1 << ($this->log2MaxFrameNumMinus4 + 4);
-            $shortTermRefs = [];
+            // L0 = 过去帧 POC 降序（最近优先）+ 未来帧 POC 升序（spec 8.2.4.2.3 / FFmpeg add_sorted）
+            // 注意：不能按 frame_num 排序——存在参考 B 帧时 frame_num 与 POC 顺序不一致
+            $pastRefs = [];
+            $futureRefs = [];
             foreach ($this->dpb as $entry) {
                 if (!$entry['isLongTerm']) {
-                    $fn = $entry['frameNum'];
-                    $fnWrap = ($fn > $this->currFrameNum) ? $fn - $maxFrameNum : $fn;
-                    $shortTermRefs[] = ['fnWrap' => $fnWrap, 'entry' => $entry];
+                    if ($entry['poc'] > $this->currPicOrderCnt) {
+                        $futureRefs[] = $entry;
+                    } else {
+                        $pastRefs[] = $entry;
+                    }
                 }
             }
-            usort($shortTermRefs, function($a, $b) {
-                return $b['fnWrap'] - $a['fnWrap'];
-            });
-            $this->refPicList0 = [];
-            foreach ($shortTermRefs as $ref) {
-                $this->refPicList0[] = $ref['entry'];
-            }
+            usort($pastRefs, function ($a, $b) { return $b['poc'] - $a['poc']; });
+            usort($futureRefs, function ($a, $b) { return $a['poc'] - $b['poc']; });
+            $this->refPicList0 = array_merge($pastRefs, $futureRefs);
         } else {
             $this->refPicList0 = [];
         }
@@ -235,6 +279,42 @@ trait SliceDecodingTrait
             $this->refHeightUv = $ref0['heightUv'];
         }
 
+        if ($sliceType === 1) {
+            // B 片：按 POC 重建双参考列表
+            // L0 = 过去帧 POC 降序 + 未来帧 POC 升序；L1 = 未来帧升序 + 过去帧降序
+            $futureRefs = [];
+            $pastRefs = [];
+            foreach ($this->dpb as $entry) {
+                if ($entry['poc'] > $this->currPicOrderCnt) {
+                    $futureRefs[] = $entry;
+                } elseif ($entry['poc'] < $this->currPicOrderCnt) {
+                    $pastRefs[] = $entry;
+                }
+            }
+            usort($futureRefs, function ($a, $b) { return $a['poc'] - $b['poc']; });
+            usort($pastRefs, function ($a, $b) { return $b['poc'] - $a['poc']; });
+            $this->refPicList0 = array_merge($pastRefs, $futureRefs);
+            $this->refPicList1 = array_merge($futureRefs, $pastRefs);
+            if (count($this->refPicList0) > $numRefIdxL0Active) {
+                $this->refPicList0 = array_slice($this->refPicList0, 0, $numRefIdxL0Active);
+            }
+            if (count($this->refPicList1) > $numRefIdxL1Active) {
+                $this->refPicList1 = array_slice($this->refPicList1, 0, $numRefIdxL1Active);
+            }
+            if (!empty($this->refPicList0)) {
+                $ref0 = $this->refPicList0[0];
+                $this->refFrameY = $ref0['y'];
+                $this->refFrameU = $ref0['u'];
+                $this->refFrameV = $ref0['v'];
+                $this->refStrideY = $ref0['strideY'];
+                $this->refStrideUv = $ref0['strideUv'];
+                $this->refWidthY = $ref0['widthY'];
+                $this->refHeightY = $ref0['heightY'];
+                $this->refWidthUv = $ref0['widthUv'];
+                $this->refHeightUv = $ref0['heightUv'];
+            }
+        }
+
         // 初始化宏块间非零系数计数
         $this->nzTopRowLuma = array_fill(0, $mbWidth * 4, 0);
         $this->nzTopRowChroma = array_fill(0, $mbWidth * 4, 0);
@@ -247,6 +327,17 @@ trait SliceDecodingTrait
         $this->mvTopRow = array_fill(0, $mbWidth * 4, null);
         $this->mvLeftCol = array_fill(0, 4, null);
 
+        $isBslice = ($sliceType === 1);
+        if ($isBslice) {
+            // B 片双 list 邻居缓存：每 list 独立的 topRow/leftCol/topLeft
+            $this->bMvTopRow = [array_fill(0, $mbWidth * 4, null), array_fill(0, $mbWidth * 4, null)];
+            $this->bMvLeftCol = [array_fill(0, 4, null), array_fill(0, 4, null)];
+            $this->bMvTopLeft = [null, null];
+        // temporal direct 的 dist_scale_factor 缓存按片重置（参考列表随片变化）
+        // 隐式加权权重缓存同片重置
+        $this->bDistScaleFactor = [];
+        $this->bImplicitWeight = [];
+        }
         if ($this->deblockInfoEnabled) {
             // 初始化去块滤波所需的宏块信息
             $this->mbTypeForDeblock = array_fill(0, $totalMbs, -1);
@@ -258,6 +349,8 @@ trait SliceDecodingTrait
             $this->mbMvForDeblock = array_fill(0, $totalMbs, $emptyMv);
             $emptyRef = array_fill(0, 16, 0);
             $this->mbRefForDeblock = array_fill(0, $totalMbs, $emptyRef);
+            $this->mbMvL1ForDeblock = array_fill(0, $totalMbs, $emptyMv);
+            $this->mbRefL1ForDeblock = array_fill(0, $totalMbs, $emptyRef);
         }
 
         $mbSkipRun = -1;
@@ -273,8 +366,36 @@ trait SliceDecodingTrait
                 $this->intra4x4LeftModes = array_fill(0, 4, -1);
                 $this->mvLeftCol = array_fill(0, 4, null);
                 $this->mvTopLeft = array_fill(0, 4, null);
+                if ($isBslice) {
+                    $this->bMvLeftCol = [array_fill(0, 4, null), array_fill(0, 4, null)];
+                    $this->bMvTopLeft = [null, null];
+        // temporal direct 的 dist_scale_factor 缓存按片重置（参考列表随片变化）
+        $this->bDistScaleFactor = [];
+        $this->bImplicitWeight = [];
+                }
             }
             $nextMvTopLeft = $this->mvTopRow[$mbX * 4 + 3] ?? null;
+            if ($isBslice) {
+                $nextBTL0 = $this->bMvTopRow[0][$mbX * 4 + 3] ?? null;
+                $nextBTL1 = $this->bMvTopRow[1][$mbX * 4 + 3] ?? null;
+            }
+
+            if ($isBslice && !$this->entropyCodingModeFlag) {
+                if ($mbSkipRun === -1) {
+                    $mbSkipRun = $this->reader->readUe();
+                }
+                if ($mbSkipRun--) {
+                    // B_Skip = B_Direct_16x16 无残差
+                    $this->decodeBSkip($mbX, $mbY);
+                    if ($this->deblockInfoEnabled) {
+                        $this->mbTypeForDeblock[$mbIdx] = 0;
+                        $this->mbQpForDeblock[$mbIdx] = $qp;
+                    }
+                    $this->bMvTopLeft[0] = $nextBTL0;
+                    $this->bMvTopLeft[1] = $nextBTL1;
+                    continue;
+                }
+            }
 
             if (($sliceType === 0 || $sliceType === 5) && !$this->entropyCodingModeFlag) {
                 if ($mbSkipRun === -1) {
@@ -290,12 +411,52 @@ trait SliceDecodingTrait
                     continue;
                 }
             }
+            if ($this->entropyCodingModeFlag && ($sliceType === 2 || $sliceType === 4)) {
+                $this->decodeCabacIntraMb($mbX, $mbY);
+                if ($this->deblockInfoEnabled) {
+                    $this->mbQpForDeblock[$mbIdx] = $this->cabQp;
+                }
+                $this->mvTopLeft = [$nextMvTopLeft, $nextMvTopLeft, $nextMvTopLeft, $nextMvTopLeft];
+                // end_of_slice_flag：FFmpeg h264_slice.c:2644 每个 MB 后必读 terminate bin
+                if ($this->cabTerminate() !== 0) break;
+                continue;
+            }
+            if ($this->entropyCodingModeFlag && ($sliceType === 0 || $sliceType === 5)) {
+                $this->decodeCabacPMb($mbX, $mbY);
+                if ($this->deblockInfoEnabled) {
+                    $this->mbQpForDeblock[$mbIdx] = $this->cabQp;
+                }
+                $this->mvTopLeft = [$nextMvTopLeft, $nextMvTopLeft, $nextMvTopLeft, $nextMvTopLeft];
+                // end_of_slice_flag：同上，每 MB 一个 terminate bin
+                if ($this->cabTerminate() !== 0) break;
+                continue;
+            }
+            if ($this->entropyCodingModeFlag && $isBslice) {
+                $this->decodeCabacBMb($mbX, $mbY);
+                if ($this->deblockInfoEnabled) {
+                    $this->mbQpForDeblock[$mbIdx] = $this->cabQp;
+                }
+                $this->mvTopLeft = [$nextMvTopLeft, $nextMvTopLeft, $nextMvTopLeft, $nextMvTopLeft];
+                $this->bMvTopLeft[0] = $nextBTL0;
+                $this->bMvTopLeft[1] = $nextBTL1;
+                // end_of_slice_flag：同上，每 MB 一个 terminate bin
+                if ($this->cabTerminate() !== 0) break;
+                continue;
+            }
             $mbQpDelta = $this->decodeMacroblock($mbX, $mbY, $qp, $sliceType);
             $qp = max(0, min(51, $qp + $mbQpDelta));
             if ($this->deblockInfoEnabled) $this->mbQpForDeblock[$mbIdx] = $qp;
             $this->mvTopLeft = [$nextMvTopLeft, $nextMvTopLeft, $nextMvTopLeft, $nextMvTopLeft];
+            if ($isBslice) {
+                $this->bMvTopLeft[0] = $nextBTL0;
+                $this->bMvTopLeft[1] = $nextBTL1;
+            }
         }
         if ($this->deblockInfoEnabled) {
+            // 调试插桩：B_NO_DEBLOCK 环境变量跳过 B 帧去块（勿提交）
+            if (getenv('B_NO_DEBLOCK') !== false && $this->currentSliceType === 1) {
+                return;
+            }
             $this->applyDeblockingFilter();
         }
     }
