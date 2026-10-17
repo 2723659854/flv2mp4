@@ -457,6 +457,7 @@ class H264Decoder
             'width' => $width,
             'height' => $height,
             'data' => $data,
+            'isIdr' => $isIdr,
         ];
         return $this->drainOneFrame($poc);
     }
@@ -490,7 +491,7 @@ class H264Decoder
         if ($pickKey === null) return null;
         $f = $this->outputQueue[$pickKey];
         array_splice($this->outputQueue, $pickKey, 1);
-        return ['data' => $f['data'], 'width' => $f['width'], 'height' => $f['height'], 'pix_fmt' => 'yuv420p'];
+        return ['data' => $f['data'], 'width' => $f['width'], 'height' => $f['height'], 'pix_fmt' => 'yuv420p', 'poc' => $f['poc'], 'isIdr' => $f['isIdr']];
     }
 
     /**
@@ -508,9 +509,18 @@ class H264Decoder
         $this->outputQueue = [];
         $out = [];
         foreach ($frames as $f) {
-            $out[] = ['data' => $f['data'], 'width' => $f['width'], 'height' => $f['height'], 'pix_fmt' => 'yuv420p'];
+            $out[] = ['data' => $f['data'], 'width' => $f['width'], 'height' => $f['height'], 'pix_fmt' => 'yuv420p', 'poc' => $f['poc'], 'isIdr' => $f['isIdr']];
         }
         return $out;
+    }
+
+    /**
+     * 流结束时冲洗残留的重排队列帧（B 帧最多延迟 bframes 帧）。
+     * @return array[] 帧结果数组
+     */
+    public function flushOutput(): array
+    {
+        return $this->flushReorderQueue();
     }
 
     public function initQuantMatrix(): void
@@ -598,6 +608,8 @@ class H264Decoder
         // 第二轮：解码图像Slice — 每个Slice是一帧，各自初始化并输出
         //$sliceCount = 0;
         $outputData = '';
+        $outputPoc = null;
+        $outputIsIdr = false;
         $this->frameNum = -1;
         foreach ($nalUnits as $nal) {
             $nalType = $nal['type'];
@@ -712,22 +724,19 @@ class H264Decoder
                     }
                     $frameBin = $yBin . $uBin . $vBin;
                     if ($this->reorderByPoc) {
-                        // 按显示序(POC)延迟排出；流结束需调用 flushReorderQueue()
+                        // 按显示序(POC)延迟排出；流结束需调用 flushOutput()
                         $drained = $this->enqueueAndDrainFrame($frameBin, $this->width, $this->height, $framePoc, $isIdrNal);
                         if ($drained !== null) {
                             $outputData .= $drained['data'];
+                            $outputPoc = $drained['poc'];
+                            $outputIsIdr = $drained['isIdr'];
                         }
                     } else {
                         $outputData .= $frameBin;
+                        $outputPoc = $framePoc;
+                        $outputIsIdr = $isIdrNal;
                     }
                 }
-            }
-        }
-
-        // POC 重排：流尾冲洗残留在输出队列中的 B 帧（最多 bframes 帧）
-        if ($buildOutput && $this->reorderByPoc) {
-            foreach ($this->flushReorderQueue() as $f) {
-                $outputData .= $f['data'];
             }
         }
 
@@ -735,7 +744,9 @@ class H264Decoder
             'data' => $outputData,
             'width' => $this->width,
             'height' => $this->height,
-            'pix_fmt' => 'yuv420p'
+            'pix_fmt' => 'yuv420p',
+            'poc' => $outputPoc,
+            'isIdr' => $outputIsIdr,
         ];
     }
 

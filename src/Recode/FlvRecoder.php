@@ -80,6 +80,8 @@ class FlvRecoder
     private ?int $lastAudioOutputTimestamp = null;
     private int $positiveVideoDtsDeltaTotal = 0;
     private int $positiveVideoDtsDeltaCount = 0;
+    /** 解码器按显示序返回的帧计数（用于 B 帧重排后的抽帧判定） */
+    private int $displayFrameCount = 0;
     private bool $multi;
     private array $config;
     private ?string $pipelineYuv = null;
@@ -244,6 +246,7 @@ class FlvRecoder
         $this->flvHeaderWritten = false;
         $this->outputVideoFrameCount = 0;
         $this->outputAudioFrameCount = 0;
+        $this->displayFrameCount = 0;
         $this->lastVideoOutputTimestamp = null;
         $this->lastAudioOutputTimestamp = null;
         $this->positiveVideoDtsDeltaTotal = 0;
@@ -414,7 +417,8 @@ class FlvRecoder
 
     private function finishOutput(string $outputFile): void
     {
-        // 冲刷双缓冲中最后一帧及排队音频，时长/帧数统计才完整
+        // 先冲洗解码器重排队列中残留的 B 帧，再冲刷编码器双缓冲末帧及排队音频
+        $this->flushDecoderFrames();
         $this->flushPendingVideo();
 
         $actualHasVideo = $this->outputVideoFrameCount > 0;
@@ -599,26 +603,37 @@ class FlvRecoder
             $relativeTime = $timestamp - $this->baseTimestamp;
         }
 
-        // 单进程模式必须解码每帧以维护解码器参考链（尤其源含 B/P 参考帧时抽帧不能跳过解码）；
-        // 多进程解码由 decoder worker 维持参考链，直接复用其 YUV 输出
+        // 单进程模式必须解码每帧以维护解码器参考链；
+        // 解码器按显示序返回帧（B 帧重排），返回 null 表示帧仍在重排队列中
         $yuvData = null;
+        $decodedIsIdr = $isKeyFrame;
         if (!$hasPipelineEncoded) {
-            $yuvData = $this->pipelineYuv ?? $this->decodeNaluToYuv($avcData);
-            if ($yuvData === null) return null;
+            if ($this->pipelineYuv !== null) {
+                $yuvData = $this->pipelineYuv;
+            } else {
+                $decoded = $this->decodeNaluToYuv($avcData);
+                if ($decoded === null) return null; // 帧在重排队列中，跳过本次输出
+                $yuvData = $decoded['data'];
+                $decodedIsIdr = $decoded['isIdr'];
+            }
         }
+
+        // 显示序帧计数（B 帧重排后，解码返回顺序即显示序）
+        $this->displayFrameCount++;
 
         // 在途帧虽未写出，但输出槽位已保留
         $reservedCount = $this->outputVideoFrameCount + ($this->pendingVideoJob !== null ? 1 : 0);
-        // 相对首关键帧时间轴选择，无浮点累积误差；首个输出固定为关键帧，关键帧一律保留（关键帧对齐抽帧）
+        // 基于显示序帧计数的抽帧判定（等效原时间轴判定，但避免 B 帧重排导致的时间戳错位）
+        $sourceFps = $this->sourceFps ?? 25.0;
         $shouldOutput = !$this->dropFrames
             || $reservedCount === 0
-            || $isKeyFrame
-            || $relativeTime * $this->effectiveTargetFps >= $reservedCount * 1000;
+            || $decodedIsIdr
+            || $this->displayFrameCount * $this->effectiveTargetFps >= $reservedCount * $sourceFps;
         if (!$shouldOutput) return null;
 
         $job = [
             'relativeTime' => $relativeTime,
-            'isKey' => $isKeyFrame,
+            'isKey' => $decodedIsIdr,
             'forcedIdr' => $this->pipelineForcedIdr,
             'pipelineEncoded' => $this->pipelineEncoded,
         ];
@@ -654,7 +669,7 @@ class FlvRecoder
             $this->encoder->setFps(max(1, (int)round($encoderFps)));
         }
 
-        $this->encoder->startFrame($yuvData, $reservedCount === 0 || $isKeyFrame);
+        $this->encoder->startFrame($yuvData, $reservedCount === 0 || $decodedIsIdr);
         $this->videoFrameCount++;
 
         return $job;
@@ -689,6 +704,57 @@ class FlvRecoder
             $this->handleAudioFrame($queuedTag);
         }
         $this->queuedAudioTags = [];
+    }
+
+    /**
+     * EOF 时冲洗解码器重排队列中残留的 B 帧（最多 bframes 帧），
+     * 逐帧送入编码器双缓冲流水线并写出。
+     */
+    private function flushDecoderFrames(): void
+    {
+        $frames = $this->decoder->flushOutput();
+        if (empty($frames)) return;
+
+        $targetW = $this->outputVideoWidth;
+        $targetH = $this->outputVideoHeight;
+
+        foreach ($frames as $f) {
+            $this->displayFrameCount++;
+            $yuvData = $f['data'];
+            $isIdr = !empty($f['isIdr']);
+
+            if ($targetW !== $this->srcWidth || $targetH !== $this->srcHeight) {
+                $yuvData = $this->scaler->scaleYUV420P($yuvData, $this->srcWidth, $this->srcHeight, $targetW, $targetH);
+            }
+            if ($this->watermarkEnabled) {
+                $yuvData = $this->applyWatermark($yuvData, $targetW, $targetH);
+            }
+
+            $this->encoder->setResolution($targetW, $targetH);
+            if ($this->targetBitrate > 0) {
+                $this->encoder->setBitrate($this->targetBitrate);
+            } else {
+                $this->encoder->setQp($this->targetQp);
+            }
+
+            $reservedCount = $this->outputVideoFrameCount + ($this->pendingVideoJob !== null ? 1 : 0);
+            $this->encoder->startFrame($yuvData, $reservedCount === 0 || $isIdr);
+            $this->videoFrameCount++;
+
+            $job = [
+                'relativeTime' => 0,
+                'isKey' => $isIdr,
+                'forcedIdr' => false,
+                'pipelineEncoded' => null,
+            ];
+
+            if ($this->pendingVideoJob !== null) {
+                $pendingJob = $this->pendingVideoJob;
+                $this->pendingVideoJob = null;
+                $this->emitPendingVideoFrame($pendingJob);
+            }
+            $this->pendingVideoJob = $job;
+        }
     }
 
     /** 冲刷最后一帧的延迟编码及排队音频（EOF/分片结束前调用） */
@@ -803,7 +869,7 @@ class FlvRecoder
         }
     }
 
-    private function decodeNaluToYuv(string $avcData): ?string
+    private function decodeNaluToYuv(string $avcData): ?array
     {
         $nalUnits = $this->extractNalUnitsFromAVCC($avcData);
 
@@ -816,7 +882,11 @@ class FlvRecoder
 
         $frame = $this->decoder->decode($nalUnits, false, true, false);
         if ($frame && !empty($frame['data'])) {
-            return $frame['data'];
+            return [
+                'data' => $frame['data'],
+                'isIdr' => !empty($frame['isIdr']),
+                'poc' => $frame['poc'] ?? 0,
+            ];
         }
         return null;
     }
