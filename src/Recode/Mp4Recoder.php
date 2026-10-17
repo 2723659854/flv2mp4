@@ -77,6 +77,8 @@ class Mp4Recoder
     private ?float $effectiveTargetFps = null;
     private bool $dropFrames = false;
     private ?int $firstVideoDtsMs = null;
+    /** 最近一次解码喂入的源 sample DTS（EOF 冲洗帧按源帧率顺延此时间轴） */
+    private ?int $lastSourceDtsMs = null;
     private bool $multi;
     private array $config;
     private ?string $pipelineYuv = null;
@@ -236,6 +238,7 @@ class Mp4Recoder
         $this->effectiveTargetFps = null;
         $this->dropFrames = false;
         $this->firstVideoDtsMs = null;
+        $this->lastSourceDtsMs = null;
         $this->pipelineYuv = null;
         $this->pipelineMediaSize = 0;
         $this->audioSpecificConfig = '';
@@ -673,7 +676,8 @@ class Mp4Recoder
 
     public function finishPipelineOutput(string $outputFile): void
     {
-        // 冲刷最后一帧的延迟编码及排队音频，保证样本完整后再封装
+        // 先冲洗解码器重排队列中残留的 B 帧，再冲刷最后一帧的延迟编码及排队音频
+        $this->flushDecoderFrames();
         $this->flushPendingVideo();
         if (!$this->videoTrack && !$this->audioTrack) throw new \RuntimeException('未找到有效的视频或音频轨道');
         $this->buildPipelineMp4($outputFile);
@@ -738,7 +742,8 @@ class Mp4Recoder
                 $this->intakeAudioPayload($sample['data'], (int)$sample['dtsMs']);
             }
         }
-        // 冲刷双缓冲中最后一帧
+        // 先冲洗解码器重排队列中残留的 B 帧，再冲刷双缓冲末帧
+        $this->flushDecoderFrames();
         $this->flushPendingVideo();
     }
 
@@ -950,6 +955,60 @@ class Mp4Recoder
         $this->flushQueuedAudio();
     }
 
+    /**
+     * EOF 时冲洗解码器重排队列中残留的 B 帧（最多 bframes 帧），
+     * 逐帧送入编码器双缓冲流水线并落盘。
+     */
+    private function flushDecoderFrames(): void
+    {
+        if ($this->decoder === null) return;
+        $frames = $this->decoder->flushOutput();
+        if (empty($frames)) return;
+
+        $targetW = $this->outputVideoWidth;
+        $targetH = $this->outputVideoHeight;
+        $frameDurMs = ($this->sourceFps !== null && $this->sourceFps > 0) ? 1000 / $this->sourceFps : 40;
+        $flushIdx = 0;
+
+        foreach ($frames as $f) {
+            $yuvData = $f['data'];
+            $isIdr = !empty($f['isIdr']);
+            $flushIdx++;
+
+            if ($targetW !== $this->srcWidth || $targetH !== $this->srcHeight) {
+                $yuvData = $this->scaler->scaleYUV420P($yuvData, $this->srcWidth, $this->srcHeight, $targetW, $targetH);
+            }
+            if ($this->watermarkEnabled) {
+                $yuvData = $this->applyWatermark($yuvData, $targetW, $targetH);
+            }
+
+            $this->encoder->setResolution($targetW, $targetH);
+            if ($this->targetBitrate > 0) {
+                $this->encoder->setBitrate($this->targetBitrate);
+            } else {
+                $this->encoder->setQp($this->targetQp);
+            }
+
+            $this->encoder->startFrame($yuvData, $isIdr);
+            $this->videoFrameCount++;
+
+            // 尾部帧的源 DTS 不可得（显示序帧与 sample 的对应关系已断裂），
+            // 按源帧率从最后喂入 sample 的时间轴顺延
+            $job = [
+                'dtsMs' => (int)round(($this->lastSourceDtsMs ?? 0) + $flushIdx * $frameDurMs),
+                'isKey' => $isIdr,
+            ];
+
+            if ($this->pendingVideoJob !== null) {
+                $pendingJob = $this->pendingVideoJob;
+                $this->pendingVideoJob = null;
+                $this->emitTranscodeVideoSample($pendingJob);
+            }
+            $this->flushQueuedAudio();
+            $this->pendingVideoJob = $job;
+        }
+    }
+
     private function intakeVideoSample(array $sample): void
     {
         $avcData = $sample['data'];
@@ -1009,20 +1068,31 @@ class Mp4Recoder
         $targetH = $this->outputVideoHeight;
 
         // 多进程模式中所有输入 sample 已由 decoder worker 解码；单进程仍在此维持参考链。
-        $yuvData = $this->pipelineYuv ?? $this->decodeNaluToYuv($avcData);
-        if ($yuvData === null) return null;
+        // 解码器按显示序返回帧（B 帧重排），返回 null 表示帧仍在重排队列中
+        if ($this->pipelineYuv !== null) {
+            $yuvData = $this->pipelineYuv;
+            $decodedIsIdr = $isKeyFrame;
+        } else {
+            $decoded = $this->decodeNaluToYuv($avcData);
+            if ($decoded === null) return null;
+            $yuvData = $decoded['data'];
+            $decodedIsIdr = $decoded['isIdr'];
+        }
+        $this->lastSourceDtsMs = $dtsMs;
 
         // 上一帧虽未 finish 落盘，但输出槽位已被保留
         $outputCount = count($this->videoSamples) + ($this->pendingVideoJob !== null ? 1 : 0);
         if ($this->firstVideoDtsMs === null) {
-            if (!$isKeyFrame) return null;
+            if (!$decodedIsIdr) return null;
             $this->firstVideoDtsMs = $dtsMs;
         }
         $relativeTime = $dtsMs - $this->firstVideoDtsMs;
         // 关键帧一律保留（关键帧对齐抽帧），其余按相对首关键帧时间轴选择
+        // 注意：B 帧重排后解码返回的是显示序帧，源 sample 的 keyframe 标志属于解码序，
+        // 因此 IDR 判定必须用解码帧自身的 isIdr
         $shouldOutput = !$this->dropFrames
             || $outputCount === 0
-            || $isKeyFrame
+            || $decodedIsIdr
             || $relativeTime * $this->effectiveTargetFps >= $outputCount * 1000;
         if (!$shouldOutput) {
             return null;
@@ -1053,13 +1123,13 @@ class Mp4Recoder
             $this->encoder->setFps(max(1, (int)round($encoderFps)));
         }
 
-        $isOutputKey = $outputCount === 0 || $isKeyFrame;
+        $isOutputKey = $outputCount === 0 || $decodedIsIdr;
         $this->encoder->startFrame($yuvData, $isOutputKey);
         $this->videoFrameCount++;
 
         return [
             'dtsMs' => $dtsMs,
-            'isKey' => $isKeyFrame,
+            'isKey' => $decodedIsIdr,
         ];
     }
 
@@ -1099,7 +1169,8 @@ class Mp4Recoder
         else $this->videoSamples[] = ['data' => $videoAvcc] + $sampleMetadata;
     }
 
-    private function decodeNaluToYuv(string $avcData): ?string
+    /** @return array{data:string,isIdr:bool}|null 解码器按显示序返回；null 表示帧仍在重排队列中 */
+    private function decodeNaluToYuv(string $avcData): ?array
     {
         $nalUnits = $this->extractNalUnitsFromAVCC($avcData);
 
@@ -1112,7 +1183,7 @@ class Mp4Recoder
 
         $frame = $this->decoder->decode($nalUnits, false, true, false);
         if ($frame && !empty($frame['data'])) {
-            return $frame['data'];
+            return ['data' => $frame['data'], 'isIdr' => !empty($frame['isIdr'])];
         }
         return null;
     }

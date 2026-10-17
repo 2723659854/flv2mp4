@@ -82,6 +82,8 @@ class FlvRecoder
     private int $positiveVideoDtsDeltaCount = 0;
     /** 解码器按显示序返回的帧计数（用于 B 帧重排后的抽帧判定） */
     private int $displayFrameCount = 0;
+    /** 最近一次解码喂入的源 tag 相对时间（EOF 冲洗帧按源帧率顺延此时间轴） */
+    private ?int $lastDecodedRelativeMs = null;
     private bool $multi;
     private array $config;
     private ?string $pipelineYuv = null;
@@ -247,6 +249,7 @@ class FlvRecoder
         $this->outputVideoFrameCount = 0;
         $this->outputAudioFrameCount = 0;
         $this->displayFrameCount = 0;
+        $this->lastDecodedRelativeMs = null;
         $this->lastVideoOutputTimestamp = null;
         $this->lastAudioOutputTimestamp = null;
         $this->positiveVideoDtsDeltaTotal = 0;
@@ -602,6 +605,7 @@ class FlvRecoder
         } else {
             $relativeTime = $timestamp - $this->baseTimestamp;
         }
+        $this->lastDecodedRelativeMs = $relativeTime;
 
         // 单进程模式必须解码每帧以维护解码器参考链；
         // 解码器按显示序返回帧（B 帧重排），返回 null 表示帧仍在重排队列中
@@ -717,11 +721,16 @@ class FlvRecoder
 
         $targetW = $this->outputVideoWidth;
         $targetH = $this->outputVideoHeight;
+        // 尾部帧的源相对时间不可得（显示序帧与 tag 的对应关系已断裂），
+        // 按源帧率从最后喂入 tag 的时间轴顺延，避免 !dropFrames 时出现 DTS 回绕
+        $frameDurMs = ($this->sourceFps !== null && $this->sourceFps > 0) ? 1000 / $this->sourceFps : 40;
+        $flushIdx = 0;
 
         foreach ($frames as $f) {
             $this->displayFrameCount++;
             $yuvData = $f['data'];
             $isIdr = !empty($f['isIdr']);
+            $flushIdx++;
 
             if ($targetW !== $this->srcWidth || $targetH !== $this->srcHeight) {
                 $yuvData = $this->scaler->scaleYUV420P($yuvData, $this->srcWidth, $this->srcHeight, $targetW, $targetH);
@@ -742,7 +751,7 @@ class FlvRecoder
             $this->videoFrameCount++;
 
             $job = [
-                'relativeTime' => 0,
+                'relativeTime' => (int)round(($this->lastDecodedRelativeMs ?? 0) + $flushIdx * $frameDurMs),
                 'isKey' => $isIdr,
                 'forcedIdr' => false,
                 'pipelineEncoded' => null,
