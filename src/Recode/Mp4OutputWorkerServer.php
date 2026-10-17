@@ -38,13 +38,22 @@ final class Mp4OutputWorkerServer
         $endCount = 0;
         $finished = false;
         $lastSeq = array_fill(0, $workers, -1);
+        // 反压门控停滞检测：worker 帧级双缓冲使"产出落后于收到"，门控条件 lastSeq<expected
+        // 可能恰好排除 expected 帧的持有者（该帧还在它的处理队列/发送缓冲里），导致 expected
+        // 永不推进、pending 只进不出。停滞若干轮（progress 无任何变化）后强制放水读全部连接。
+        $lastProgress = '';
+        $stallRounds = 0;
         try {
             while (true) {
+                $progress = $expected . ':' . count($pending);
+                $stallRounds = ($progress === $lastProgress) ? $stallRounds + 1 : 0;
+                $lastProgress = $progress;
                 // 反压：乱序重排队列达软上限后，连续序号已在队列中则本轮不读（整轮消费会迅速释放积压）；
                 // 缺连续序号 N 时，N 只可能来自"最后见到的序号仍小于 N"的落后连接（每路序号严格递增），
                 // 故只读这些连接，绝不把超前连接的未来帧吸进重排队列，避免长 GOP 下内存成倍膨胀；
                 // 未达上限时读尽全部就绪连接，按唤醒周期批量推进（Windows select 唤醒粒度约 10~15ms）
                 $gated = !$finished && $pendingBytes >= HlsPipelineProtocol::PENDING_SOFT_LIMIT;
+                if ($gated && $stallRounds > 500) $gated = false;
                 if ($finished) $read = [];
                 elseif (!$gated) $read = $sockets;
                 elseif (isset($pending[$expected])) $read = [];
@@ -70,12 +79,12 @@ final class Mp4OutputWorkerServer
                 }
                 foreach ($inputs as $id => $buffer) {
                     foreach (HlsPipelineProtocol::take($inputs[$id], PHP_INT_MAX) as $event) {
-                        // END 不进入按序号重排队列：收齐 workerCount 个且队列排空后才收尾（与 HLS 一致）
-                        if ($event['type'] === HlsPipelineProtocol::END) {
-                            $endCount++;
-                            continue;
-                        }
-                        if ($event['type'] !== HlsPipelineProtocol::EVENT) continue;
+                        // END 与 EVENT 统一按序号入重排队列：END 占用派发序号（dispatcher 的 $sequence++），
+                        // 若只计数不入队，expected 可能恰好停在 END 的序号上，而被更大序号的媒体事件
+                        // 包围（多路 TCP 交错到达），expected 永不推进 → 全链死锁。
+                        // END 消费时跳过（不入封装），仅作为序号推进的占位。
+                        if ($event['type'] === HlsPipelineProtocol::END) $endCount++;
+                        if ($event['type'] !== HlsPipelineProtocol::EVENT && $event['type'] !== HlsPipelineProtocol::END) continue;
                         $seq = $event['sequence'];
                         if ($seq < $expected) continue;
                         if (isset($pending[$seq])) throw new RuntimeException("媒体事件 sequence 重复: {$seq}");
@@ -97,7 +106,9 @@ final class Mp4OutputWorkerServer
                     $pendingBytes -= $eventBytes;
                     if ($event['type'] === HlsPipelineProtocol::EVENT) {
                         $recoder->processPipelineSample($event['metadata'], $event['payload']);
-                    } else throw new RuntimeException('输出进程收到未知事件');
+                    } elseif ($event['type'] !== HlsPipelineProtocol::END) {
+                        throw new RuntimeException('输出进程收到未知事件');
+                    }
                     $expected++;
                 }
                 foreach ($outputs as $id => $buffer) {

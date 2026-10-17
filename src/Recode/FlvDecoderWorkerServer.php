@@ -132,7 +132,8 @@ final class FlvDecoderWorkerServer
                         elseif ($cmd === 'gopEnd') {
                             // 先冲刷在途帧再重置：保证 GOP 最后一帧正常输出且不跨 GOP 残留流水线状态
                             $gop = (int)($event['metadata']['gop'] ?? -1);
-                            $output .= $this->flushGopTail((int)($event['metadata']['tailSeq'] ?? 0), (int)($event['metadata']['tailMax'] ?? 0));
+                            $tailOut = $this->flushGopTail((int)($event['metadata']['tailSeq'] ?? 0), (int)($event['metadata']['tailMax'] ?? 0));
+                            $output .= $tailOut;
                             $this->resetGopState();
                             if ($this->fast) {
                                 // 快速路径：回报该 GOP 完成并重新声明空闲，主进程据此派发下一个完整 GOP
@@ -142,7 +143,8 @@ final class FlvDecoderWorkerServer
                         }
                     } elseif ($event['type'] === HlsPipelineProtocol::END) {
                         // 末帧在途：收尾后再转发 END，输出进程必然先收齐全部媒体再看到 END
-                        $output .= $this->flushGopTail((int)($event['metadata']['tailSeq'] ?? 0), (int)($event['metadata']['tailMax'] ?? 0));
+                        $tailOut = $this->flushGopTail((int)($event['metadata']['tailSeq'] ?? 0), (int)($event['metadata']['tailMax'] ?? 0));
+                        $output .= $tailOut;
                         $output .= HlsPipelineProtocol::frame(HlsPipelineProtocol::END, $event['sequence']);
                         $ended = true;
                     } else {
