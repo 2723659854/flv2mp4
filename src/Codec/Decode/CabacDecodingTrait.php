@@ -133,6 +133,11 @@ trait CabacDecodingTrait
         if ($f === false) {
             return;
         }
+        // 调试插桩：P_MBT_FRAME=帧号时只记录该帧（勿提交）
+        $pf = getenv('P_MBT_FRAME');
+        if ($pf !== false && $this->frameNum !== (int)$pf) {
+            return;
+        }
         if ($f === '1') {
             fwrite(STDERR, $line);
             return;

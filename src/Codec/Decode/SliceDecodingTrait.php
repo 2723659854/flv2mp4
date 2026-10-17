@@ -170,61 +170,31 @@ trait SliceDecodingTrait
             }
         }
 
+        // dec_ref_pic_marking（spec 7.3.3.3）：此处只解析并暂存命令。
+        // 执行必须延后到当前帧解码完成、加入 DPB 之后（spec 8.2.5 / FFmpeg
+        // ff_h264_execute_ref_pic_marking 在帧完成后执行）——否则当前帧的
+        // 参考列表会用到一个被提前踢除了参考帧的 DPB（多参考 P/B 帧错位）。
+        $this->pendingMmco = [];
+        $this->pendingMmcoSliding = false;
         if ($nalRefIdc !== 0) {
             if ($isIDR) {
-                $noOutputPrior = $this->reader->readU(1);
-                $longTermRef = $this->reader->readU(1);
+                $this->reader->readU(1); // no_output_of_prior_pics_flag
+                $this->reader->readU(1); // long_term_reference_flag
             } else {
                 $adaptiveRefPicMarkingModeFlag = $this->reader->readU(1);
                 if ($adaptiveRefPicMarkingModeFlag) {
-                    $maxPicNumMmco = 1 << ($this->log2MaxFrameNumMinus4 + 4);
                     while (true) {
                         $mmco = $this->reader->readUe();
                         if ($mmco === 0) break;
-                        if ($mmco === 1) {
-                            // MMCO1: mark short-term ref unused
-                            // FFmpeg h264_refs.c: short_pic_num=(currPicNum-diff-1)&(maxPicNum-1)
-                            $diffOfPicNumsMinus1 = $this->reader->readUe();
-                            $shortPicNum = ($frameNum - $diffOfPicNumsMinus1 - 1) & ($maxPicNumMmco - 1);
-                            foreach ($this->dpb as $dpk => $dpEntry) {
-                                if (!$dpEntry['isLongTerm'] && $dpEntry['frameNum'] === $shortPicNum) {
-                                    array_splice($this->dpb, $dpk, 1);
-                                    break;
-                                }
-                            }
-                        }
-                        if ($mmco === 1 || $mmco === 3) {
-                            if ($mmco === 3) $this->reader->readUe(); // MMCO3 diff_of_pic_nums
-                        }
-                        if ($mmco === 2) $this->reader->readUe();
-                        if ($mmco === 3 || $mmco === 6) $this->reader->readUe();
-                        if ($mmco === 4) $this->reader->readUe();
+                        $args = [];
+                        if ($mmco === 1 || $mmco === 3) $args[] = $this->reader->readUe(); // diff_of_pic_nums_minus1
+                        if ($mmco === 2) $args[] = $this->reader->readUe(); // long_term_pic_num
+                        if ($mmco === 3 || $mmco === 6) $args[] = $this->reader->readUe(); // long_term_frame_idx
+                        if ($mmco === 4) $args[] = $this->reader->readUe(); // max_long_term_frame_idx_plus1
+                        $this->pendingMmco[] = [$mmco, $args];
                     }
                 } else {
-                    // spec 8.2.5.3 隐式滑动窗口：必须在参考列表构建（8.2.4）之前执行。
-                    // 当前帧此刻起计为短期参考，故短期计数 +1；超出 max_num_ref_frames
-                    // 时，把 FrameNumWrap 最小（最老）的短期参考移出 DPB。
-                    $maxFrameNum = 1 << ($this->log2MaxFrameNumMinus4 + 4);
-                    $shortTermCount = 1; // 当前帧
-                    foreach ($this->dpb as $entry) {
-                        if (!$entry['isLongTerm']) $shortTermCount++;
-                    }
-                    while ($shortTermCount > $this->maxNumRefFrames) {
-                        $oldestKey = null;
-                        $oldestFnWrap = null;
-                        foreach ($this->dpb as $k => $entry) {
-                            if ($entry['isLongTerm']) continue;
-                            $fn = $entry['frameNum'];
-                            $fnWrap = ($fn > $frameNum) ? $fn - $maxFrameNum : $fn;
-                            if ($oldestFnWrap === null || $fnWrap < $oldestFnWrap) {
-                                $oldestFnWrap = $fnWrap;
-                                $oldestKey = $k;
-                            }
-                        }
-                        if ($oldestKey === null) break;
-                        array_splice($this->dpb, $oldestKey, 1);
-                        $shortTermCount--;
-                    }
+                    $this->pendingMmcoSliding = true;
                 }
             }
         }
@@ -432,10 +402,31 @@ trait SliceDecodingTrait
 
         $mbSkipRun = -1;
 
+        // 调试插桩：POLL 环境变量=帧号时，逐 MB 轮询坏区像素跳变（勿提交）
+        $pollActive = getenv('POLL') !== false && $this->frameNum === (int)getenv('POLL');
+        $pollWatch = [496, 512, 528, 544, 560, 12000, 12016, 14976, 16480];
+        $pollPrevVals = null;
+        $pollPrevMb = '';
+
         //$isPSlice = ($sliceType === 0 || $sliceType === 5);
         for ($mbIdx = $startMbIdx; $mbIdx < $endMbIdx; $mbIdx++) {
             $mbX = $mbIdx % $mbWidth;
             $mbY = (int)($mbIdx / $mbWidth);
+
+            if ($pollActive) {
+                $cur = [];
+                foreach ($pollWatch as $off) { $cur[$off] = $this->yPlane[$off] ?? -1; }
+                if ($pollPrevVals !== null) {
+                    foreach ($pollWatch as $off) {
+                        if ($cur[$off] !== $pollPrevVals[$off]) {
+                            file_put_contents(getenv('POLL_FILE') ?: 'poll.log',
+                                "MB($pollPrevMb) changed yPlane[$off]: {$pollPrevVals[$off]} -> {$cur[$off]}\n", FILE_APPEND);
+                        }
+                    }
+                }
+                $pollPrevVals = $cur;
+                $pollPrevMb = "$mbX,$mbY";
+            }
 
             if ($mbX === 0) {
                 $this->nzLeftColLuma = array_fill(0, 4, 0);
@@ -529,12 +520,79 @@ trait SliceDecodingTrait
                 $this->bMvTopLeft[1] = $nextBTL1;
             }
         }
+        if ($pollActive && $pollPrevVals !== null) {
+            foreach ($pollWatch as $off) {
+                $v = $this->yPlane[$off] ?? -1;
+                if ($v !== $pollPrevVals[$off]) {
+                    file_put_contents(getenv('POLL_FILE') ?: 'poll.log',
+                        "MB($pollPrevMb) [loop end] changed yPlane[$off]: {$pollPrevVals[$off]} -> $v\n", FILE_APPEND);
+                }
+            }
+        }
         if ($this->deblockInfoEnabled) {
             // 调试插桩：B_NO_DEBLOCK 环境变量跳过 B 帧去块（勿提交）
             if (getenv('B_NO_DEBLOCK') !== false && $this->currentSliceType === 1) {
                 return;
             }
             $this->applyDeblockingFilter();
+        }
+    }
+
+    /** dec_ref_pic_marking 待执行命令（slice header 解析，帧入 DPB 后执行） */
+    public array $pendingMmco = [];
+    public bool $pendingMmcoSliding = false;
+
+    /**
+     * dec_ref_pic_marking 执行阶段（spec 8.2.5 / FFmpeg ff_h264_execute_ref_pic_marking）。
+     * 必须在当前参考帧加入 DPB 之后调用：MMCO/滑动窗口影响的是后续帧的参考列表，
+     * 当前帧的列表构建用的是标记前的 DPB。
+     */
+    private function executeRefPicMarking(int $frameNum): void
+    {
+        if (!empty($this->pendingMmco)) {
+            $cmds = $this->pendingMmco;
+            $this->pendingMmco = [];
+            $maxPicNumMmco = 1 << ($this->log2MaxFrameNumMinus4 + 4);
+            foreach ($cmds as [$mmco, $args]) {
+                if ($mmco === 1) {
+                    // MMCO1: 标记短期参考为不用于参考
+                    // FFmpeg h264_refs.c: short_pic_num=(currPicNum-diff-1)&(maxPicNum-1)
+                    $shortPicNum = ($frameNum - $args[0] - 1) & ($maxPicNumMmco - 1);
+                    foreach ($this->dpb as $dpk => $dpEntry) {
+                        if (!$dpEntry['isLongTerm'] && $dpEntry['frameNum'] === $shortPicNum) {
+                            array_splice($this->dpb, $dpk, 1);
+                            break;
+                        }
+                    }
+                }
+                // MMCO2-6（长期参考）当前流不使用，参数已在解析阶段消费
+            }
+        }
+        if ($this->pendingMmcoSliding) {
+            $this->pendingMmcoSliding = false;
+            // spec 8.2.5.3 隐式滑动窗口：当前帧已在 DPB 内计数；短期参考总数超出
+            // max_num_ref_frames 时，踢出 FrameNumWrap 最小（最老）的短期参考。
+            $maxFrameNum = 1 << ($this->log2MaxFrameNumMinus4 + 4);
+            $shortTermCount = 0;
+            foreach ($this->dpb as $entry) {
+                if (!$entry['isLongTerm']) $shortTermCount++;
+            }
+            while ($shortTermCount > $this->maxNumRefFrames) {
+                $oldestKey = null;
+                $oldestFnWrap = null;
+                foreach ($this->dpb as $k => $entry) {
+                    if ($entry['isLongTerm']) continue;
+                    $fn = $entry['frameNum'];
+                    $fnWrap = ($fn > $frameNum) ? $fn - $maxFrameNum : $fn;
+                    if ($oldestFnWrap === null || $fnWrap < $oldestFnWrap) {
+                        $oldestFnWrap = $fnWrap;
+                        $oldestKey = $k;
+                    }
+                }
+                if ($oldestKey === null) break;
+                array_splice($this->dpb, $oldestKey, 1);
+                $shortTermCount--;
+            }
         }
     }
 

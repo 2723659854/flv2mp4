@@ -599,6 +599,14 @@ class FlvRecoder
             $relativeTime = $timestamp - $this->baseTimestamp;
         }
 
+        // 单进程模式必须解码每帧以维护解码器参考链（尤其源含 B/P 参考帧时抽帧不能跳过解码）；
+        // 多进程解码由 decoder worker 维持参考链，直接复用其 YUV 输出
+        $yuvData = null;
+        if (!$hasPipelineEncoded) {
+            $yuvData = $this->pipelineYuv ?? $this->decodeNaluToYuv($avcData);
+            if ($yuvData === null) return null;
+        }
+
         // 在途帧虽未写出，但输出槽位已保留
         $reservedCount = $this->outputVideoFrameCount + ($this->pendingVideoJob !== null ? 1 : 0);
         // 相对首关键帧时间轴选择，无浮点累积误差；首个输出固定为关键帧，关键帧一律保留（关键帧对齐抽帧）
@@ -619,10 +627,6 @@ class FlvRecoder
         if ($hasPipelineEncoded) {
             return $job;
         }
-
-        // 多进程模式中输入 sample 已由 decoder worker 解码；单进程仍在此维持参考链。
-        $yuvData = $this->pipelineYuv ?? $this->decodeNaluToYuv($avcData);
-        if ($yuvData === null) return null;
 
         $targetW = $this->outputVideoWidth;
         $targetH = $this->outputVideoHeight;

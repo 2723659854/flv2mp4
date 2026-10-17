@@ -1109,6 +1109,15 @@ trait MacroblockDecodingTrait
         }
         $lumaRefX = $dstX * 4 + $mvX;
         $lumaRefY = $dstY * 4 + $mvY;
+        if (getenv('MCDEBUG') !== false && $this->frameNum === (int)getenv('MCDEBUG') && $dstX >= 496 && $dstX <= 560 && $dstY === 0) {
+            $la = $list === 0 ? $this->refPicList0 : $this->refPicList1;
+            $e = $la[$refIdx] ?? null;
+            $srcX = max(0, min(719, intdiv($lumaRefX, 4)));
+            $srcY = max(0, min(741, intdiv($lumaRefY, 4)));
+            $srcPix = $e ? ($e['y'][$srcY * $e['strideY'] + $srcX] ?? -1) : -2;
+            file_put_contents(getenv('MCDEBUG_FILE') ?: 'mcdebug.log',
+                "dst($dstX,$dstY) list=$list ref=$refIdx mv=($mvX,$mvY) refFrame poc=" . ($e['poc'] ?? '?') . " fn=" . ($e['frameNum'] ?? '?') . " src($srcX,$srcY)=$srcPix refCnt=" . count($la) . "\n", FILE_APPEND);
+        }
         $needLuma = ($lumaRefX & 3) !== 0 || ($lumaRefY & 3) !== 0;
         $needChroma = ($lumaRefX & 7) !== 0 || ($lumaRefY & 7) !== 0;
         $this->ensureBRefBytes($list, $refIdx, $needLuma, $needChroma);
@@ -2774,6 +2783,21 @@ trait MacroblockDecodingTrait
         if (is_int($ref)) {
             $this->ensureRefBytes($ref, $needLuma, $needChroma);
             $ref = $this->getRefPlanes($ref);
+        }
+        // 调试插桩：PMCDBG=帧号 时记录 P 帧 MC 源（勿提交）
+        if (getenv('PMCDBG') !== false && $this->frameNum === (int)getenv('PMCDBG') && $dstY === 0 && $dstX >= 480 && $dstX <= 560) {
+            $e = is_int($refIdxArg ?? null) && isset($this->refPicList0[$refIdxArg]) ? $this->refPicList0[$refIdxArg] : ($this->refPicList0[$refIdx] ?? null);
+            $sx = max(0, min(719, intdiv($lumaRefX, 4)));
+            $sy = max(0, min(741, intdiv($lumaRefY, 4)));
+            $mean = 0; $cnt = 0;
+            for ($yy = $sy; $yy < min($sy + $blockH, 742); $yy++) {
+                for ($xx = $sx; $xx < min($sx + $blockW, 720); $xx++) {
+                    $mean += $ref['y'][$yy * $ref['strideY'] + $xx] ?? 0; $cnt++;
+                }
+            }
+            file_put_contents(getenv('PMCDBG_FILE') ?: 'pmcdebug.log',
+                "dst($dstX,$dstY) ref=$refIdx mv=($mvX,$mvY) refFn=" . ($e['frameNum'] ?? '?') . " refPoc=" . ($e['poc'] ?? '?')
+                . " listCnt=" . count($this->refPicList0) . " src($sx,$sy) mean=" . round($mean / max(1, $cnt), 1) . "\n", FILE_APPEND);
         }
         $this->mcLumaTo(
             $ref['y'], $ref['strideY'], $ref['widthY'], $ref['heightY'],
