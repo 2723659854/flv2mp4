@@ -117,13 +117,16 @@ final class FlvPipelineClient
                         if (($exhausted || $stopReading) && $hold === '' && !$lastGopClosed) {
                             if ($gopSeq > 0 && isset($gopWorkerMap[$gopSeq - 1])) {
                                 $lastGop = $gopSeq - 1;
-                                $outbound[$gopWorkerMap[$lastGop]] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::CONTROL, 0, ['cmd' => 'gopEnd', 'gop' => $lastGop]);
+                                $outbound[$gopWorkerMap[$lastGop]] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::CONTROL, 0, ['cmd' => 'gopEnd', 'gop' => $lastGop, 'tailSeq' => $sequence, 'tailMax' => HlsPipelineProtocol::TAIL_SEQ_RESERVE]);
+                                $sequence += HlsPipelineProtocol::TAIL_SEQ_RESERVE;
                             }
                             $lastGopClosed = true;
                         }
                         if (($exhausted || $stopReading) && $lastGopClosed && !$endEnqueued) {
                             for ($i = 0; $i < $workerCount; $i++) {
-                                $outbound[$i] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::END, $sequence++);
+                                $tailSeq = $sequence;
+                                $sequence += HlsPipelineProtocol::TAIL_SEQ_RESERVE;
+                                $outbound[$i] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::END, $sequence++, ['tailSeq' => $tailSeq, 'tailMax' => HlsPipelineProtocol::TAIL_SEQ_RESERVE]);
                             }
                             $endEnqueued = true;
                         }
@@ -132,7 +135,9 @@ final class FlvPipelineClient
                         // 输出 worker 需收齐 workerCount 个 END 才收尾并回 FINISHED（与 HLS 流水线一致）。
                         // END 追加在各 worker 媒体末尾，天然保证"先收完媒体再收尾"的顺序。
                         for ($i = 0; $i < $workerCount; $i++) {
-                            $outbound[$i] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::END, $sequence++);
+                            $tailSeq = $sequence;
+                            $sequence += HlsPipelineProtocol::TAIL_SEQ_RESERVE;
+                            $outbound[$i] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::END, $sequence++, ['tailSeq' => $tailSeq, 'tailMax' => HlsPipelineProtocol::TAIL_SEQ_RESERVE]);
                         }
                         $endEnqueued = true;
                     }
@@ -278,7 +283,8 @@ final class FlvPipelineClient
                 // 上一GOP所有帧之后插入边界标记：worker 处理到此处即代表该 GOP 已完成，
                 // 重置解码参考链与编码器 GOP 状态（保留已预热的运动估计子进程）
                 $prevWorker = ($gopSeq - 1) % $workerCount;
-                $outbound[$prevWorker] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::CONTROL, 0, ['cmd' => 'gopEnd', 'gop' => $gopSeq - 1]);
+                $outbound[$prevWorker] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::CONTROL, 0, ['cmd' => 'gopEnd', 'gop' => $gopSeq - 1, 'tailSeq' => $sequence, 'tailMax' => HlsPipelineProtocol::TAIL_SEQ_RESERVE]);
+                $sequence += HlsPipelineProtocol::TAIL_SEQ_RESERVE;
             }
             $currentWorker = $gopSeq % $workerCount;
             $gopSeq++;
@@ -349,7 +355,8 @@ final class FlvPipelineClient
         if ($isKey) {
             if ($gopSeq > 0 && isset($gopWorkerMap[$gopSeq - 1])) {
                 $prev = $gopSeq - 1;
-                $outbound[$gopWorkerMap[$prev]] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::CONTROL, 0, ['cmd' => 'gopEnd', 'gop' => $prev]);
+                $outbound[$gopWorkerMap[$prev]] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::CONTROL, 0, ['cmd' => 'gopEnd', 'gop' => $prev, 'tailSeq' => $sequence, 'tailMax' => HlsPipelineProtocol::TAIL_SEQ_RESERVE]);
+                $sequence += HlsPipelineProtocol::TAIL_SEQ_RESERVE;
             }
             $gop = $gopSeq;
             $worker = $gop === 0

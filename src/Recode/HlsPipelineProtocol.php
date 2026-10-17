@@ -29,6 +29,11 @@ final class HlsPipelineProtocol
     public const MAX_BUFFER_LENGTH = 67108868;
     /** 输出进程乱序重排队列软上限（按负载字节计）：超过则停止读解码进程，形成端到端反压 */
     public const PENDING_SOFT_LIMIT = 50331648;
+    /**
+     * 每个 gopEnd/END 为解码 worker 预留的连续序号数（B 帧重排滞留的 GOP 尾帧经这些序号发出）。
+     * 取值上限依据 H.264 max_num_reorder_frames（≤16）；不足部分由 worker 以 drop 占位事件补齐。
+     */
+    public const TAIL_SEQ_RESERVE = 16;
 
     public static function frame(int $type, int $sequence, array $metadata = [], string $payload = ''): string
     {

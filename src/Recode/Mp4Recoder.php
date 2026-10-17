@@ -1298,8 +1298,9 @@ class Mp4Recoder
 
     private function buildSrcAvccHeader(): void
     {
-        $spsClean = NalUtil::removeEmulationPrevention("\x67" . $this->srcSpsData);
-        $ppsClean = NalUtil::removeEmulationPrevention("\x68" . $this->srcPpsData);
+        // srcSpsData/srcPpsData 是 RBSP（已去防竞争字节），avcC 需要 EBSP 形态，补回防竞争字节
+        $spsClean = "\x67" . NalUtil::addEmulationPrevention($this->srcSpsData);
+        $ppsClean = "\x68" . NalUtil::addEmulationPrevention($this->srcPpsData);
 
         $spsLen = strlen($spsClean);
         $ppsLen = strlen($ppsClean);

@@ -38,6 +38,8 @@ final class Mp4PipelineClient
         $config['pipeline'] = $streamMetadata;
         // 下发给 worker 的是"每 worker 运动进程数"（自适应结果）
         $config['motionWorkers'] = $motionPerWorker;
+        // B 帧 GOP 解码内存远超默认 512M，与 FLV 流水线一致下发（worker 侧 mp4-recode-worker.php 据此 ini_set）
+        $config['memory_limit'] = '2048M';
         $encodedConfig = base64_encode(json_encode($config, JSON_THROW_ON_ERROR));
         $sockets = [];
         try {
@@ -95,7 +97,8 @@ final class Mp4PipelineClient
                             if (!empty($sample['keyframe'])) {
                                 if ($gopSeq > 0 && isset($gopWorkerMap[$gopSeq - 1])) {
                                     // GOP 边界标记：worker 完成上一 GOP 后重置解码参考链与编码器状态
-                                    $outbound[$gopWorkerMap[$gopSeq - 1]] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::CONTROL, 0, ['cmd' => 'gopEnd', 'gop' => $gopSeq - 1]);
+                                    $outbound[$gopWorkerMap[$gopSeq - 1]] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::CONTROL, 0, ['cmd' => 'gopEnd', 'gop' => $gopSeq - 1, 'tailSeq' => $sequence, 'tailMax' => HlsPipelineProtocol::TAIL_SEQ_RESERVE]);
+                                    $sequence += HlsPipelineProtocol::TAIL_SEQ_RESERVE;
                                 }
                                 if ($fast) {
                                     $gop = $gopSeq;
@@ -168,20 +171,25 @@ final class Mp4PipelineClient
                         // 快速路径收尾：hold 排空 → 最后一个GOP补边界 → 广播 END
                         if ($allEnqueued && $hold === '' && !$lastGopClosed) {
                             if ($gopSeq > 0 && isset($gopWorkerMap[$gopSeq - 1])) {
-                                $outbound[$gopWorkerMap[$gopSeq - 1]] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::CONTROL, 0, ['cmd' => 'gopEnd', 'gop' => $gopSeq - 1]);
+                                $outbound[$gopWorkerMap[$gopSeq - 1]] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::CONTROL, 0, ['cmd' => 'gopEnd', 'gop' => $gopSeq - 1, 'tailSeq' => $sequence, 'tailMax' => HlsPipelineProtocol::TAIL_SEQ_RESERVE]);
+                                $sequence += HlsPipelineProtocol::TAIL_SEQ_RESERVE;
                             }
                             $lastGopClosed = true;
                         }
                         if ($allEnqueued && $lastGopClosed && !$endEnqueued) {
                             for ($i = 0; $i < $workerCount; $i++) {
-                                $outbound[$i] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::END, $sequence++);
+                                $tailSeq = $sequence;
+                                $sequence += HlsPipelineProtocol::TAIL_SEQ_RESERVE;
+                                $outbound[$i] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::END, $sequence++, ['tailSeq' => $tailSeq, 'tailMax' => HlsPipelineProtocol::TAIL_SEQ_RESERVE]);
                             }
                             $endEnqueued = true;
                         }
                     } elseif ($allEnqueued && !$endEnqueued) {
                         // END 广播给每个解码 worker，输出 worker 收齐 workerCount 个 END 才收尾
                         for ($i = 0; $i < $workerCount; $i++) {
-                            $outbound[$i] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::END, $sequence++);
+                            $tailSeq = $sequence;
+                            $sequence += HlsPipelineProtocol::TAIL_SEQ_RESERVE;
+                            $outbound[$i] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::END, $sequence++, ['tailSeq' => $tailSeq, 'tailMax' => HlsPipelineProtocol::TAIL_SEQ_RESERVE]);
                         }
                         $endEnqueued = true;
                     }
@@ -348,8 +356,9 @@ final class Mp4PipelineClient
     private function startWorker(array $arguments): void
     {
         $options = ['bypass_shell' => true]; if (PHP_OS_FAMILY === 'Windows') $options['create_process_group'] = true;
-        $nul = PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null'; $pipes = [];
-        $process = proc_open(array_merge([PHP_BINARY], $arguments), [['file', $nul, 'r'], ['file', $nul, 'a'], ['file', $nul, 'a']], $pipes, dirname(__DIR__, 2), null, $options);
+        $pipes = [];
+        // stdout/stderr 继承控制台（与 FLV 流水线一致）：worker 内 fatal 直接可见，不再静默死亡
+        $process = proc_open(array_merge([PHP_BINARY], $arguments), [fopen('php://stdin', 'r'), fopen('php://stdout', 'a'), fopen('php://stderr', 'a')], $pipes, dirname(__DIR__, 2), null, $options);
         if (!is_resource($process)) throw new RuntimeException('无法启动 MP4 recode worker');
         $this->processes[] = $process;
     }

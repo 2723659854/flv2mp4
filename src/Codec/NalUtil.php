@@ -31,6 +31,27 @@ class NalUtil
     }
 
     /**
+     * 重新加入H264 NAL防竞争字节：连续两个0后若下一字节 <= 0x03，插入0x03
+     * （removeEmulationPrevention 的逆操作；avcC/FLV 配置记录中的 SPS/PPS 必须是转义后的 EBSP 形态）
+     */
+    public static function addEmulationPrevention(string $data): string
+    {
+        $out = '';
+        $zeroCnt = 0;
+        $len = strlen($data);
+        for ($i = 0; $i < $len; $i++) {
+            $b = ord($data[$i]);
+            if ($zeroCnt >= 2 && $b <= 0x03) {
+                $out .= "\x03";
+                $zeroCnt = 0;
+            }
+            $out .= chr($b);
+            $zeroCnt = $b === 0 ? $zeroCnt + 1 : 0;
+        }
+        return $out;
+    }
+
+    /**
      * 拆分AnnexB(H264裸流 0001/000001起始码) 为NAL数组
      * @param string $stream AnnexB码流
      * @return array [{type:int, data:rbsp, raw:nal完整字节}]

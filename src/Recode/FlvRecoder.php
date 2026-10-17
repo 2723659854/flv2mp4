@@ -367,14 +367,13 @@ class FlvRecoder
             $this->pipelineEncoded = null;
             $this->pipelineForcedIdr = false;
             if (!empty($metadata['encoded']) && isset($metadata['encodedVariant'])) {
-                // GOP worker 已完成解码+缩放+编码：payload = [u32 bodyLen][原始tag body][AnnexB编码帧]
-                $bodyLength = unpack('N', substr($payload, 0, 4))[1];
-                $tag->body = substr($payload, 4, $bodyLength);
+                // GOP worker 已完成解码+缩放+编码：直接按显示序封装落盘，不再重复抽帧门控/自解码
                 $variant = $metadata['encodedVariant'];
                 $annexb = substr($payload, (int)$variant['offset'], (int)$variant['length']);
-                $this->pipelineEncoded = $this->splitAnnexBToNals($annexb);
-                $this->pipelineForcedIdr = !empty($metadata['keyFrame']);
-            } elseif (!empty($metadata['decoded'])) {
+                $this->appendPipelineEncodedFrame($this->splitAnnexBToNals($annexb), !empty($metadata['keyFrame']), (int)($metadata['timestamp'] ?? 0));
+                return;
+            }
+            if (!empty($metadata['decoded'])) {
                 $bodyLength = unpack('N', substr($payload, 0, 4))[1];
                 $tag->body = substr($payload, 4, $bodyLength);
                 $this->pipelineYuv = substr($payload, 4 + $bodyLength);
@@ -702,6 +701,28 @@ class FlvRecoder
         $this->writeEncodedVideoFrame($encodedNals, $this->outputVideoFrameCount === 0 || $isKeyFrame, $outputDts, 0);
     }
 
+    /**
+     * GOP worker 已编码帧的直封装入口：构造与 prepareTranscodeVideoFrame 兼容的 job，
+     * 走同一双缓冲管线（startFrame 已在 worker 内完成，此处只维护 pendingVideoJob 时序）。
+     */
+    private function appendPipelineEncodedFrame(array $nals, bool $forcedIdr, int $timestamp): void
+    {
+        if ($this->baseTimestamp === null) $this->baseTimestamp = $timestamp;
+        $job = [
+            'relativeTime' => $timestamp - $this->baseTimestamp,
+            'isKey' => false,
+            'forcedIdr' => $forcedIdr,
+            'pipelineEncoded' => $nals,
+        ];
+        if ($this->pendingVideoJob !== null) {
+            $pendingJob = $this->pendingVideoJob;
+            $this->pendingVideoJob = null;
+            $this->emitPendingVideoFrame($pendingJob);
+        }
+        $this->replayQueuedAudio();
+        $this->pendingVideoJob = $job;
+    }
+
     private function replayQueuedAudio(): void
     {
         foreach ($this->queuedAudioTags as $queuedTag) {
@@ -836,7 +857,11 @@ class FlvRecoder
             $this->parseAudioSpecificConfig($this->audioSpecificConfig);
             return;
         }
+        // FLV 头由首个输出视频帧写出（emitPendingVideoFrame）。B 帧重排期间首帧尚未产出
+        // 但 baseTimestamp 已被关键帧事件设置，此时直写音频帧会落在 FLV 头之前破坏文件结构。
+        // 注意必须放在 AAC config 解析之后：config tag 位于首帧视频之前，只解析不写出
         if ($aacPacketType !== 1) return;
+        if (!$this->flvHeaderWritten) return;
         if ($this->baseTimestamp === null || !$this->audioConfigParsed) return;
 
         $aacRaw = substr($raw, 2);
@@ -991,10 +1016,9 @@ class FlvRecoder
         $ppsPos = $this->findNalHeaderPos($ppsAnnexB);
 
         if ($spsPos < 0 || $ppsPos < 0) {
-            $spsClean = NalUtil::removeEmulationPrevention("\x67" . $this->srcSpsData);
-            $ppsClean = NalUtil::removeEmulationPrevention("\x68" . $this->srcPpsData);
-            $spsRaw = $spsClean;
-            $ppsRaw = $ppsClean;
+            // srcSpsData/srcPpsData 是 RBSP（已去防竞争字节），avcC 需要 EBSP 形态，补回防竞争字节
+            $spsRaw = "\x67" . NalUtil::addEmulationPrevention($this->srcSpsData);
+            $ppsRaw = "\x68" . NalUtil::addEmulationPrevention($this->srcPpsData);
         } else {
             $spsRaw = substr($spsAnnexB, $spsPos);
             $ppsRaw = substr($ppsAnnexB, $ppsPos);
