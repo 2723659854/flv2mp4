@@ -2756,15 +2756,17 @@ trait MacroblockDecodingTrait
                 }
                 $this->performMotionCompensationBlock(
                     $mbX * 16 + $x * 4, $mbY * 16 + $y * 4,
-                    $width * 4, $height * 4, $mv[0], $mv[1], $refCache[$mv[2]]
+                    $width * 4, $height * 4, $mv[0], $mv[1], $refCache[$mv[2]], $mv[2]
                 );
             }
         }
     }
 
-    private function performMotionCompensationBlock(int $dstX, int $dstY, int $blockW, int $blockH, int $mvX, int $mvY, int|array $ref): void
+    private function performMotionCompensationBlock(int $dstX, int $dstY, int $blockW, int $blockH, int $mvX, int $mvY, int|array $ref, ?int $refIdxArg = null): void
     {
         if ($this->refFrameY === null) return;
+        // 合并任务路径传入的是参考平面数组，真实 refIdx 由 $refIdxArg 携带（显式加权预测按 refIdx 查权重）
+        $refIdx = $refIdxArg ?? (is_int($ref) ? $ref : 0);
         $lumaRefX = $dstX * 4 + $mvX;
         $lumaRefY = $dstY * 4 + $mvY;
         $needLuma = ($lumaRefX & 3) !== 0 || ($lumaRefY & 3) !== 0;
@@ -2785,6 +2787,23 @@ trait MacroblockDecodingTrait
             $this->uPlane, $this->vPlane, $chromaStride, intdiv($dstX, 2), intdiv($dstY, 2),
             $ref['uBytes'], $ref['vBytes']
         );
+        // 显式加权预测（spec 8.4.2.3.1）：P/SP slice 且 pred_weight_table 非默认时应用
+        if ($this->pwtActive && isset($this->pwtL0W[$refIdx]) && getenv('NO_PWT') === false) {
+            $defLumaW = 1 << $this->pwtLd;
+            $defChromaW = 1 << $this->pwtCd;
+            $lw = $this->pwtL0W[$refIdx]; $lo = $this->pwtL0O[$refIdx];
+            if ($lw !== $defLumaW || $lo !== 0) {
+                $this->applyExplicitWeight($this->yPlane, $this->width, $dstX, $dstY, $blockW, $blockH, $lw, $lo, $this->pwtLd);
+            }
+            $cbw = $this->pwtL0CbW[$refIdx]; $cbo = $this->pwtL0CbO[$refIdx];
+            $crw = $this->pwtL0CrW[$refIdx]; $cro = $this->pwtL0CrO[$refIdx];
+            if ($cbw !== $defChromaW || $cbo !== 0) {
+                $this->applyExplicitWeight($this->uPlane, $chromaStride, intdiv($dstX, 2), intdiv($dstY, 2), intdiv($blockW, 2), intdiv($blockH, 2), $cbw, $cbo, $this->pwtCd);
+            }
+            if ($crw !== $defChromaW || $cro !== 0) {
+                $this->applyExplicitWeight($this->vPlane, $chromaStride, intdiv($dstX, 2), intdiv($dstY, 2), intdiv($blockW, 2), intdiv($blockH, 2), $crw, $cro, $this->pwtCd);
+            }
+        }
     }
 
     private function performMotionCompensation8x8(int $mbX, int $mbY, int $blkX, int $blkY, int $mvX, int $mvY, int $refIdx): void

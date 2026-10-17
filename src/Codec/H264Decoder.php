@@ -74,6 +74,16 @@ class H264Decoder
     public int $numRefIdxL1DefaultActive = 1;
     public bool $weightedPredFlag = false;
     public int $weightedBipredIdc = 0;
+    // 显式加权预测表（pred_weight_table，spec 7.3.3.2 / 8.4.2.3）
+    public bool $pwtActive = false;
+    public int $pwtLd = 0;   // luma_log2_weight_denom
+    public int $pwtCd = 0;   // chroma_log2_weight_denom
+    public array $pwtL0W = [];
+    public array $pwtL0O = [];
+    public array $pwtL0CbW = [];
+    public array $pwtL0CbO = [];
+    public array $pwtL0CrW = [];
+    public array $pwtL0CrO = [];
     public bool $entropyCodingModeFlag = false;
     public bool $deblockingFilterParametersPresent = false;
     public bool $redundantPicCntPresent = false;
@@ -127,6 +137,9 @@ class H264Decoder
     // DPB (Decoded Picture Buffer) - 多参考帧管理
     public array $dpb = [];
     public array $refPicList0 = [];
+    // ref_pic_list_modification 命令暂存（[idc, value] 对，slice header 解析后于默认列表上执行）
+    public array $modsL0 = [];
+    public array $modsL1 = [];
     public int $maxNumRefFrames = 1;
     public int $currFrameNum = 0;
 
@@ -646,40 +659,7 @@ class H264Decoder
                         'heightUv' => (int)($mbAlignedHeight / 2),
                     ];
                     $this->dpb[] = $dpbEntry;
-
-                    $maxFrameNum = 1 << ($this->log2MaxFrameNumMinus4 + 4);
-                    // 调试插桩：DPB_KEEP 环境变量覆盖参考帧保留数（勿提交）
-                    $maxRefDebug = getenv('DPB_KEEP') !== false ? (int)getenv('DPB_KEEP') : $this->maxNumRefFrames;
-                    $shortTermCount = 0;
-                    $oldestKey = null;
-                    $oldestFnWrap = null;
-                    foreach ($this->dpb as $k => $entry) {
-                        if ($entry['isLongTerm']) continue;
-                        $shortTermCount++;
-                        $fn = $entry['frameNum'];
-                        $fnWrap = ($fn > $this->currFrameNum) ? $fn - $maxFrameNum : $fn;
-                        if ($oldestFnWrap === null || $fnWrap < $oldestFnWrap) {
-                            $oldestFnWrap = $fnWrap;
-                            $oldestKey = $k;
-                        }
-                    }
-                    while ($shortTermCount > $maxRefDebug) {
-                        if ($oldestKey !== null) {
-                            array_splice($this->dpb, $oldestKey, 1);
-                        }
-                        $shortTermCount--;
-                        $oldestKey = null;
-                        $oldestFnWrap = null;
-                        foreach ($this->dpb as $k => $entry) {
-                            if ($entry['isLongTerm']) continue;
-                            $fn = $entry['frameNum'];
-                            $fnWrap = ($fn > $this->currFrameNum) ? $fn - $maxFrameNum : $fn;
-                            if ($oldestFnWrap === null || $fnWrap < $oldestFnWrap) {
-                                $oldestFnWrap = $fnWrap;
-                                $oldestKey = $k;
-                            }
-                        }
-                    }
+                    // 滑动窗口淘汰已在 decodeSlice() 的 slice header 阶段（参考列表构建前）完成
 
                     $this->refFrameY = $dpbEntry['y'];
                     $this->refFrameU = $dpbEntry['u'];
@@ -692,7 +672,7 @@ class H264Decoder
                     $this->refHeightUv = $dpbEntry['heightUv'];
 
                     // POC 参考状态仅在参考帧后更新（H.264 8.2.1.1）
-                    $this->updatePrevPocState($this->currFrameNum, $maxFrameNum, $isIdrNal);
+                    $this->updatePrevPocState($this->currFrameNum, 1 << ($this->log2MaxFrameNumMinus4 + 4), $isIdrNal);
                 }
 
                 // 恢复实际图像尺寸

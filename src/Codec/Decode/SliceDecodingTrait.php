@@ -69,12 +69,6 @@ trait SliceDecodingTrait
                 $delta1 = $this->reader->readSe();
             }
         }
-        if ($this->picOrderCntType === 2) {
-            // H.264 spec 8.2.1.2：pocType=2 无 pocLsb 字段，POC 直接由 frame_num 推导
-            // 参考帧 POC = 2*frame_num，非参考帧 POC = 2*frame_num - 1
-            $this->currPicOrderCnt = $isIDR ? 0 : ($nalRefIdc !== 0 ? 2 * $frameNum : 2 * $frameNum - 1);
-        }
-
         if ($this->redundantPicCntPresent) {
             $redPicCnt = $this->reader->readUe();
         }
@@ -100,61 +94,62 @@ trait SliceDecodingTrait
             $this->numRefIdxL1Active = $numRefIdxL1Active;
         }
         
-        if (!$isIDR) {
-            // L0 = 过去帧 POC 降序（最近优先）+ 未来帧 POC 升序（spec 8.2.4.2.3 / FFmpeg add_sorted）
-            // 注意：不能按 frame_num 排序——存在参考 B 帧时 frame_num 与 POC 顺序不一致
-            $pastRefs = [];
-            $futureRefs = [];
-            foreach ($this->dpb as $entry) {
-                if (!$entry['isLongTerm']) {
-                    if ($entry['poc'] > $this->currPicOrderCnt) {
-                        $futureRefs[] = $entry;
-                    } else {
-                        $pastRefs[] = $entry;
-                    }
-                }
-            }
-            usort($pastRefs, function ($a, $b) { return $b['poc'] - $a['poc']; });
-            usort($futureRefs, function ($a, $b) { return $a['poc'] - $b['poc']; });
-            $this->refPicList0 = array_merge($pastRefs, $futureRefs);
-        }
-
+        // 参考列表的默认构建在 dec_ref_pic_marking（MMCO/滑动窗口）之后统一进行；
+        // 此处只解析并暂存 ref_pic_list_modification 命令（spec 7.3.3.1：
+        // idc=0/1 仅 abs_diff_pic_num_minus1 一个参数，idc=2 仅 long_term_pic_num 一个参数）
+        $this->modsL0 = [];
         if ($sliceType !== 2 && $sliceType !== 4) {
             $refPicListModificationFlagL0 = $this->reader->readU(1);
             if ($refPicListModificationFlagL0) {
                 while (true) {
                     $idc = $this->reader->readUe();
                     if ($idc === 3) break;
-                    $this->reader->readUe();
+                    $this->modsL0[] = [$idc, $this->reader->readUe()];
                 }
             }
         }
+        $this->modsL1 = [];
         if ($sliceType === 1) {
             $refPicListModificationFlagL1 = $this->reader->readU(1);
             if ($refPicListModificationFlagL1) {
                 while (true) {
                     $idc = $this->reader->readUe();
                     if ($idc === 3) break;
-                    $this->reader->readUe();
+                    $this->modsL1[] = [$idc, $this->reader->readUe()];
                 }
             }
         }
 
+        $this->pwtActive = false;
         if (($this->weightedPredFlag && ($sliceType === 0 || $sliceType === 3)) || ($this->weightedBipredIdc === 1 && $sliceType === 1)) {
             $lumaLog2WeightDenom = $this->reader->readUe();
             $chromaLog2WeightDenom = $this->reader->readUe();
+            $this->pwtLd = $lumaLog2WeightDenom;
+            $this->pwtCd = $chromaLog2WeightDenom;
+            $defLumaW = 1 << $lumaLog2WeightDenom;
+            $defChromaW = 1 << $chromaLog2WeightDenom;
             for ($i = 0; $i < $numRefIdxL0Active; $i++) {
                 $lumaWeightL0Flag = $this->reader->readU(1);
+                $lw = $defLumaW; $lo = 0;
                 if ($lumaWeightL0Flag) {
-                    $this->reader->readSe();
-                    $this->reader->readSe();
+                    // spec 7.3.3.2 / FFmpeg h264_parse.c：luma_weight_l0[i] 是有符号绝对权重值，
+                    // 不是 default+delta！（flag=0 时才是默认值 1<<denom）
+                    $lw = $this->reader->readSe();
+                    $lo = $this->reader->readSe();
                 }
                 $chromaWeightL0Flag = $this->reader->readU(1);
+                $cbw = $defChromaW; $cbo = 0; $crw = $defChromaW; $cro = 0;
                 if ($chromaWeightL0Flag) {
-                    $this->reader->readSe();
-                    $this->reader->readSe();
-                    $this->reader->readSe();
-                    $this->reader->readSe();
+                    $cbw = $this->reader->readSe();
+                    $cbo = $this->reader->readSe();
+                    $crw = $this->reader->readSe();
+                    $cro = $this->reader->readSe();
+                }
+                $this->pwtL0W[$i] = $lw; $this->pwtL0O[$i] = $lo;
+                $this->pwtL0CbW[$i] = $cbw; $this->pwtL0CbO[$i] = $cbo;
+                $this->pwtL0CrW[$i] = $crw; $this->pwtL0CrO[$i] = $cro;
+                if ($lw !== $defLumaW || $lo !== 0 || $cbw !== $defChromaW || $cbo !== 0 || $crw !== $defChromaW || $cro !== 0) {
+                    $this->pwtActive = true;
                 }
             }
             if ($sliceType === 1) {
@@ -182,13 +177,53 @@ trait SliceDecodingTrait
             } else {
                 $adaptiveRefPicMarkingModeFlag = $this->reader->readU(1);
                 if ($adaptiveRefPicMarkingModeFlag) {
+                    $maxPicNumMmco = 1 << ($this->log2MaxFrameNumMinus4 + 4);
                     while (true) {
                         $mmco = $this->reader->readUe();
                         if ($mmco === 0) break;
-                        if ($mmco === 1 || $mmco === 3) $this->reader->readUe();
+                        if ($mmco === 1) {
+                            // MMCO1: mark short-term ref unused
+                            // FFmpeg h264_refs.c: short_pic_num=(currPicNum-diff-1)&(maxPicNum-1)
+                            $diffOfPicNumsMinus1 = $this->reader->readUe();
+                            $shortPicNum = ($frameNum - $diffOfPicNumsMinus1 - 1) & ($maxPicNumMmco - 1);
+                            foreach ($this->dpb as $dpk => $dpEntry) {
+                                if (!$dpEntry['isLongTerm'] && $dpEntry['frameNum'] === $shortPicNum) {
+                                    array_splice($this->dpb, $dpk, 1);
+                                    break;
+                                }
+                            }
+                        }
+                        if ($mmco === 1 || $mmco === 3) {
+                            if ($mmco === 3) $this->reader->readUe(); // MMCO3 diff_of_pic_nums
+                        }
                         if ($mmco === 2) $this->reader->readUe();
                         if ($mmco === 3 || $mmco === 6) $this->reader->readUe();
                         if ($mmco === 4) $this->reader->readUe();
+                    }
+                } else {
+                    // spec 8.2.5.3 隐式滑动窗口：必须在参考列表构建（8.2.4）之前执行。
+                    // 当前帧此刻起计为短期参考，故短期计数 +1；超出 max_num_ref_frames
+                    // 时，把 FrameNumWrap 最小（最老）的短期参考移出 DPB。
+                    $maxFrameNum = 1 << ($this->log2MaxFrameNumMinus4 + 4);
+                    $shortTermCount = 1; // 当前帧
+                    foreach ($this->dpb as $entry) {
+                        if (!$entry['isLongTerm']) $shortTermCount++;
+                    }
+                    while ($shortTermCount > $this->maxNumRefFrames) {
+                        $oldestKey = null;
+                        $oldestFnWrap = null;
+                        foreach ($this->dpb as $k => $entry) {
+                            if ($entry['isLongTerm']) continue;
+                            $fn = $entry['frameNum'];
+                            $fnWrap = ($fn > $frameNum) ? $fn - $maxFrameNum : $fn;
+                            if ($oldestFnWrap === null || $fnWrap < $oldestFnWrap) {
+                                $oldestFnWrap = $fnWrap;
+                                $oldestKey = $k;
+                            }
+                        }
+                        if ($oldestKey === null) break;
+                        array_splice($this->dpb, $oldestKey, 1);
+                        $shortTermCount--;
                     }
                 }
             }
@@ -246,22 +281,47 @@ trait SliceDecodingTrait
         $endMbIdx = $totalMbs;
 
         if (!$isIDR) {
-            // L0 = 过去帧 POC 降序（最近优先）+ 未来帧 POC 升序（spec 8.2.4.2.3 / FFmpeg add_sorted）
-            // 注意：不能按 frame_num 排序——存在参考 B 帧时 frame_num 与 POC 顺序不一致
-            $pastRefs = [];
-            $futureRefs = [];
-            foreach ($this->dpb as $entry) {
-                if (!$entry['isLongTerm']) {
-                    if ($entry['poc'] > $this->currPicOrderCnt) {
-                        $futureRefs[] = $entry;
-                    } else {
-                        $pastRefs[] = $entry;
+            if ($sliceType === 1) {
+                // B 片默认 L0（8.2.4.2.3）：POC past 降序 + future 升序；下方 B 块会重建 L0/L1
+                $pastRefs = [];
+                $futureRefs = [];
+                foreach ($this->dpb as $entry) {
+                    if (!$entry['isLongTerm']) {
+                        if ($entry['poc'] > $this->currPicOrderCnt) {
+                            $futureRefs[] = $entry;
+                        } else {
+                            $pastRefs[] = $entry;
+                        }
                     }
                 }
+                usort($pastRefs, function ($a, $b) { return $b['poc'] - $a['poc']; });
+                usort($futureRefs, function ($a, $b) { return $a['poc'] - $b['poc']; });
+                $this->refPicList0 = array_merge($pastRefs, $futureRefs);
+            } else {
+                // P/SP 片默认 L0（8.2.4.2.1）：短期参考按 FrameNumWrap 降序（最接近当前帧优先）。
+                // 注意：存在参考 B 帧时 frame_num 序与 POC 序不同，必须按 frame_num。
+                $maxPicNum = 1 << ($this->log2MaxFrameNumMinus4 + 4);
+                $refs = [];
+                foreach ($this->dpb as $entry) {
+                    if (!$entry['isLongTerm']) {
+                        $fn = $entry['frameNum'];
+                        $refs[] = ['w' => ($fn > $frameNum) ? $fn - $maxPicNum : $fn, 'e' => $entry];
+                    }
+                }
+                usort($refs, function ($a, $b) { return $b['w'] - $a['w']; });
+                $this->refPicList0 = array_map(function ($r) { return $r['e']; }, $refs);
+                // 执行 ref_pic_list_modification（8.2.4.3.1）
+                if (!empty($this->modsL0)) {
+                    $this->applyRefPicListModification($this->refPicList0, $this->modsL0, $frameNum, $maxPicNum, $numRefIdxL0Active);
+                }
+                if (count($this->refPicList0) > $numRefIdxL0Active) {
+                    $this->refPicList0 = array_slice($this->refPicList0, 0, $numRefIdxL0Active);
+                }
+                // 不足 numRefIdxL0Active 时以默认列表[0]（default_ref）补齐（FFmpeg: null 槽位替换为 default_ref）
+                while (count($this->refPicList0) < $numRefIdxL0Active && !empty($this->refPicList0)) {
+                    $this->refPicList0[] = $this->refPicList0[0];
+                }
             }
-            usort($pastRefs, function ($a, $b) { return $b['poc'] - $a['poc']; });
-            usort($futureRefs, function ($a, $b) { return $a['poc'] - $b['poc']; });
-            $this->refPicList0 = array_merge($pastRefs, $futureRefs);
         } else {
             $this->refPicList0 = [];
         }
@@ -295,11 +355,28 @@ trait SliceDecodingTrait
             usort($pastRefs, function ($a, $b) { return $b['poc'] - $a['poc']; });
             $this->refPicList0 = array_merge($pastRefs, $futureRefs);
             $this->refPicList1 = array_merge($futureRefs, $pastRefs);
+            // 执行 ref_pic_list_modification（8.2.4.3.1）
+            if (!empty($this->modsL0) || !empty($this->modsL1)) {
+                $maxPicNumB = 1 << ($this->log2MaxFrameNumMinus4 + 4);
+                if (!empty($this->modsL0)) {
+                    $this->applyRefPicListModification($this->refPicList0, $this->modsL0, $frameNum, $maxPicNumB, $numRefIdxL0Active);
+                }
+                if (!empty($this->modsL1)) {
+                    $this->applyRefPicListModification($this->refPicList1, $this->modsL1, $frameNum, $maxPicNumB, $numRefIdxL1Active);
+                }
+            }
             if (count($this->refPicList0) > $numRefIdxL0Active) {
                 $this->refPicList0 = array_slice($this->refPicList0, 0, $numRefIdxL0Active);
             }
             if (count($this->refPicList1) > $numRefIdxL1Active) {
                 $this->refPicList1 = array_slice($this->refPicList1, 0, $numRefIdxL1Active);
+            }
+            // 不足时以 default_ref（默认列表[0]）补齐
+            while (count($this->refPicList0) < $numRefIdxL0Active && !empty($this->refPicList0)) {
+                $this->refPicList0[] = $this->refPicList0[0];
+            }
+            while (count($this->refPicList1) < $numRefIdxL1Active && !empty($this->refPicList1)) {
+                $this->refPicList1[] = $this->refPicList1[0];
             }
             if (!empty($this->refPicList0)) {
                 $ref0 = $this->refPicList0[0];
@@ -458,6 +535,57 @@ trait SliceDecodingTrait
                 return;
             }
             $this->applyDeblockingFilter();
+        }
+    }
+
+    /**
+     * 执行 ref_pic_list_modification（spec 8.2.4.3.1 / FFmpeg h264_refs.c ff_h264_build_ref_list）。
+     * 关键语义（与朴素"移除再插入"不同）：
+     *  - 列表长度固定为 refCount（numRefIdxActive），默认列表不足时先补 null；
+     *  - 每条命令把目标参考写入 index，[index..i-1] 右移一位（i 为同 pic_id 的既有位置，
+     *    找不到则 i=refCount-1，末位被挤出）——允许同一帧占据多个 refIdx；
+     *  - 结束后仍为 null 的槽位以默认列表[0]（default_ref）替换。
+     */
+    private function applyRefPicListModification(array &$list, array $mods, int $currPicNum, int $maxPicNum, int $refCount): void
+    {
+        if ($refCount <= 0 || empty($list)) return;
+        $defaultRef = $list[0];
+        while (count($list) < $refCount) $list[] = null;
+        $pred = $currPicNum;
+        foreach ($mods as $index => $mod) {
+            if ($index >= $refCount) break;
+            [$idc, $val] = $mod;
+            $ref = null;
+            $picId = 0;
+            if ($idc === 0 || $idc === 1) {
+                $absDiff = $val + 1;
+                if ($absDiff > $maxPicNum) return;
+                $pred = ($idc === 0) ? ($pred - $absDiff) & ($maxPicNum - 1)
+                                     : ($pred + $absDiff) & ($maxPicNum - 1);
+                $picId = $pred;
+                foreach ($this->dpb as $e) {
+                    if (!$e['isLongTerm'] && $e['frameNum'] === $picId) { $ref = $e; break; }
+                }
+            } else { // idc=2：长期参考（本测试流无长期参考，保留语义）
+                $picId = $val;
+                foreach ($this->dpb as $e) {
+                    if ($e['isLongTerm'] && ($e['longTermPicNum'] ?? -1) === $val) { $ref = $e; break; }
+                }
+            }
+            if ($ref === null) { $list[$index] = null; continue; }
+            // 从 index 起找同 pic_id 的既有位置
+            $i = $index;
+            for (; $i + 1 < $refCount; $i++) {
+                $cur = $list[$i];
+                if ($cur !== null && $cur['isLongTerm'] === $ref['isLongTerm'] && $cur['frameNum'] === $picId) break;
+            }
+            for (; $i > $index; $i--) {
+                $list[$i] = $list[$i - 1];
+            }
+            $list[$index] = $ref;
+        }
+        for ($i = 0; $i < $refCount; $i++) {
+            if ($list[$i] === null) $list[$i] = $defaultRef;
         }
     }
 }

@@ -25,6 +25,33 @@ trait MotionCompensationTrait
         return $pred;
     }
 
+    /**
+     * 显式加权预测（spec 8.4.2.3.1）：对刚做完 MC 的目标区域应用 weight/offset。
+     * pred = clip(((v*w + rnd) >> log2Wd) + o)；log2Wd==0 时 pred = clip(v*w + o)
+     */
+    private function applyExplicitWeight(array &$plane, int $stride, int $dstX, int $dstY, int $blockW, int $blockH, int $w, int $o, int $log2Wd): void
+    {
+        if ($log2Wd >= 1) {
+            $rnd = 1 << ($log2Wd - 1);
+            for ($j = 0; $j < $blockH; $j++) {
+                $base = ($dstY + $j) * $stride + $dstX;
+                for ($i = 0; $i < $blockW; $i++) {
+                    $v = $plane[$base + $i];
+                    $v = (($v * $w + $rnd) >> $log2Wd) + $o;
+                    $plane[$base + $i] = $v < 0 ? 0 : ($v > 255 ? 255 : $v);
+                }
+            }
+        } else {
+            for ($j = 0; $j < $blockH; $j++) {
+                $base = ($dstY + $j) * $stride + $dstX;
+                for ($i = 0; $i < $blockW; $i++) {
+                    $v = $plane[$base + $i] * $w + $o;
+                    $plane[$base + $i] = $v < 0 ? 0 : ($v > 255 ? 255 : $v);
+                }
+            }
+        }
+    }
+
     private function mcLumaTo(
         array $refPlane,
         int $refStride,

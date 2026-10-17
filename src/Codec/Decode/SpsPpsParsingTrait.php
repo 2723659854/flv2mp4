@@ -73,7 +73,7 @@ trait SpsPpsParsingTrait
             for ($j = 0; $j < $numRefFramesInPicOrderCntCycle; $j++) $this->reader->readSe();
         }
 
-        $this->maxNumRefFrames = $this->reader->readUe() + 1; // max_num_ref_frames
+        $this->maxNumRefFrames = $this->reader->readUe(); // max_num_ref_frames（规范 7.3.2.1，无 +1）
         $this->reader->skip(1);
         $picWidthInMbsMinus1 = $this->reader->readUe();
         $picHeightInMapUnitsMinus1 = $this->reader->readUe();
