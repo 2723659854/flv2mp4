@@ -61,10 +61,6 @@ trait MacroblockDecodingTrait
      */
     private function decodeIntraMacroblock(int $mbX, int $mbY, int $mbType, int $sliceQp): int
     {
-        // 调试插桩（勿提交）：I 帧宏块入口日志
-        if (getenv('I_MB_DBG') !== false) {
-            file_put_contents('i_mb_debug.log', sprintf("MB %d %d t%d pos%d\n", $mbX, $mbY, $mbType, $this->reader->getPos()), FILE_APPEND);
-        }
         // 同位帧存储：intra 标记（B 帧 direct 的 colZero 判定依赖）
         $this->picMbType[$mbY * $this->picWidthInMbs + $mbX] |= 1;
 
@@ -152,10 +148,6 @@ trait MacroblockDecodingTrait
                 $remMode = $this->reader->readU(3);
                 $mode = $remMode >= $predicted ? $remMode + 1 : $remMode;
             }
-            // 调试插桩（勿提交）：mode 原始读取序列
-            if (getenv('I4_DUMP') !== false && $mbX === 13 && $mbY === 2) {
-                file_put_contents('i4_dump.log', sprintf("scan%d pos%d prev%d rem%d pred%d mode%d\n", $scanIdx, $this->reader->getPos(), $prevFlag, $prevFlag ? -1 : $remMode ?? -1, $predicted, $mode), FILE_APPEND);
-            }
             $modeCache[$rasterIdx] = $mode;
             $modes[$rasterIdx] = $mode;
         }
@@ -180,10 +172,6 @@ trait MacroblockDecodingTrait
         $mbQpDelta = 0;
         if ($cbp > 0) {
             $mbQpDelta = $this->reader->readSe();
-        }
-        // 调试插桩（勿提交）：chromaPred/cbp/qpDelta 位位置与值
-        if (getenv('I4_DUMP') !== false && $mbX === 13 && ($mbY === 2 || $mbY === 3)) {
-            file_put_contents('i4_dump.log', sprintf("MB %d %d chromaPos%d chroma%d cbpPos%d cbpCode%d cbp%d qpDeltaPos%d delta%d\n", $mbX, $mbY, $this->reader->getPos(), $chromaPredMode, 0, $cbpCode, $cbp, 0, $mbQpDelta), FILE_APPEND);
         }
         $qp = max(0, min(51, $sliceQp + $mbQpDelta));
         $yCoeffs = array_fill(0, 16, array_fill(0, 16, 0));
@@ -325,19 +313,6 @@ trait MacroblockDecodingTrait
         // 色度DC逆哈达玛 + AC IDCT
         //   - AC存在 (chromaCbp>=2): DC放入coeffs[0], 一次IDCT (单一+32偏置, >>6)
         //   - DC-only (chromaCbp==1): dc_add = (dc + 32) >> 6, 加到所有像素
-        // 调试插桩（勿提交）：dump Intra4x4 详情
-        if (getenv('I4_DUMP') !== false && ($mbX === 13 && ($mbY === 2 || $mbY === 3))) {
-            $out = sprintf("MB %d %d cbp%d qp%d sliceQp%d qpDelta%d pos%d modes[%s]\n", $mbX, $mbY, $cbp, $qp, $sliceQp, $mbQpDelta, $this->reader->getPos(), implode(',', $modes));
-            for ($blk = 0; $blk < 16; $blk++) {
-                $by = intdiv($blk, 4); $bx = $blk % 4;
-                $out .= sprintf(" blk%d mode%d nz%d coeff[0..5]=%s pred00=%d res=%s\n",
-                    $blk, $modes[$blk], $yCoeffs[$blk][0] !== null ? 1 : 0,
-                    implode(',', array_slice($yCoeffs[$blk], 0, 6)),
-                    $this->intra4x4Prediction($mbX, $mbY, $bx, $by, $modes[$blk])[0][0],
-                    implode(',', array_slice($yPixels[$by * 4 + 0], $bx * 4, 4)));
-            }
-            file_put_contents('i4_dump.log', $out . "\n", FILE_APPEND);
-        }
         $uPixels = array_fill(0, 8, array_fill(0, 8, 0));
         $vPixels = array_fill(0, 8, array_fill(0, 8, 0));
 
@@ -948,10 +923,6 @@ trait MacroblockDecodingTrait
         $mvX = $predMvX;
         $mvY = $predMvY;
 
-        if (getenv('CAB_MV') !== false && $this->cabMbIdx <= 95) {
-            fwrite(STDERR, sprintf("MVP sl=%d mb=%d type=skip mv=(%d,%d)\n",
-                $this->cabSliceIdx, $this->cabMbIdx, $mvX, $mvY));
-        }
         $this->performMotionCompensation16x16($mbX, $mbY, $mvX, $mvY, $refIdx);
 
         $this->saveMvForPrediction($mbX, $mbY, $mvX, $mvY, $refIdx);
@@ -1109,15 +1080,6 @@ trait MacroblockDecodingTrait
         }
         $lumaRefX = $dstX * 4 + $mvX;
         $lumaRefY = $dstY * 4 + $mvY;
-        if (getenv('MCDEBUG') !== false && $this->frameNum === (int)getenv('MCDEBUG') && $dstX >= 496 && $dstX <= 560 && $dstY === 0) {
-            $la = $list === 0 ? $this->refPicList0 : $this->refPicList1;
-            $e = $la[$refIdx] ?? null;
-            $srcX = max(0, min(719, intdiv($lumaRefX, 4)));
-            $srcY = max(0, min(741, intdiv($lumaRefY, 4)));
-            $srcPix = $e ? ($e['y'][$srcY * $e['strideY'] + $srcX] ?? -1) : -2;
-            file_put_contents(getenv('MCDEBUG_FILE') ?: 'mcdebug.log',
-                "dst($dstX,$dstY) list=$list ref=$refIdx mv=($mvX,$mvY) refFrame poc=" . ($e['poc'] ?? '?') . " fn=" . ($e['frameNum'] ?? '?') . " src($srcX,$srcY)=$srcPix refCnt=" . count($la) . "\n", FILE_APPEND);
-        }
         $needLuma = ($lumaRefX & 3) !== 0 || ($lumaRefY & 3) !== 0;
         $needChroma = ($lumaRefX & 7) !== 0 || ($lumaRefY & 7) !== 0;
         $this->ensureBRefBytes($list, $refIdx, $needLuma, $needChroma);
@@ -1800,9 +1762,6 @@ trait MacroblockDecodingTrait
 
     private function decodeBInterMacroblock(int $mbX, int $mbY, int $mbType, int $sliceQp): int
     {
-        if (getenv('B_MB_DBG') !== false) {
-            file_put_contents('b_mb_debug.log', sprintf("MB %d %d t%d\n", $mbX, $mbY, $mbType), FILE_APPEND);
-        }
         if ($mbType >= 23 && $mbType <= 48) {
             // B 片内嵌 Intra 宏块：mb_type-23 → I 片语义（FFmpeg h264_cavlc.c L706-713）
             $mbQpDelta = $this->decodeIntraMacroblock($mbX, $mbY, $mbType - 23, $sliceQp);
@@ -1844,11 +1803,6 @@ trait MacroblockDecodingTrait
         list($predX, $predY) = $this->getB16x16MvPrediction($mbX, $mbY, $list, $refIdx);
         $mvX = $predX + $mvdX;
         $mvY = $predY + $mvdY;
-        if (getenv('B_MB_DBG') !== false) {
-            file_put_contents('b_mb_debug.log', sprintf("MB %d %d single l%d ref%d mvd(%d,%d) pred(%d,%d) mv(%d,%d)\n",
-                $mbX, $mbY, $list, $refIdx, $mvdX, $mvdY, $predX, $predY, $mvX, $mvY), FILE_APPEND);
-        }
-
         $this->mcBBlockTo($mbX * 16, $mbY * 16, 16, 16, $mvX, $mvY, $list, $refIdx);
 
         $mv = [$mvX, $mvY, $refIdx];
@@ -2131,22 +2085,12 @@ trait MacroblockDecodingTrait
         $cbpCode = $this->reader->readUe();
         $codedBlockPattern = self::GOLOMB_TO_INTER_CBP[$cbpCode] ?? 0;
         $mbQpDelta = 0;
-        if (getenv('B_MB_DBG') !== false) {
-            file_put_contents('b_mb_debug.log', sprintf("MB %d %d res cbpcode%d cbp%d sliceQp%d",
-                $mbX, $mbY, $cbpCode, $codedBlockPattern, $sliceQp), FILE_APPEND);
-        }
         if ($codedBlockPattern !== 0) {
             $mbQpDelta = $this->reader->readSe();
             $qp = $sliceQp + $mbQpDelta;
             $qp = max(0, min(51, $qp));
-            if (getenv('B_MB_DBG') !== false) {
-                file_put_contents('b_mb_debug.log', sprintf(" qpDelta%d qp%d\n", $mbQpDelta, $qp), FILE_APPEND);
-            }
             $this->decodeResidualAndAdd($mbX, $mbY, $codedBlockPattern, $qp, 0);
         } else {
-            if (getenv('B_MB_DBG') !== false) {
-                file_put_contents('b_mb_debug.log', "\n", FILE_APPEND);
-            }
             $this->updateNzCountZero($mbX, $mbY);
         }
         $this->updateInterMbIntraModes($mbX);
@@ -2155,9 +2099,6 @@ trait MacroblockDecodingTrait
 
     private function decodeBSkip(int $mbX, int $mbY): void
     {
-        if (getenv('B_MB_DBG') !== false) {
-            file_put_contents('b_mb_debug.log', sprintf("MB %d %d skip\n", $mbX, $mbY), FILE_APPEND);
-        }
         // B_Skip = B_Direct_16x16 无残差（FFmpeg decode_mb_skip）
         $this->decodeBDirect16x16($mbX, $mbY);
         $this->updateNzCountZero($mbX, $mbY);
@@ -2784,21 +2725,6 @@ trait MacroblockDecodingTrait
             $this->ensureRefBytes($ref, $needLuma, $needChroma);
             $ref = $this->getRefPlanes($ref);
         }
-        // 调试插桩：PMCDBG=帧号 时记录 P 帧 MC 源（勿提交）
-        if (getenv('PMCDBG') !== false && $this->frameNum === (int)getenv('PMCDBG') && $dstY === 0 && $dstX >= 480 && $dstX <= 560) {
-            $e = is_int($refIdxArg ?? null) && isset($this->refPicList0[$refIdxArg]) ? $this->refPicList0[$refIdxArg] : ($this->refPicList0[$refIdx] ?? null);
-            $sx = max(0, min(719, intdiv($lumaRefX, 4)));
-            $sy = max(0, min(741, intdiv($lumaRefY, 4)));
-            $mean = 0; $cnt = 0;
-            for ($yy = $sy; $yy < min($sy + $blockH, 742); $yy++) {
-                for ($xx = $sx; $xx < min($sx + $blockW, 720); $xx++) {
-                    $mean += $ref['y'][$yy * $ref['strideY'] + $xx] ?? 0; $cnt++;
-                }
-            }
-            file_put_contents(getenv('PMCDBG_FILE') ?: 'pmcdebug.log',
-                "dst($dstX,$dstY) ref=$refIdx mv=($mvX,$mvY) refFn=" . ($e['frameNum'] ?? '?') . " refPoc=" . ($e['poc'] ?? '?')
-                . " listCnt=" . count($this->refPicList0) . " src($sx,$sy) mean=" . round($mean / max(1, $cnt), 1) . "\n", FILE_APPEND);
-        }
         $this->mcLumaTo(
             $ref['y'], $ref['strideY'], $ref['widthY'], $ref['heightY'],
             $lumaRefX, $lumaRefY, $blockW, $blockH,
@@ -2812,7 +2738,7 @@ trait MacroblockDecodingTrait
             $ref['uBytes'], $ref['vBytes']
         );
         // 显式加权预测（spec 8.4.2.3.1）：P/SP slice 且 pred_weight_table 非默认时应用
-        if ($this->pwtActive && isset($this->pwtL0W[$refIdx]) && getenv('NO_PWT') === false) {
+        if ($this->pwtActive && isset($this->pwtL0W[$refIdx])) {
             $defLumaW = 1 << $this->pwtLd;
             $defChromaW = 1 << $this->pwtCd;
             $lw = $this->pwtL0W[$refIdx]; $lo = $this->pwtL0O[$refIdx];

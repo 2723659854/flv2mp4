@@ -635,21 +635,6 @@ class H264Decoder
                 // IDR关键帧永不跳滤波（参考链重置点，且通常都保留输出）
                 $this->decodeSlice($nal['data'], $isIdrNal, $nalRefIdc, $skipDeblock && $nalType !== 5);
                 $framePoc = $this->currPicOrderCnt;
-                if (getenv('DUMP_FRAMES')) {
-                    file_put_contents(getenv('DUMP_FRAMES'),
-                        json_encode(['i' => $this->frameNum, 't' => $this->currentSliceType, 'fn' => $this->currFrameNum, 'poc' => $framePoc, 'idr' => $isIdrNal, 'ref' => $nalRefIdc]) . "\n", FILE_APPEND);
-                }
-                if (getenv('DUMP_SLICE') !== false && (int)getenv('DUMP_SLICE') === $this->frameNum) {
-                    $wMbs = $this->picWidthInMbs; $hMbs = $this->picHeightInMbs;
-                    $out = '';
-                    for ($mby2 = 0; $mby2 < $hMbs; $mby2++) {
-                        for ($mbx2 = 0; $mbx2 < $wMbs; $mbx2++) {
-                            $mi = $mby2 * $wMbs + $mbx2; $b = $mi * 16;
-                            $out .= json_encode([$mbx2, $mby2, $this->picMbType[$mi] ?? 0, $this->picIsDirectMb[$mi] ?? 0, $this->picRef0[$b] ?? -9, $this->picMv0[$b] ?? [0, 0], $this->picRef1[$b] ?? -9, $this->picMv1[$b] ?? [0, 0], $this->picCbp[$mi] ?? -1]) . "\n";
-                        }
-                    }
-                    file_put_contents(getenv('DUMP_SLICE_FILE'), $out);
-                }
                 // B 片的解码序≠显示序，启用按 POC 重排输出
                 if ($this->currentSliceType === 1) {
                     $this->reorderByPoc = true;

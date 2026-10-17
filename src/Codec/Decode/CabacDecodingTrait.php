@@ -116,39 +116,6 @@ trait CabacDecodingTrait
     // 引擎
     // ============================================================
 
-    /** 临时：导出算术原语调用序列（CAB_SEQ=文件路径），供独立 C 引擎回放 */
-    private function cabSeqLog(string $line): void
-    {
-        $f = getenv('CAB_SEQ');
-        if ($f !== false) {
-            file_put_contents($f, $line . "\n", FILE_APPEND);
-        }
-    }
-
-    /** 临时探针：P_MBT=文件路径 → 追加写入；P_MBT=1 → STDERR。首调用截断文件 */
-    private bool $cabPmbtInit = false;
-    private function cabPmbtLog(string $line): void
-    {
-        $f = getenv('P_MBT');
-        if ($f === false) {
-            return;
-        }
-        // 调试插桩：P_MBT_FRAME=帧号时只记录该帧（勿提交）
-        $pf = getenv('P_MBT_FRAME');
-        if ($pf !== false && $this->frameNum !== (int)$pf) {
-            return;
-        }
-        if ($f === '1') {
-            fwrite(STDERR, $line);
-            return;
-        }
-        if (!$this->cabPmbtInit) {
-            file_put_contents($f, '');
-            $this->cabPmbtInit = true;
-        }
-        file_put_contents($f, $line, FILE_APPEND);
-    }
-
     /**
      * 在 slice header 结束（已字节对齐）后启动 CABAC。
      * 始终采用 FFmpeg 的“奇对齐”规范初始化：消费 b0/b1/b2 三字节。
@@ -158,9 +125,6 @@ trait CabacDecodingTrait
         $this->cabSliceIdx++;
         $this->cabacData = $rbsp;
         $this->cabacEnd = strlen($rbsp);
-        if (getenv('CAB_SEQ') !== false) {
-            file_put_contents(getenv('CAB_SEQ') . '.rbsp', $rbsp);
-        }
         $this->cabacInitAt($byteOffset);
     }
 
@@ -171,9 +135,7 @@ trait CabacDecodingTrait
         $b2 = $this->cabacAbsByte($byteOffset + 2);
         // FFmpeg ff_init_cabac_decoder：读完 b0/b1 后按指针奇偶选分支。
         // gb.buffer 为偶对齐，故由 slice-data 字节偏移奇偶决定。
-        // 可用环境变量 CAB_INIT=even|odd 强制覆盖（调试）。
-        $force = getenv('CAB_INIT');
-        $even = $force !== false ? ($force === 'even') : (($byteOffset & 1) === 0);
+        $even = ($byteOffset & 1) === 0;
         if ($even) {
             $this->cabacPtr = $byteOffset + 2;
             $this->cabacLow = (($b0 << 18) | ($b1 << 10) | (1 << 9)) & 0xFFFFFFFF;
@@ -182,14 +144,6 @@ trait CabacDecodingTrait
             $this->cabacLow = (($b0 << 18) | ($b1 << 10) | ($b2 << 2) | 2) & 0xFFFFFFFF;
         }
         $this->cabacRange = 0x1FE;
-        $this->cabSeqLog(sprintf("I %d %d", $byteOffset, $even ? 0 : 1));
-        if (getenv('CAB_BIN') !== false) {
-            fwrite(STDERR, sprintf("INITCAB %02x %02x %02x | next %02x %02x | low=%08x range=%03x | st11=%d st14=%d st40=%d\n",
-                $b0, $b1, $b2,
-                $this->cabacAbsByte($byteOffset + 3), $this->cabacAbsByte($byteOffset + 4),
-                $this->cabacLow, $this->cabacRange,
-                $this->cabacStates[11] ?? -1, $this->cabacStates[14] ?? -1, $this->cabacStates[40] ?? -1));
-        }
     }
 
     private function cabacAbsByte(int $abs): int
@@ -234,7 +188,6 @@ trait CabacDecodingTrait
 
     private function cabGet(int $ctxIdx): int
     {
-        $this->cabSeqLog("G $ctxIdx");
         $this->cabBinsTotal++;
         $s = $this->cabacStates[$ctxIdx];
         $range = $this->cabacRange;
@@ -266,15 +219,11 @@ trait CabacDecodingTrait
             $this->cabacLow = $low;
             $this->cabacRange = $range;
         }
-        if (getenv('CAB_BIN') !== false && $this->cabBinSeq < 20000) {
-            fwrite(STDERR, sprintf("G %d %d %d %08x %03x %d\n", ++$this->cabBinSeq, $ctxIdx, $bit, $this->cabacLow, $this->cabacRange, $this->cabacStates[$ctxIdx]));
-        }
         return $bit;
     }
 
     private function cabBypass(): int
     {
-        $this->cabSeqLog("B");
         $this->cabBinsTotal++;
         $low = ($this->cabacLow << 1) & 0xFFFFFFFF;
         $this->cabacLow = $low;
@@ -287,21 +236,14 @@ trait CabacDecodingTrait
         $d = ($low - $r) & 0xFFFFFFFF;
         if ($d >= 0x80000000) {
             // 有符号 low < r：bit=0，low 保持
-            if (getenv('CAB_BIN') !== false && $this->cabBinSeq < 20000) {
-                fwrite(STDERR, sprintf("B %d 0 %08x %03x\n", ++$this->cabBinSeq, $this->cabacLow, $this->cabacRange));
-            }
             return 0;
         }
         $this->cabacLow = $d;
-        if (getenv('CAB_BIN') !== false && $this->cabBinSeq < 20000) {
-            fwrite(STDERR, sprintf("B %d 1 %08x %03x\n", ++$this->cabBinSeq, $this->cabacLow, $this->cabacRange));
-        }
         return 1;
     }
 
     private function cabBypassSign(int $val): int
     {
-        $this->cabSeqLog("S");
         $this->cabBinsTotal++;
         $low = ($this->cabacLow << 1) & 0xFFFFFFFF;
         $this->cabacLow = $low;
@@ -314,16 +256,12 @@ trait CabacDecodingTrait
         $d = ($low - $r) & 0xFFFFFFFF;
         $mask = $d >= 0x80000000 ? -1 : 0;
         $this->cabacLow = ($d + ($r & $mask)) & 0xFFFFFFFF;
-        if (getenv('CAB_BIN') !== false && $this->cabBinSeq < 20000) {
-            fwrite(STDERR, sprintf("B %d %d %08x %03x\n", ++$this->cabBinSeq, $mask & 1, $this->cabacLow, $this->cabacRange));
-        }
         return ($val ^ $mask) - $mask;
     }
 
     /** @return int 0=未结束，非零=已到片尾（调用方一般只判真假） */
     private function cabTerminate(): int
     {
-        $this->cabSeqLog("T");
         $this->cabBinsTotal++;
         $range = $this->cabacRange - 2;
         // FFmpeg：if((int32)low < (int32)(range<<17)) —— 有符号比较
@@ -337,13 +275,7 @@ trait CabacDecodingTrait
             if (($this->cabacLow & 0xFFFF) === 0) {
                 $this->cabacRefill();
             }
-            if (getenv('CAB_BIN') !== false && $this->cabBinSeq < 20000) {
-                fwrite(STDERR, sprintf("T %d 0 %08x %03x\n", ++$this->cabBinSeq, $this->cabacLow, $this->cabacRange));
-            }
             return 0;
-        }
-        if (getenv('CAB_BIN') !== false && $this->cabBinSeq < 20000) {
-            fwrite(STDERR, sprintf("T %d 1 %08x %03x\n", ++$this->cabBinSeq, $this->cabacLow, $range));
         }
         return 1;
     }
@@ -380,17 +312,11 @@ trait CabacDecodingTrait
             $states[$i] = $pre; // state 含 MPS（最低位）
         }
         $this->cabacStates = $states;
-        if (getenv('CAB_SEQ') !== false) {
-            $this->cabSeqLog("C " . implode(' ', array_map('intval', $states)));
-        }
     }
 
     /** 片开始 */
     private function cabacSliceBegin(string $rbsp, int $headerEndByte, int $sliceQp, int $sliceTypeNos): void
     {
-        if (getenv('CAB_TRC') !== false) {
-            fwrite(STDERR, "TRC sliceBegin headerEndByte={$headerEndByte} sliceQp={$sliceQp} type={$sliceTypeNos} initIdc={$this->cabacInitIdc}\n");
-        }
         $this->cabacStart($rbsp, $headerEndByte);
         $this->cabacInitStates($sliceQp, $sliceTypeNos);
         $this->cabQp = max(0, min(51, $sliceQp));
@@ -828,23 +754,14 @@ trait CabacDecodingTrait
         }
 
         $out = [];
-        $raw = [];
         $nodeCtx = 0;
         while ($coeffCount > 0) {
             $k = $index[--$coeffCount];
             $j = $scanJ[$k];
 
             $ctx = $levBase + self::$LV1_CTX[$nodeCtx];
-            if (getenv('CAB_LV') !== false && $levBase === 426) {
-                fwrite(STDERR, sprintf("LV cc=%2d k=%2d node=%d ctx=%d\n", $coeffCount, $k, $nodeCtx, $ctx));
-            }
             if ($this->cabGet($ctx) === 0) {
-                $oldNode = $nodeCtx;
                 $nodeCtx = self::$TRANS_L1[$nodeCtx];
-                if (getenv('CAB_LV') !== false && $levBase === 426) {
-                    fwrite(STDERR, sprintf("LVT1 k=%2d old=%d new=%d type=%s tbl=%s tbl4=%s\n",
-                        $k, $oldNode, $nodeCtx, gettype($nodeCtx), json_encode(self::$TRANS_L1), var_export(self::$TRANS_L1[4] ?? 'MISSING', true)));
-                }
                 $sv = $this->cabBypassSign(-1);
                 if ($qmul === null) {
                     $out[$j] = $sv;
@@ -876,15 +793,6 @@ trait CabacDecodingTrait
                     $out[$j] = (($sv * $qmul[$j]) + 32) >> 6;
                 }
             }
-            $raw[$j] = $sv;
-        }
-        if (getenv('CAB_RAW') !== false && $this->cabMbIdx <= 2) {
-            $line = "RAW mb={$this->cabMbIdx} tag={$this->cabRawTag}";
-            ksort($raw);
-            foreach ($raw as $rj => $rv) {
-                $line .= " {$rj}:{$rv}";
-            }
-            fwrite(STDERR, $line . "\n");
         }
         return [$out, count($out)];
     }
@@ -898,21 +806,6 @@ trait CabacDecodingTrait
     private function cabDecodeAcBlock(int $cat, int $n, int $list, int $qp, bool $zz15): array
     {
         $cell = self::$SCAN8[$n];
-        if (getenv('CAB_DBG') !== false && $cat === 2 && $this->cabMbIdx <= 2) {
-            $ctx = $this->cabCbfAcCtx($cat, $n);
-            fwrite(STDERR, sprintf("CBF mb=%d n=%2d cell=%2d nza[%2d]=%3d nzb[%2d]=%3d ctx=%d seq>=%d\n",
-                $this->cabMbIdx, $n, $cell, $cell - 1, $this->cabNzCache[$cell - 1],
-                $cell - 8, $this->cabNzCache[$cell - 8], $ctx, $this->cabBinSeq));
-        }
-        if (getenv('CAB_DBG') !== false && $cat === 2 && $this->cabMbIdx === 1 && $n === 0) {
-            $p = $this->cabacPtr;
-            $bytes = '';
-            for ($z = $p - 4; $z <= $p + 4; $z++) {
-                $bytes .= ($z >= 0 && $z < $this->cabacEnd) ? sprintf('%02x ', ord($this->cabacData[$z])) : '.. ';
-            }
-            fwrite(STDERR, sprintf("ENG mb=1 n=0 low=%08x range=%03x ptr=%d ctx96state=%d around[%s]\n",
-                $this->cabacLow, $this->cabacRange, $p, $this->cabacStates[96], $bytes));
-        }
         if ($this->cabGet($this->cabCbfAcCtx($cat, $n)) === 0) {
             $this->cabNzCache[$cell] = 0;
             return [array_fill(0, 16, 0), 0];
@@ -930,17 +823,11 @@ trait CabacDecodingTrait
         }
         $this->cabRawTag = "cat{$cat}n{$n}";
         [$map, $nz] = $this->cabResidualCore($cat, $scanJ, $maxCoeff, $qmul, false);
-        if (getenv('CAB_TRC') !== false && $this->cabMbIdx === 0) {
-            fwrite(STDERR, sprintf("TRC  AC cat=%d n=%2d CBF=1 nz=%2d\n", $cat, $n, $nz));
-        }
         $block = array_fill(0, 16, 0);
         foreach ($map as $j => $v) {
             $block[$j] = $v;
         }
         $this->cabNzCache[$cell] = $nz;
-        if (getenv('CAB_DBG') !== false && $cat === 2 && $this->cabMbIdx <= 2) {
-            fwrite(STDERR, sprintf("ACZ mb=%d n=%2d cell=%2d nz=%d seq>=%d\n", $this->cabMbIdx, $n, $cell, $nz, $this->cabBinSeq));
-        }
         return [$block, $nz];
     }
 
@@ -980,16 +867,9 @@ trait CabacDecodingTrait
         if ($this->cabGet(self::$CBF_BASE[3] + $nza + 2 * $nzb) === 0) {
             // decode_cabac_residual_dc：CBF=0 时置 nzCache[scan8[n]]=0（n=16+c）
             $this->cabNzCache[self::$SCAN8[16 + $c]] = 0;
-            if (getenv('CAB_TRC') !== false && $mbIdx === 0) {
-                fwrite(STDERR, "TRC  chromaDC c={$c} CBF=0\n");
-            }
             return [0, 0, 0, 0];
         }
         [$map] = $this->cabResidualCore(3, [0, 1, 2, 3], 4, null, false);
-        if (getenv('CAB_TRC') !== false && $mbIdx === 0) {
-            fwrite(STDERR, "TRC  chromaDC c={$c} CBF=1 nz=" . count($map)
-                . " levels=[" . implode(',', $map) . "]\n");
-        }
         $out = [0, 0, 0, 0];
         foreach ($map as $k => $v) {
             $out[$k] = $v;
@@ -1053,10 +933,6 @@ trait CabacDecodingTrait
 
         if ($t['k'] === 'pcm') {
             $this->cabDecodePcm();
-            if (getenv('CAB_DBG') !== false) {
-                fwrite(STDERR, sprintf("MB%3d (%2d,%2d) PCM qp=%d ptr=%d\n",
-                    $mbIdx, $mbX, $mbY, $this->cabQp, $this->cabacPtr));
-            }
             return;
         }
 
@@ -1064,22 +940,6 @@ trait CabacDecodingTrait
             $this->cabDecodeI4x4($mbX, $mbY);
         } else {
             $this->cabDecodeI16x16($mbX, $mbY, $t['mode'], $t['luma15'], $t['chromaCbp']);
-        }
-
-        if (getenv('CAB_DBG') !== false) {
-            $nz = $this->cabNz;
-            $luma = 0;
-            for ($i = 0; $i < 16; $i++) {
-                $luma += $nz[$i];
-            }
-            fwrite(STDERR, sprintf("MB%3d (%2d,%2d) %s mode=%s l15=%s chr=%s dct8=%d lumaNz=%3d qp=%d ptrOff=%d\n",
-                $mbIdx, $mbX, $mbY, $t['k'],
-                $t['k'] === 'i4' ? '-' : (string)$t['mode'],
-                isset($t['luma15']) ? ((int)$t['luma15']) : '-',
-                $t['k'] === 'i16' ? $t['chromaCbp'] : '-',
-                (int)(($this->picMbType[$mbIdx] & self::$CAB_FLG_DCT8) !== 0),
-                $luma, $this->cabQp,
-                $this->cabacPtr));
         }
     }
 
@@ -1128,26 +988,10 @@ trait CabacDecodingTrait
             }
         }
 
-        if (getenv('CAB_DBG') !== false && $mbIdx <= 1) {
-            fwrite(STDERR, "DBG mb={$mbIdx} funcEntry(afterMbType)={$this->cabBinSeq}\n");
-        }
         $chromaPredMode = $this->cabReadChromaPredMode();
-        if (getenv('CAB_DBG') !== false && $mbIdx <= 1) {
-            fwrite(STDERR, "DBG mb={$mbIdx} afterModes+chroma={$this->cabBinSeq} chromaPred={$chromaPredMode}\n");
-        }
         $lumaCbp = $this->cabReadCbpLuma();
         $chromaCbp = $this->cabReadCbpChroma();
         $cbp = $lumaCbp | ($chromaCbp << 4);
-        if (getenv('CAB_DBG') !== false && $mbIdx <= 1) {
-            fwrite(STDERR, "DBG mb={$mbIdx} afterCbp={$this->cabBinSeq} cbp={$cbp} lumaCbp={$lumaCbp} chrCbp={$chromaCbp}\n");
-        }
-
-        if (getenv('CAB_TRC') !== false && $this->cabMbIdx <= 2) {
-            fwrite(STDERR, "TRC MB{$mbIdx} i4 modes(n)=" . implode(',', $modes)
-                . " chromaPred={$chromaPredMode} lumaCbp=" . sprintf('%04b', $lumaCbp)
-                . " chromaCbp={$chromaCbp}\n");
-        }
-
         $this->cabCbp = $cbp;
         $this->picCbp[$mbIdx] = $cbp;
         $this->picChromaPred[$mbIdx] = $chromaPredMode;
@@ -1157,9 +1001,6 @@ trait CabacDecodingTrait
             $this->cabReadQpDelta();
         } else {
             $this->cabLastQpDiff = 0;
-        }
-        if (getenv('CAB_DBG') !== false && $mbIdx <= 1) {
-            fwrite(STDERR, "DBG mb={$mbIdx} afterDqp={$this->cabBinSeq} qp={$this->cabQp} lastQpDiff={$this->cabLastQpDiff}\n");
         }
 
         $qp = $this->cabQp;
@@ -1269,13 +1110,6 @@ trait CabacDecodingTrait
     private function cabBuildNz24(): void
     {
         $nz = &$this->cabNzCache;
-        if (getenv('CAB_DBG') !== false && $this->cabMbIdx === 1) {
-            $cells = [];
-            for ($n = 0; $n < 16; $n++) {
-                $cells[] = self::$N2R[$n] . ':' . $nz[self::$SCAN8[$n]];
-            }
-            fwrite(STDERR, "NZ24 mb=1 luma=" . implode(',', $cells) . " cb=" . implode(',', array_slice($this->cabNz, 16, 4)) . "\n");
-        }
         for ($n = 0; $n < 16; $n++) {
             $this->cabNz[self::$N2R[$n]] = $nz[self::$SCAN8[$n]];
         }
@@ -1853,11 +1687,6 @@ trait CabacDecodingTrait
         // FFmpeg h264_cabac.c L1510：ctx = ctxbase + ((amvd-3)>>31) + ((amvd-33)>>31) + 2
         // 即 amvd<3 -> ctxbase+0，[3,33) -> ctxbase+1，>=33 -> ctxbase+2
         $ctx = $ctxBase + 2 - ($amvd < 3 ? 1 : 0) - ($amvd < 33 ? 1 : 0);
-        if (getenv('MVD_PROBE') !== false && $this->cabMbIdx === 2) {
-            $lm = $lMb >= 0 ? json_encode($store[$lMb * 16 + $lBlk] ?? null) : '-';
-            $tm = $tMb >= 0 ? json_encode($store[$tMb * 16 + $tBlk] ?? null) : '-';
-            fwrite(STDERR, "PROBE mb2 n=$n comp=$comp lMb=$lMb lBlk=$lBlk m=$lm tMb=$tMb tBlk=$tBlk m=$tm amvd=$amvd ctx=$ctx\n");
-        }
         if ($this->cabGet($ctx) === 0) {
             return 0;
         }
@@ -1894,9 +1723,6 @@ trait CabacDecodingTrait
             $store = &$this->picMvd0;
         } else {
             $store = &$this->picMvd1;
-        }
-        if (getenv('MVD_PROBE') !== false && $mbIdx < 4) {
-            fwrite(STDERR, "STORE list=$list mb=$mbIdx box=($bx,$by,$bw,$bh) d=($dx,$dy)\n");
         }
         $base = $mbIdx * 16;
         for ($y = $by; $y < $by + $bh; $y++) {
@@ -1944,28 +1770,7 @@ trait CabacDecodingTrait
                     if ($block !== null) {
                         $x0 = $mbX * 16 + ($p8 & 1) * 8;
                         $y0 = $mbY * 16 + ($p8 >> 1) * 8;
-                        if (getenv('CAB_DMP') !== false && $this->cabMbIdx <= 3) {
-                            $pred = [];
-                            for ($yy = 0; $yy < 8; $yy++) {
-                                for ($xx = 0; $xx < 8; $xx++) {
-                                    $pred[] = $this->yPlane[($y0 + $yy) * $w + $x0 + $xx];
-                                }
-                            }
-                            $dh = fopen(getenv('CAB_DMP_FILE') ?: 'php://stderr', 'ab');
-                            fwrite($dh, "DMP PRED sl={$this->cabSliceIdx} mb={$this->cabMbIdx} p8={$p8} x0={$x0} y0={$y0} pix=" . implode(',', $pred) . "\n");
-                            fwrite($dh, "DMP BLK sl={$this->cabSliceIdx} mb={$this->cabMbIdx} p8={$p8} qp={$qp} blk=" . implode(',', $block) . "\n");
-                        }
                         $this->idct8AddToPlane($this->yPlane, $w, $x0, $y0, $block);
-                        if (getenv('CAB_DMP') !== false && $this->cabMbIdx <= 3) {
-                            $post = [];
-                            for ($yy = 0; $yy < 8; $yy++) {
-                                for ($xx = 0; $xx < 8; $xx++) {
-                                    $post[] = $this->yPlane[($y0 + $yy) * $w + $x0 + $xx];
-                                }
-                            }
-                            fwrite($dh, "DMP POST sl={$this->cabSliceIdx} mb={$this->cabMbIdx} p8={$p8} pix=" . implode(',', $post) . "\n");
-                            fclose($dh);
-                        }
                     }
                 } else {
                     $cell = self::$SCAN8[4 * $p8];
@@ -2104,8 +1909,6 @@ trait CabacDecodingTrait
         $mbIdx = $this->cabMbIdx;
         $this->picChromaPred[$mbIdx] = 0;
         $this->picIsSkip[$mbIdx] = 0;
-        $pbProbe = getenv('P_MBT') !== false;
-        $pbBin0 = $this->cabBinsTotal;
 
         // ---------- skip（decode_cabac_mb_skip）----------
         if ($this->cabReadMbSkip(false)) {
@@ -2114,29 +1917,15 @@ trait CabacDecodingTrait
             $this->cabLastQpDiff = 0;    // FFmpeg L1952: sl->last_qscale_diff = 0
             $this->decodePSkip($mbX, $mbY);
             $this->cabWriteDeblock(0);
-            if ($pbProbe) {
-                $this->cabPmbtLog(sprintf("PMBT s=%d mb=%d (%d,%d) SKIP qp=%d bins=%d ptr=%d\n",
-                    $this->cabSliceIdx, $mbIdx, $mbX, $mbY, $this->cabQp, $this->cabBinsTotal - $pbBin0, $this->cabacPtr));
-            }
-            if (getenv('CAB_TRC') !== false && $this->cabMbY === 0 && $this->cabMbX < 6) {
-                fwrite(STDERR, "TRC P MB({$mbX},0) SKIP\n");
-            }
             return;
         }
 
         $mbType = $this->cabReadPMbType();
-        if (getenv('CAB_TRC') !== false && $this->cabMbY === 0 && $this->cabMbX < 6) {
-            fwrite(STDERR, "TRC P MB({$mbX},0) mbType={$mbType}\n");
-        }
         if ($mbType === -1) {
             // P 片内嵌 Intra（ctx 17, intra_slice=0）
             $this->picIsSkip[$mbIdx] = 0;
             $intraType = $this->cabReadIntraMbType(17, false);
             $this->decodeCabacIntraMb($mbX, $mbY, $intraType);
-            if ($pbProbe) {
-                $this->cabPmbtLog(sprintf("PMBT s=%d mb=%d (%d,%d) INTRA it=%d qp=%d bins=%d ptr=%d\n",
-                    $this->cabSliceIdx, $mbIdx, $mbX, $mbY, $intraType, $this->cabQp, $this->cabBinsTotal - $pbBin0, $this->cabacPtr));
-            }
             // intra 邻居：P 缓存 MV/ref 标记未使用
             $intraMv = [0, 0, -1];
             $this->mvLeftCol = [$intraMv, $intraMv, $intraMv, $intraMv];
@@ -2153,7 +1942,6 @@ trait CabacDecodingTrait
         $dct8Allowed = $this->transform8x8ModeFlag;
         $mcTasks = [];
         $mbMvs = [];
-        $pbInfo = '';
 
         if ($mbType === 0) {
             // P_L0_16x16
@@ -2164,18 +1952,8 @@ trait CabacDecodingTrait
             $mvdY = $this->cabReadMvd(0, 1, 0);
             $mvX = $px + $mvdX;
             $mvY = $py + $mvdY;
-            $pbInfo = sprintf("ref=%d mvd=(%d,%d) mv=(%d,%d)", $refIdx, $mvdX, $mvdY, $mvX, $mvY);
-            if (getenv('CAB_MV') !== false && $this->cabMbIdx <= 95) {
-                fwrite(STDERR, sprintf("MVP sl=%d mb=%d type=16x16 ref=%d mvp=(%d,%d) mvd=(%d,%d) mv=(%d,%d)\n",
-                    $this->cabSliceIdx, $this->cabMbIdx, $refIdx, $px, $py, $mvdX, $mvdY, $mvX, $mvY));
-            }
             $this->performMotionCompensation16x16($mbX, $mbY, $mvX, $mvY, $refIdx);
             $this->saveMvForPrediction($mbX, $mbY, $mvX, $mvY, $refIdx);
-            if (getenv('CAB_TRC') !== false && $this->cabMbY === 0 && $this->cabMbX < 6) {
-                $mtAfter = $this->picMbType[$mbIdx];
-                $refAfter = $this->picRef0[$mbIdx * 16];
-                fwrite(STDERR, "TRC P MB({$mbX},0) 16x16 mv=({$mvX},{$mvY}) refIdx={$refIdx} mtAfter={$mtAfter} ref0[0]={$refAfter}\n");
-            }
             $this->cabStoreMvd(0, $mbIdx, 0, 0, 4, 4, $mvdX, $mvdY);
             if ($this->deblockInfoEnabled) {
                 $this->mbMvForDeblock[$mbIdx] = array_fill(0, 16, [$mvX, $mvY]);
@@ -2227,21 +2005,11 @@ trait CabacDecodingTrait
                 $mv1X = $px + $mvd1X; $mv1Y = $py + $mvd1Y;
                 $this->cabStoreMvd(0, $mbIdx, 2, 0, 2, 4, $mvd1X, $mvd1Y);
             }
-            $pbInfo = sprintf("%s refs=%d,%d mvds=(%d,%d)(%d,%d)",
-                $mbType === 1 ? '16x8' : '8x16', $ref0, $ref1, $mvd0X, $mvd0Y, $mvd1X, $mvd1Y);
             if ($mbType === 1) {
-                if (getenv('CAB_MV') !== false && $this->cabMbIdx <= 95) {
-                    fwrite(STDERR, sprintf("MVP sl=%d mb=%d type=16x8 p0: ref=%d mv=(%d,%d) | p1: ref=%d mv=(%d,%d)\n",
-                        $this->cabSliceIdx, $this->cabMbIdx, $ref0, $mv0X, $mv0Y, $ref1, $mv1X, $mv1Y));
-                }
                 $this->performMotionCompensation16x8($mbX, $mbY, 0, $mv0X, $mv0Y, $ref0);
                 $this->performMotionCompensation16x8($mbX, $mbY, 1, $mv1X, $mv1Y, $ref1);
                 $this->saveMvForPrediction16x8($mbX, $mbY, $mv0X, $mv0Y, $ref0, $mv1X, $mv1Y, $ref1);
             } else {
-                if (getenv('CAB_MV') !== false && $this->cabMbIdx <= 95) {
-                    fwrite(STDERR, sprintf("MVP sl=%d mb=%d type=8x16 p0: ref=%d mv=(%d,%d) | p1: ref=%d mv=(%d,%d)\n",
-                        $this->cabSliceIdx, $this->cabMbIdx, $ref0, $mv0X, $mv0Y, $ref1, $mv1X, $mv1Y));
-                }
                 $this->performMotionCompensation8x16($mbX, $mbY, 0, $mv0X, $mv0Y, $ref0);
                 $this->performMotionCompensation8x16($mbX, $mbY, 1, $mv1X, $mv1Y, $ref1);
                 $this->saveMvForPrediction8x16($mbX, $mbY, $mv0X, $mv0Y, $ref0, $mv1X, $mv1Y, $ref1);
@@ -2284,7 +2052,6 @@ trait CabacDecodingTrait
                 // FFmpeg：每象限 ref 读后立即 fill ref_cache 2x2（后续象限 ctx 可见）
                 $this->cabOvRefBox(0, ($i & 1) * 2, ($i >> 1) * 2, 2, 2, $refs[$i]);
             }
-            $pbMvdList = [];
             // mvds + 预测（list 序、子块序、分区序）
             for ($i = 0; $i < 4; $i++) {
                 $st = $subTypes[$i];
@@ -2299,11 +2066,6 @@ trait CabacDecodingTrait
                     $mvdY = $this->cabReadMvd(0, 1, $n);
                     $mvX += $mvdX;
                     $mvY += $mvdY;
-                    $pbMvdList[] = "($mvdX,$mvdY)";
-                    if (getenv('CAB_MV') !== false && $this->cabMbIdx <= 95) {
-                        fwrite(STDERR, sprintf("MVP sl=%d mb=%d type=8x8sub i=%d st=%d ref=%d mvp=(%d,%d) mvd=(%d,%d) mv=(%d,%d)\n",
-                            $this->cabSliceIdx, $this->cabMbIdx, $i, $st, $refs[$i], $mvX - $mvdX, $mvY - $mvdY, $mvdX, $mvdY, $mvX, $mvY));
-                    }
                     for ($y = $by; $y < $by + $rows; $y++) {
                         for ($x = $bx; $x < $bx + $cols; $x++) {
                             $mbMvs[$y][$x] = [$mvX, $mvY, $refs[$i]];
@@ -2313,9 +2075,6 @@ trait CabacDecodingTrait
                     $this->cabStoreMvd(0, $mbIdx, $bx, $by, $cols, $rows, $mvdX, $mvdY);
                 }
             }
-            $pbInfo = sprintf("sub=%d,%d,%d,%d ref=%d,%d,%d,%d mvd=%s",
-                $subTypes[0], $subTypes[1], $subTypes[2], $subTypes[3],
-                $refs[0], $refs[1], $refs[2], $refs[3], implode('', $pbMvdList));
             $this->executeMergedMcTasks($mbX, $mbY, $mcTasks);
             $this->saveMvForPrediction8x8($mbX, $mbY, $mbMvs);
             if ($this->deblockInfoEnabled) {
@@ -2349,11 +2108,6 @@ trait CabacDecodingTrait
             $this->cabLastQpDiff = 0;
         }
         $this->cabDecodeInterResidual($mbX, $mbY, $cbpLuma, $cbpChroma, $dct8);
-        if ($pbProbe) {
-            $this->cabPmbtLog(sprintf("PMBT s=%d mb=%d (%d,%d) t=%d %s cbpL=%d cbpC=%d d8=%d qp=%d bins=%d ptr=%d\n",
-                $this->cabSliceIdx, $mbIdx, $mbX, $mbY, $mbType, $pbInfo,
-                $cbpLuma, $cbpChroma, (int)$dct8, $this->cabQp, $this->cabBinsTotal - $pbBin0, $this->cabacPtr));
-        }
         $this->cabFinishInterMb($mbX, $mbY, $cbp, $dct8, $mbType);
     }
 

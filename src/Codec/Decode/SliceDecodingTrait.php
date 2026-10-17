@@ -205,10 +205,6 @@ trait SliceDecodingTrait
             $this->cabacInitIdc = 0;
         }
 
-        // 调试插桩（勿提交）：qp_delta 前位位置
-        if (getenv('SH_DBG') !== false) {
-            file_put_contents('sh_debug.log', sprintf("pos@qpdelta=%d\n", $this->reader->getPos()), FILE_APPEND);
-        }
         $sliceQpDelta = $this->reader->readSe();
         $qp = $this->picInitQp + $sliceQpDelta;
         $qp = max(0, min(51, $qp));
@@ -225,10 +221,6 @@ trait SliceDecodingTrait
                 $betaOffset = $this->reader->readSe();
                 $this->sliceAlphaC0Offset = $alphaOffset * 2;
                 $this->sliceBetaOffset = $betaOffset * 2;
-            }
-            // 调试插桩（勿提交）：slice header 关键字段位位置
-            if (getenv('SH_DBG') !== false) {
-                file_put_contents('sh_debug.log', sprintf("pos@deblock=%d idc=%d\n", $this->reader->getPos(), $deblockingFilterIdc), FILE_APPEND);
             }
         } else {
             $this->disableDeblockingFilterIdc = 0;
@@ -402,31 +394,10 @@ trait SliceDecodingTrait
 
         $mbSkipRun = -1;
 
-        // 调试插桩：POLL 环境变量=帧号时，逐 MB 轮询坏区像素跳变（勿提交）
-        $pollActive = getenv('POLL') !== false && $this->frameNum === (int)getenv('POLL');
-        $pollWatch = [496, 512, 528, 544, 560, 12000, 12016, 14976, 16480];
-        $pollPrevVals = null;
-        $pollPrevMb = '';
-
         //$isPSlice = ($sliceType === 0 || $sliceType === 5);
         for ($mbIdx = $startMbIdx; $mbIdx < $endMbIdx; $mbIdx++) {
             $mbX = $mbIdx % $mbWidth;
             $mbY = (int)($mbIdx / $mbWidth);
-
-            if ($pollActive) {
-                $cur = [];
-                foreach ($pollWatch as $off) { $cur[$off] = $this->yPlane[$off] ?? -1; }
-                if ($pollPrevVals !== null) {
-                    foreach ($pollWatch as $off) {
-                        if ($cur[$off] !== $pollPrevVals[$off]) {
-                            file_put_contents(getenv('POLL_FILE') ?: 'poll.log',
-                                "MB($pollPrevMb) changed yPlane[$off]: {$pollPrevVals[$off]} -> {$cur[$off]}\n", FILE_APPEND);
-                        }
-                    }
-                }
-                $pollPrevVals = $cur;
-                $pollPrevMb = "$mbX,$mbY";
-            }
 
             if ($mbX === 0) {
                 $this->nzLeftColLuma = array_fill(0, 4, 0);
@@ -520,20 +491,7 @@ trait SliceDecodingTrait
                 $this->bMvTopLeft[1] = $nextBTL1;
             }
         }
-        if ($pollActive && $pollPrevVals !== null) {
-            foreach ($pollWatch as $off) {
-                $v = $this->yPlane[$off] ?? -1;
-                if ($v !== $pollPrevVals[$off]) {
-                    file_put_contents(getenv('POLL_FILE') ?: 'poll.log',
-                        "MB($pollPrevMb) [loop end] changed yPlane[$off]: {$pollPrevVals[$off]} -> $v\n", FILE_APPEND);
-                }
-            }
-        }
         if ($this->deblockInfoEnabled) {
-            // 调试插桩：B_NO_DEBLOCK 环境变量跳过 B 帧去块（勿提交）
-            if (getenv('B_NO_DEBLOCK') !== false && $this->currentSliceType === 1) {
-                return;
-            }
             $this->applyDeblockingFilter();
         }
     }
