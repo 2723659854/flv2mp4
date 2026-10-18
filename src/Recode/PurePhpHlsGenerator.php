@@ -67,6 +67,8 @@ class PurePhpHlsGenerator
     private ?int $maxFrames = null;
     private array $videoFrameCounts = [];
     private array $lastDts = [];
+    /** 已写入 TS 的最大视频 dts（90kHz tick），用于全局单调钳制（跨分片持续有效） */
+    private ?int $lastVideoDtsTick = null;
     private array $segmentFirstFrame = [];
     private string $srcSpsData = '';
     private string $srcPpsData = '';
@@ -489,6 +491,15 @@ class PurePhpHlsGenerator
         $dts = (int)($relativeTime * 90);
         $pts = (int)(($relativeTime + $cts) * 90);
         if ($pts < $dts) $pts = $dts;
+        // 分布式管线 GOP 尾帧为合成时间戳，可能与下一 GOP 首帧网格时间戳碰撞；
+        // 重编码流无 B 帧（呈现序=解码序），TS 要求 dts 严格递增，
+        // 钳制到上一帧 dts+1 tick（0.011ms，人眼不可感知），否则播放器
+        // （VLC 硬解）会因时间轴错乱报非单调 dts 并出现大面积灰色
+        if ($this->lastVideoDtsTick !== null && $dts <= $this->lastVideoDtsTick) {
+            $dts = $this->lastVideoDtsTick + 1;
+            if ($pts < $dts) $pts = $dts;
+        }
+        $this->lastVideoDtsTick = $dts;
 
         $profileJobs = [];
         $encodedPayload = $this->pipelineEncodedPayload;

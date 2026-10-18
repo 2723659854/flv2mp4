@@ -158,7 +158,10 @@ class Flv2HlsCompact
     private bool $plFinishing = false;
     private int $plFinished = 0;
     private bool $plEndSent = false;
-    private ?int $lastEncodedVideoTimestamp = null;
+    /** 抽帧网格基准：首个保留 IDR 的源时间戳（-1=未初始化，与静态管线一致） */
+    private int $plBaseVideoTs = -1;
+    /** 已保留帧计数：第 n 个保留帧重映射到 base + n×1000/targetFps 均匀网格 */
+    private int $plSelectedFrames = 0;
 
     /**
      * @param string $pullUrl 直播地址 http(s)-flv / ws(s)-flv
@@ -832,16 +835,33 @@ class Flv2HlsCompact
             }
             if ($packetType === 1) {
                 $isKey = ((ord($body[0]) >> 4) === 1) && $this->containsIdrNal($body);
-                $drop = false;
-                if ($isKey) $this->lastEncodedVideoTimestamp = $timestamp;
-                elseif ($this->targetFps > 0 && $this->lastEncodedVideoTimestamp !== null) {
-                    $drop = $timestamp - $this->lastEncodedVideoTimestamp < 1000 / $this->targetFps;
-                    if (!$drop) $this->lastEncodedVideoTimestamp = $timestamp;
-                } else $this->lastEncodedVideoTimestamp = $timestamp;
                 if ($isKey) $this->plStartGop();
                 $metadata = ['tagType' => 9, 'timestamp' => $timestamp];
-                // 尾帧冲刷用：保留帧时间戳在目标帧率均匀网格上，尾帧步长对齐输出节奏
-                if ($this->targetFps > 0) $metadata['sourceFps'] = $this->targetFps;
+                $drop = false;
+                if ($this->targetFps > 0) {
+                    // 尾帧冲刷用：保留帧时间戳在目标帧率均匀网格上，尾帧步长对齐输出节奏
+                    $metadata['sourceFps'] = $this->targetFps;
+                    // 与静态管线 HlsPipelineClient 同款网格选帧：保留帧重映射到
+                    // base + n×1000/targetFps 均匀网格（outTimestamp），被抽帧仍送解码
+                    // 维持参考链但标记 drop 不写输出。源 DTS 33ms 步进不规则，
+                    // 沿用会与 GOP 尾帧合成时间戳碰撞（DTS 重复/倒挂 → 播放器灰色画面）
+                    if ($this->plBaseVideoTs < 0) {
+                        if ($isKey) {
+                            $this->plBaseVideoTs = $timestamp;
+                            $metadata['outTimestamp'] = $timestamp;
+                            $this->plSelectedFrames = 1;
+                        } else {
+                            $drop = true;
+                        }
+                    } elseif (!$isKey
+                        && ($timestamp - $this->plBaseVideoTs) * $this->targetFps < $this->plSelectedFrames * 1000) {
+                        $drop = true;
+                    } else {
+                        $metadata['outTimestamp'] = $this->plBaseVideoTs
+                            + (int)round($this->plSelectedFrames * 1000 / $this->targetFps);
+                        $this->plSelectedFrames++;
+                    }
+                }
                 if ($drop) $metadata['drop'] = true;
                 $this->plRoute(HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $this->plSeq++, $metadata, $body));
                 // 在途加权负载：抽掉帧只解码维持参考链（权重1），保留帧全链路（权重2）。
