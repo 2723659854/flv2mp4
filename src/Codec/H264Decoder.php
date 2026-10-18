@@ -571,12 +571,19 @@ class H264Decoder
         $this->uPlane = [];
         $this->vPlane = [];
 
-        // 第一轮：解析SPS/PPS获取分辨率
+        // 第一轮：解析SPS/PPS获取分辨率。
+        // SPS 必须先于 PPS 解析：parsePPS 的 High profile 扩展
+        // （transform_8x8_mode_flag / 缩放矩阵 / second_chroma_qp_index_offset）
+        // 依赖 SPS 先解析出的 profileIdc；调用方若以 [PPS,SPS,...] 顺序注入
+        // （如 Mp4DecoderWorkerServer 的 unshift），原序解析会把 High 流
+        // 误判为非 High，transform8x8ModeFlag 丢失导致 CABAC 解码错位。
         foreach ($nalUnits as $nal) {
-            $nalType = $nal['type'];
-            if ($nalType === 7) {
+            if ($nal['type'] === 7) {
                 $this->parseSPS($nal['data']);
-            } elseif ($nalType === 8) {
+            }
+        }
+        foreach ($nalUnits as $nal) {
+            if ($nal['type'] === 8) {
                 $this->parsePPS($nal['data']);
             }
         }
