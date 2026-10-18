@@ -35,7 +35,6 @@ trait CabacDecodingTrait
     private array $cabNz = [];
     private int $cabCbp = 0;
     private int $cabBinSeq = 0;
-    private int $cabBinsTotal = 0;
     private string $cabRawTag = '';
     /** 当前 MB 是否 intra（mb_type 读出后由 cabFixUnavailNz 设置；不可用邻居的 nz/cbp 默认值依赖它） */
     private bool $cabMbIsIntra = true;
@@ -186,23 +185,8 @@ trait CabacDecodingTrait
         $this->cabacPtr = $p + 2;
     }
 
-    /** bin 级调试：>=0 时对指定 poc/mb 的每个 CABAC bin 打印状态 */
-    public int $debugBinPoc = -1;
-    public int $debugBinMb = -1;
-
-    private function binTrace(string $kind, int $ctxIdx, int $stateBefore, int $bit): void
-    {
-        if ($this->debugBinPoc >= 0
-            && ($this->currPicOrderCnt ?? -99) === $this->debugBinPoc
-            && ($this->cabMbIdx ?? -99) === $this->debugBinMb) {
-            fprintf(STDERR, "BIN %s ctx=%d s=%d bit=%d low=%08x range=%08x ptr=%d\n",
-                $kind, $ctxIdx, $stateBefore, $bit, $this->cabacLow, $this->cabacRange, $this->cabacPtr);
-        }
-    }
-
     private function cabGet(int $ctxIdx): int
     {
-        $this->cabBinsTotal++;
         $sBefore = $this->cabacStates[$ctxIdx];
         $s = $sBefore;
         $range = $this->cabacRange;
@@ -234,13 +218,11 @@ trait CabacDecodingTrait
             $this->cabacLow = $low;
             $this->cabacRange = $range;
         }
-        $this->binTrace('C', $ctxIdx, $sBefore, $bit);
         return $bit;
     }
 
     private function cabBypass(): int
     {
-        $this->cabBinsTotal++;
         $low = ($this->cabacLow << 1) & 0xFFFFFFFF;
         $this->cabacLow = $low;
         if (($low & 0xFFFF) === 0) {
@@ -252,17 +234,14 @@ trait CabacDecodingTrait
         $d = ($low - $r) & 0xFFFFFFFF;
         if ($d >= 0x80000000) {
             // 有符号 low < r：bit=0，low 保持
-            $this->binTrace('B', -1, -1, 0);
             return 0;
         }
         $this->cabacLow = $d;
-        $this->binTrace('B', -1, -1, 1);
         return 1;
     }
 
     private function cabBypassSign(int $val): int
     {
-        $this->cabBinsTotal++;
         $low = ($this->cabacLow << 1) & 0xFFFFFFFF;
         $this->cabacLow = $low;
         if (($low & 0xFFFF) === 0) {
@@ -275,17 +254,12 @@ trait CabacDecodingTrait
         $mask = $d >= 0x80000000 ? -1 : 0;
         $this->cabacLow = ($d + ($r & $mask)) & 0xFFFFFFFF;
         $ret = ($val ^ $mask) - $mask;
-        $this->binTrace('S', -1, -1, $ret & 1);
         return $ret;
     }
 
     /** @return int 0=未结束，非零=已到片尾（调用方一般只判真假） */
     private function cabTerminate(): int
     {
-        $this->cabBinsTotal++;
-        $termTrace = $this->debugBinPoc >= 0
-            && ($this->currPicOrderCnt ?? -99) === $this->debugBinPoc
-            && ($this->cabMbIdx ?? -99) === $this->debugBinMb;
         $range = $this->cabacRange - 2;
         // FFmpeg：if((int32)low < (int32)(range<<17)) —— 有符号比较
         $d = ($this->cabacLow - ($range << 17)) & 0xFFFFFFFF;
@@ -298,15 +272,7 @@ trait CabacDecodingTrait
             if (($this->cabacLow & 0xFFFF) === 0) {
                 $this->cabacRefill();
             }
-            if ($termTrace) {
-                fprintf(STDERR, "BIN T bit=0 low=%08x range=%08x ptr=%d\n",
-                    $this->cabacLow, $this->cabacRange, $this->cabacPtr);
-            }
             return 0;
-        }
-        if ($termTrace) {
-            fprintf(STDERR, "BIN T bit=1 low=%08x range=%08x ptr=%d\n",
-                $this->cabacLow, $this->cabacRange, $this->cabacPtr);
         }
         return 1;
     }
@@ -353,7 +319,6 @@ trait CabacDecodingTrait
         $this->cabQp = max(0, min(51, $sliceQp));
         $this->cabLastQpDiff = 0;
         $this->cabBinSeq = 0;
-        $this->cabBinsTotal = 0;
 
         // 每片重置 scan8 持久存储（write_back_non_zero_count / write_back_intra_pred_mode）
         $mbCount = $this->picWidthInMbs * $this->picHeightInMbs;
@@ -2150,13 +2115,10 @@ trait CabacDecodingTrait
         $this->picChromaPred[$mbIdx] = 0;
         $this->picIsSkip[$mbIdx] = 0;
         $this->picIsDirectMb[$mbIdx] = 0;
-        $dbg = &$this->dbgBStat;
-        $dbg['n']++;
 
         // ---------- skip（B_Skip = B_Direct_16x16 无残差）----------
         if ($this->cabReadMbSkip(true)) {
             $this->picIsSkip[$mbIdx] = 1;
-            $dbg['skip']++;
             $this->picIsDirectMb[$mbIdx] = 1;
             // B_Skip = B_Direct_16x16：direct_cache 全 MB direct（邻居 ref ctx 排除）
             $q0 = $mbIdx * 4;
@@ -2169,11 +2131,9 @@ trait CabacDecodingTrait
         }
 
         $t = $this->cabReadBMbType();
-        $this->dbgLastBMbType = $t['k'] === 'inter' ? $t['mbType'] : ($t['k'] === 'direct' ? 0 : -2);
 
         if ($t['k'] === 'i4' || $t['k'] === 'i16' || $t['k'] === 'pcm') {
             // B 片内嵌 Intra
-            $dbg['intra']++;
             $this->decodeCabacIntraMb($mbX, $mbY, $t);
             // intra 邻居：B 列表 MV/ref 缓存标记未使用
             $intraMv = [0, 0, -1];
@@ -2189,7 +2149,6 @@ trait CabacDecodingTrait
 
         if ($t['k'] === 'direct') {
             // B_Direct_16x16（含残差）；direct 同属 inter（FFmpeg !IS_INTRA -> 0）
-            $dbg['direct']++;
             $this->cabFixUnavailNz(false);
             $this->picIsDirectMb[$mbIdx] = 1;
             // B_Direct_16x16：direct_cache 全 MB direct（邻居 ref ctx 排除）
@@ -2206,8 +2165,6 @@ trait CabacDecodingTrait
             $cbp = $cbpLuma | ($cbpChroma << 4);
             // FFmpeg L2345：cbp_table 在残差解码前赋值（色度 DC/亮度 DC 的 CBF 标志位在其上 OR）
             $this->picCbp[$mbIdx] = $cbp;
-        // FFmpeg L2345：cbp_table 在残差解码前赋值（色度 DC/亮度 DC 的 CBF 标志位在其上 OR）
-        $this->picCbp[$mbIdx] = $cbp;
             if ($cbp !== 0) {
                 $this->cabReadQpDelta();
             } else {
@@ -2219,7 +2176,6 @@ trait CabacDecodingTrait
         }
 
         $mbType = $t['mbType'];
-        $dbg['inter']++;
         // 显式 inter 分区（16x16/16x8/8x16/8x8）：不可用邻居 nz 哨兵转 0
         $this->cabFixUnavailNz(false);
         $dct8Allowed = $this->transform8x8ModeFlag;
@@ -2375,8 +2331,6 @@ trait CabacDecodingTrait
             $cbp = $cbpLuma | ($cbpChroma << 4);
             // FFmpeg L2345：cbp_table 在残差解码前赋值（色度 DC/亮度 DC 的 CBF 标志位在其上 OR）
             $this->picCbp[$mbIdx] = $cbp;
-        // FFmpeg L2345：cbp_table 在残差解码前赋值（色度 DC/亮度 DC 的 CBF 标志位在其上 OR）
-        $this->picCbp[$mbIdx] = $cbp;
             if ($cbp !== 0) {
                 $this->cabReadQpDelta();
             } else {

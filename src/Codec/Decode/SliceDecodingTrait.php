@@ -234,12 +234,6 @@ trait SliceDecodingTrait
             $headerEndByte = intdiv($this->reader->getPos(), 8);
             $sliceTypeNos = ($sliceType === 2 || $sliceType === 4) ? 2 : ($sliceType === 1 ? 1 : 0);
             $this->cabacSliceBegin($rbsp, $headerEndByte, $qp, $sliceTypeNos);
-            if (!empty($this->debugCabacB) && $sliceType === 1) {
-                fprintf(STDERR, "[Bslice] rbspLen=%d headerEnd=%d qp=%d poc=%d frameNum=%d directSpatial=%d nL0=%d nL1=%d pwt=%d cabacInitIdc=%d disableDb=%d\n",
-                    strlen($rbsp), $headerEndByte, $qp, $this->currPicOrderCnt, $frameNum,
-                    $this->directSpatialMvPred ? 1 : 0, $this->numRefIdxL0Active, $this->numRefIdxL1Active,
-                    $this->pwtActive ? 1 : 0, $this->cabacInitIdc, $this->disableDeblockingFilterIdc);
-            }
         }
 
         $mbWidth = $this->picWidthInMbs;
@@ -486,12 +480,6 @@ trait SliceDecodingTrait
                 $this->bMvTopLeft[1] = $nextBTL1;
                 // end_of_slice_flag：同上，每 MB 一个 terminate bin
                 $term = $this->cabTerminate();
-                if (!empty($this->debugCabacB)) {
-                    fprintf(STDERR, "MB %4d (%2d,%2d) skip=%d direct=%d cbp=%d term=%d cabPtr=%d low=%08x range=%08x mbType=%d\n",
-                        $mbIdx, $mbX, $mbY, $this->picIsSkip[$mbIdx] ?? -1, $this->picIsDirectMb[$mbIdx] ?? -1,
-                        $this->picCbp[$mbIdx] ?? -1, $term, $this->cabacPtr, $this->cabacLow, $this->cabacRange,
-                        $this->dbgLastBMbType ?? -1);
-                }
                 if ($term !== 0) break;
                 continue;
             }

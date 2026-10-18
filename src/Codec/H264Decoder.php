@@ -52,7 +52,6 @@ class H264Decoder
     ];
 
     public $debugResidual = false;
-    public bool $debugCabacB = false;
     public BitReader $reader;
 
     public int $width = 0;
@@ -419,7 +418,6 @@ class H264Decoder
         $this->picIs8x8Dct = array_fill(0, $n, 0);
         $this->picIsPcm = array_fill(0, $n, 0);
         $this->currentIsLongTerm = false;
-        $this->dbgBStat = ['n' => 0, 'skip' => 0, 'direct' => 0, 'intra' => 0, 'inter' => 0, 'other' => 0];
     }
 
     // ===== POC 计算 (H.264 8.2.1.1) =====
