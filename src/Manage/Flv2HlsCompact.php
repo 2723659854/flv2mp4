@@ -840,6 +840,8 @@ class Flv2HlsCompact
                 } else $this->lastEncodedVideoTimestamp = $timestamp;
                 if ($isKey) $this->plStartGop();
                 $metadata = ['tagType' => 9, 'timestamp' => $timestamp];
+                // 尾帧冲刷用：保留帧时间戳在目标帧率均匀网格上，尾帧步长对齐输出节奏
+                if ($this->targetFps > 0) $metadata['sourceFps'] = $this->targetFps;
                 if ($drop) $metadata['drop'] = true;
                 $this->plRoute(HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $this->plSeq++, $metadata, $body));
                 // 在途加权负载：抽掉帧只解码维持参考链（权重1），保留帧全链路（权重2）。
@@ -876,7 +878,13 @@ class Flv2HlsCompact
                 // 上一GOP仍在hold未派发就收到新IDR：drainFrames的hold中断应已杜绝此情形
                 throw new RuntimeException("GOP{$prev}尚未派发即收到下一个IDR（hold中断失效）");
             }
-            $this->plOut[$prevWorker] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::CONTROL, 0, ['cmd' => 'gopEnd', 'gop' => $prev]);
+            // main/high 源按 POC 重排，GOP 末尾帧滞留解码器重排队列，gopEnd 触发尾帧冲刷。
+            // 尾帧占用连续预留序号（不足以 drop 占位补齐），保证输出端全局序号严格连续。
+            $this->plOut[$prevWorker] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::CONTROL, 0, [
+                'cmd' => 'gopEnd', 'gop' => $prev,
+                'tailSeq' => $this->plSeq, 'tailMax' => HlsPipelineProtocol::TAIL_SEQ_RESERVE,
+            ]);
+            $this->plSeq += HlsPipelineProtocol::TAIL_SEQ_RESERVE;
         }
         $gop = $this->plGopSeq;
         $worker = ($gop === 0) ? 0 : $this->plPickReadyWorker();
@@ -931,13 +939,17 @@ class Flv2HlsCompact
         $this->plHold = '';
     }
 
-    /** 收尾：为最后一个GOP补边界标记，worker冲刷末帧后回READY */
+    /** 收尾：为最后一个GOP补边界标记（含尾帧序号预留），worker冲刷末帧后回READY */
     private function plCloseCurrentGop(): void
     {
         if ($this->plGopSeq > 0) {
             $gop = $this->plGopSeq - 1;
-            if (isset($this->plGopWorker[$gop])) {
-                $this->plOut[$this->plGopWorker[$gop]] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::CONTROL, 0, ['cmd' => 'gopEnd', 'gop' => $gop]);
+            if (isset($this->plGopWorker[$gop]) && $this->plGopWorker[$gop] >= 0) {
+                $this->plOut[$this->plGopWorker[$gop]] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::CONTROL, 0, [
+                    'cmd' => 'gopEnd', 'gop' => $gop,
+                    'tailSeq' => $this->plSeq, 'tailMax' => HlsPipelineProtocol::TAIL_SEQ_RESERVE,
+                ]);
+                $this->plSeq += HlsPipelineProtocol::TAIL_SEQ_RESERVE;
             }
         }
     }
