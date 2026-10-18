@@ -33,6 +33,12 @@ final class HlsDecoderWorkerServer
      * 输出进程依赖每路连接序号严格递增，不能让后续帧在同路连接上反超在途帧。
      */
     private string $deferredOutput = '';
+    /** 最近一个已编码保留帧的时间戳（tail 帧时间戳延续基准） */
+    private int $lastVideoTs = 0;
+    /** 源帧率（主进程随视频 meta 下发），用于推导 tail 帧时间戳步长 */
+    private float $sourceFps = 0.0;
+    /** B 帧粘滞：源流出现过 B 帧后，后续每个 GOP 起始即按 POC 重排 */
+    private bool $sawBFrames = false;
 
     public function __construct(private array $profiles)
     {
@@ -179,16 +185,18 @@ final class HlsDecoderWorkerServer
                         $cmd = $event['metadata']['cmd'] ?? '';
                         if ($cmd === 'config') $this->parseConfiguration(substr($event['payload'], 5));
                         elseif ($cmd === 'gopEnd') {
-                            // 先冲刷在途帧再重置：保证 GOP 最后一帧正常输出且不跨 GOP 残留流水线状态
+                            // 先冲刷在途帧与解码器重排队列（B 帧尾帧）再重置：
+                            // 保证 GOP 最后一帧正常输出且不跨 GOP 残留流水线状态
                             $gop = (int)($event['metadata']['gop'] ?? -1);
-                            $output .= $this->flushEncodedFrame();
+                            $output .= $this->flushGopTail((int)($event['metadata']['tailSeq'] ?? 0), (int)($event['metadata']['tailMax'] ?? 0));
                             $this->resetGopState();
                             $upOutput .= HlsPipelineProtocol::frame(HlsPipelineProtocol::PROGRESS, 0, ['gop' => $gop]);
                             $upOutput .= HlsPipelineProtocol::frame(HlsPipelineProtocol::READY, 0, ['gop' => $gop]);
                         }
                     } elseif ($event['type'] === HlsPipelineProtocol::END) {
-                        // 末帧在途：收尾后再转发 END，输出进程必然先收齐全部媒体再看到 END
-                        $output .= $this->flushEncodedFrame();
+                        // 末帧在途：冲刷在途帧与解码器重排队列后再转发 END，
+                        // 输出进程必然先收齐全部媒体再看到 END
+                        $output .= $this->flushGopTail((int)($event['metadata']['tailSeq'] ?? 0), (int)($event['metadata']['tailMax'] ?? 0));
                         $output .= HlsPipelineProtocol::frame(HlsPipelineProtocol::END, $event['sequence']);
                         $ended = true;
                     } else {
@@ -264,6 +272,7 @@ final class HlsDecoderWorkerServer
         if ($this->sps !== '') array_unshift($nals, ['type' => 7, 'data' => $this->sps]);
         if ($this->pps !== '') array_unshift($nals, ['type' => 8, 'data' => $this->pps]);
         $dropFrame = !empty($meta['drop']);
+        if (isset($meta['sourceFps'])) $this->sourceFps = (float)$meta['sourceFps'];
         // 抽帧帧仍需解码以维持P链，但不需要生成YUV输出，也不需要执行去块滤波。
         // IDR在解码器内部仍会强制保留去块，保证关键帧参考链正确。
         $frame = $this->decoder->decode($nals, false, !$dropFrame, $dropFrame);
@@ -272,11 +281,19 @@ final class HlsDecoderWorkerServer
         if ($dropFrame) {
             return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, $body);
         }
-        if (!$frame || empty($frame['data'])) return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, $body);
+        // 重排延迟：本帧已在解码器 reorder 队列中等待 POC 排序，内容随后续帧产出。
+        // 不能透传未解码的原始 NAL（输出端拿到 High NAL 会产生马赛克），标记 drop 跳过输出。
+        if (!$frame || empty($frame['data'])) {
+            $meta['drop'] = true;
+            return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, $body);
+        }
         $meta['decoded'] = true;
         $meta['sourceWidth'] = $this->width;
         $meta['sourceHeight'] = $this->height;
-        $isKeyFrame = (ord($body[0]) >> 4) === 1;
+        // 重排下 IDR 内容滞后一帧，tag 的 frameType 标记与实际编码内容错位，
+        // 必须用解码帧的 isIdr 决定编码关键帧，否则切片 IDR 缺失导致首段无画面
+        $isKeyFrame = !empty($frame['isIdr']);
+        $this->lastVideoTs = (int)($meta['outTimestamp'] ?? $meta['timestamp'] ?? 0);
         $variantDims = [];
         // 先为所有 profile startFrame（异步派发运动估计），在途帧的 finish 在 feedEncoder 内完成，
         // 主进程 CAVLC(N) 与运动子进程计算(N+1) 时间重叠（与 FLV/MP4 worker 同一条流水线）
@@ -338,6 +355,57 @@ final class HlsDecoderWorkerServer
         return $frame;
     }
 
+    /**
+     * GOP 尾部冲刷：排出解码器重排队列中滞留的尾帧，经缩放/编码后占用 dispatcher 预留的
+     * 连续序号发出；不足 tailMax 部分以 drop 占位事件补齐，保全局序号连续。
+     * 多 profile 版：每帧为所有 profile 缩放/配置/startFrame，buildPendingFrame 统一 finish。
+     */
+    private function flushGopTail(int $tailSeq, int $tailMax): string
+    {
+        $out = '';
+        $emitted = 0;
+        if ($tailMax > 0) {
+            $frames = $this->width > 0 ? $this->decoder->flushOutput() : [];
+            $frameDurMs = $this->sourceFps > 0.0 ? 1000 / $this->sourceFps : 40;
+            foreach ($frames as $f) {
+                if ($emitted >= $tailMax || empty($f['data'])) break;
+                $variantDims = [];
+                foreach ($this->profiles as $name => $profile) {
+                    $targetWidth = ($profile['width'] ?? 0) > 0 ? (int)$profile['width'] : $this->width;
+                    $targetHeight = ($profile['height'] ?? 0) > 0 ? (int)$profile['height'] : $this->height;
+                    $variant = ($targetWidth !== $this->width || $targetHeight !== $this->height)
+                        ? $this->scaler->scaleYUV420P($f['data'], $this->width, $this->height, $targetWidth, $targetHeight) : $f['data'];
+                    if (!empty($profile['watermark']) && !empty($profile['watermarkFile'])) $variant = $this->applyWatermark($variant, $targetWidth, $targetHeight, $profile['watermarkFile']);
+                    $encoder = $this->encoders[$name];
+                    $encoder->setResolution($targetWidth, $targetHeight);
+                    $encoder->setBitrate((int)($profile['bitrate'] ?? 500000));
+                    $encoder->setFps((int)($profile['fps'] ?? 25));
+                    $encoder->setQp((int)($profile['qp'] ?? 26));
+                    $encoder->startFrame($variant, !empty($f['isIdr']));
+                    $variantDims[$name] = [$targetWidth, $targetHeight];
+                }
+                if ($this->pendingFrame !== null) {
+                    $out .= $this->buildPendingFrame();
+                    $this->pendingFrame = null;
+                }
+                $ts = (int)round($this->lastVideoTs + ($emitted + 1) * $frameDurMs);
+                // 合成最小 AVCC NALU 包头：输出端 videoFrameDataRead/avcPacketRead 需要解析
+                // frameType/codecId/packetType 才能走到 encoded 直封装路径，body 为空会被静默丢弃
+                $body = chr(((!empty($f['isIdr']) ? 1 : 2) << 4) | 7) . chr(1) . "\0\0\0";
+                $this->pendingFrame = ['sequence' => $tailSeq + $emitted,
+                    'meta' => ['tagType' => 9, 'timestamp' => $ts],
+                    'body' => $body, 'isKey' => !empty($f['isIdr']), 'dims' => $variantDims];
+                $emitted++;
+            }
+        }
+        $out .= $this->flushEncodedFrame();
+        while ($emitted < $tailMax) {
+            $out .= HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $tailSeq + $emitted, ['tagType' => 9, 'drop' => true], '');
+            $emitted++;
+        }
+        return $out;
+    }
+
     private function buildPendingFrame(): string
     {
         $p = $this->pendingFrame;
@@ -367,9 +435,12 @@ final class HlsDecoderWorkerServer
     {
         // 解码器内部仍包含较多SPS/PPS、参考帧和帧计数耦合状态，先保留原有安全做法：
         // GOP边界重建解码器；编码器则使用轻量重置并复用已连接的运动估计worker。
+        // B 帧粘滞：源流出现过 B 帧后，每个 GOP 起始即按 POC 重排，避免 GOP 头部帧乱序
+        $this->sawBFrames = $this->sawBFrames || $this->decoder->reorderByPoc;
         $this->pendingFrame = null;
         $this->deferredOutput = '';
         $this->decoder = new H264Decoder();
+        $this->decoder->reorderByPoc = $this->sawBFrames;
         if ($this->sps !== '') {
             $this->decoder->decode([['type' => 7, 'data' => $this->sps]], true);
             $this->width = $this->decoder->getWidth();

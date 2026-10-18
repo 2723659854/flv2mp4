@@ -350,6 +350,12 @@ class PurePhpHlsGenerator
                 // 抽帧保留帧使用主进程重映射后的均匀网格时间戳，音频/未抽帧使用源时间戳
                 return (int)($this->metadata['outTimestamp'] ?? $this->metadata['timestamp'] ?? 0);
             }
+            public function hasKeyFrameMark(): bool {
+                return array_key_exists('keyFrame', $this->metadata);
+            }
+            public function isMarkedKey(): bool {
+                return !empty($this->metadata['keyFrame']);
+            }
         };
         if (!empty($metadata['decoded']) || !empty($metadata['encoded'])) {
             $bodyLength = unpack('N', substr($payload, 0, 4))[1];
@@ -405,7 +411,12 @@ class PurePhpHlsGenerator
 
         if ($avc['avcPacketType'] !== self::AVC_PACKET_TYPE_NALU) return;
 
-        $isKeyFrame = ($videoData['frameType'] === self::VIDEO_FRAME_TYPE_KEY_FRAME);
+        // 关键帧判定：分布式管线下解码内容因 POC 重排滞后于 tag，body 首字节不可信，
+        // 解码 worker 已在 meta.keyFrame 写入真实编码内容的 isIdr（与 FlvRecoder 消费约定一致）；
+        // 非分布式路径无该标记，回退 body frameType
+        $isKeyFrame = (method_exists($tag, 'hasKeyFrameMark') && $tag->hasKeyFrameMark())
+            ? $tag->isMarkedKey()
+            : ($videoData['frameType'] === self::VIDEO_FRAME_TYPE_KEY_FRAME);
         $timestamp = method_exists($tag, 'getTime') ? $tag->getTime() : 0;
 
         // 首关键帧初始化时间基准
@@ -418,7 +429,12 @@ class PurePhpHlsGenerator
             }
         }
 
-        $job = $this->prepareVideoJob($avc['data'], $isKeyFrame, $timestamp - $this->baseTimestamp, $avc['compositionTime'] ?? 0);
+        // 重编码流无 B 帧（呈现序=解码序），pts 必须等于 dts 单调递增。
+        // 分布式预编码事件的 cts 属于源流且与重排后的实际内容不配对，
+        // 沿用会让 pts 倒挂 → ffmpeg h264 parser 推导出非单调 dts（muxer 报错），
+        // 故强制 cts=0 按均匀网格推进；非分布式路径内容与 tag 一一对应，保留源 cts
+        $cts = !empty($this->pipelineEncodedVariants) ? 0 : ($avc['compositionTime'] ?? 0);
+        $job = $this->prepareVideoJob($avc['data'], $isKeyFrame, $timestamp - $this->baseTimestamp, $cts);
         if ($job === null) return;
 
         // 关键顺序：新帧各 profile 已 startFrame（worker 在途）→ 此时 finish 上一帧，

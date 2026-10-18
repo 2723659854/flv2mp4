@@ -149,7 +149,10 @@ final class HlsPipelineClient
                                     if ($newGop > 0) {
                                         // 上一 GOP 所有帧之后插入边界标记：worker 处理到此处即代表该 GOP 已解码完
                                         $prevGop = $newGop - 1;
-                                        $enqueue($gopWorker[$prevGop], HlsPipelineProtocol::frame(HlsPipelineProtocol::CONTROL, 0, ['cmd' => 'gopEnd', 'gop' => $prevGop]), $prevGop);
+                                        // 尾帧序号预留：解码 worker 冲刷重排队列时占用连续序号发出尾部帧，
+                                        // 不足部分以 drop 占位补齐，保全局序号连续（与 FLV 管线同协议）
+                                        $enqueue($gopWorker[$prevGop], HlsPipelineProtocol::frame(HlsPipelineProtocol::CONTROL, 0, ['cmd' => 'gopEnd', 'gop' => $prevGop, 'tailSeq' => $sequence, 'tailMax' => HlsPipelineProtocol::TAIL_SEQ_RESERVE]), $prevGop);
+                                        $sequence += HlsPipelineProtocol::TAIL_SEQ_RESERVE;
                                     }
                                     // 派给在途加权负载最小的 worker（首个 GOP 固定 worker0，序列头只投递给它）
                                     if ($newGop === 0) {
@@ -169,7 +172,8 @@ final class HlsPipelineClient
                                 // IDR 强制保留（切片边界/解码器刷新点），其余帧按目标帧率时间量化，
                                 // 被抽掉的帧仍送解码维持参考链，但标记 drop 不缩放不编码
                                 $timestamp = (int)$tag['timestamp'];
-                                $videoMeta = ['tagType' => 9, 'timestamp' => $timestamp];
+                                // sourceFps 随视频 meta 下发：解码 worker 冲刷重排队列时推导尾帧时间戳步长
+                                $videoMeta = ['tagType' => 9, 'timestamp' => $timestamp, 'sourceFps' => $sourceFps];
                                 if ($dropFrames) {
                                     if ($baseVideoTimestamp < 0) {
                                         if ($isKey) {
@@ -215,7 +219,12 @@ final class HlsPipelineClient
                     // （收尾协议与直播流水线一致；只发给 worker0 会导致其余 worker 与输出进程永久等待）。
                     // END 追加在各 worker 媒体末尾，天然保证"先收完媒体再收尾"的顺序，无需独立控制连接。
                     for ($i = 0; $i < $workerCount; $i++) {
-                        $outbound[$i] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::END, $sequence++);
+                        $tailSeq = $sequence;
+                        // 每个 worker 尾帧恰好占 tailMax 个连续序号；END 帧本身必须用 seq 0
+                        // （输出进程不把 END 入重排队列，若 END 占用媒体序号会在该序号处
+                        // 永久缺号 → finishPipelineOutput 永不触发，全管线死锁）
+                        $sequence += HlsPipelineProtocol::TAIL_SEQ_RESERVE;
+                        $outbound[$i] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::END, 0, ['tailSeq' => $tailSeq, 'tailMax' => HlsPipelineProtocol::TAIL_SEQ_RESERVE]);
                     }
                     $endEnqueued = true;
                 }
