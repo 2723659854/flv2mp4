@@ -52,6 +52,7 @@ class H264Decoder
     ];
 
     public $debugResidual = false;
+    public bool $debugCabacB = false;
     public BitReader $reader;
 
     public int $width = 0;

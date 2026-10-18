@@ -186,10 +186,25 @@ trait CabacDecodingTrait
         $this->cabacPtr = $p + 2;
     }
 
+    /** bin 级调试：>=0 时对指定 poc/mb 的每个 CABAC bin 打印状态 */
+    public int $debugBinPoc = -1;
+    public int $debugBinMb = -1;
+
+    private function binTrace(string $kind, int $ctxIdx, int $stateBefore, int $bit): void
+    {
+        if ($this->debugBinPoc >= 0
+            && ($this->currPicOrderCnt ?? -99) === $this->debugBinPoc
+            && ($this->cabMbIdx ?? -99) === $this->debugBinMb) {
+            fprintf(STDERR, "BIN %s ctx=%d s=%d bit=%d low=%08x range=%08x ptr=%d\n",
+                $kind, $ctxIdx, $stateBefore, $bit, $this->cabacLow, $this->cabacRange, $this->cabacPtr);
+        }
+    }
+
     private function cabGet(int $ctxIdx): int
     {
         $this->cabBinsTotal++;
-        $s = $this->cabacStates[$ctxIdx];
+        $sBefore = $this->cabacStates[$ctxIdx];
+        $s = $sBefore;
         $range = $this->cabacRange;
         $low = $this->cabacLow;
 
@@ -219,6 +234,7 @@ trait CabacDecodingTrait
             $this->cabacLow = $low;
             $this->cabacRange = $range;
         }
+        $this->binTrace('C', $ctxIdx, $sBefore, $bit);
         return $bit;
     }
 
@@ -236,9 +252,11 @@ trait CabacDecodingTrait
         $d = ($low - $r) & 0xFFFFFFFF;
         if ($d >= 0x80000000) {
             // 有符号 low < r：bit=0，low 保持
+            $this->binTrace('B', -1, -1, 0);
             return 0;
         }
         $this->cabacLow = $d;
+        $this->binTrace('B', -1, -1, 1);
         return 1;
     }
 
@@ -256,13 +274,18 @@ trait CabacDecodingTrait
         $d = ($low - $r) & 0xFFFFFFFF;
         $mask = $d >= 0x80000000 ? -1 : 0;
         $this->cabacLow = ($d + ($r & $mask)) & 0xFFFFFFFF;
-        return ($val ^ $mask) - $mask;
+        $ret = ($val ^ $mask) - $mask;
+        $this->binTrace('S', -1, -1, $ret & 1);
+        return $ret;
     }
 
     /** @return int 0=未结束，非零=已到片尾（调用方一般只判真假） */
     private function cabTerminate(): int
     {
         $this->cabBinsTotal++;
+        $termTrace = $this->debugBinPoc >= 0
+            && ($this->currPicOrderCnt ?? -99) === $this->debugBinPoc
+            && ($this->cabMbIdx ?? -99) === $this->debugBinMb;
         $range = $this->cabacRange - 2;
         // FFmpeg：if((int32)low < (int32)(range<<17)) —— 有符号比较
         $d = ($this->cabacLow - ($range << 17)) & 0xFFFFFFFF;
@@ -275,7 +298,15 @@ trait CabacDecodingTrait
             if (($this->cabacLow & 0xFFFF) === 0) {
                 $this->cabacRefill();
             }
+            if ($termTrace) {
+                fprintf(STDERR, "BIN T bit=0 low=%08x range=%08x ptr=%d\n",
+                    $this->cabacLow, $this->cabacRange, $this->cabacPtr);
+            }
             return 0;
+        }
+        if ($termTrace) {
+            fprintf(STDERR, "BIN T bit=1 low=%08x range=%08x ptr=%d\n",
+                $this->cabacLow, $this->cabacRange, $this->cabacPtr);
         }
         return 1;
     }
@@ -2138,6 +2169,7 @@ trait CabacDecodingTrait
         }
 
         $t = $this->cabReadBMbType();
+        $this->dbgLastBMbType = $t['k'] === 'inter' ? $t['mbType'] : ($t['k'] === 'direct' ? 0 : -2);
 
         if ($t['k'] === 'i4' || $t['k'] === 'i16' || $t['k'] === 'pcm') {
             // B 片内嵌 Intra
@@ -2330,7 +2362,10 @@ trait CabacDecodingTrait
             $this->storeBDeblockInfo($mbX, $mbY, $gridL0, $gridL1);
         } else {
             // B_8x8（mbType 22）
-            $dct8Allowed = $dct8Allowed && $this->decodeCabacB8x8($mbX, $mbY, $mbIdx);
+            // 禁止写成 $dct8Allowed && $this->decodeCabacB8x8(...)：transform8x8ModeFlag=false
+            // 时 && 短路会跳过整个子宏块语法读取（sub_mb_type/ref/mvd），CABAC 引擎立即失步。
+            $b8x8Dct8Ok = $this->decodeCabacB8x8($mbX, $mbY, $mbIdx);
+            $dct8Allowed = $dct8Allowed && $b8x8Dct8Ok;
             $cbpLuma = $this->cabReadCbpLuma();
             $cbpChroma = $this->cabReadCbpChroma();
             $dct8 = false;
