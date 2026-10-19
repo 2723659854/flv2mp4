@@ -167,25 +167,20 @@ final class Mp4PipelineClient
                         }
                     }
                     if ($index >= $total || $allEnqueued) $allEnqueued = true;
-                    if ($fast) {
-                        // 快速路径收尾：hold 排空 → 最后一个GOP补边界 → 广播 END
-                        if ($allEnqueued && $hold === '' && !$lastGopClosed) {
-                            if ($gopSeq > 0 && isset($gopWorkerMap[$gopSeq - 1])) {
-                                $outbound[$gopWorkerMap[$gopSeq - 1]] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::CONTROL, 0, ['cmd' => 'gopEnd', 'gop' => $gopSeq - 1, 'tailSeq' => $sequence, 'tailMax' => HlsPipelineProtocol::TAIL_SEQ_RESERVE]);
-                                $sequence += HlsPipelineProtocol::TAIL_SEQ_RESERVE;
-                            }
-                            $lastGopClosed = true;
+                }
+                // 收尾每轮执行（必须在 allEnqueued 块外）：末 GOP 曾被 hold 时，allEnqueued 先于
+                // hold 排空置真，若收尾逻辑只在该块内跑一次，held GOP 派发后补边界/END 永不执行
+                // → worker 等不到 gopEnd 不发 READY、主进程等不到 FINISHED，全链死锁
+                if ($fast) {
+                    // 快速路径收尾：hold 排空 → 最后一个GOP补边界 → 广播 END
+                    if ($allEnqueued && $hold === '' && !$lastGopClosed) {
+                        if ($gopSeq > 0 && isset($gopWorkerMap[$gopSeq - 1])) {
+                            $outbound[$gopWorkerMap[$gopSeq - 1]] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::CONTROL, 0, ['cmd' => 'gopEnd', 'gop' => $gopSeq - 1, 'tailSeq' => $sequence, 'tailMax' => HlsPipelineProtocol::TAIL_SEQ_RESERVE]);
+                            $sequence += HlsPipelineProtocol::TAIL_SEQ_RESERVE;
                         }
-                        if ($allEnqueued && $lastGopClosed && !$endEnqueued) {
-                            for ($i = 0; $i < $workerCount; $i++) {
-                                $tailSeq = $sequence;
-                                $sequence += HlsPipelineProtocol::TAIL_SEQ_RESERVE;
-                                $outbound[$i] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::END, $sequence++, ['tailSeq' => $tailSeq, 'tailMax' => HlsPipelineProtocol::TAIL_SEQ_RESERVE]);
-                            }
-                            $endEnqueued = true;
-                        }
-                    } elseif ($allEnqueued && !$endEnqueued) {
-                        // END 广播给每个解码 worker，输出 worker 收齐 workerCount 个 END 才收尾
+                        $lastGopClosed = true;
+                    }
+                    if ($allEnqueued && $lastGopClosed && !$endEnqueued) {
                         for ($i = 0; $i < $workerCount; $i++) {
                             $tailSeq = $sequence;
                             $sequence += HlsPipelineProtocol::TAIL_SEQ_RESERVE;
@@ -193,6 +188,14 @@ final class Mp4PipelineClient
                         }
                         $endEnqueued = true;
                     }
+                } elseif ($allEnqueued && !$endEnqueued) {
+                    // END 广播给每个解码 worker，输出 worker 收齐 workerCount 个 END 才收尾
+                    for ($i = 0; $i < $workerCount; $i++) {
+                        $tailSeq = $sequence;
+                        $sequence += HlsPipelineProtocol::TAIL_SEQ_RESERVE;
+                        $outbound[$i] .= HlsPipelineProtocol::frame(HlsPipelineProtocol::END, $sequence++, ['tailSeq' => $tailSeq, 'tailMax' => HlsPipelineProtocol::TAIL_SEQ_RESERVE]);
+                    }
+                    $endEnqueued = true;
                 }
 
                 $read = [];
