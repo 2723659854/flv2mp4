@@ -27,7 +27,8 @@ class PurePhpHlsGenerator
     private array $profiles;
     private string $outputDir;
     private array $segmentWriters = [];
-    private array $segmentDurations = [];
+    /** index.m3u8 追加写句柄（每 profile 一个），开流后保持打开直到写入 ENDLIST */
+    private array $playlistHandles = [];
     private array $spsPpsData = [];
     private array $continuityCounters = [];
 
@@ -134,7 +135,7 @@ class PurePhpHlsGenerator
             if (!is_dir($dir)) mkdir($dir, 0777, true);
 
             $this->segmentWriters[$name] = ['sequence' => 0, 'handle' => null, 'startTime' => 0, 'endTime' => 0];
-            $this->segmentDurations[$name] = [];
+            $this->playlistHandles[$name] = null;
             $this->spsPpsData[$name] = '';
             $this->continuityCounters[$name] = [];
             $this->segmentStartTimes[$name] = 0;
@@ -185,12 +186,18 @@ class PurePhpHlsGenerator
 
     /**
      * 设置切片间隔
+     * 追加写模式下 header 无法回改，故在开流前（尚无任何分片）一次性重写 TARGETDURATION
      * @param int $segmentDuration
      * @return void
      */
     public function setSegmentDuration(int $segmentDuration = 3)
     {
         $this->segmentDuration = $segmentDuration;
+        $started = false;
+        foreach ($this->segmentWriters as $writer) {
+            if (($writer['sequence'] ?? 0) > 0) { $started = true; break; }
+        }
+        if (!$started) $this->resetPlaylists();
     }
 
     private function loadWatermarkFile(string $watermarkFile): array
@@ -1096,6 +1103,8 @@ class PurePhpHlsGenerator
         $this->continuityCounters[$profile] = [];
         $filePath = $this->profileDir($profile) . "/segment_{$writer['sequence']}.ts";
         $writer['handle'] = fopen($filePath, 'wb');
+        // 首个分片开启时接管 index.m3u8 追加句柄，并清空上一次运行的残留条目
+        $this->openPlaylistHandle($profile, $writer['sequence'] === 1);
         // 分片头部写入PAT/PMT，兼容播放器
         $this->writePAT($profile);
         $this->writePMT($profile);
@@ -1104,7 +1113,7 @@ class PurePhpHlsGenerator
     }
 
     /**
-     * 关闭分片并更新m3u8
+     * 关闭分片并向 index.m3u8 追加条目
      */
     private function closeSegment(string $profile, int $endTime = 0): void
     {
@@ -1116,8 +1125,12 @@ class PurePhpHlsGenerator
 
         $endTs = $endTime ?: $this->currentSegmentLastTimes[$profile];
         $durSec = max(0.001, round(($endTs - $this->segmentStartTimes[$profile]) / 1000.0, 3));
-        $this->segmentDurations[$profile][$writer['sequence']] = $durSec;
-        $this->updatePlaylist($profile);
+        // 单次 fwrite 写入完整条目块（EXTINF + URI），避免读到半行
+        $handle = $this->playlistHandles[$profile] ?? null;
+        if (is_resource($handle)) {
+            fwrite($handle, "#EXTINF:" . number_format($durSec, 3, '.', '') . ",\nsegment_{$writer['sequence']}.ts\n");
+            fflush($handle);
+        }
     }
 
     /**
@@ -1152,63 +1165,79 @@ class PurePhpHlsGenerator
     }
 
     /**
-     * 初始化空m3u8
+     * 初始化空m3u8：仅当文件不存在时写占位 header（正式的 header 在首个分片开启时定稿）
      */
     private function ensureInitialPlaylist(): void
     {
         foreach ($this->profiles as $name => $_) {
             $m3u8Path = $this->profileDir($name) . '/index.m3u8';
             if (!file_exists($m3u8Path)) {
-                $lines = [
-                    '#EXTM3U',
-                    '#EXT-X-VERSION:3',
-                    '#EXT-X-TARGETDURATION:' . $this->segmentDuration,
-                    '#EXT-X-MEDIA-SEQUENCE:1',
-                    '#EXT-X-INDEPENDENT-SEGMENTS',
-                ];
-                file_put_contents($m3u8Path, implode("\n", $lines) . "\n");
+                file_put_contents($m3u8Path, $this->playlistHeader());
             }
         }
     }
 
     /**
-     * 更新分片m3u8，原子写入tmp防止损坏
+     * 开流前重写 header（此时尚无任何分片，可安全截断）
      */
-    private function updatePlaylist(string $profile): void
+    private function resetPlaylists(): void
     {
-        $lines = ['#EXTM3U', '#EXT-X-VERSION:3'];
-        $maxDur = $this->segmentDuration;
-        foreach ($this->segmentDurations[$profile] as $d) {
-            $maxDur = max($maxDur, ceil($d));
+        foreach ($this->profiles as $name => $_) {
+            if (is_resource($this->playlistHandles[$name] ?? null)) continue;
+            file_put_contents($this->profileDir($name) . '/index.m3u8', $this->playlistHeader());
         }
-        $lines[] = "#EXT-X-TARGETDURATION:{$maxDur}";
-        $lines[] = '#EXT-X-MEDIA-SEQUENCE:1';
-        $lines[] = '#EXT-X-INDEPENDENT-SEGMENTS';
-
-        $seqMax = $this->segmentWriters[$profile]['sequence'];
-        for ($i = 1; $i <= $seqMax; $i++) {
-            $d = $this->segmentDurations[$profile][$i] ?? $this->segmentDuration;
-            $lines[] = "#EXTINF:" . number_format($d, 3, '.', '') . ",";
-            $lines[] = "segment_{$i}.ts";
-        }
-        $content = implode("\n", $lines) . "\n";
-        $path = $this->profileDir($profile) . '/index.m3u8';
-        $tmp = $path . '.tmp';
-        file_put_contents($tmp, $content);
-        rename($tmp, $path);
     }
 
     /**
-     * 末尾追加ENDLIST标记
+     * m3u8 header：追加写无法回改，TARGETDURATION 一次性定死并留余量
+     * （分片时长取首个满足 elapsed >= segmentDuration 的关键帧，会随源关键帧间隔上浮）
+     */
+    private function playlistHeader(): string
+    {
+        $target = max(1, (int)ceil($this->segmentDuration) + 2);
+        return "#EXTM3U\n"
+            . "#EXT-X-VERSION:3\n"
+            . "#EXT-X-TARGETDURATION:{$target}\n"
+            . "#EXT-X-MEDIA-SEQUENCE:1\n"
+            . "#EXT-X-INDEPENDENT-SEGMENTS\n";
+    }
+
+    /**
+     * 取得 index.m3u8 追加写句柄；$reset 为真时截断旧内容重写 header
+     */
+    private function openPlaylistHandle(string $profile, bool $reset): void
+    {
+        if (!$reset && is_resource($this->playlistHandles[$profile] ?? null)) return;
+        $path = $this->profileDir($profile) . '/index.m3u8';
+        $existing = $this->playlistHandles[$profile] ?? null;
+        if (is_resource($existing)) fclose($existing);
+        if ($reset || !file_exists($path)) {
+            file_put_contents($path, $this->playlistHeader());
+        }
+        $handle = @fopen($path, 'ab');
+        if ($handle === false) throw new \RuntimeException("无法打开索引文件写入: {$path}");
+        $this->playlistHandles[$profile] = $handle;
+    }
+
+    /**
+     * 末尾追加ENDLIST标记并关闭句柄；重复调用幂等
      */
     private function addEndList(string $profile): void
     {
+        $handle = $this->playlistHandles[$profile] ?? null;
+        if (is_resource($handle)) {
+            fwrite($handle, "#EXT-X-ENDLIST\n");
+            fflush($handle);
+            fclose($handle);
+            $this->playlistHandles[$profile] = null;
+            return;
+        }
+        // 无句柄（仅做收尾的实例）：直接对文件追加，已存在 ENDLIST 则跳过
         $path = $this->profileDir($profile) . '/index.m3u8';
         if (!file_exists($path)) return;
-        $buf = rtrim(file_get_contents($path)) . "\n";
-        if (strpos($buf, '#EXT-X-ENDLIST') === false) {
-            file_put_contents($path, $buf . "#EXT-X-ENDLIST\n");
-        }
+        $buf = file_get_contents($path);
+        if ($buf === false || strpos($buf, '#EXT-X-ENDLIST') !== false) return;
+        file_put_contents($path, rtrim($buf, "\n") . "\n#EXT-X-ENDLIST\n");
     }
 
     /**
