@@ -10,7 +10,7 @@ namespace Xiaosongshu\Flv2mp4\Codec;
 class NalUtil
 {
     /**
-     * 移除H264 NAL防竞争字节 0x000003 -> 0x0000
+     * 移除NAL防竞争字节 0x000003 -> 0x0000
      */
     public static function removeEmulationPrevention(string $data): string
     {
@@ -31,7 +31,7 @@ class NalUtil
     }
 
     /**
-     * 重新加入H264 NAL防竞争字节：连续两个0后若下一字节 <= 0x03，插入0x03
+     * 重新加入NAL防竞争字节：连续两个0后若下一字节 <= 0x03，插入0x03
      * （removeEmulationPrevention 的逆操作；avcC/FLV 配置记录中的 SPS/PPS 必须是转义后的 EBSP 形态）
      */
     public static function addEmulationPrevention(string $data): string
@@ -52,7 +52,7 @@ class NalUtil
     }
 
     /**
-     * 拆分AnnexB(H264裸流 0001/000001起始码) 为NAL数组
+     * 拆分AnnexB(裸流 0001/000001起始码) 为NAL数组
      * @param string $stream AnnexB码流
      * @return array [{type:int, data:rbsp, raw:nal完整字节}]
      */

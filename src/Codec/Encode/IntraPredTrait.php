@@ -1374,7 +1374,7 @@ trait IntraPredTrait
                 $topMode = -1;
             }
 
-            // 计算MPM (Most Probable Mode) - 参考openh264 PredIntra4x4Mode
+            // 计算 MPM (Most Probable Mode)
             $predicted = ($leftMode < 0 || $topMode < 0) ? 2 : min($leftMode, $topMode);
             $mode = $intra4x4PredModes[$rasterIdx];
 

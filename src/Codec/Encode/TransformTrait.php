@@ -116,7 +116,7 @@ trait TransformTrait
 
     /**
      * 4x4 IDCT 整数逆变换（一维行优先输入输出）——原地
-     * 蝶形顺序与 FFmpeg ff_h264_idct_add / 解码器 idct4x4Flat 一致：
+     * 蝶形顺序与解码器 idct4x4Flat 一致：
      * 先列变换（stride 4）后行变换并 >>6。本地重建必须与解码端 bit-exact，
      * 行列顺序互换会因 >>1 舍入产生 ±1 漂移。
      */
@@ -376,7 +376,7 @@ trait TransformTrait
             $z2 = $temp[4 + $j] - $temp[12 + $j];
             $z3 = $temp[4 + $j] + $temp[12 + $j];
 
-            // FFmpeg: (x*qmul + 128) >> 8，PHP >> 对负数为算术右移(floor)，与 C 一致。
+            // (x*qmul + 128) >> 8，PHP >> 对负数为算术右移(floor)，与 C 一致。
             // 不可用向0截断(-((abs)>>8))，否则本地重建与解码端漂移 ±1。
             $out[0 * 4 + $j] = (($z0 + $z3) * $qmul + 128) >> 8;
             $out[1 * 4 + $j] = (($z1 + $z2) * $qmul + 128) >> 8;

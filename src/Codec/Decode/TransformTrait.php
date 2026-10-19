@@ -218,7 +218,7 @@ trait TransformTrait
 
     // ===== High profile 8x8 变换 =====
 
-    /** ff_h264_dequant8_coeff_init (h264data.c)。PHP 8.1 trait 不支持常量，用静态数组 */
+    /** dequant8_coeff_init。PHP 8.1 trait 不支持常量，用静态数组 */
     private static array $DEQUANT8_COEFF_INIT = [
         [20, 18, 32, 19, 25, 24],
         [22, 19, 35, 21, 28, 26],
@@ -227,12 +227,12 @@ trait TransformTrait
         [32, 28, 51, 30, 40, 38],
         [36, 32, 58, 34, 46, 43],
     ];
-    /** ff_h264_dequant8_coeff_init_scan */
+    /** dequant8_coeff_init_scan */
     private static array $DEQUANT8_COEFF_SCAN = [0, 3, 4, 3, 3, 1, 5, 1, 4, 5, 2, 5, 3, 1, 5, 1];
 
     /**
      * 构造 8x8 块的反量化乘数表（raster 64 项，flat scaling=16）。
-     * 对应 FFmpeg pps->dequant8_coeff[cqm][qp][j]，cqm: 帧内Y=0 帧间Y=3。
+     * 对应 pps->dequant8_coeff[cqm][qp][j]，cqm: 帧内Y=0 帧间Y=3。
      */
     public function buildQmul8(int $qp, bool $intraLuma): array
     {
@@ -252,7 +252,7 @@ trait TransformTrait
     }
 
     /**
-     * 8x8 整数反变换并叠加到像素平面（移植 ff_h264_idct8_add）。
+     * 8x8 整数反变换并叠加到像素平面（移植 idct8_add）。
      * @param array $block 64 个已反量化系数（raster），会被清零语义忽略
      */
     public function idct8AddToPlane(array &$plane, int $stride, int $x0, int $y0, array $block): void
@@ -291,7 +291,7 @@ trait TransformTrait
             $block[$i + 4 * 8] = $b6 - $b1;
         }
         // 第二遍：行变换并 >>6 叠加。
-        // 系数块是转置存储布局（scanJ = TRANSPOSE(zigzag)），ff_h264_idct8_add
+        // 系数块是转置存储布局（scanJ = TRANSPOSE(zigzag)），idct8_add
         // 把存储行 i 的 8 个输出竖写进图像列 i（dst[i + k*stride]），
         // 这样转置布局与两遍蝶形的转置效应正好抵消，输出才是正确方向的像素。
         // 之前横写进行 y0+i 导致整个 8x8 残差块被转置（坏 MB 的 diff 呈反对称）。
@@ -329,7 +329,7 @@ trait TransformTrait
     }
 
     /**
-     * 8x8 仅 DC 系数时叠加（ff_h264_idct8_dc_add），dc 为已反量化的 [0] 系数。
+     * 8x8 仅 DC 系数时叠加（idct8_dc_add），dc 为已反量化的 [0] 系数。
      */
     public function idct8DcAddToPlane(array &$plane, int $stride, int $x0, int $y0, int $dc): void
     {

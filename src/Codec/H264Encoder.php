@@ -12,7 +12,7 @@ use Xiaosongshu\Flv2mp4\Codec\Encode\SpsPpsTrait;
 use Xiaosongshu\Flv2mp4\Codec\Encode\TransformTrait;
 
 /**
- * @purpose yuv重建h264
+ * @purpose yuv重建码流
  * @author yanglong
  * @time 2026年7月23日14:48:28
  */
@@ -29,7 +29,7 @@ class H264Encoder
     ];
 
     /**
-     * 色度QP映射表（H.264标准）
+     * 色度QP映射表（编码标准）
      * 编码器和解码器必须使用相同的映射
      */
     public const CHROMA_QP_TABLE = [
@@ -340,7 +340,7 @@ class H264Encoder
 
     /**
      * P帧QP偏移量（相对于I帧QP）
-     * 默认+2，即P帧QP = I帧QP + 2，与x264默认一致
+     * 默认 +2，即 P 帧 QP = I 帧 QP + 2
      */
     public $pFrameQpDelta = 0;
 
@@ -476,7 +476,7 @@ class H264Encoder
 
     /**
      * 6抽头插值滤波器系数 (1/32, -5/32, 20/32, 20/32, -5/32, 1/32)
-     * H.264标准规定的半像素插值
+     * 编码标准规定的半像素插值
      */
     private const INTERP_TAP0 = 1;
     private const INTERP_TAP1 = -5;

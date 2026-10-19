@@ -524,7 +524,7 @@ trait InterPredTrait
     }
 
     /**
-     * P帧16x16宏块运动向量预测 (H.264 8.4.1.3节)
+     * P帧16x16宏块运动向量预测 (8.4.1.3节)
      * 与解码器predictMvP16x16完全一致
      * @param array|null $mvLeft [mvX, mvY, refIdx]或null
      * @param array|null $mvTop  [mvX, mvY, refIdx]或null
@@ -572,8 +572,8 @@ trait InterPredTrait
     }
 
     /**
-     * P_Skip运动向量预测 (H.264 8.4.1.1节)
-     * 特殊快速路径（与FFmpeg pred_pskip_motion一致，与解码器完全一致）：
+     * P_Skip运动向量预测 (8.4.1.1节)
+     * 特殊快速路径（与 pred_pskip_motion 一致，与解码器完全一致）：
      * - 如果A（左邻居）完全不存在（帧边界外，null）→ 返回(0,0)
      * - 如果B（上邻居）完全不存在（帧边界外，null）→ 返回(0,0)
      * - 如果A是Inter宏块且ref=0、MV=(0,0) → 返回(0,0)
@@ -740,7 +740,7 @@ trait InterPredTrait
     }
 
     /**
-     * 亮度运动补偿 - 1/4 像素精度（与FFmpeg实现一致）
+     * 亮度运动补偿 - 1/4 像素精度（与参考实现一致）
      * 对角线方向：中间H数组不移位不裁剪，最终一次性移位10位
      */
     private function mcLumaBlock(string $refPlane, int $refX, int $refY, int $w, int $h): array

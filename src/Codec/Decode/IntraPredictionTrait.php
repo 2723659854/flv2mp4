@@ -344,7 +344,7 @@ trait IntraPredictionTrait
 
     /**
      * Intra8x8 帧内预测（transform_8x8_flag=1 的 I8x8 宏块）
-     * 严格对照 FFmpeg h264pred_template.c 的 pred8x8l_* 系列：
+     * 严格对照参考实现的 pred8x8l_* 系列：
      * 邻居样值先经 [1 2 1]/4 滤波（l0..l7/t0..t15/lt），再按模式生成 8x8 预测。
      * blkX/blkY ∈ {0,1}：8x8 块在宏块内的位置。
      */
@@ -401,7 +401,7 @@ trait IntraPredictionTrait
             $slt = $this->yPlane[($y0 - 1) * $w + ($x0 - 1)];
         }
 
-        // [1 2 1]/4 滤波（FFmpeg PREDICT_8x8_LOAD_*）
+        // [1 2 1]/4 滤波（PREDICT_8x8_LOAD_*）
         $l = [];
         $l[0] = (($topLeftAvail ? $slt : $sl[0]) + 2 * $sl[0] + $sl[1] + 2) >> 2;
         for ($y = 1; $y <= 6; $y++) {
@@ -678,7 +678,7 @@ trait IntraPredictionTrait
                     }
                 }
                 break;
-            case 3: // 平面预测 (H.264 8.3.3.1.4, pred16x16_plane_compat)
+            case 3: // 平面预测 (8.3.3.1.4, pred16x16_plane_compat)
                 // topLine[0]=lt, topLine[1..16]=top[0..15]
                 // leftLine[0]=lt, leftLine[1..16]=left[0..15]
                 // H = sum_{i=0..7} (i+1)*(top[8+i] - top[6-i]), 当 i=7 时 top[6-7]=top[-1]=lt
@@ -692,7 +692,7 @@ trait IntraPredictionTrait
                 }
                 $b = (5 * $H + 32) >> 6;
                 $c = (5 * $V + 32) >> 6;
-                // a = 16*(top[15]+left[15]+1) - 7*(b+c), 等价于 H.264 标准 a=16*(top[15]+left[15]), pred=(a+b*(x-7)+c*(y-7)+16)>>5
+                // a = 16*(top[15]+left[15]+1) - 7*(b+c), 等价于编码标准 a=16*(top[15]+left[15]), pred=(a+b*(x-7)+c*(y-7)+16)>>5
                 $a = 16 * ($topLine[16] + $leftLine[16] + 1) - 7 * ($b + $c);
                 for ($y = 0; $y < 16; $y++) {
                     for ($x = 0; $x < 16; $x++) {
@@ -712,7 +712,7 @@ trait IntraPredictionTrait
     public function intraChromaPrediction(int $mbX, int $mbY, int $mode, int $uvIdx): array
     {
         // intra_pred.rs predict_chroma_8x8
-        // H.264 色度预测模式: 0=DC, 1=Horizontal, 2=Vertical, 3=Plane
+        // 色度预测模式: 0=DC, 1=Horizontal, 2=Vertical, 3=Plane
         $pred = array_fill(0, 8, array_fill(0, 8, 128));
         $cw = (int)($this->width / 2);
         $px0 = $mbX * 8;

@@ -137,7 +137,7 @@ trait MacroblockDecodingTrait
                 $topMode = $this->intra4x4TopModes[$absBlkX];
             }
 
-            // H.264标准8.3.1.1节：如果任一邻居不可用(mode<0)，predicted=DC(2)
+            // 编码标准8.3.1.1节：如果任一邻居不可用(mode<0)，predicted=DC(2)
             // 否则 predicted=min(leftMode, topMode)
             $minMode = min($leftMode, $topMode);
             $predicted = ($minMode < 0) ? 2 : $minMode;
@@ -168,7 +168,7 @@ trait MacroblockDecodingTrait
         $chromaPredMode = $this->reader->readUe();
         $cbpCode = $this->reader->readUe();
         $cbp = $this->golombToIntraCbp($cbpCode);
-        // mb_qp_delta 仅在 CBP > 0 时读取（H.264 标准 7.4.5）
+        // mb_qp_delta 仅在 CBP > 0 时读取（编码标准 7.4.5）
         $mbQpDelta = 0;
         if ($cbp > 0) {
             $mbQpDelta = $this->reader->readSe();
@@ -422,7 +422,7 @@ trait MacroblockDecodingTrait
      */
     public function decodeIntra16x16(int $mbX, int $mbY, int $mbType, int $qp): int
     {
-        // H.264标准Table 7-11 (I帧) / Table 7-10 (P帧Intra mb_type-5):
+        // 编码标准Table 7-11 (I帧) / Table 7-10 (P帧Intra mb_type-5):
         // mbType 1-24: Intra16x16
         // predMode顺序: 0(V),1(H),2(DC),3(Plane) 每4个一循环
         // cbp分组: 每4个一组
@@ -448,12 +448,12 @@ trait MacroblockDecodingTrait
             $chromaPredMode = 0; // 回退到DC模式
         }
 
-        // mb_qp_delta - I_16x16无论cbp如何都要读取（H.264标准 7.4.5.2）
+        // mb_qp_delta - I_16x16无论cbp如何都要读取（编码标准 7.4.5.2）
         $mbQpDelta = $this->reader->readSe();
         $qp = max(0, min(51, $qp + $mbQpDelta));
 
         // 亮度DC系数
-        // 参考x264编码顺序: 亮度DC -> 亮度AC -> 色度DC -> 色度AC
+        // 编码顺序：亮度 DC → 亮度 AC → 色度 DC → 色度 AC
         $nzCache = array_fill(0, 24, 0);
         $leftNz = array_fill(0, 8, 0);
         $topNz = array_fill(0, $this->picWidthInMbs * 4 + $this->picWidthInMbs * 4, 0);
@@ -755,7 +755,7 @@ trait MacroblockDecodingTrait
         $this->nzTopRowChroma[$this->picWidthInMbs * 2 + $mbX * 2 + 1] = $nzCache[23];
 
         // Intra16x16宏块传递DC_PRED(2)给相邻宏块
-        // H.264 spec 8.3.1.1: 当邻居不是Intra_4x4时，其预测模式推断为DC_PRED(2)
+        // spec 8.3.1.1: 当邻居不是Intra_4x4时，其预测模式推断为DC_PRED(2)
         // 存储2而不是-1的原因：如果存储-1，当左边是-1但上边是有效模式(如1)时，
         // min(-1, 1) = -1会导致predicted=DC_PRED(2)，但正确行为应该是min(2, 1) = 1
         $this->intra4x4LeftModes = array_fill(0, 4, 2);
@@ -858,7 +858,7 @@ trait MacroblockDecodingTrait
 
     /**
      * P帧宏块解码
-     * H.264 P-slice mb_type (CAVLC, Table 7-11):
+     * P-slice mb_type (CAVLC, Table 7-11):
      *   0 = P_L0_16x16
      *   1 = P_L0_L0_16x8
      *   2 = P_L0_L0_8x16
@@ -971,7 +971,7 @@ trait MacroblockDecodingTrait
 
     /**
      * Inter宏块解码后更新intra4x4预测模式缓存
-     * H.264标准: 非Intra_4x4宏块的邻居预测模式视为DC_PRED(2)
+     * 编码标准: 非Intra_4x4宏块的邻居预测模式视为DC_PRED(2)
      */
     private function updateInterMbIntraModes(int $mbX): void
     {
@@ -993,7 +993,7 @@ trait MacroblockDecodingTrait
     // ====================== B 片宏块解码（CAVLC，main profile）======================
 
     // B 片 mb_type 4-21 双分区规格：[layout(0=16x8,1=8x16), dir0, dir1]，dir: 0=L0/1=L1/2=Bi
-    // （FFmpeg h264data.c ff_h264_b_mb_type_info）
+    // （b_mb_type_info）
     private static array $bPartSpecs = [
         4 => [0, 0, 0], 5 => [1, 0, 0], 6 => [0, 1, 1], 7 => [1, 1, 1],
         8 => [0, 0, 1], 9 => [1, 0, 1], 10 => [0, 1, 0], 11 => [1, 1, 0],
@@ -1001,7 +1001,7 @@ trait MacroblockDecodingTrait
         16 => [0, 2, 0], 17 => [1, 2, 0], 18 => [0, 2, 1], 19 => [1, 2, 1],
         20 => [0, 2, 2], 21 => [1, 2, 2],
     ];
-    // B sub_mb_type 0-12 的分区数（FFmpeg ff_h264_b_sub_mb_type_info）
+    // B sub_mb_type 0-12 的分区数（b_sub_mb_type_info）
     private static array $bSubPartCount = [1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 4, 4, 4];
     // B sub_mb_type 是否使用 L0/L1
     private static array $bSubUsesL0 = [0, 1, 0, 1, 1, 1, 0, 0, 1, 1, 1, 0, 1];
@@ -1188,7 +1188,7 @@ trait MacroblockDecodingTrait
         $mvTop = null;
         $mvC = null;
         if ($mbX > 0) {
-            // FFmpeg pred_motion：A = mv_cache[scan8[0]-1] = 左 MB 块 3（索引 0）
+            // pred_motion：A = mv_cache[scan8[0]-1] = 左 MB 块 3（索引 0）
             if (isset($this->bMvLeftCol[$list][0])) {
                 $mvLeft = $this->bMvLeftCol[$list][0];
             }
@@ -1261,7 +1261,7 @@ trait MacroblockDecodingTrait
 
         if ($partIdx === 0) {
             if ($mbX > 0) {
-                // FFmpeg pred_8x16 n=0：A = mv_cache[scan8[0]-1] = 左 MB 块 3（索引 0）
+                // pred_8x16 n=0：A = mv_cache[scan8[0]-1] = 左 MB 块 3（索引 0）
                 if (isset($this->bMvLeftCol[$list][0])) {
                     $mvLeft = $this->bMvLeftCol[$list][0];
                 }
@@ -1308,7 +1308,7 @@ trait MacroblockDecodingTrait
     }
 
     /**
-     * spatial direct 的 MB 级邻居预测（FFmpeg h264_direct.c pred_spatial_direct_motion L228-277）
+     * spatial direct 的 MB 级邻居预测（pred_spatial_direct_motion）
      * 每 list 独立：取邻居有效 ref 最小值 + 匹配中值 MV；无有效邻居 → ref=-1（该 list 丢弃）
      * @return array [list => [ref, mvX, mvY]]
      */
@@ -1321,7 +1321,7 @@ trait MacroblockDecodingTrait
             $top = null;
             $c = null;
             if ($mbX > 0) {
-                // FFmpeg pred_spatial_direct_motion：left_ref = mv_cache[scan8[0]-1] = 左 MB 块 3（索引 0）
+                // pred_spatial_direct_motion：left_ref = mv_cache[scan8[0]-1] = 左 MB 块 3（索引 0）
                 if (isset($this->bMvLeftCol[$list][0])) {
                     $left = $this->bMvLeftCol[$list][0];
                 }
@@ -1354,8 +1354,8 @@ trait MacroblockDecodingTrait
 
     /**
      * 同位块（refPicList1[0] 同位置 8x8 子块）的运动信息
-     * mv0/mv1 = 8x8 顶左 4x4；mv0c/mv1c = 8x8 远角 4x4（FFmpeg h264_direct.c
-     * L454/L699：x8*3 + y8*3*b4_stride）——同位 16x8/8x16 时角点才落在自身分区
+     * mv0/mv1 = 8x8 顶左 4x4；mv0c/mv1c = 8x8 远角 4x4（x8*3 + y8*3*b4_stride）
+     * ——同位 16x8/8x16 时角点才落在自身分区
      * @return array|null [isIntra, isLongTerm, mbFlags, ref0, mv0, ref1, mv1, mv0c, mv1c]
      */
     private function getColocatedBlockInfo(int $mbX, int $mbY, int $i8): ?array
@@ -1383,7 +1383,7 @@ trait MacroblockDecodingTrait
 
     /**
      * colZero 判定：同位非 intra 且 MV 近零 → 置零 ref==0 方向的 MV
-     * （FFmpeg h264_direct.c L378-396 / L409-427 / L447-461；MV 幅度取远角 4x4，
+     * （MV 幅度取远角 4x4，
      * colocated 16x16/intra 时远角==顶左，16x8/8x16 时仅远角属于自身分区）
      */
     private function applyColZero(array $col, int &$ref, int &$mvX, int &$mvY): void
@@ -1406,7 +1406,7 @@ trait MacroblockDecodingTrait
     private array $bImplicitWeight = [];
 
     /**
-     * dist_scale_factor[L0[i]]（FFmpeg h264_direct.c get_scale_factor L37-58）
+     * dist_scale_factor[L0[i]]（get_scale_factor）
      * td = clip8(L1[0].poc − L0[i].poc)；td==0 或长参考 → 256
      * 否则 tb=clip8(curPoc−L0[i].poc)，tx=(16384+|td|/2)/td，结果 clip((tb*tx+32)>>6, -512, 511)
      */
@@ -1440,10 +1440,10 @@ trait MacroblockDecodingTrait
     }
 
     /**
-     * 隐式模式双预测的 L0 权重（FFmpeg h264_slice.c implicit_weight_table L689-748）
+     * 隐式模式双预测的 L0 权重（implicit_weight_table）
      * td = clip_int8(poc1−poc0)；tb = clip_int8(curPoc−poc0)
      * tx = (16384+|td|/2)/td；dsf = (tb*tx+32)>>8；w0 = 64 − dsf（范围 [-64,128] 才生效）
-     * 长参考或 td==0 → 32；色度用同一权重（FFmpeg h264_mb.c L424-433）
+     * 长参考或 td==0 → 32；色度用同一权重
      */
     private function getBImplicitWeight0(int $refIdx0, int $refIdx1): int
     {
@@ -1474,7 +1474,7 @@ trait MacroblockDecodingTrait
     }
 
     /**
-     * fill_colmap（FFmpeg h264_direct.c L82-118）：把同位帧参考列表的
+     * fill_colmap：把同位帧参考列表的
      * 第 refIdxCol 帧按 frame_num 匹配到当前 L0 的索引；未找到 → 0
      */
     private function mapColToList0(int $list, int $refIdxCol): int
@@ -1500,7 +1500,7 @@ trait MacroblockDecodingTrait
     }
 
     /**
-     * 单个 8x8 temporal direct 子块（FFmpeg h264_direct.c pred_temp_direct_motion L670-719）
+     * 单个 8x8 temporal direct 子块（pred_temp_direct_motion）
      * refL1 恒为 0；mvL0 = (scale*mvCol+128)>>8，mvL1 = mvL0 − mvCol
      */
     private function applyBDirect8x8Temporal(int $mbX, int $mbY, int $i8, array &$gridL0, array &$gridL1): void
@@ -1518,12 +1518,12 @@ trait MacroblockDecodingTrait
             return;
         }
         $refIdxCol = $col['ref0'];
-        // temporal 缩放输入用 8x8 远角 4x4 的 MV（FFmpeg L699：x8*3+y8*3*b4_stride；
+        // temporal 缩放输入用 8x8 远角 4x4 的 MV（x8*3+y8*3*b4_stride；
         // colocated 16x16/intra 时远角==顶左，单 MV 路径 i8=0 不受影响）
         $mvCol = $col['mv0c'];
         $colList = 0;
         if ($refIdxCol < 0) {
-            // 同位块未用 L0 → 用其 L1 信息（FFmpeg L688-694）
+            // 同位块未用 L0 → 用其 L1 信息
             $refIdxCol = $col['ref1'];
             $mvCol = $col['mv1c'];
             $colList = 1;
@@ -1554,7 +1554,7 @@ trait MacroblockDecodingTrait
                 $gridL1[$by][$bx] = [$mvL1x, $mvL1y, 0];
             }
         } else {
-            // B_SUB_4x4：同位 4x4 逐块缩放（FFmpeg L707-718）
+            // B_SUB_4x4：同位 4x4 逐块缩放
             $colMbIdx = $mbY * $this->picWidthInMbs + $mbX;
             $colBase = $colMbIdx * 16 + $baseY * 4 + $baseX;
             for ($j = 0; $j < 4; $j++) {
@@ -1572,7 +1572,7 @@ trait MacroblockDecodingTrait
     }
 
     /**
-     * 单个 8x8 直接子块：MB 级邻居预测 + 每子块 colZero（FFmpeg h264_direct.c L428-487）
+     * 单个 8x8 直接子块：MB 级邻居预测 + 每子块 colZero
      */
     private function applyBDirect8x8(int $mbX, int $mbY, int $i8, array $neighborPred, array &$gridL0, array &$gridL1): void
     {
@@ -1665,7 +1665,7 @@ trait MacroblockDecodingTrait
 
         $col = $this->getColocatedBlockInfo($mbX, $mbY, 0);
         if (!$this->directSpatialMvPred) {
-            // temporal direct（FFmpeg pred_temp_direct_motion）
+            // temporal direct（pred_temp_direct_motion）
             // colocated 16x16_OR_INTRA（flags: 0x08|intra 0x07）→ 整 MB 单一 MV
             if ($col === null || ($col['mbFlags'] & 0x0F) !== 0) {
                 $tmpL0 = [];
@@ -1691,12 +1691,12 @@ trait MacroblockDecodingTrait
             $mv1x = $neighborPred[1][1];
             $mv1y = $neighborPred[1][2];
             if ($ref0 < 0 && $ref1 < 0) {
-                // 双 list 均无有效邻居 → ref=0, mv=0 双向（FFmpeg h264_direct.c L272-277）
+                // 双 list 均无有效邻居 → ref=0, mv=0 双向
                 $ref0 = $ref1 = 0;
                 $mv0x = $mv0y = $mv1x = $mv1y = 0;
             }
 
-            // colZero 粒度跟随同位块分区（FFmpeg pred_spatial_direct_motion）：
+            // colZero 粒度跟随同位块分区（pred_spatial_direct_motion）：
             // colocated 16x16_OR_INTRA → 当前保持 B_16x16，MB 级判定（L404-427，
             // 顶左 4x4 == 角点(0,0)）；colocated 16x8/8x16/8x8 → 当前升级 per-8x8，
             // 均匀填充后逐 8x8 独立判定（L428-487，远角 4x4 的 mv）
@@ -1763,7 +1763,7 @@ trait MacroblockDecodingTrait
     private function decodeBInterMacroblock(int $mbX, int $mbY, int $mbType, int $sliceQp): int
     {
         if ($mbType >= 23 && $mbType <= 48) {
-            // B 片内嵌 Intra 宏块：mb_type-23 → I 片语义（FFmpeg h264_cavlc.c L706-713）
+            // B 片内嵌 Intra 宏块：mb_type-23 → I 片语义
             $mbQpDelta = $this->decodeIntraMacroblock($mbX, $mbY, $mbType - 23, $sliceQp);
             // intra 邻居的 MV 标记为未使用（双 list 一致，镜像 P 片 intra 路径）
             $intraMv = [0, 0, -1];
@@ -1825,7 +1825,7 @@ trait MacroblockDecodingTrait
 
     private function decodeBBi16x16(int $mbX, int $mbY, int $sliceQp): int
     {
-        // 语法顺序：ref L0 → ref L1 → mvd L0 → mvd L1（FFmpeg h264_cavlc.c L921-949 list 主序）
+        // 语法顺序：ref L0 → ref L1 → mvd L0 → mvd L1（list 主序）
         $refIdx0 = $this->readRefIdxB(0);
         $refIdx1 = $this->readRefIdxB(1);
         list($predX0, $predY0) = $this->getB16x16MvPrediction($mbX, $mbY, 0, $refIdx0);
@@ -1854,7 +1854,7 @@ trait MacroblockDecodingTrait
         $spec = self::$bPartSpecs[$mbType];
         $layout = $spec[0]; // 0=16x8, 1=8x16
         // ref 读取：list 主序，未使用该 list 的分区填 -1；Bi(2) 分区两个 list 都读
-        // （FFmpeg h264_cavlc.c L951-1010：IS_DIR 对 Bi 分区双向为真）
+        // （IS_DIR 对 Bi 分区双向为真）
         $refs = [[-1, -1], [-1, -1]];
         for ($list = 0; $list < 2; $list++) {
             for ($p = 0; $p < 2; $p++) {
@@ -1925,7 +1925,7 @@ trait MacroblockDecodingTrait
 
     private function decodeB8x8(int $mbX, int $mbY, int $sliceQp): int
     {
-        // sub_mb_type ×4 → ref（list 主序）→ mvd（list 主序）（FFmpeg h264_cavlc.c L811-914）
+        // sub_mb_type ×4 → ref（list 主序）→ mvd（list 主序）
         $subTypes = [];
         $hasDirect = false;
         for ($i = 0; $i < 4; $i++) {
@@ -1955,7 +1955,7 @@ trait MacroblockDecodingTrait
                     }
                 }
             }
-            // direct 子块 MV 同步进 mbMvs（FFmpeg pred_direct_motion 先行写入 mv_cache），
+            // direct 子块 MV 同步进 mbMvs（pred_direct_motion 先行写入 mv_cache），
             // 供同 MB 后续 inter 子块的 MV 预测作邻居
             for ($i = 0; $i < 4; $i++) {
                 if ($subTypes[$i] !== 0) {
@@ -2099,7 +2099,7 @@ trait MacroblockDecodingTrait
 
     private function decodeBSkip(int $mbX, int $mbY): void
     {
-        // B_Skip = B_Direct_16x16 无残差（FFmpeg decode_mb_skip）
+        // B_Skip = B_Direct_16x16 无残差
         $this->decodeBDirect16x16($mbX, $mbY);
         $this->updateNzCountZero($mbX, $mbY);
         $this->updateInterMbIntraModes($mbX);

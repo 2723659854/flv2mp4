@@ -16,7 +16,7 @@ use Xiaosongshu\Flv2mp4\Codec\Decode\SpsPpsParsingTrait;
 use Xiaosongshu\Flv2mp4\Codec\Decode\TransformTrait;
 
 /**
- * @purpose H.264解码器 - 支持 baseline/main/high profile (I/P/B帧, CAVLC/CABAC)
+ * @purpose 视频解码器 - 支持 baseline/main/high profile (I/P/B帧, CAVLC/CABAC)
  * @author yanglong
  * @time 2026年7月23日14:41:47
  */
@@ -171,7 +171,7 @@ class H264Decoder
     public bool $transform8x8ModeFlag = false;
     public int $secondChromaQpIndexOffset = 0;
 
-    // POC (H.264 8.2.1, type0)
+    // POC (8.2.1, type0)
     public int $prevPicOrderCntMsb = 0;
     public int $prevPicOrderCntLsb = 0;
     public int $currPicOrderCntLsb = 0;
@@ -220,7 +220,7 @@ class H264Decoder
     public array $picMvd1 = [];
     public array $picIsSkip = [];    // mbCount 0/1（CABAC mb_skip_flag 上下文）
     public array $picIsDirectMb = []; // mbCount 0/1（CABAC B mb_type/ref 上下文，仅 B_Direct_16x16/Skip）
-    public array $picDirectQ = [];   // mbCount*4 逐 8x8 象限 direct 标记（FFmpeg direct_table，B 片 ref ctx 排除用）
+    public array $picDirectQ = [];   // mbCount*4 逐 8x8 象限 direct 标记（direct_table，B 片 ref ctx 排除用）
     public array $picMbType = [];    // mbCount flags
     public array $picSubType = [];   // mbCount*4 8x8 子类型 flags
     public array $picCbp = [];       // mbCount
@@ -252,13 +252,13 @@ class H264Decoder
     ];
 
     // Inter宏块CBP映射表（golomb code -> CBP）
-    // H.264标准Table 9-4
+    // 编码标准Table 9-4
     public const GOLOMB_TO_INTER_CBP = [
         0, 16, 1, 2, 4, 8, 32, 3, 5, 10, 12, 15, 47, 7, 11, 13, 14, 6, 9, 31, 35, 37, 42, 44, 33, 34,
         36, 40, 39, 43, 45, 46, 17, 18, 20, 24, 19, 21, 26, 28, 23, 27, 29, 30, 22, 25, 38, 41,
     ];
 
-    // FFmpeg scan8数组，用于将块索引映射到缓存位置
+    // scan8数组，用于将块索引映射到缓存位置
     // 用于pred_non_zero_count计算
     public const SCAN8 = [
         12, 13, 20, 21,
@@ -420,7 +420,7 @@ class H264Decoder
         $this->currentIsLongTerm = false;
     }
 
-    // ===== POC 计算 (H.264 8.2.1.1) =====
+    // ===== POC 计算 (8.2.1.1) =====
 
     /**
      * 参考帧解码完成后更新 prev POC 状态。
@@ -624,7 +624,7 @@ class H264Decoder
                 $nalRefIdc = ($nalHeader >> 5) & 0x03;
                 //$sliceCount++;
                 $this->frameNum++;
-                // 每帧重新初始化像素平面（128 = H.264 规定的帧内预测默认值）
+                // 每帧重新初始化像素平面（128 = 标准规定的帧内预测默认值）
                 $this->yPlane = array_fill(0, $ySize, 128);
                 $this->uPlane = array_fill(0, $uvSize, 128);
                 $this->vPlane = array_fill(0, $uvSize, 128);
@@ -690,7 +690,7 @@ class H264Decoder
                     $this->refWidthUv = $dpbEntry['widthUv'];
                     $this->refHeightUv = $dpbEntry['heightUv'];
 
-                    // POC 参考状态仅在参考帧后更新（H.264 8.2.1.1）
+                    // POC 参考状态仅在参考帧后更新（8.2.1.1）
                     $this->updatePrevPocState($this->currFrameNum, 1 << ($this->log2MaxFrameNumMinus4 + 4), $isIdrNal);
                 }
 
@@ -743,7 +743,7 @@ class H264Decoder
 
     /**
      * 默认缩放矩阵 (intra Y 和 intra C)
-     * 来自 H.264 标准 Table 7-3, FFmpeg default_scaling4
+     * 来自编码标准 Table 7-3, default_scaling4
      */
     private const DEFAULT_SCALING4_INTRA = [
         6, 13, 20, 28, 13, 20, 28, 32, 20, 28, 32, 37, 28, 32, 37, 42
@@ -753,7 +753,7 @@ class H264Decoder
     ];
 
     /**
-     * Dequant coefficient init table (H.264 标准)
+     * Dequant coefficient init table (编码标准)
      */
     private const DEQUANT4_COEFF_INIT = [
         [10, 13, 16],

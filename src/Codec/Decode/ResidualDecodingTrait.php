@@ -32,7 +32,7 @@ trait ResidualDecodingTrait
         $suffixLen = ($totalCoeff > 10 && $trailingOnes < 3) ? 1 : 0;
         $rem = $totalCoeff - $trailingOnes;
         $revStart = $lastNz - $trailingOnes;
-        // H.264 suffix_length 更新阈值表
+        // suffix_length 更新阈值表
         $suffixLimit = [0, 3, 6, 12, 24, 48, PHP_INT_MAX];
 
         for ($i = $revStart; $i >= 0 && $rem > 0; $i--) {
@@ -79,7 +79,7 @@ trait ResidualDecodingTrait
             $level = (($adjustedCode + 2) >> 1) ^ $mask;
             $level = $level - $mask;
             $coeffs[$i] = $level;
-            // 更新 suffix_length (参考 FFmpeg SUFFIX_LIMIT 表)
+            // 更新 suffix_length (参考 SUFFIX_LIMIT 表)
             $absLvl = abs($level);
             if ($isFirst) {
                 // 第一个 level 之后: suffixLen = 1 + (|level| > 3)
@@ -890,7 +890,7 @@ trait ResidualDecodingTrait
         $trailingOnes = 0;
         $this->readCoeffToken($totalCoeff, $trailingOnes, $nC);
 
-        // 根据H.264标准，如果totalCoeff超过maxCoef，限制为maxCoef
+        // 根据编码标准，如果totalCoeff超过maxCoef，限制为maxCoef
         $totalCoeff = min($totalCoeff, $maxCoef);
         // trailingOnes不能超过totalCoeff
         $trailingOnes = min($trailingOnes, $totalCoeff);
@@ -954,7 +954,7 @@ trait ResidualDecodingTrait
                     }
                 }
 
-                // 从 levelCode 中提取符号和绝对值（H.264 标准：最低位是符号位，0=正，1=负）
+                // 从 levelCode 中提取符号和绝对值（编码标准：最低位是符号位，0=正，1=负）
                 $sign = $levelCode & 1;
                 $absLevelMinus1 = $levelCode >> 1;
                 if ($isFirst && $trailingOnes < 3) {

@@ -132,7 +132,7 @@ trait SliceDecodingTrait
                 $lumaWeightL0Flag = $this->reader->readU(1);
                 $lw = $defLumaW; $lo = 0;
                 if ($lumaWeightL0Flag) {
-                    // spec 7.3.3.2 / FFmpeg h264_parse.c：luma_weight_l0[i] 是有符号绝对权重值，
+                    // spec 7.3.3.2：luma_weight_l0[i] 是有符号绝对权重值，
                     // 不是 default+delta！（flag=0 时才是默认值 1<<denom）
                     $lw = $this->reader->readSe();
                     $lo = $this->reader->readSe();
@@ -171,8 +171,8 @@ trait SliceDecodingTrait
         }
 
         // dec_ref_pic_marking（spec 7.3.3.3）：此处只解析并暂存命令。
-        // 执行必须延后到当前帧解码完成、加入 DPB 之后（spec 8.2.5 / FFmpeg
-        // ff_h264_execute_ref_pic_marking 在帧完成后执行）——否则当前帧的
+        // 执行必须延后到当前帧解码完成、加入 DPB 之后（spec 8.2.5：
+        // ref_pic_marking 在帧完成后执行）——否则当前帧的
         // 参考列表会用到一个被提前踢除了参考帧的 DPB（多参考 P/B 帧错位）。
         $this->pendingMmco = [];
         $this->pendingMmcoSliding = false;
@@ -228,7 +228,7 @@ trait SliceDecodingTrait
             $this->sliceBetaOffset = 0;
         }
 
-        // CABAC：slice header 后字节对齐，从对齐字节起初始化算术引擎（FFmpeg h264_slice.c）
+        // CABAC：slice header 后字节对齐，从对齐字节起初始化算术引擎
         if ($this->entropyCodingModeFlag) {
             $this->reader->alignToByte();
             $headerEndByte = intdiv($this->reader->getPos(), 8);
@@ -279,7 +279,7 @@ trait SliceDecodingTrait
                 if (count($this->refPicList0) > $numRefIdxL0Active) {
                     $this->refPicList0 = array_slice($this->refPicList0, 0, $numRefIdxL0Active);
                 }
-                // 不足 numRefIdxL0Active 时以默认列表[0]（default_ref）补齐（FFmpeg: null 槽位替换为 default_ref）
+                // 不足 numRefIdxL0Active 时以默认列表[0]（default_ref）补齐（null 槽位替换为 default_ref）
                 while (count($this->refPicList0) < $numRefIdxL0Active && !empty($this->refPicList0)) {
                     $this->refPicList0[] = $this->refPicList0[0];
                 }
@@ -456,7 +456,7 @@ trait SliceDecodingTrait
                     $this->mbQpForDeblock[$mbIdx] = $this->cabQp;
                 }
                 $this->mvTopLeft = [$nextMvTopLeft, $nextMvTopLeft, $nextMvTopLeft, $nextMvTopLeft];
-                // end_of_slice_flag：FFmpeg h264_slice.c:2644 每个 MB 后必读 terminate bin
+                // end_of_slice_flag：每个 MB 后必读 terminate bin
                 if ($this->cabTerminate() !== 0) break;
                 continue;
             }
@@ -502,7 +502,7 @@ trait SliceDecodingTrait
     public bool $pendingMmcoSliding = false;
 
     /**
-     * dec_ref_pic_marking 执行阶段（spec 8.2.5 / FFmpeg ff_h264_execute_ref_pic_marking）。
+     * dec_ref_pic_marking 执行阶段（spec 8.2.5）。
      * 必须在当前参考帧加入 DPB 之后调用：MMCO/滑动窗口影响的是后续帧的参考列表，
      * 当前帧的列表构建用的是标记前的 DPB。
      */
@@ -515,7 +515,7 @@ trait SliceDecodingTrait
             foreach ($cmds as [$mmco, $args]) {
                 if ($mmco === 1) {
                     // MMCO1: 标记短期参考为不用于参考
-                    // FFmpeg h264_refs.c: short_pic_num=(currPicNum-diff-1)&(maxPicNum-1)
+                    // short_pic_num=(currPicNum-diff-1)&(maxPicNum-1)
                     $shortPicNum = ($frameNum - $args[0] - 1) & ($maxPicNumMmco - 1);
                     foreach ($this->dpb as $dpk => $dpEntry) {
                         if (!$dpEntry['isLongTerm'] && $dpEntry['frameNum'] === $shortPicNum) {
@@ -556,7 +556,7 @@ trait SliceDecodingTrait
     }
 
     /**
-     * 执行 ref_pic_list_modification（spec 8.2.4.3.1 / FFmpeg h264_refs.c ff_h264_build_ref_list）。
+     * 执行 ref_pic_list_modification（spec 8.2.4.3.1）。
      * 关键语义（与朴素"移除再插入"不同）：
      *  - 列表长度固定为 refCount（numRefIdxActive），默认列表不足时先补 null；
      *  - 每条命令把目标参考写入 index，[index..i-1] 右移一位（i 为同 pic_id 的既有位置，

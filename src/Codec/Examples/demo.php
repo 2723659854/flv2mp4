@@ -1,19 +1,19 @@
 <?php
 /**
- * H.264 编解码 + 缩放 Demo
+ * 视频编解码 + 缩放 Demo
  * 
  * 功能：
- *   1. 从 FLV 文件中提取 H.264 裸流 (input.h264)
- *   2. 使用纯 PHP H.264 解码器解码为 YUV420P
+ *   1. 从 FLV 文件中提取裸流 (input.h264)
+ *   2. 使用纯 PHP 视频解码器解码为 YUV420P
  *   3. 使用 VideoScaler 缩放到目标分辨率
- *   4. 使用 H.264 编码器重新编码为 output.h264
+ *   4. 使用视频编码器重新编码为 output.h264
  * 
  * 使用方法：
  *   1. 准备 test.flv 文件放在项目根目录
  *   2. 运行: php demo.php
  *   3. 生成的文件:
- *      - input.h264   从 FLV 提取的原始 H.264 流
- *      - output.h264  解码+缩放+编码后的 H.264 流
+ *      - input.h264   从 FLV 提取的原始码流
+ *      - output.h264  解码+缩放+编码后的码流
  *      - input_decoded.yuv  解码后的原始 YUV (可选保存)
  *      - output_decoded.yuv 重新解码后的 YUV (可选保存，用于对比)
  */
@@ -44,7 +44,7 @@ $saveScaledYuv = false;   // 是否保存缩放后的 YUV (用于调试)
 ini_set('memory_limit', '2048M');
 set_time_limit(0);
 
-// ========== Step 1: 从 FLV 提取 H.264 裸流 ==========
+// ========== Step 1: 从 FLV 提取裸流 ==========
 
 echo "========================================\n";
 echo "Step 1: 从 FLV 提取 H.264 裸流\n";
@@ -78,7 +78,7 @@ foreach (FlvParse::getTags() as $tag) {
     $frameType = ($videoFrameHeader >> 4) & 0x0F;
     $codecId = $videoFrameHeader & 0x0F;
     
-    if ($codecId !== 7) continue; // 只处理 AVC (H.264)
+    if ($codecId !== 7) continue; // 只处理 AVC
     
     // AVC Packet Type (1字节)
     $avcPacketType = ord($body[1]);
@@ -130,7 +130,7 @@ if ($videoFrameCount === 0) {
     die("错误: 未找到视频帧\n");
 }
 
-// ========== Step 2: 解码 H.264 ==========
+// ========== Step 2: 解码 ==========
 
 echo "========================================\n";
 echo "Step 2: 解码 H.264\n";

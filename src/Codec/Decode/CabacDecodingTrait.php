@@ -5,10 +5,10 @@ namespace Xiaosongshu\Flv2mp4\Codec\Decode;
 /**
  * CABAC 算术解码（main/high profile）。
  *
- * 严格对照 FFmpeg：
- *  - libavcodec/cabac.c            ff_init_cabac_decoder
- *  - libavcodec/cabac_functions.h get_cabac_inline / refill / refill2 / bypass / terminate
- *  - libavcodec/h264_cabac.c      ctx 初始化、宏块层语法、残差
+ * 严格对照参考实现：
+ *  - 算术解码器初始化（消费 b0/b1/b2）
+ *  - 内联解码 / refill / refill2 / bypass / terminate
+ *  - ctx 初始化、宏块层语法、残差
  *
  * 32 位无符号运算统一用 & 0xFFFFFFFF 仿真；PHP >> 为算术下移，掩码后数值恒 < 2^31，
  * 因此 >>31 即逻辑移位。
@@ -17,7 +17,7 @@ trait CabacDecodingTrait
 {
     use CabacTablesTrait;
 
-    // MB 类型标志（与 FFmpeg mpegutils.h / h264dec.h 一致）
+    // MB 类型标志
     private static int $CAB_FLG_I4    = 0x00000001;  // MB_TYPE_INTRA4x4
     private static int $CAB_FLG_I16   = 0x00000002;  // MB_TYPE_INTRA16x16
     private static int $CAB_FLG_PCM   = 0x00000004;  // MB_TYPE_INTRA_PCM
@@ -38,12 +38,12 @@ trait CabacDecodingTrait
     private string $cabRawTag = '';
     /** 当前 MB 是否 intra（mb_type 读出后由 cabFixUnavailNz 设置；不可用邻居的 nz/cbp 默认值依赖它） */
     private bool $cabMbIsIntra = true;
-    /** 本 MB 渐进 ref 覆盖（FFmpeg ref_cache 语义）：[list][4x4 块号] = ref；未设块按 -1 处理 */
+    /** 本 MB 渐进 ref 覆盖（ref_cache 语义）：[list][4x4 块号] = ref；未设块按 -1 处理 */
     private array $cabMbRefOv = [[], []];
-    /** 本 MB 渐进 direct 标记（FFmpeg direct_cache 语义）：4x4 块号 => 1，B 片 ref ctx 排除用 */
+    /** 本 MB 渐进 direct 标记（direct_cache 语义）：4x4 块号 => 1，B 片 ref ctx 排除用 */
     private array $cabMbDirOv = [];
 
-    // ---- FFmpeg scan8 cache 几何（h264_parse.h scan8 / h264_mvpred.h fill/write_back）----
+    // ---- scan8 cache 几何（scan8 / fill/write_back）----
     /** @var int[] 工作 cache，8 宽共 120 单元，下标 = scan8 位置 */
     private array $cabNzCache = [];
     /** @var int[] 同几何的 intra4x4 预测模式 cache（-1=不可用，2=DC） */
@@ -53,7 +53,7 @@ trait CabacDecodingTrait
     /** @var int[] 每 MB 持久 i4 模式（16，n 序），仅 I4 MB 有效 */
     private array $cabI4Store = [];
 
-    // I 片不可用邻居默认值（FFmpeg fill_decode_caches）：nz=64，cbp=0x7CF
+    // I 片不可用邻居默认值（fill_decode_caches）：nz=64，cbp=0x7CF
     private static int $CAB_NZ_UNAVAIL = 64;
     private static int $CAB_CBP_INTRA  = 0x7CF;
 
@@ -79,7 +79,7 @@ trait CabacDecodingTrait
     private static array $LAST_BASE = [0 => 166, 1 => 181, 2 => 195, 3 => 210, 4 => 213, 5 => 417, 9 => 690];
     private static array $LEV_BASE  = [0 => 227, 1 => 237, 2 => 247, 3 => 257, 4 => 266, 5 => 426, 9 => 708];
     private static array $CBF_BASE  = [0 => 85, 1 => 89, 2 => 93, 3 => 97, 4 => 101, 9 => 1016];
-    // 8x8 ff_zigzag_direct
+    // 8x8 zigzag_direct
     private static array $ZZ8 = [
         0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5,
         12, 19, 26, 33, 40, 48, 41, 34, 27, 20, 13, 6, 7, 14, 21, 28,
@@ -87,7 +87,7 @@ trait CabacDecodingTrait
         58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
     ];
 
-    // scan8[n]：n 是 8x8 分组序块号（非 raster）。420 用到前 36 项（h264_parse.h L40-L49）
+    // scan8[n]：n 是 8x8 分组序块号（非 raster）。420 用到前 36 项
     private static array $SCAN8 = [
         12, 13, 20, 21,  14, 15, 22, 23,  28, 29, 36, 37,  30, 31, 38, 39, // 0..15 luma
         52, 53, 60, 61,  54, 55, 62, 63,                                    // 16..23 Cb
@@ -117,7 +117,7 @@ trait CabacDecodingTrait
 
     /**
      * 在 slice header 结束（已字节对齐）后启动 CABAC。
-     * 始终采用 FFmpeg 的“奇对齐”规范初始化：消费 b0/b1/b2 三字节。
+     * 始终采用“奇对齐”规范初始化：消费 b0/b1/b2 三字节。
      */
     private function cabacStart(string $rbsp, int $byteOffset): void
     {
@@ -132,7 +132,7 @@ trait CabacDecodingTrait
         $b0 = $this->cabacAbsByte($byteOffset);
         $b1 = $this->cabacAbsByte($byteOffset + 1);
         $b2 = $this->cabacAbsByte($byteOffset + 2);
-        // FFmpeg ff_init_cabac_decoder：读完 b0/b1 后按指针奇偶选分支。
+        // 解码器初始化：读完 b0/b1 后按指针奇偶选分支。
         // gb.buffer 为偶对齐，故由 slice-data 字节偏移奇偶决定。
         $even = ($byteOffset & 1) === 0;
         if ($even) {
@@ -148,7 +148,7 @@ trait CabacDecodingTrait
     private function cabacAbsByte(int $abs): int
     {
         if ($abs < 0 || $abs >= $this->cabacEnd) {
-            return 0; // AV_INPUT_BUFFER_PADDING 零
+            return 0; // 零填充（AV_INPUT_BUFFER_PADDING）
         }
         return ord($this->cabacData[$abs]);
     }
@@ -170,7 +170,7 @@ trait CabacDecodingTrait
         if ($v < 512) {
             $i = 7 - self::$cabacNormShift[$v];
         } else {
-            // 理论不可达（FFmpeg 512 项表）；与 HAVE_FAST_CLZ 分支 i=ctz(low)-16 等价
+            // 理论不可达（512 项表）；与快速 clz 分支 i=ctz(low)-16 等价
             $u = $low;
             $z = 0;
             while (($u & 1) === 0 && $z < 32) {
@@ -194,14 +194,14 @@ trait CabacDecodingTrait
 
         $rangeLps = self::$cabacLpsRange[2 * ($range & 0xC0) + $s];
         $range -= $rangeLps;
-        // FFmpeg int32 回绕语义：lps_mask = ((range<<17) - low) >> 31，等价于无符号 (range<<17) < low 时取 -1
+        // int32 回绕语义：lps_mask = ((range<<17) - low) >> 31，等价于无符号 (range<<17) < low 时取 -1
         $d = (($range << 17) - $low) & 0xFFFFFFFF;
         $mask = $d >= 0x80000000 ? -1 : 0;
 
         $low -= ($range << 17) & $mask;
         $range += ($rangeLps - $range) & $mask;
 
-        // FFmpeg: s ^= lps_mask → LPS 时 s 变为 -(s+1)，mlps 索引 128+s 即 127-s（表前 128 项镜像段）
+        // s ^= lps_mask → LPS 时 s 变为 -(s+1)，mlps 索引 128+s 即 127-s（表前 128 项镜像段）
         $s ^= $mask;
         $this->cabacStates[$ctxIdx] = self::$cabacMlps[128 + $s];
         $bit = $s & 1;
@@ -230,7 +230,7 @@ trait CabacDecodingTrait
             $low = $this->cabacLow;
         }
         $r = $this->cabacRange << 17;
-        // FFmpeg：if((int32)low < (int32)range) return 0; 必须按有符号比较
+        // if((int32)low < (int32)range) return 0; 必须按有符号比较
         $d = ($low - $r) & 0xFFFFFFFF;
         if ($d >= 0x80000000) {
             // 有符号 low < r：bit=0，low 保持
@@ -249,7 +249,7 @@ trait CabacDecodingTrait
             $low = $this->cabacLow;
         }
         $r = $this->cabacRange << 17;
-        // FFmpeg：low-=range; mask=(int32)low>>31; 必须按有符号 32 位
+        // low-=range; mask=(int32)low>>31; 必须按有符号 32 位
         $d = ($low - $r) & 0xFFFFFFFF;
         $mask = $d >= 0x80000000 ? -1 : 0;
         $this->cabacLow = ($d + ($r & $mask)) & 0xFFFFFFFF;
@@ -261,7 +261,7 @@ trait CabacDecodingTrait
     private function cabTerminate(): int
     {
         $range = $this->cabacRange - 2;
-        // FFmpeg：if((int32)low < (int32)(range<<17)) —— 有符号比较
+        // if((int32)low < (int32)(range<<17)) —— 有符号比较
         $d = ($this->cabacLow - ($range << 17)) & 0xFFFFFFFF;
         if ($d >= 0x80000000) {
             // renorm once
@@ -278,7 +278,7 @@ trait CabacDecodingTrait
     }
 
     // ============================================================
-    // 上下文初始化（h264_cabac.c ff_h264_init_cabac_states）
+    // 上下文初始化
     // ============================================================
 
     /**
@@ -298,7 +298,7 @@ trait CabacDecodingTrait
         for ($i = 0; $i < 1024; $i++) {
             $m = $init[$i][0];
             $n = $init[$i][1];
-            // 严格对照 FFmpeg：pre ^= pre>>31（负数 -> -pre-1；正数保持，不 clamp）
+            // 严格对照参考实现：pre ^= pre>>31（负数 -> -pre-1；正数保持，不 clamp）
             $pre = 2 * ((($m * $qp) >> 4) + $n) - 127;
             if ($pre < 0) {
                 $pre = -$pre - 1;
@@ -347,7 +347,7 @@ trait CabacDecodingTrait
         $this->cabMbX = $mbX;
         $this->cabMbY = $mbY;
         $this->cabMbIdx = $mbY * $this->picWidthInMbs + $mbX;
-        // 本 MB 渐进 ref/direct 覆盖（FFmpeg ref_cache/direct_cache 在 MB 解码内渐进填写）
+        // 本 MB 渐进 ref/direct 覆盖（ref_cache/direct_cache 在 MB 解码内渐进填写）
         $this->cabMbRefOv = [[], []];
         $this->cabMbDirOv = [];
         $this->cabNz = array_fill(0, 24, 0);
@@ -355,7 +355,7 @@ trait CabacDecodingTrait
         $this->cabFillCaches();
     }
 
-    /** 本 MB 覆盖：写入一块区域的渐进 ref（FFmpeg ref 循环 fill_rectangle） */
+    /** 本 MB 覆盖：写入一块区域的渐进 ref（ref 循环 fill_rectangle） */
     private function cabOvRefBox(int $list, int $bx, int $by, int $bw, int $bh, int $ref): void
     {
         for ($y = $by; $y < $by + $bh; $y++) {
@@ -373,7 +373,7 @@ trait CabacDecodingTrait
     }
 
     /**
-     * 按 FFmpeg fill_decode_caches（h264_mvpred.h）从持久存储填充本 MB 的 nz / i4 mode
+     * 按 fill_decode_caches 从持久存储填充本 MB 的 nz / i4 mode
      * 工作 cache（当前矩形 + 上/左邻居边）。I 片：不可用邻居 nz=64、mode=-1、cbp=0x7CF。
      */
     private function cabFillCaches(): void
@@ -404,7 +404,7 @@ trait CabacDecodingTrait
             $nz[86] = $this->cabNzStore[$s + 38]; $nz[87] = $this->cabNzStore[$s + 39];
         } else {
             // 不可用 top：填哨兵 -1，mb_type 读出后经 cabFixUnavailNz 转为
-            // FFmpeg fill_decode_caches 默认值（h264_mvpred.h L685/L716：
+            // fill_decode_caches 默认值（
             // CABAC && !IS_INTRA(mb_type) ? 0 : 64）
             foreach ([4, 5, 6, 7, 44, 45, 46, 47, 84, 85, 86, 87] as $c) {
                 $nz[$c] = -1;
@@ -445,8 +445,8 @@ trait CabacDecodingTrait
     }
 
     /**
-     * mb_type 读出后调用：把不可用邻居的 nz 哨兵(-1)按当前 MB 类型转为 FFmpeg 默认值。
-     * FFmpeg fill_decode_caches（h264_mvpred.h L685/L716）：
+     * mb_type 读出后调用：把不可用邻居的 nz 哨兵(-1)按当前 MB 类型转为默认值。
+     * fill_decode_caches：
      *   CABAC && !IS_INTRA(mb_type) ? 0 : 64
      * cabMbBegin 在 mb_type 读取前执行（fill 时尚不知 intra/inter），故哨兵延迟到此转换。
      * skip/PCM 无 CBF 读取，未调用亦无影响（哨兵在 ctx 计算中表现为 0）。
@@ -464,12 +464,12 @@ trait CabacDecodingTrait
     }
 
     /**
-     * 左/上 MB 的 cbp 上下文（ffmpeg fill_decode_caches，h264_mvpred.h:720-733）。
+     * 左/上 MB 的 cbp 上下文（fill_decode_caches）。
      * 帧 MBAFF（非场）时 left_block={0,1,2,3,...}、leftL==leftBot：
      *   top_cbp  = top 存在 ? cbp_table[top]（原始，不掩码） : (intra?0x7CF:0x00F)
      *   left_cbp = left 存在 ? (c&0x7F0) | (c&0x02) | (c&0x08) : (intra?0x7CF:0x00F)
      *   即保留原 bit1 与 bit3（(c>>(0&~1))&2 与 ((c>>(2&~1))&2)<<2），丢弃 bit0/bit2。
-     * 不可用默认值按当前 MB 类型（h264_mvpred.h L725/L732：IS_INTRA ? 0x7CF : 0x00F）：
+     * 不可用默认值按当前 MB 类型（IS_INTRA ? 0x7CF : 0x00F）：
      * cbp_luma/chroma 的 ctx 两者等价，但 luma-DC(bit8)/chroma-DC(bit6,7) 的 CBF ctx 不等价。
      *
      * @return array{0:int,1:int} [leftCbp,topCbp]
@@ -566,7 +566,7 @@ trait CabacDecodingTrait
             if ($this->cabGet($ctxBase) === 0) {
                 return ['k' => 'i4'];
             }
-            // FFmpeg decode_cabac_intra_mb_type：state+=2 仅在 intra_slice 分支内，
+            // decode_cabac_intra_mb_type：state+=2 仅在 intra_slice 分支内，
             // 非 intra 片保持 state=ctx_base（后续读 state[1..3+2*is] 即 ctx_base+1..3）
             $state = $ctxBase;
         }
@@ -605,7 +605,7 @@ trait CabacDecodingTrait
         if ($l >= 0 && $this->picChromaPred[$l] !== 0) {
             $ctx++;
         }
-        // FFmpeg decode_cabac_mb_chroma_pre_mode：左/上邻居各 ctx++（非 +2）
+        // decode_cabac_mb_chroma_pre_mode：左/上邻居各 ctx++（非 +2）
         if ($t >= 0 && $this->picChromaPred[$t] !== 0) {
             $ctx++;
         }
@@ -651,7 +651,7 @@ trait CabacDecodingTrait
         return 1 + $this->cabGet(77 + $ctx);
     }
 
-    /** 读取 mb_qp_delta，更新 cabQp / cabLastQpDiff（h264_cabac.c decode_cabac_mb_dqp） */
+    /** 读取 mb_qp_delta，更新 cabQp / cabLastQpDiff（decode_cabac_mb_dqp） */
     private function cabReadQpDelta(): void
     {
         if ($this->cabGet(60 + ($this->cabLastQpDiff !== 0 ? 1 : 0)) === 0) {
@@ -727,7 +727,7 @@ trait CabacDecodingTrait
                     }
                 }
             }
-            // FFmpeg: 循环正常退出（last==63）时最后一位必显著；break（last=64）不补
+            // 循环正常退出（last==63）时最后一位必显著；break（last=64）不补
             if (!$terminated) {
                 $index[$coeffCount++] = 63;
             }
@@ -743,7 +743,7 @@ trait CabacDecodingTrait
                     }
                 }
             }
-            // FFmpeg 宏语义：break（last 置 max）不补；正常退出（last==max-1）补最后一位
+            // 循环语义：break（last 置 max）不补；正常退出（last==max-1）补最后一位
             if (!$terminated) {
                 $index[$coeffCount++] = $maxCoeff - 1;
             }
@@ -881,7 +881,7 @@ trait CabacDecodingTrait
      */
     private function cabResidualLuma8x8(int $p8, bool $intra): ?array
     {
-        // scanJ[k] = TRANSPOSE8(ff_zigzag_direct[k])（FFmpeg 存储布局）
+        // scanJ[k] = TRANSPOSE8(zigzag_direct[k])（存储布局）
         $scanJ = [];
         for ($k = 0; $k < 64; $k++) {
             $z = self::$ZZ8[$k];
@@ -924,7 +924,7 @@ trait CabacDecodingTrait
         $this->picMbType[$mbY * $this->picWidthInMbs + $mbX] |= 1;
 
         $t = $preType ?? $this->cabReadIntraMbType(3, true);
-        // intra 恒定：不可用邻居 nz 哨兵转 64（FFmpeg IS_INTRA -> 0x40）
+        // intra 恒定：不可用邻居 nz 哨兵转 64（IS_INTRA -> 0x40）
         $this->cabFixUnavailNz(true);
 
         if ($t['k'] === 'pcm') {
@@ -1003,7 +1003,7 @@ trait CabacDecodingTrait
 
         // ---------- 亮度残差（n 序；cbp 位 = n>>2）----------
         if ($dct8) {
-            // FFmpeg hl_decode_mb 的 8x8DCT 分支：逐 8x8 块 预测→叠残差→重建完成，
+            // hl_decode_mb 的 8x8DCT 分支：逐 8x8 块 预测→叠残差→重建完成，
             // 后续块的预测使用已重建邻居样值（不能先写全部预测再统一叠残差）
             for ($p8 = 0; $p8 < 4; $p8++) {
                 $bx = $p8 & 1;
@@ -1283,7 +1283,7 @@ trait CabacDecodingTrait
                 [$crAc[$b]] = $this->cabDecodeAcBlock(4, 32 + $b, $crList, $chromaQp, true);
             }
         } else {
-            // FFmpeg h264_cabac.c: cbp&0x20==0 时 fill_rectangle 清零色度 AC nz，
+            // cbp&0x20==0 时 fill_rectangle 清零色度 AC nz，
             // 否则陈旧值会经 48-store 污染后续 MB 的 CBF 邻居
             foreach (self::$CELL_CB_ST as $cell) {
                 $this->cabNzCache[$cell] = 0;
@@ -1459,7 +1459,7 @@ trait CabacDecodingTrait
         $this->picIs8x8Dct[$mbIdx] = 0;
         $this->picChromaPred[$mbIdx] = 0;
         $this->picCbp[$mbIdx] = 0xf7ef;
-        // PCM：当前矩形所有 nz=16 并持久化（ff_h264_write_back_non_zero_count 语义）
+        // PCM：当前矩形所有 nz=16 并持久化（write_back_non_zero_count 语义）
         foreach (self::$CELL_RESET as $cell) {
             $this->cabNzCache[$cell] = 16;
         }
@@ -1479,7 +1479,7 @@ trait CabacDecodingTrait
     }
 
     // ================================================================
-    // CABAC P/B 宏块（FFmpeg h264_cabac.c ff_h264_decode_mb_cabac）
+    // CABAC P/B 宏块
     // ================================================================
 
     /**
@@ -1626,7 +1626,7 @@ trait CabacDecodingTrait
         [$lMb, $lBlk, $tMb, $tBlk] = $this->cabNbBlock($n);
         $store = $list === 0 ? $this->picRef0 : $this->picRef1;
         $ctx = 0;
-        // 本 MB 内的邻居：读渐进覆盖（FFmpeg ref_cache 在 MB 解码过程中渐进填写，
+        // 本 MB 内的邻居：读渐进覆盖（ref_cache 在 MB 解码过程中渐进填写，
         // ref 循环里后解码象限的 ctx 能看到先解码象限的 ref）
         if ($lMb >= 0) {
             if ($lMb === $this->cabMbIdx) {
@@ -1668,7 +1668,7 @@ trait CabacDecodingTrait
     {
         [$lMb, $lBlk, $tMb, $tBlk] = $this->cabNbBlock($n);
         $store = $list === 0 ? $this->picMvd0 : $this->picMvd1;
-        // FFmpeg mvd_cache 存的是 abs(mvd) 截 70（decode_cabac_mb_mvd 传出 *mvda），
+        // mvd_cache 存的是 abs(mvd) 截 70（decode_cabac_mb_mvd 传出 *mvda），
         // amvd = 左/上邻块 abs 值之和
         $amvd = 0;
         if ($lMb >= 0) {
@@ -1680,7 +1680,7 @@ trait CabacDecodingTrait
             $amvd += min(70, abs($m[$comp]));
         }
         $ctxBase = $comp === 0 ? 40 : 47;
-        // FFmpeg h264_cabac.c L1510：ctx = ctxbase + ((amvd-3)>>31) + ((amvd-33)>>31) + 2
+        // ctx = ctxbase + ((amvd-3)>>31) + ((amvd-33)>>31) + 2
         // 即 amvd<3 -> ctxbase+0，[3,33) -> ctxbase+1，>=33 -> ctxbase+2
         $ctx = $ctxBase + 2 - ($amvd < 3 ? 1 : 0) - ($amvd < 33 ? 1 : 0);
         if ($this->cabGet($ctx) === 0) {
@@ -1751,7 +1751,7 @@ trait CabacDecodingTrait
         return [$px + ($j & 1), $py + ($j >> 1), 1, 1];
     }
 
-    /** inter 宏块残差：叠加到运动补偿后的像素上（FFmpeg L2360-2510 inter 残差语义） */
+    /** inter 宏块残差：叠加到运动补偿后的像素上（inter 残差语义） */
     private function cabDecodeInterResidual(int $mbX, int $mbY, int $cbpLuma, int $cbpChroma, bool $dct8): void
     {
         $qp = $this->cabQp;
@@ -1781,7 +1781,7 @@ trait CabacDecodingTrait
                 if (($cbpLuma & (1 << ($n >> 2))) !== 0) {
                     [$block] = $this->cabDecodeAcBlock(2, $n, 3, $qp, false);
                     $idct = $this->idct4x4Flat($block);
-                    // FFmpeg block_offset[i] 由 scan8[i]-scan8[0] 派生（h264_slice.c L555）：
+                    // block_offset[i] 由 scan8[i]-scan8[0] 派生：
                     // 残差块号 n 为 8x8 分组序，像素位置须经 N2R 映射到 raster
                     $r = self::$N2R[$n];
                     $px0 = $mbX * 16 + ($r & 3) * 4;
@@ -1909,8 +1909,8 @@ trait CabacDecodingTrait
         // ---------- skip（decode_cabac_mb_skip）----------
         if ($this->cabReadMbSkip(false)) {
             $this->picIsSkip[$mbIdx] = 1;
-            $this->picCbp[$mbIdx] = 0;   // FFmpeg decode_mb_skip: h->cbp_table[mb_xy] = 0
-            $this->cabLastQpDiff = 0;    // FFmpeg L1952: sl->last_qscale_diff = 0
+            $this->picCbp[$mbIdx] = 0;   // 跳过宏块：cbp_table 置 0
+            $this->cabLastQpDiff = 0;    // last_qscale_diff 置 0
             $this->decodePSkip($mbX, $mbY);
             $this->cabWriteDeblock(0);
             return;
@@ -1933,7 +1933,7 @@ trait CabacDecodingTrait
         }
 
         // ---------- inter 语法 ----------
-        // inter MB：不可用邻居 nz 哨兵转 0（FFmpeg !IS_INTRA -> 0）
+        // inter MB：不可用邻居 nz 哨兵转 0（!IS_INTRA -> 0）
         $this->cabFixUnavailNz(false);
         $dct8Allowed = $this->transform8x8ModeFlag;
         $mcTasks = [];
@@ -1958,10 +1958,10 @@ trait CabacDecodingTrait
         } elseif ($mbType === 1 || $mbType === 2) {
             // P_L0_16x8 / P_L0_8x16
             // anchor 用 raster 块号（p1 首块：16x8=(0,2)→8，8x16=(2,0)→2；
-            // FFmpeg per-quadrant 8/4 经 scan8 落在同位置，cabNbBlock 按空间取邻居）
+            // per-quadrant 8/4 经 scan8 落在同位置，cabNbBlock 按空间取邻居）
             $ns = $mbType === 1 ? [0, 8] : [0, 2];
             $ref0 = $this->cabReadRefIdx(0, $ns[0], false);
-            // FFmpeg 16x8/8x16：每分区 ref 读后立即 fill ref_cache（part1 的 ref ctx 可见 part0）
+            // 16x8/8x16：每分区 ref 读后立即 fill ref_cache（part1 的 ref ctx 可见 part0）
             if ($mbType === 1) {
                 $this->cabOvRefBox(0, 0, 0, 4, 2, $ref0);
             } else {
@@ -1980,9 +1980,9 @@ trait CabacDecodingTrait
                 $mvd0X = $this->cabReadMvd(0, 0, 0);
                 $mvd0Y = $this->cabReadMvd(0, 1, 0);
                 $mv0X = $px + $mvd0X; $mv0Y = $py + $mvd0Y;
-                // FFmpeg L2282：每分区读后立即写回 mvd_cache（part1 的 amvd 依赖 part0 的值）
+                // 每分区读后立即写回 mvd_cache（part1 的 amvd 依赖 part0 的值）
                 $this->cabStoreMvd(0, $mbIdx, 0, 0, 4, 2, $mvd0X, $mvd0Y);
-                // FFmpeg L2278：part1 的 pred 经 mv_cache（part0 的 ref 已回填），mvPart0 须带 ref0
+                // part1 的 pred 经 mv_cache（part0 的 ref 已回填），mvPart0 须带 ref0
                 [$px, $py] = $this->getP16x8MvPrediction($mbX, $mbY, 1, $ref1, [$mv0X, $mv0Y, $ref0]);
                 $mvd1X = $this->cabReadMvd(0, 0, 8);
                 $mvd1Y = $this->cabReadMvd(0, 1, 8);
@@ -1994,7 +1994,7 @@ trait CabacDecodingTrait
                 $mvd0Y = $this->cabReadMvd(0, 1, 0);
                 $mv0X = $px + $mvd0X; $mv0Y = $py + $mvd0Y;
                 $this->cabStoreMvd(0, $mbIdx, 0, 0, 2, 4, $mvd0X, $mvd0Y);
-                // 同 16x8：mvPart0 带上 ref0（FFmpeg mv_cache[scan8[4]-1] 的 ref = part0）
+                // 同 16x8：mvPart0 带上 ref0（mv_cache[scan8[4]-1] 的 ref = part0）
                 [$px, $py] = $this->getP8x16MvPrediction($mbX, $mbY, 1, $ref1, [$mv0X, $mv0Y, $ref0]);
                 $mvd1X = $this->cabReadMvd(0, 0, 2);
                 $mvd1Y = $this->cabReadMvd(0, 1, 2);
@@ -2045,7 +2045,7 @@ trait CabacDecodingTrait
             $p8RefN = [0, 2, 8, 10];
             for ($i = 0; $i < 4; $i++) {
                 $refs[$i] = $this->cabReadRefIdx(0, $p8RefN[$i], false);
-                // FFmpeg：每象限 ref 读后立即 fill ref_cache 2x2（后续象限 ctx 可见）
+                // 每象限 ref 读后立即 fill ref_cache 2x2（后续象限 ctx 可见）
                 $this->cabOvRefBox(0, ($i & 1) * 2, ($i >> 1) * 2, 2, 2, $refs[$i]);
             }
             // mvds + 预测（list 序、子块序、分区序）
@@ -2096,7 +2096,7 @@ trait CabacDecodingTrait
             $dct8 = true;
         }
         $cbp = $cbpLuma | ($cbpChroma << 4);
-        // FFmpeg L2345：cbp_table 在残差解码前赋值（色度 DC/亮度 DC 的 CBF 标志位在其上 OR）
+        // cbp_table 在残差解码前赋值（色度 DC/亮度 DC 的 CBF 标志位在其上 OR）
         $this->picCbp[$mbIdx] = $cbp;
         if ($cbp !== 0) {
             $this->cabReadQpDelta();
@@ -2123,8 +2123,8 @@ trait CabacDecodingTrait
             // B_Skip = B_Direct_16x16：direct_cache 全 MB direct（邻居 ref ctx 排除）
             $q0 = $mbIdx * 4;
             $this->picDirectQ[$q0] = $this->picDirectQ[$q0 + 1] = $this->picDirectQ[$q0 + 2] = $this->picDirectQ[$q0 + 3] = 1;
-            $this->picCbp[$mbIdx] = 0;   // FFmpeg decode_mb_skip: h->cbp_table[mb_xy] = 0
-            $this->cabLastQpDiff = 0;    // FFmpeg L1952: sl->last_qscale_diff = 0
+            $this->picCbp[$mbIdx] = 0;   // 跳过宏块：cbp_table 置 0
+            $this->cabLastQpDiff = 0;    // last_qscale_diff 置 0
             $this->decodeBSkip($mbX, $mbY);
             $this->cabWriteDeblock(0);
             return;
@@ -2148,7 +2148,7 @@ trait CabacDecodingTrait
         }
 
         if ($t['k'] === 'direct') {
-            // B_Direct_16x16（含残差）；direct 同属 inter（FFmpeg !IS_INTRA -> 0）
+            // B_Direct_16x16（含残差）；direct 同属 inter（!IS_INTRA -> 0）
             $this->cabFixUnavailNz(false);
             $this->picIsDirectMb[$mbIdx] = 1;
             // B_Direct_16x16：direct_cache 全 MB direct（邻居 ref ctx 排除）
@@ -2163,7 +2163,7 @@ trait CabacDecodingTrait
                 $dct8 = true;
             }
             $cbp = $cbpLuma | ($cbpChroma << 4);
-            // FFmpeg L2345：cbp_table 在残差解码前赋值（色度 DC/亮度 DC 的 CBF 标志位在其上 OR）
+            // cbp_table 在残差解码前赋值（色度 DC/亮度 DC 的 CBF 标志位在其上 OR）
             $this->picCbp[$mbIdx] = $cbp;
             if ($cbp !== 0) {
                 $this->cabReadQpDelta();
@@ -2184,7 +2184,7 @@ trait CabacDecodingTrait
             // B_L0/L1_16x16
             $list = $mbType === 1 ? 0 : 1;
             $refIdx = $this->cabReadRefIdx($list, 0, true);
-            // FFmpeg：ref 读后立即 fill ref_cache 4x4（后续 MB 边界与本 MB mvd ctx 可见）
+            // ref 读后立即 fill ref_cache 4x4（后续 MB 边界与本 MB mvd ctx 可见）
             $this->cabOvRefBox($list, 0, 0, 4, 4, $refIdx);
             [$px, $py] = $this->getB16x16MvPrediction($mbX, $mbY, $list, $refIdx);
             $mvdX = $this->cabReadMvd($list, 0, 0);
@@ -2216,7 +2216,7 @@ trait CabacDecodingTrait
             // B_Bi_16x16
             $ref0 = $this->cabReadRefIdx(0, 0, true);
             $ref1 = $this->cabReadRefIdx(1, 0, true);
-            // FFmpeg：ref 读后立即 fill ref_cache 4x4
+            // ref 读后立即 fill ref_cache 4x4
             $this->cabOvRefBox(0, 0, 0, 4, 4, $ref0);
             $this->cabOvRefBox(1, 0, 0, 4, 4, $ref1);
             [$px0, $py0] = $this->getB16x16MvPrediction($mbX, $mbY, 0, $ref0);
@@ -2248,7 +2248,7 @@ trait CabacDecodingTrait
                     $dir = $spec[1 + $p];
                     if ($dir === $list || $dir === 2) {
                         $refs[$list][$p] = $this->cabReadRefIdx($list, $ns[$p], true);
-                        // FFmpeg：每分区 ref 读后立即 fill ref_cache（part1 的 ref ctx 可见 part0）
+                        // 每分区 ref 读后立即 fill ref_cache（part1 的 ref ctx 可见 part0）
                         if ($layout === 0) {
                             $this->cabOvRefBox($list, 0, $p * 2, 4, 2, $refs[$list][$p]);
                         } else {
@@ -2271,7 +2271,7 @@ trait CabacDecodingTrait
                     }
                     $mvdX = $this->cabReadMvd($list, 0, $ns[$p]);
                     $mvdY = $this->cabReadMvd($list, 1, $ns[$p]);
-                    // FFmpeg fill_rectangle 回填 mv_cache 时 ref 一并写入，part1 的
+                    // fill_rectangle 回填 mv_cache 时 ref 一并写入，part1 的
                     // B/A 邻居（mv_cache[20]/[13]）能读到 part0 的 ref；须带 ref 分量
                     $mvs[$list][$p] = [$px + $mvdX, $py + $mvdY, $refs[$list][$p]];
                     $bx0 = ($layout === 0 ? 0 : $p * 2) + ($ns[$p] & 3);
@@ -2329,7 +2329,7 @@ trait CabacDecodingTrait
                 $dct8 = true;
             }
             $cbp = $cbpLuma | ($cbpChroma << 4);
-            // FFmpeg L2345：cbp_table 在残差解码前赋值（色度 DC/亮度 DC 的 CBF 标志位在其上 OR）
+            // cbp_table 在残差解码前赋值（色度 DC/亮度 DC 的 CBF 标志位在其上 OR）
             $this->picCbp[$mbIdx] = $cbp;
             if ($cbp !== 0) {
                 $this->cabReadQpDelta();
@@ -2349,7 +2349,7 @@ trait CabacDecodingTrait
             $dct8 = true;
         }
         $cbp = $cbpLuma | ($cbpChroma << 4);
-        // FFmpeg L2345：cbp_table 在残差解码前赋值（色度 DC/亮度 DC 的 CBF 标志位在其上 OR）
+        // cbp_table 在残差解码前赋值（色度 DC/亮度 DC 的 CBF 标志位在其上 OR）
         $this->picCbp[$mbIdx] = $cbp;
         if ($cbp !== 0) {
             $this->cabReadQpDelta();
@@ -2401,7 +2401,7 @@ trait CabacDecodingTrait
         $gridL0 = array_fill(0, 4, array_fill(0, 4, [0, 0, -1]));
         $gridL1 = array_fill(0, 4, array_fill(0, 4, [0, 0, -1]));
 
-        // FFmpeg L2130：direct_cache 按 8x8 象限 fill（direct 象限标记，B 片 ref ctx 排除 +
+        // direct_cache 按 8x8 象限 fill（direct 象限标记，B 片 ref ctx 排除 +
         // 写回 direct_table 供后续 MB 边界 ctx 使用）
         for ($i = 0; $i < 4; $i++) {
             $this->picDirectQ[$mbIdx * 4 + $i] = ($subTypes[$i] === 0) ? 1 : 0;
@@ -2429,7 +2429,7 @@ trait CabacDecodingTrait
                 }
                 $partX = ($i & 1) * 2;
                 $partY = ($i >> 1) * 2;
-                // FFmpeg pred_direct_motion：direct 象限 mv_cache 双 list 无条件 2x2 fill
+                // pred_direct_motion：direct 象限 mv_cache 双 list 无条件 2x2 fill
                 //（后续非 direct 象限 pred_motion 的 A/B 邻居可读到 direct MV/ref）
                 for ($y = $partY; $y < $partY + 2; $y++) {
                     for ($x = $partX; $x < $partX + 2; $x++) {
@@ -2452,7 +2452,7 @@ trait CabacDecodingTrait
                 }
                 if (($list === 0 && self::$bSubUsesL0[$st]) || ($list === 1 && self::$bSubUsesL1[$st])) {
                     $refs[$list][$i] = $this->cabReadRefIdx($list, $b8RefN[$i], true);
-                    // FFmpeg L2156-2157：每象限 ref 读后立即 fill ref_cache 2x2（后续象限 ctx 可见）
+                    // 每象限 ref 读后立即 fill ref_cache 2x2（后续象限 ctx 可见）
                     $this->cabOvRefBox($list, ($i & 1) * 2, ($i >> 1) * 2, 2, 2, $refs[$list][$i]);
                 }
             }
@@ -2475,7 +2475,7 @@ trait CabacDecodingTrait
                 $partX = ($i & 1) * 2;
                 $partY = ($i >> 1) * 2;
                 if ($refs[$list][$i] < 0) {
-                    // FFmpeg L2214-2217：未用该 list 的非 direct 象限 mv_cache 填 0（ref=-1）
+                    // 未用该 list 的非 direct 象限 mv_cache 填 0（ref=-1）
                     //——后续象限 pred_motion 将其视为"可用但不匹配"而非不可用
                     for ($y = $partY; $y < $partY + 2; $y++) {
                         for ($x = $partX; $x < $partX + 2; $x++) {
