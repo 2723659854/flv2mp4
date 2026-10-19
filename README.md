@@ -17,7 +17,7 @@
 ## Introduction
 
 A lightweight pure PHP 8.1+ media processing toolkit with **zero external dependencies (no FFmpeg required)**.  
-Supports FLV, FMP4, MP4, HLS mutual conversion, live streaming gateway, pushing, pulling, rebroadcasting, as well as **H.264 decoding + scaling + re-encoding** (Baseline Profile) and **Full-format Interconversion of AAC/MP3/Opus/WAV**.
+Supports FLV, FMP4, MP4, HLS mutual conversion, live streaming gateway, pushing, pulling, rebroadcasting, as well as **H.264 decoding + scaling + re-encoding** (input supports Baseline/Main/High Profile) and **Full-format Interconversion of AAC/MP3/Opus/WAV**.
 
 ---
 
@@ -63,9 +63,8 @@ Supports FLV, FMP4, MP4, HLS mutual conversion, live streaming gateway, pushing,
 | Pushing client        | FLV / MP4 → RTMP/HTTP-FLV/WS-FLV             | Push static files as a pseudo-live stream                          |
 | Pulling client        | RTMP/HTTP-FLV/WS-FLV → FLV                   | Pull live stream and save as local FLV                             |
 | Rebroadcasting        | Multi-protocol input → Multi-protocol output | One pull, multiple forwards                                        |
-| **H.264 re-encoding** | Decode → Scale → Encode                      | Baseline Profile, provides core support for multi-bitrate HLS      |
+| **H.264 re-encoding** | Decode → Scale → Encode                      | Input: Baseline/Main/High Profile; output Baseline. Core support for multi-bitrate HLS      |
 | **OPUS→AAC**          | opus→pcm→aac                                 | Convert WebRTC Opus audio to AAC-LC                                |
-| **AAC→MP3**           | aac→pcm→mp3                                  | Convert AAC-LC audio to MP3                                        |
 | **opus/aac/mp3/wav format conversion** | Source audio → PCM → target format audio | Supports mutual conversion among Opus/AAC/MP3/WAV audio formats |
 ---
 
@@ -82,7 +81,7 @@ Supports FLV, FMP4, MP4, HLS mutual conversion, live streaming gateway, pushing,
 - 💡 **Container remuxing (FLV/MP4/HLS conversion) only changes the container format and is very fast.**
 - ⚠️ **H.264 re-encoding requires `proc_open` to be enabled.** (This module uses multi-process distributed computing and spawns child processes to process frames in parallel.)
 - ⚠️ **Opus real-time transcoding (live streaming only) requires `proc_open` to be enabled.** (In real-time scenarios such as WebRTC to RTMP, it launches a standalone background Worker process for audio transcoding. Static file Opus transcoding does not require this function.)
-- ⚠️ **H.264 re-encoding is a CPU-intensive task. Performance depends on server configuration. It is not recommended for live real-time transcoding. Enabling JIT acceleration is highly recommended.**
+- ⚠️ **H.264 re-encoding is a CPU-intensive task. Performance depends on server configuration and resolution/frame rate. Evaluate against your own hardware benchmarks before using it for live real-time scenarios. Enabling JIT acceleration is highly recommended.**
 
 ---
 
@@ -147,7 +146,7 @@ $file = __DIR__ . '/test.flv';
 
 ### Opus 2 AAC
 
-`WebRtcFlvRelay` receives WebRTC RTP data, wraps H.264 video into FLV, transcodes Opus audio to AAC‑LC via a pure PHP Worker, and pushes it to a WebSocket‑FLV service for recording or forwarding to RTMP.
+`WebRtcFlvRelay` receives WebRTC RTP data, wraps H.264 video into FLV, and transcodes Opus audio to AAC‑LC in real time via a pure PHP Worker, then pushes it to a WebSocket‑FLV service, which can continue recording or forwarding to RTMP and other targets.
 
 ```php
 <?php
@@ -202,11 +201,11 @@ php webrtc.php
 
 - The relay automatically starts `bin/opus-worker.php` if no Worker is listening on the port – no manual startup needed.
 - Worker listens only on `127.0.0.1`, default port `8330`.
-- Auto‑start passes the host project's real `vendor/autoload.php` via `--autoload`, working with both local development and Composer‑installed setups.
+- Auto‑start passes the host project's real `vendor/autoload.php` via `--autoload`, compatible with both `composer require xiaosongshu/flv2mp4` installation and custom `vendor-dir` setups.
 - Default output: 48kHz, mono, 64kbps AAC‑LC.
 - One Worker process can manage multiple independent connections, but real‑time transcoding is CPU‑heavy; plan for one live stream per instance.
 - Different project instances on the same machine must use different `$opusWorkerPort`.
-- On `Ctrl+C` or process exit, call `OpusWorkerClient::shutdownOwnedWorkers()` – the example already handles this.
+- On `Ctrl+C` or process exit, call `OpusWorkerClient::shutdownOwnedWorkers()`; `start.php` already includes the corresponding exit handling.
 - PHP must allow `proc_open` for automatic Worker creation.
 - The Worker queue has bounded back‑pressure; do not simply enlarge the queue to solve performance issues, as it may increase latency and cause A/V desync.
 - WebRTC service requires the `xiaosongshu/webrtc` package.
@@ -266,7 +265,7 @@ php pusher.php
 
 ### Pulling Client
 
-Pulls a live stream and saves it as a local FLV file. Create `puller.php`:
+Pulls a live stream and saves it as a local FLV file, suitable for recording or debugging. Create `puller.php`:
 
 ```php
 require_once __DIR__ . '/vendor/autoload.php';
@@ -308,7 +307,7 @@ php forward.php
 | fMP4 | MSE player | `play_merge.html`, `mse.html` |
 | HLS (TS) | hls.js / Safari | `play.html` |
 | FLV | flv.js | `flv.html` |
-| FLV (push test) | Web push test | `push.html` |
+| FLV | Web push test | `push.html` |
 
 ---
 
@@ -325,7 +324,7 @@ php forward.php
 ---
 ### 🔥 H.264 Decoding + Scaling + Re-encoding
 
-Supports Baseline Profile H.264 decoding, scaling, and re-encoding, providing core capabilities for the following scenarios:
+Supports H.264 decoding, scaling, and re-encoding with Baseline/Main/High Profile input (output is always Baseline Profile; B frames from Main/High input are decoded and re-encoded as P frames, so the output stream contains no B frames and dts equals pts with monotonic timestamps), providing core capabilities for the following scenarios:
 **Technical positioning**: This is a complete **H.264 pixel processing pipeline** (decode → process → encode), implemented in pure PHP without FFmpeg.
 
 ---
@@ -393,7 +392,7 @@ $config = [
 
 ```
 
-- The current project supports live stream compression transcoding with no measured latency, meeting live streaming requirements. Actual performance depends heavily on server configuration; adjust the parameters above according to your server resources.
+- Real-time performance of live stream compression transcoding depends on server configuration and input/output resolution and frame rate. Testing shows it can meet live streaming requirements at low resolution and low frame rate (see test conditions below); benchmark on your own hardware before production use. Actual performance depends heavily on server configuration; adjust the parameters above according to your server resources.
 - `motionWorkers` and `decodeWorkers`: the higher the input resolution, the more you should increase `decodeWorkers`; the higher the output resolution, the more you should increase `motionWorkers`. The sum of both should not exceed the number of logical processors on the server (motion estimation processes are child processes of decoding processes).
 - Tested with OBS push: input 960×540, 30 fps, one keyframe per second, Baseline Profile, H.264 + AAC; output 480×270, 15 fps, 3-second HLS segments. Ran continuously for 30 minutes with no dropped frames and no backlog.
 - ⚠️ Live stream compression transcoding only supports CLI mode. Do not call it directly in an FPM request, otherwise it will block the web service worker processes.
@@ -410,8 +409,9 @@ $config = [
 - [x] **CAVLC entropy coding** (Baseline Profile)
 - [x] **Resolution scaling** (YUV scaling after decoding → re-encoding)
 - [x] **Bitrate control** (via QP parameter)
-- [ ] **B-frame support** (planned, requires extension to Main Profile with bidirectional prediction)
-- [ ] **CABAC entropy coding** (planned, Main Profile support)
+- [x] **B-frame decoding** (Main/High Profile, CABAC, including Direct mode; B frames are re-encoded as P frames on output)
+- [x] **CABAC entropy decoding** (Main/High Profile support)
+- [ ] **B-frame encoding** (planned, requires bidirectional prediction)
 ---
 
 ### Watermark Generation Tool
@@ -494,7 +494,7 @@ WatermarkUtil::generateFromImage(__DIR__."/watermark_80x16.png",__DIR__ . '/test
 > Time Ratio = Re-encoding Time ÷ Video Duration.
 
 - Test results are affected by video complexity, computer hardware performance, and system load. Please refer to actual test results.
-
+- The current test report uses Baseline Profile video resources, whereas Main/High Profile video resources containing B-frames will be slightly slower.
 ---
 
 ## Encoding/Decoding for AAC-MP3-OPUS-WAV
@@ -532,7 +532,7 @@ WatermarkUtil::generateFromImage(__DIR__."/watermark_80x16.png",__DIR__ . '/test
 - 100% pure PHP 8.1+, no FFmpeg dependency.
 - Originally built to serve [xiaosongshu/rtmp_server](https://github.com/2723659854/rtmp-server).
 - Recommended static analysis: [PHPStan](https://phpstan.org/) Level 8.
-- H.264 re‑encoding uses distributed multi‑process architecture; disable distributed mode if running on a single‑core machine.
+- H.264 re‑encoding uses a distributed multi‑process architecture to fully utilize multiple CPU cores; if the server has a single core, it is recommended to disable distributed mode.
 
 ## Open Source License & Disclaimer
 
