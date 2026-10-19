@@ -101,19 +101,16 @@ composer require xiaosongshu/flv2mp4
 
 declare(strict_types=1);
 require_once __DIR__ . '/vendor/autoload.php';
-
 ini_set('memory_limit', '512M');
 
-$file = __DIR__ . '/test.flv';
-
 // 1. FLV → fragmented fMP4 (merged)
-\Xiaosongshu\Flv2mp4\Client::runFlv2Fmp4Mixed($file, __DIR__ . '/output_merge');
+\Xiaosongshu\Flv2mp4\Client::runFlv2Fmp4Mixed(__DIR__ . '/test.flv', __DIR__ . '/output_merge');
 
 // 2. FLV → fragmented fMP4 (separate audio/video tracks)
-\Xiaosongshu\Flv2mp4\Client::runFlv2Fmp4Separate($file, __DIR__ . '/output_separate');
+\Xiaosongshu\Flv2mp4\Client::runFlv2Fmp4Separate(__DIR__ . '/test.flv', __DIR__ . '/output_separate');
 
 // 3. FLV → HLS
-\Xiaosongshu\Flv2mp4\Client::runFlv2Hls($file, __DIR__ . '/hls');
+\Xiaosongshu\Flv2mp4\Client::runFlv2Hls(__DIR__ . '/test.flv', __DIR__ . '/hls');
 
 // 4. HLS → FLV
 \Xiaosongshu\Flv2mp4\Client::runHls2Flv(__DIR__ . '/hls/index.m3u8', __DIR__ . '/output.flv');
@@ -122,7 +119,7 @@ $file = __DIR__ . '/test.flv';
 \Xiaosongshu\Flv2mp4\Client::runMp42Flv(__DIR__ . '/test.mp4', __DIR__ . '/output.flv');
 
 // 6. FLV → MP4
-\Xiaosongshu\Flv2mp4\Client::runFlv2Mp4($file, __DIR__ . '/output.mp4');
+\Xiaosongshu\Flv2mp4\Client::runFlv2Mp4(__DIR__ . '/test.flv', __DIR__ . '/output.mp4');
 
 // 7. fMP4 → FLV (supports both merged and separate formats)
 \Xiaosongshu\Flv2mp4\Client::runFmp42Flv(__DIR__ . '/output_merge/index.m3u8', __DIR__ . '/output.flv');
