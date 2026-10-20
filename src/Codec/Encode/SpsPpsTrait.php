@@ -94,6 +94,11 @@ trait SpsPpsTrait
 
     public function vuiParameters(): string
     {
+        // bitstream_restriction 必须如实声明重排延迟：B 帧流（IBBP）锚点前插 2 个 B，
+        // 重排延迟为 2；声明为 0 会让解复用/解码端把 B 帧 pts<dts 判为非法时间戳并打乱输出节拍
+        $reorderFrames = $this->bFrames ? 2 : 0;
+        $dpbFrames = $this->bFrames ? max(2, $this->numRefFrames) : 1;
+
         $bits = '';
         $bits .= '0';
         $bits .= '0';
@@ -110,8 +115,8 @@ trait SpsPpsTrait
         $bits .= $this->ue(0);
         $bits .= $this->ue(16);
         $bits .= $this->ue(16);
-        $bits .= $this->ue(0);
-        $bits .= $this->ue(1);
+        $bits .= $this->ue($reorderFrames);
+        $bits .= $this->ue($dpbFrames);
         return $bits;
     }
 

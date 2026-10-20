@@ -1065,6 +1065,12 @@ class FlvRecoder
 
     private function writeEncodedVideoFrame(array $nals, bool $isKeyFrame, int $timestamp, int $cts): void
     {
+        // B 帧模式：对齐 FFmpeg flv muxer 行为——tag 时间戳保持编码序 DTS，
+        // CTS 统一加上 2 个帧时长的常量偏移，使所有 CTS ≥ 0（避免解复用端
+        // "Invalid timestamps/Negative cts" 及播放器重排节拍错乱），音视频同移保持同步
+        if ($this->bframes) {
+            $cts += $this->bCtsShiftMs();
+        }
         $videoNalsAnnexB = '';
         foreach ($nals as $nal) {
             $nalHeaderPos = $this->findNalHeaderPos($nal);
@@ -1077,6 +1083,14 @@ class FlvRecoder
 
         $avccData = $this->annexBToAvcc($videoNalsAnnexB);
         $this->writeVideoTag($avccData, $isKeyFrame, $timestamp, $cts);
+    }
+
+    /** B 帧输出时间线前移常量：2 × 帧时长（IBBP 最小 CTS 为 -1 帧，偏移后 ≥ +1 帧） */
+    private function bCtsShiftMs(): int
+    {
+        $fps = $this->effectiveTargetFps ?? $this->sourceFps;
+        $frameDurMs = ($fps !== null && $fps > 0) ? 1000.0 / $fps : 40.0;
+        return (int)round(2 * $frameDurMs);
     }
 
     private function handleAudioFrame(FlvTag $tag): void
@@ -1336,6 +1350,10 @@ class FlvRecoder
 
     private function writeAudioTag(string $aacRaw, int $timestamp): void
     {
+        // B 帧模式：音频与视频时间线同移同一常量（见 writeEncodedVideoFrame），保持 A/V 同步
+        if ($this->bframes) {
+            $timestamp += $this->bCtsShiftMs();
+        }
         $audioHeader = $this->getAudioHeaderByte();
         $body = chr($audioHeader) . chr(1) . $aacRaw;
 
