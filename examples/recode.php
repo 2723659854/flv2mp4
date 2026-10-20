@@ -24,6 +24,11 @@ $config = [
     'motion_budget'  => 8,
     'decode_workers' => 6,
     'segmentDuration'=> 3,
+    // 输出 profile 等级：baseline / main / high；取值不匹配时默认 baseline
+    // baseline 不允许 B 帧；若同时开启 bframes，则 baseline 自动提升为 main
+    'profile'=>'main',
+    // 是否开启 B 帧（IBBP）。开启后需 main/high profile；关闭则保持原有 I/P 路径
+    'bframes'=> true,
 ];
 
 $flvFile = __DIR__ . '/index.flv';
