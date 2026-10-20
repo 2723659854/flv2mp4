@@ -50,9 +50,12 @@ trait BitstreamTrait
         return $bytes;
     }
 
-    public function rbspToNal(string $rbsp, int $type): string
+    /**
+     * @param int|null $nalRefIdc 显式指定 nal_ref_idc（B 帧非参考帧需传 0）；为 null 时按 NAL 类型默认推导
+     */
+    public function rbspToNal(string $rbsp, int $type, ?int $nalRefIdc = null): string
     {
-        $ref = match (true) {
+        $ref = $nalRefIdc ?? match (true) {
             $type === 5 => 3,
             $type === 7 || $type === 8 => 3,
             default => 2

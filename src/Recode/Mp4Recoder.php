@@ -106,6 +106,7 @@ class Mp4Recoder
         $this->decoder = new H264Decoder();
         $this->encoder = new H264Encoder();
         $this->encoder->motionWorkers = max(1, (int)($config['motionWorkers'] ?? 8));
+        $this->encoder->setProfile($config['profile'] ?? 'baseline');
         if (!empty($config['fastMotion'])) $this->encoder->setFastMotion(true);
         $this->scaler = new VideoScaler();
     }
@@ -211,6 +212,7 @@ class Mp4Recoder
         $this->decoder = new H264Decoder();
         $this->encoder = new H264Encoder();
         $this->encoder->motionWorkers = max(1, (int)($this->config['motionWorkers'] ?? 8));
+        $this->encoder->setProfile($this->config['profile'] ?? 'baseline');
         if (!empty($this->config['fastMotion'])) $this->encoder->setFastMotion(true);
         $this->mp4Data = '';
         $this->boxTree = [];

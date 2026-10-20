@@ -188,8 +188,13 @@ trait SliceEncodeTrait
         return $this->encodeSliceBody($ctx, $results);
     }
 
-    /** 帧级准备：slice 类型判定 + YUV 平面宏块对齐填充（与运动估计/CAVLC 无关，可提前） */
-    private function prepareSliceContext(string $yuvData, bool $isIDR): array
+    /**
+     * 将输入 YUV 平面扩展到宏块对齐尺寸（边缘复制填充）。
+     * P/I 路径与 B 帧路径共用，避免重复实现。
+     *
+     * @return array{0:string,1:string,2:string,3:int,4:int,5:int,6:int} [yPlane,uPlane,vPlane,mbWidth,mbHeight,aw,ah]
+     */
+    private function padYuvPlanes(string $yuvData): array
     {
         $mbWidth = (int)ceil($this->width / 16);
         $mbHeight = (int)ceil($this->height / 16);
@@ -201,8 +206,6 @@ trait SliceEncodeTrait
         $uPlane = substr($yuvData, $ySize, $uvSize);
         $vPlane = substr($yuvData, $ySize + $uvSize, $uvSize);
 
-        // 将输入图像扩展到宏块对齐尺寸（边缘复制填充）
-        // 行收集后一次性 implode：避免逐行 .= 造成的整串重复拷贝（360p 下每帧数千万次复制）
         if ($mbAlignedWidth !== $this->width || $mbAlignedHeight !== $this->height) {
             $padRight = $mbAlignedWidth - $this->width;
             $rows = [];
@@ -234,11 +237,23 @@ trait SliceEncodeTrait
                 $$planeName = implode('', $rowsUv);
             }
         }
+        return [$yPlane, $uPlane, $vPlane, $mbWidth, $mbHeight, $mbAlignedWidth, $mbAlignedHeight];
+    }
+
+    /** 帧级准备：slice 类型判定 + YUV 平面宏块对齐填充（与运动估计/CAVLC 无关，可提前） */
+    private function prepareSliceContext(string $yuvData, bool $isIDR): array
+    {
+        [
+            $yPlane, $uPlane, $vPlane,
+            $mbWidth, $mbHeight, $mbAlignedWidth, $mbAlignedHeight,
+        ] = $this->padYuvPlanes($yuvData);
 
         // 场景切换检测（在派发 P 帧运动估计之前定案，流水线 start(N+1) 与同步路径都在此分叉，
         // 不存在"N+1 已按错误参考派发"的时序问题）：与上一帧【输入】做抽样 SAD，
         // 超阈值则把本帧强制升级 IDR，阻止硬切旧画面沿 P 参考链污染整个源 GOP。
-        if (!$isIDR && $this->enableInter && $this->refYPlane !== null
+        // B 帧模式下禁用场景切换强制 IDR：B 三元组已按未来锚点定案，
+        // 中途把 P 锚点升级成 IDR 会重置 POC/frame_num，破坏已排定 B 片的 POC 连续性。
+        if (!$this->bFrames && !$isIDR && $this->enableInter && $this->refYPlane !== null
             && $this->scenePrevY !== null
             && $this->scenePrevAw === $mbAlignedWidth
             && $this->scenePrevAh === $mbAlignedHeight) {
@@ -538,5 +553,116 @@ trait SliceEncodeTrait
 
         $prefixNals[] = $nal;
         return $prefixNals;
+    }
+
+    /**
+     * 编码一个 B 帧（IBBP 中的非参考 B 帧）。
+     * 解码序：其后的锚点（未来帧）已编码完成，才编码它前面的 B 帧。
+     * B 帧不更新参考帧、不自增 frameNum/poc，只产出 1 个 slice NAL（无 SPS/PPS）。
+     *
+     * @param string $yuvData 该 B 帧画面（YUV420p）
+     * @param int $poc 该 B 帧 POC（IBBP 下 = 2 × 显示序），由驱动层按显示序给出
+     * @param array|null $refL0 过去锚点重建帧 [y,u,v]；null 取 snapshotBRefL0() 保存的快照
+     * @param array|null $refL1 未来锚点重建帧 [y,u,v]；null 取当前参考帧 $this->refYPlane/…
+     * @return array 仅含该帧 slice NAL 的数组（与 encodeFrame 返回值形状一致）
+     */
+    public function encodeBFrame(string $yuvData, int $poc, ?array $refL0 = null, ?array $refL1 = null): array
+    {
+        $refL0 ??= [$this->bRefL0YPlane, $this->bRefL0UPlane, $this->bRefL0VPlane];
+        $refL1 ??= [$this->refYPlane, $this->refUPlane, $this->refVPlane];
+        if ($refL0[0] === null || $refL1[0] === null) {
+            throw new \RuntimeException('B 帧需要 L0/L1 两个锚点参考帧');
+        }
+        return $this->encodeBSliceBody($yuvData, $poc, $refL0, $refL1);
+    }
+
+    /** B slice 头 + B 宏块 CAVLC 主循环（B_L0_16x16 / B_L1_16x16 按 SAD 择优） */
+    private function encodeBSliceBody(string $yuvData, int $poc, array $refL0, array $refL1): array
+    {
+        [$yPlane, $uPlane, $vPlane, $mbWidth, $mbHeight, $aw, $ah] = $this->padYuvPlanes($yuvData);
+        $this->picWidthInMbs = $mbWidth;
+        $this->mbAlignedWidth = $aw;
+        $this->mbAlignedHeight = $ah;
+
+        $bits = '';
+        $bits .= $this->ue(0);   // first_mb_in_slice
+        $bits .= $this->ue(1);   // slice_type = B
+        $bits .= $this->ue(0);   // pic_parameter_set_id
+
+        $log2MaxFrameNum = $this->log2MaxFrameNumMinus4 + 4;
+        // 非参考帧：frame_num = 解码序中前一个参考帧的 frame_num。
+        // 锚点编码结束时 frameNum 已自增，故此处取 frameNum-1。
+        $bFrameNum = ($this->frameNum - 1) & ((1 << $log2MaxFrameNum) - 1);
+        $bits .= $this->u($bFrameNum, $log2MaxFrameNum);
+
+        $log2MaxPicOrderCntLsb = $this->log2MaxPicOrderCntLsbMinus4 + 4;
+        $pocLsb = $poc & ((1 << $log2MaxPicOrderCntLsb) - 1);
+        $bits .= $this->u($pocLsb, $log2MaxPicOrderCntLsb);
+
+        $bits .= '1';  // direct_spatial_mv_pred_flag（本编码器不使用 direct 模式，取值不影响解码）
+        $bits .= '0';  // num_ref_idx_active_override_flag
+        $bits .= '0';  // ref_pic_list_modification_flag_l0
+        $bits .= '0';  // ref_pic_list_modification_flag_l1
+        $bits .= $this->se($this->pFrameQpDelta); // slice_qp_delta
+        $bits .= $this->ue(1); // disable_deblocking_filter_idc = 1（与解码器一致）
+
+        $topNzLuma = array_fill(0, $mbWidth * 4, 0);
+        $topNzCb = array_fill(0, $mbWidth * 2, 0);
+        $topNzCr = array_fill(0, $mbWidth * 2, 0);
+
+        // B 双 list 邻居缓存（镜像解码器：片起始顶部为 null，每行起始重置 left/topLeft）
+        $this->bMvTopRow = [array_fill(0, $mbWidth * 4, null), array_fill(0, $mbWidth * 4, null)];
+        $this->bMvLeftCol = [array_fill(0, 4, null), array_fill(0, 4, null)];
+        $this->bMvTopLeft = [null, null];
+
+        // 两个参考帧的 Y 整数缓存各 unpack 一次（每宏块复用），避免每宏块重建整帧数组
+        $this->bRefIntsL0 = unpack('C*', $refL0[0]);
+        $this->bRefIntsL1 = unpack('C*', $refL1[0]);
+
+        $cw = intdiv($aw, 2);
+        $motionRange = $this->fastMotion ? min(8, $this->motionRange) : $this->motionRange;
+        for ($mbY = 0; $mbY < $mbHeight; $mbY++) {
+            $leftAvailable = false;
+            $leftNz = [0, 0, 0, 0, 0, 0, 0, 0];
+            $this->bMvLeftCol = [array_fill(0, 4, null), array_fill(0, 4, null)];
+            $this->bMvTopLeft = [null, null];
+            for ($mbX = 0; $mbX < $mbWidth; $mbX++) {
+                $nextBTL0 = $this->bMvTopRow[0][$mbX * 4 + 3] ?? null;
+                $nextBTL1 = $this->bMvTopRow[1][$mbX * 4 + 3] ?? null;
+
+                $luma = '';
+                for ($row = 0; $row < 16; $row++) {
+                    $luma .= substr($yPlane, ($mbY * 16 + $row) * $aw + $mbX * 16, 16);
+                }
+                $curU = '';
+                $curV = '';
+                for ($row = 0; $row < 8; $row++) {
+                    $curU .= substr($uPlane, ($mbY * 8 + $row) * $cw + $mbX * 8, 8);
+                    $curV .= substr($vPlane, ($mbY * 8 + $row) * $cw + $mbX * 8, 8);
+                }
+
+                $prepared = $this->prepareBMacroblock(
+                    $mbX, $mbY, $luma, $curU, $curV,
+                    $refL0[0], $refL0[1], $refL0[2],
+                    $refL1[0], $refL1[1], $refL1[2],
+                    $motionRange
+                );
+                $bits .= $this->encodeBMacroblock(
+                    $mbX, $mbY, $prepared,
+                    $leftAvailable, $leftNz, $mbY > 0,
+                    $topNzLuma, $topNzCb, $topNzCr
+                );
+
+                $this->bMvTopLeft[0] = $nextBTL0;
+                $this->bMvTopLeft[1] = $nextBTL1;
+                $leftAvailable = true;
+            }
+        }
+        $bits .= '1';
+        while (strlen($bits) % 8 != 0) $bits .= '0';
+
+        $rbsp = $this->bitsToBytes($bits);
+        $nal = $this->rbspToNal($rbsp, 1, 0); // B 片：nal_ref_idc = 0
+        return [$nal];
     }
 }

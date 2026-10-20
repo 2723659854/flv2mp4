@@ -10,7 +10,16 @@ trait SpsPpsTrait
 {
     public function generateSPS(): string
     {
+        // 依据配置的 profile 选择 profile_idc 与 constraint_set 标志位
         $profileIdc = 66;
+        $constraintFlags = '1100'; // baseline：constraint_set0=1
+        if ($this->profile === 'main') {
+            $profileIdc = 77;
+            $constraintFlags = '0100'; // main：constraint_set1=1
+        } elseif ($this->profile === 'high') {
+            $profileIdc = 100;
+            $constraintFlags = '0000';
+        }
         $levelIdc = 10;
 
         $picWidthInMbs = (int)ceil($this->width / 16);
@@ -20,14 +29,21 @@ trait SpsPpsTrait
 
         $bits .= $this->u($profileIdc, 8);
 
-        $bits .= '1';
-        $bits .= '1';
-        $bits .= '0';
-        $bits .= '0';
+        // constraint_set0..3_flag + reserved_zero_4bits
+        $bits .= $constraintFlags;
         $bits .= '0000';
         $bits .= $this->u($levelIdc, 8);
 
-        $bits .= $this->ue(0);
+        $bits .= $this->ue(0);              // seq_parameter_set_id = 0
+
+        // High profile 专属语法（规范 7.3.2.1.1）：与解码端 parseSPS 的读取顺序严格一致
+        if ($profileIdc === 100) {
+            $bits .= $this->ue(1);          // chroma_format_idc = 1 (4:2:0)
+            $bits .= $this->ue(0);          // bit_depth_luma_minus8
+            $bits .= $this->ue(0);          // bit_depth_chroma_minus8
+            $bits .= '0';                   // qpprime_y_zero_transform_bypass_flag
+            $bits .= '0';                   // seq_scaling_matrix_present_flag
+        }
 
         $this->log2MaxFrameNumMinus4 = 3;
         $bits .= $this->ue($this->log2MaxFrameNumMinus4);
@@ -35,10 +51,12 @@ trait SpsPpsTrait
         $picOrderCntType = 0;
         $bits .= $this->ue($picOrderCntType);
 
-        $this->log2MaxPicOrderCntLsbMinus4 = 0;
+        // B 帧（IBBP）下锚点间 POC 步进为 6，解码端 msb 推导要求连续参考帧 POC 差
+        // ≤ MaxPocLsb/2，故 4bit（16）不够，需扩到 8bit（256）。
+        $this->log2MaxPicOrderCntLsbMinus4 = $this->bFrames ? 4 : 0;
         $bits .= $this->ue($this->log2MaxPicOrderCntLsbMinus4);
 
-        $numRefFrames = 1;
+        $numRefFrames = $this->bFrames ? max(2, $this->numRefFrames) : 1;
         $bits .= $this->ue($numRefFrames);
 
         $gapsInFrameNumValueAllowedFlag = false;
@@ -116,6 +134,13 @@ trait SpsPpsTrait
         $bits .= '1';                       // deblocking_filter_control_present_flag = 1
         $bits .= '0';                       // constrained_intra_pred_flag = 0
         $bits .= '0';                       // redundant_pic_cnt_present_flag = 0
+
+        // High profile PPS 扩展（规范 7.3.2.2）：与解码端 parsePPS 的读取顺序严格一致
+        if ($this->profile === 'high') {
+            $bits .= '0';                   // transform_8x8_mode_flag = 0（不使用 8x8 变换）
+            $bits .= '0';                   // pic_scaling_matrix_present_flag = 0
+            $bits .= $this->se(0);          // second_chroma_qp_index_offset = 0
+        }
 
         $bits .= '1';                       // rbsp_stop_one_bit
         while (strlen($bits) % 8 != 0) $bits .= '0';

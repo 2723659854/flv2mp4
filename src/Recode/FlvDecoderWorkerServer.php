@@ -37,6 +37,22 @@ final class FlvDecoderWorkerServer
     private int $lastVideoTs = 0;
     /** 源流是否出现过 B 帧（跨 GOP 粘滞）：让每 GOP 起始即按 POC 重排，避免 GOP 头部帧乱序 */
     private bool $sawBFrames = false;
+    /** 是否启用 B 帧编码（config.bframes；请求 baseline 时自动升为 main） */
+    private bool $bframes = false;
+    /**
+     * B 帧调度：显示序待编码帧队列 [{yuv,isKey,idx,seq,timestamp,sourceFps,w,h}]。
+     * seq 为该帧在全局序号空间的槽位（决定输出封装顺序）；解码器重排滞留的尾部帧无事件序号（null），
+     * 由 gopEnd 预留槽位补发。
+     */
+    private array $bQueue = [];
+    /** 最近一个已编码锚点的显示序序号（三元组对齐基准，GOP 内） */
+    private int $bLastAnchorIdx = -1;
+    /** 最近一个已编码 IDR 的显示序序号（POC 基准） */
+    private int $bPocBase = 0;
+    /** B 模式编码序计数（GOP 内）：输出侧按写出序号×帧时长推导全局 DTS，故此处只需编码/显示序的相对差 */
+    private int $bEncodeCounter = 0;
+    /** B 模式显示序计数（GOP 内） */
+    private int $bDisplayCounter = 0;
     /**
      * fastMotion 快速路径：与直播流水线同款——
      * 启动/GOP边界向主进程回报 READY，主进程只向 READY worker 投递完整 GOP；
@@ -53,6 +69,14 @@ final class FlvDecoderWorkerServer
         // 编码在 GOP worker 内完成：每个 worker 独立编码器 + 独立运动估计子进程（GOP边界只重置状态不重建）
         $this->encoder = new H264Encoder();
         $this->encoder->motionWorkers = max(1, (int)($config['motionWorkers'] ?? 8));
+        $profile = strtolower(trim($config['profile'] ?? 'baseline'));
+        // 取值校验前置：非 baseline/main/high 一律回退 baseline（与 setProfile 一致）
+        if (!in_array($profile, ['baseline', 'main', 'high'], true)) $profile = 'baseline';
+        $this->bframes = !empty($config['bframes']);
+        // B 片不属于 baseline 语法：请求 B 帧时至少按 main profile 输出
+        if ($this->bframes && $profile === 'baseline') $profile = 'main';
+        $this->encoder->setProfile($profile);
+        if ($this->bframes) $this->encoder->enableBFrames(true);
         if (!empty($config['fastMotion'])) {
             $this->encoder->setFastMotion(true);
             $this->fast = true;
@@ -218,6 +242,7 @@ final class FlvDecoderWorkerServer
         $h = ($this->config['height'] ?? 0) > 0 ? (int)$this->config['height'] : $this->height;
         $needTranscode = ($w !== $this->width || $h !== $this->height)
             || (int)($this->config['bitrate'] ?? 0) > 0 || $dropFrames
+            || $this->bframes
             || (!empty($this->config['watermark']) && !empty($this->config['watermarkFile']));
         // 无需转码（纯直通）时原封不动转发，输出侧同样判定为直通
         if (!$needTranscode) return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $event['sequence'], $meta, $body);
@@ -234,6 +259,8 @@ final class FlvDecoderWorkerServer
         if (!empty($this->config['watermark']) && !empty($this->config['watermarkFile'])) $yuv = $this->applyWatermark($yuv, $w, $h, $this->config['watermarkFile']);
         // GOP worker 内直接完成编码（运动估计走本 worker 的子进程），输出侧只做封装
         $this->configureEncoder($w, $h, $dropFrames, $sourceFps, $targetFps);
+        // B 模式：显示序帧入 3 帧重排缓冲，凑齐三元组后按编码序（锚点→B→B）落盘
+        if ($this->bframes) return $this->feedBFrame($event, $yuv, $w, $h, !empty($frame['isIdr']));
         return $this->feedEncoder($event, $meta, $body, $yuv, $w, $h, !empty($frame['isIdr']));
     }
 
@@ -296,6 +323,7 @@ final class FlvDecoderWorkerServer
      */
     private function flushGopTail(int $tailSeq, int $tailMax): string
     {
+        if ($this->bframes) return $this->flushGopTailB($tailSeq, $tailMax);
         $out = '';
         $emitted = 0;
         if ($tailMax > 0) {
@@ -332,6 +360,184 @@ final class FlvDecoderWorkerServer
         return $out;
     }
 
+    /** 显示序帧入队（B 模式），并尝试排出已凑齐的编码三元组。 */
+    private function feedBFrame(array $event, string $yuv, int $w, int $h, bool $isKeyFrame): string
+    {
+        $meta = $event['metadata'];
+        $this->lastVideoTs = (int)($meta['timestamp'] ?? 0);
+        $this->bQueue[] = [
+            'yuv' => $yuv,
+            'isKey' => $isKeyFrame,
+            'idx' => $this->bDisplayCounter++,
+            'seq' => $event['sequence'],
+            'timestamp' => (int)($meta['timestamp'] ?? 0),
+            'sourceFps' => $meta['sourceFps'] ?? null,
+            'w' => $w,
+            'h' => $h,
+        ];
+        $tail = 0;
+        return $this->drainBQueue(false, 0, $tail);
+    }
+
+    /**
+     * 显示序缓冲 → 编码序落盘（与单进程 FlvRecoder::drainBQueue 同构）。
+     * 固定 3 帧延迟的 IBBP：锚点在显示序 1、4、7…（IDR 为首帧），三元组编码序 = 锚点 → 前 2 个 B。
+     * 关键差异：输出按序号升序封装，故三元组内锚点必须占用【最小】序号，才能保证封装顺序=解码序。
+     */
+    private function drainBQueue(bool $flush, int $tailSeq, int &$tailUsed): string
+    {
+        $out = '';
+        while (true) {
+            $n = count($this->bQueue);
+            if ($n === 0) break;
+            $head = $this->bQueue[0];
+
+            // 1) 队首是 IDR：直接作为锚点编码，并把 POC 基准移到本帧
+            if ($head['isKey']) {
+                $nals = $this->encoder->encodeFrame($head['yuv'], true);
+                $out .= $this->emitEncodedB($nals, $head, true, $tailSeq, $tailUsed);
+                $this->bLastAnchorIdx = $head['idx'];
+                $this->bPocBase = $head['idx'];
+                array_shift($this->bQueue);
+                continue;
+            }
+
+            // 2) 前 3 帧内出现 IDR：先把 IDR 之前的残留帧按 P 编码（下轮再处理 IDR）
+            $idrPos = null;
+            for ($i = 1; $i < min(3, $n); $i++) if ($this->bQueue[$i]['isKey']) { $idrPos = $i; break; }
+            if ($idrPos !== null) {
+                for ($i = 0; $i < $idrPos; $i++) $out .= $this->emitBAnchorP(array_shift($this->bQueue), $tailSeq, $tailUsed);
+                continue;
+            }
+
+            // 3) 标准三元组（三帧均携带事件序号；尾部解码器滞留帧不参与）
+            if ($n >= 3 && $this->bLastAnchorIdx >= 0
+                && $head['idx'] === $this->bLastAnchorIdx + 1
+                && $this->bQueue[1]['idx'] === $this->bLastAnchorIdx + 2
+                && $this->bQueue[2]['idx'] === $this->bLastAnchorIdx + 3
+                && $head['seq'] !== null && $this->bQueue[1]['seq'] !== null && $this->bQueue[2]['seq'] !== null) {
+                $b1 = $this->bQueue[0];
+                $b2 = $this->bQueue[1];
+                $anchor = $this->bQueue[2];
+                // 槽位按升序重排后配给编码序：锚点取最小、其次 B1、B2（输出按序号升序写出 = 解码序）
+                $slots = [$b1['seq'], $b2['seq'], $anchor['seq']];
+                sort($slots);
+                $this->encoder->snapshotBRefL0();
+                $this->encoder->poc = 2 * ($anchor['idx'] - $this->bPocBase);
+                $anchorNals = $this->encoder->encodeFrame($anchor['yuv'], false);
+                $out .= $this->wrapEncodedBFrame($anchorNals, $slots[0], false, $this->nextCts($anchor), $anchor);
+                $b1Nals = $this->encoder->encodeBFrame($b1['yuv'], 2 * ($b1['idx'] - $this->bPocBase));
+                $out .= $this->wrapEncodedBFrame($b1Nals, $slots[1], false, $this->nextCts($b1), $b1);
+                $b2Nals = $this->encoder->encodeBFrame($b2['yuv'], 2 * ($b2['idx'] - $this->bPocBase));
+                $out .= $this->wrapEncodedBFrame($b2Nals, $slots[2], false, $this->nextCts($b2), $b2);
+                array_splice($this->bQueue, 0, 3);
+                $this->bLastAnchorIdx = $anchor['idx'];
+                continue;
+            }
+
+            // 4) 冲刷时把残留帧按显示序 P 编码（GOP 尾部不足一个三元组；其真实 L1 属下一 GOP 不可见）
+            if ($flush) {
+                $e = array_shift($this->bQueue);
+                if ($this->bLastAnchorIdx < 0) {
+                    $nals = $this->encoder->encodeFrame($e['yuv'], true);
+                    $out .= $this->emitEncodedB($nals, $e, true, $tailSeq, $tailUsed);
+                    $this->bPocBase = $e['idx'];
+                } else {
+                    $out .= $this->emitBAnchorP($e, $tailSeq, $tailUsed);
+                }
+                $this->bLastAnchorIdx = $e['idx'];
+                continue;
+            }
+            break; // 等待后续帧凑齐三元组
+        }
+        return $out;
+    }
+
+    /** 把一帧按锚点 P 编码（参考上一锚点重建帧），推进锚点基准。 */
+    private function emitBAnchorP(array $e, int $tailSeq, int &$tailUsed): string
+    {
+        $this->encoder->snapshotBRefL0();
+        $this->encoder->poc = 2 * ($e['idx'] - $this->bPocBase);
+        $nals = $this->encoder->encodeFrame($e['yuv'], false);
+        $out = $this->emitEncodedB($nals, $e, false, $tailSeq, $tailUsed);
+        $this->bLastAnchorIdx = $e['idx'];
+        return $out;
+    }
+
+    /** 单帧（锚点 IDR / 尾部 P）编码落盘：有事件序号用其槽位，否则占用 gopEnd 预留槽位。 */
+    private function emitEncodedB(array $nals, array $e, bool $isKey, int $tailSeq, int &$tailUsed): string
+    {
+        $seq = $e['seq'] ?? ($tailSeq + $tailUsed++);
+        return $this->wrapEncodedBFrame($nals, $seq, $isKey, $this->nextCts($e), $e);
+    }
+
+    /** 当前编码序下的 CTS = PTS − DTS =（显示序 − 编码序）×帧时长，并推进编码序计数。 */
+    private function nextCts(array $e): int
+    {
+        $cts = (int)round(($e['idx'] - $this->bEncodeCounter) * $this->bFrameDurMs());
+        $this->bEncodeCounter++;
+        return $cts;
+    }
+
+    /** B 模式帧时长（毫秒）：抽帧取目标帧率，否则取源帧率；与输出侧推导 DTS 的时基保持一致。 */
+    private function bFrameDurMs(): float
+    {
+        $sourceFps = (float)($this->config['source_fps'] ?? 0);
+        if ($sourceFps <= 0.0) $sourceFps = 25.0;
+        $targetFps = (int)($this->config['fps'] ?? 0);
+        $fps = ($targetFps > 0 && $targetFps < $sourceFps - 0.01) ? (float)$targetFps : $sourceFps;
+        return $fps > 0 ? 1000.0 / $fps : 40.0;
+    }
+
+    /**
+     * B 模式帧封装：把编码 NAL 与 cts 附在 meta 上（DTS 由输出侧按写出序号×帧时长推导）。
+     * 负载 = 4 字节 body 长度前缀(0) + AnnexB NAL，encodedVariant 指向 NAL 起点。
+     */
+    private function wrapEncodedBFrame(array $nals, int $seq, bool $isKey, int $cts, array $e): string
+    {
+        $annexb = '';
+        foreach ($nals as $nal) $annexb .= $nal;
+        $meta = [
+            'tagType' => 9,
+            'timestamp' => (int)($e['timestamp'] ?? 0),
+            'encoded' => true,
+            'keyFrame' => $isKey,
+            'cts' => $cts,
+            'encodedVariant' => ['offset' => 4, 'length' => strlen($annexb), 'width' => (int)($e['w'] ?? 0), 'height' => (int)($e['h'] ?? 0)],
+        ];
+        if (isset($e['sourceFps'])) $meta['sourceFps'] = $e['sourceFps'];
+        return HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $seq, $meta, pack('N', 0) . $annexb);
+    }
+
+    /**
+     * B 模式 GOP 尾部冲刷：先把解码器重排队列滞留的显示序尾帧补入 B 缓冲（无事件序号），
+     * 再按显示序以 P 帧补齐残留帧，最后不足 tailMax 部分以 drop 占位补齐。
+     */
+    private function flushGopTailB(int $tailSeq, int $tailMax): string
+    {
+        $tailUsed = 0;
+        if ($tailMax > 0 && $this->width > 0) {
+            $sourceFps = isset($this->config['source_fps']) ? (float)$this->config['source_fps'] : 0.0;
+            if ($sourceFps <= 0.0) $sourceFps = 0.0;
+            $w = ($this->config['width'] ?? 0) > 0 ? (int)$this->config['width'] : $this->width;
+            $h = ($this->config['height'] ?? 0) > 0 ? (int)$this->config['height'] : $this->height;
+            foreach ($this->decoder->flushOutput() as $f) {
+                if (empty($f['data'])) continue;
+                $yuv = ($w === $this->width && $h === $this->height) ? $f['data'] : $this->scaler->scaleYUV420P($f['data'], $this->width, $this->height, $w, $h);
+                if (!empty($this->config['watermark']) && !empty($this->config['watermarkFile'])) $yuv = $this->applyWatermark($yuv, $w, $h, $this->config['watermarkFile']);
+                $this->bQueue[] = ['yuv' => $yuv, 'isKey' => !empty($f['isIdr']), 'idx' => $this->bDisplayCounter++,
+                    'seq' => null, 'timestamp' => $this->lastVideoTs,
+                    'sourceFps' => $sourceFps > 0.0 ? $sourceFps : null, 'w' => $w, 'h' => $h];
+            }
+        }
+        $out = $this->drainBQueue(true, $tailSeq, $tailUsed);
+        while ($tailUsed < $tailMax) {
+            $out .= HlsPipelineProtocol::frame(HlsPipelineProtocol::EVENT, $tailSeq + $tailUsed, ['tagType' => 9, 'drop' => true], '');
+            $tailUsed++;
+        }
+        return $out;
+    }
+
     private function configureEncoder(int $w, int $h, bool $dropFrames, float $sourceFps, int $targetFps): void
     {
         $this->encoder->setResolution($w, $h);
@@ -348,6 +554,11 @@ final class FlvDecoderWorkerServer
         $this->sawBFrames = $this->sawBFrames || $this->decoder->reorderByPoc;
         $this->pendingFrame = null;
         $this->deferredOutput = '';
+        $this->bQueue = [];
+        $this->bLastAnchorIdx = -1;
+        $this->bPocBase = 0;
+        $this->bEncodeCounter = 0;
+        $this->bDisplayCounter = 0;
         $this->decoder = new H264Decoder();
         $this->decoder->reorderByPoc = $this->sawBFrames;
         if ($this->sps !== '') {

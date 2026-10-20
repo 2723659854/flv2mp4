@@ -13,7 +13,7 @@ use Xiaosongshu\Flv2mp4\Flv\FlvTag;
  * @purpose flv重编码（改变分辨率/码率）
  * @author yanglong
  * @time 2026年7月28日
- * @note 本转码器目前仅支持baseline profile
+ * @note 支持 baseline / main / high profile（由 config.profile 指定，未匹配回落 baseline）
  */
 class FlvRecoder
 {
@@ -95,6 +95,22 @@ class FlvRecoder
     /** @var FlvTag[] 在途视频帧之后到达的音频 tag，待该帧写出后按原顺序回放 */
     private array $queuedAudioTags = [];
 
+    // B 帧（IBBP）编码调度状态：显示序待编码帧队列 + 编码序计数
+    /** 是否启用 B 帧编码（config.bframes 且 profile 非 baseline） */
+    private bool $bframes = false;
+    /** 实际下发给编码器的 profile（请求 B 帧时 baseline 自动升为 main） */
+    private string $profileName = 'baseline';
+    /** @var array<int,array{yuv:string,isKey:bool,idx:int}> 显示序待编码帧（最多滞留 3 帧） */
+    private array $bQueue = [];
+    /** 最近一个已编码锚点的显示序序号；三元组（锚点+2B）对齐基准 */
+    private int $bLastAnchorIdx = -1;
+    /** 最近一个已编码 IDR 的显示序序号；POC 基准（IDR 会把 POC 重置为 0） */
+    private int $bPocBase = 0;
+    /** 编码序 DTS 计数（每落盘一帧 +1） */
+    private int $bDtsCounter = 0;
+    /** 输出显示序计数（每解出一帧参与输出的显示帧 +1） */
+    private int $bDisplayCounter = 0;
+
     public function __construct(array $config = [], bool $multi = false)
     {
         $this->multi = $multi;
@@ -115,6 +131,15 @@ class FlvRecoder
         $this->decoder = new H264Decoder();
         $this->encoder = new H264Encoder();
         $this->encoder->motionWorkers = max(1, (int)($config['motionWorkers'] ?? 8));
+        $profile = strtolower(trim($config['profile'] ?? 'baseline'));
+        // 取值校验前置：非 baseline/main/high 一律回退 baseline（与 setProfile 一致）
+        if (!in_array($profile, ['baseline', 'main', 'high'], true)) $profile = 'baseline';
+        $this->bframes = !empty($config['bframes']);
+        // B 片不属于 baseline 语法：请求 B 帧时至少按 main profile 输出
+        if ($this->bframes && $profile === 'baseline') $profile = 'main';
+        $this->profileName = $profile;
+        $this->encoder->setProfile($profile);
+        if ($this->bframes) $this->encoder->enableBFrames(true);
         if (!empty($config['fastMotion'])) $this->encoder->setFastMotion(true);
         $this->scaler = new VideoScaler();
     }
@@ -221,6 +246,8 @@ class FlvRecoder
         $this->decoder = new H264Decoder();
         $this->encoder = new H264Encoder();
         $this->encoder->motionWorkers = max(1, (int)($this->config['motionWorkers'] ?? 8));
+        $this->encoder->setProfile($this->profileName);
+        if ($this->bframes) $this->encoder->enableBFrames(true);
         if (!empty($this->config['fastMotion'])) $this->encoder->setFastMotion(true);
         $this->srcWidth = 0;
         $this->srcHeight = 0;
@@ -256,6 +283,11 @@ class FlvRecoder
         $this->positiveVideoDtsDeltaCount = 0;
         $this->pendingVideoJob = null;
         $this->queuedAudioTags = [];
+        $this->bQueue = [];
+        $this->bLastAnchorIdx = -1;
+        $this->bPocBase = 0;
+        $this->bDtsCounter = 0;
+        $this->bDisplayCounter = 0;
     }
 
     private function detectSourceFps(array $tags): void
@@ -370,7 +402,7 @@ class FlvRecoder
                 // GOP worker 已完成解码+缩放+编码：直接按显示序封装落盘，不再重复抽帧门控/自解码
                 $variant = $metadata['encodedVariant'];
                 $annexb = substr($payload, (int)$variant['offset'], (int)$variant['length']);
-                $this->appendPipelineEncodedFrame($this->splitAnnexBToNals($annexb), !empty($metadata['keyFrame']), (int)($metadata['timestamp'] ?? 0));
+                $this->appendPipelineEncodedFrame($this->splitAnnexBToNals($annexb), !empty($metadata['keyFrame']), (int)($metadata['timestamp'] ?? 0), array_key_exists('cts', $metadata) ? (int)$metadata['cts'] : null);
                 return;
             }
             if (!empty($metadata['decoded'])) {
@@ -420,7 +452,12 @@ class FlvRecoder
     private function finishOutput(string $outputFile): void
     {
         // 先冲洗解码器重排队列中残留的 B 帧，再冲刷编码器双缓冲末帧及排队音频
-        $this->flushDecoderFrames();
+        if ($this->bframes) {
+            // B 模式：解码器尾帧补入显示序缓冲（随后 flushPendingVideo 冲刷 B 调度器与输出 worker 在途帧）
+            $this->flushDecoderFramesB();
+        } else {
+            $this->flushDecoderFrames();
+        }
         $this->flushPendingVideo();
 
         $actualHasVideo = $this->outputVideoFrameCount > 0;
@@ -555,7 +592,8 @@ class FlvRecoder
             $this->targetHeight > 0 && $this->srcHeight !== $this->targetHeight ||
             $this->targetBitrate > 0 ||
             $this->dropFrames ||
-            $this->watermarkEnabled
+            $this->watermarkEnabled ||
+            $this->bframes
         );
 
         if (!$needTranscode) {
@@ -572,6 +610,12 @@ class FlvRecoder
                 $relativeTime = $timestamp - $this->baseTimestamp;
             }
             $this->writeVideoTag($avcData, $isKeyFrame, $relativeTime, $cts);
+            return;
+        }
+
+        if ($this->bframes) {
+            // IBBP 编码序调度：显示序解出的帧先入 3 帧重排缓冲，凑齐三元组后按锚点→B→B 落盘
+            $this->handleBFrameVideo($avcData, $isKeyFrame, $timestamp);
             return;
         }
 
@@ -678,6 +722,192 @@ class FlvRecoder
         return $job;
     }
 
+    /**
+     * IBBP（B 模式）单进程转码入口：解码→缩放→抽帧判定，入 3 帧显示序缓冲后交给调度器。
+     * 与 P 路径不同，这里不做 startFrame 双缓冲（B 帧需要在"未来锚点"到齐后才能按编码序落盘）。
+     */
+    private function handleBFrameVideo(string $avcData, bool $isKeyFrame, int $timestamp): void
+    {
+        if ($this->baseTimestamp === null) {
+            if (!$isKeyFrame) return;
+            $this->baseTimestamp = $timestamp;
+            $relativeTime = 0;
+        } else {
+            $relativeTime = $timestamp - $this->baseTimestamp;
+        }
+        $this->lastDecodedRelativeMs = $relativeTime;
+
+        // 单进程必须逐帧解码以维护参考链；解码器按显示序返回帧，null 表示仍在重排队列中
+        $decoded = $this->decodeNaluToYuv($avcData);
+        if ($decoded === null) return;
+        $yuvData = $decoded['data'];
+        $decodedIsIdr = $decoded['isIdr'];
+
+        $this->displayFrameCount++;
+
+        // 抽帧门控（与 P 路径同口径）：bQueue 中滞留帧等同"已保留但未落盘的输出槽位"
+        $reservedCount = $this->outputVideoFrameCount + count($this->bQueue);
+        $sourceFps = $this->sourceFps ?? 25.0;
+        $shouldOutput = !$this->dropFrames
+            || $reservedCount === 0
+            || $decodedIsIdr
+            || $this->displayFrameCount * $this->effectiveTargetFps >= $reservedCount * $sourceFps;
+        if (!$shouldOutput) return;
+
+        $targetW = $this->outputVideoWidth;
+        $targetH = $this->outputVideoHeight;
+        if ($targetW !== $this->srcWidth || $targetH !== $this->srcHeight) {
+            $yuvData = $this->scaler->scaleYUV420P($yuvData, $this->srcWidth, $this->srcHeight, $targetW, $targetH);
+        }
+        if ($this->watermarkEnabled) {
+            $yuvData = $this->applyWatermark($yuvData, $targetW, $targetH);
+        }
+        $this->configureBEncoder($targetW, $targetH);
+
+        $this->bQueue[] = ['yuv' => $yuvData, 'isKey' => $decodedIsIdr, 'idx' => $this->bDisplayCounter++];
+        $this->drainBQueue(false);
+    }
+
+    /** 与 P 路径 prepareTranscodeVideoFrame 尾部一致的编码器参数下发 */
+    private function configureBEncoder(int $w, int $h): void
+    {
+        $this->encoder->setResolution($w, $h);
+        if ($this->targetBitrate > 0) {
+            $this->encoder->setBitrate($this->targetBitrate);
+        } else {
+            $this->encoder->setQp($this->targetQp);
+        }
+        $encoderFps = $this->effectiveTargetFps ?? $this->sourceFps;
+        if ($encoderFps !== null && $encoderFps > 0) {
+            $this->encoder->setFps(max(1, (int)round($encoderFps)));
+        }
+    }
+
+    /**
+     * 显示序缓冲 → 编码序落盘。
+     * 固定 3 帧延迟的 IBBP：锚点在显示序 0、3、6…，每个三元组编码序 = 锚点 → 前 2 个 B。
+     * 遇源 IDR 时截断当前三元组（把 IDR 之前的残留帧按 P 编码），IDR 自身仍作锚点并重置 POC 基准。
+     */
+    private function drainBQueue(bool $flush): void
+    {
+        while (true) {
+            $n = count($this->bQueue);
+            if ($n === 0) break;
+            $head = $this->bQueue[0];
+
+            // 1) 队首是 IDR：直接作为锚点编码，并把 POC 基准移到本帧
+            if ($head['isKey']) {
+                $nals = $this->encoder->encodeFrame($head['yuv'], true);
+                $this->emitBFrame($nals, $head['idx'], true);
+                $this->bLastAnchorIdx = $head['idx'];
+                $this->bPocBase = $head['idx'];
+                array_shift($this->bQueue);
+                continue;
+            }
+
+            // 2) 队首之后（前 3 帧内）出现 IDR：先把 IDR 之前的残留帧按 P 编码，下轮再处理 IDR
+            $idrPos = null;
+            for ($i = 1; $i < min(3, $n); $i++) {
+                if ($this->bQueue[$i]['isKey']) { $idrPos = $i; break; }
+            }
+            if ($idrPos !== null) {
+                for ($i = 0; $i < $idrPos; $i++) {
+                    $e = array_shift($this->bQueue);
+                    $this->emitBAnchorP($e);
+                }
+                continue;
+            }
+
+            // 3) 标准三元组：队首 idx == 上一锚点+1，第 3 帧 idx == 上一锚点+3
+            if ($n >= 3 && $this->bLastAnchorIdx >= 0
+                && $head['idx'] === $this->bLastAnchorIdx + 1
+                && $this->bQueue[1]['idx'] === $this->bLastAnchorIdx + 2
+                && $this->bQueue[2]['idx'] === $this->bLastAnchorIdx + 3) {
+                $b1 = $this->bQueue[0];
+                $b2 = $this->bQueue[1];
+                $anchor = $this->bQueue[2];
+                // 编码序：锚点（未来参考 L1）→ B(过去锚点=快照 L0，未来=本锚点) → B
+                $this->encoder->snapshotBRefL0();
+                $this->encoder->poc = 2 * ($anchor['idx'] - $this->bPocBase);
+                $anchorNals = $this->encoder->encodeFrame($anchor['yuv'], false);
+                $this->emitBFrame($anchorNals, $anchor['idx'], false);
+                $b1Nals = $this->encoder->encodeBFrame($b1['yuv'], 2 * ($b1['idx'] - $this->bPocBase));
+                $this->emitBFrame($b1Nals, $b1['idx'], false);
+                $b2Nals = $this->encoder->encodeBFrame($b2['yuv'], 2 * ($b2['idx'] - $this->bPocBase));
+                $this->emitBFrame($b2Nals, $b2['idx'], false);
+                array_splice($this->bQueue, 0, 3);
+                $this->bLastAnchorIdx = $anchor['idx'];
+                continue;
+            }
+
+            // 4) 其余情况仅在冲刷时把残留帧按显示序 P 编码（GOP 尾部不足一个三元组）
+            if ($flush) {
+                $e = array_shift($this->bQueue);
+                if ($this->bLastAnchorIdx < 0) {
+                    $nals = $this->encoder->encodeFrame($e['yuv'], true);
+                    $this->emitBFrame($nals, $e['idx'], true);
+                    $this->bPocBase = $e['idx'];
+                } else {
+                    $this->emitBAnchorP($e);
+                }
+                $this->bLastAnchorIdx = $e['idx'];
+                continue;
+            }
+            break; // 等待后续帧凑齐三元组
+        }
+    }
+
+    /** 把一帧按锚点 P 编码（参考上一锚点重建帧），并推进锚点基准 */
+    private function emitBAnchorP(array $e): void
+    {
+        $this->encoder->snapshotBRefL0();
+        $this->encoder->poc = 2 * ($e['idx'] - $this->bPocBase);
+        $nals = $this->encoder->encodeFrame($e['yuv'], false);
+        $this->emitBFrame($nals, $e['idx'], false);
+        $this->bLastAnchorIdx = $e['idx'];
+    }
+
+    /**
+     * 编码序落盘一帧：DTS 按编码序步进、PTS 按显示序计算，CTS = PTS - DTS（B 帧为负，
+     * FLV 组合时间偏移按 24bit 有符号写出）。
+     */
+    private function emitBFrame(array $nals, int $displayIdx, bool $isKey): void
+    {
+        $fps = $this->effectiveTargetFps ?? $this->sourceFps;
+        $frameDurMs = ($fps !== null && $fps > 0) ? 1000.0 / $fps : 40.0;
+        $dts = (int)round($this->bDtsCounter * $frameDurMs);
+        $pts = (int)round($displayIdx * $frameDurMs);
+        $cts = $pts - $dts;
+
+        if ($this->outputVideoFrameCount === 0) {
+            $this->extractSpsPpsFromNals($nals);
+            $this->writeFlvHeader(true, true);
+            $this->writeSequenceHeaderTag();
+        }
+        $this->writeEncodedVideoFrame($nals, $isKey || $this->outputVideoFrameCount === 0, $dts, $cts);
+        $this->bDtsCounter++;
+    }
+
+    /** EOF/分片结束：把解码器重排队列中滞留的 B 尾帧补入显示序缓冲，再冲刷 B 调度器 */
+    private function flushDecoderFramesB(): void
+    {
+        foreach ($this->decoder->flushOutput() as $f) {
+            if (empty($f['data'])) continue;
+            $this->displayFrameCount++;
+            $yuvData = $f['data'];
+            $targetW = $this->outputVideoWidth;
+            $targetH = $this->outputVideoHeight;
+            if ($targetW !== $this->srcWidth || $targetH !== $this->srcHeight) {
+                $yuvData = $this->scaler->scaleYUV420P($yuvData, $this->srcWidth, $this->srcHeight, $targetW, $targetH);
+            }
+            if ($this->watermarkEnabled) {
+                $yuvData = $this->applyWatermark($yuvData, $targetW, $targetH);
+            }
+            $this->configureBEncoder($targetW, $targetH);
+            $this->bQueue[] = ['yuv' => $yuvData, 'isKey' => !empty($f['isIdr']), 'idx' => $this->bDisplayCounter++];
+        }
+    }
+
     /** finishFrame 取出在途编码结果并写出（其 CAVLC 与下一帧 worker 计算重叠） */
     private function emitPendingVideoFrame(array $job): void
     {
@@ -690,22 +920,32 @@ class FlvRecoder
             $this->writeSequenceHeaderTag();
         }
 
-        // 重编码器不生成 B 帧，CTS 必须为0。
-        // 抽帧输出按目标帧率生成 CFR 时间轴（帧序号 × 帧时长）：选中帧虽落在对应
-        // 网格点附近，但保留源 DTS 会使帧间隔随源帧率抖动，下游按 avg_frame_rate
-        // 时基（如 1/10）量化时相邻帧会撞相同整数 DTS。与 Mp4Recoder 保持一致。
-        // 不抽帧（直通/无 fps 变换）时保留源 DTS。
-        $outputDts = $this->dropFrames && $this->effectiveTargetFps !== null && $this->effectiveTargetFps > 0
-            ? (int)round($this->outputVideoFrameCount * 1000 / $this->effectiveTargetFps)
-            : $job['relativeTime'];
-        $this->writeEncodedVideoFrame($encodedNals, $this->outputVideoFrameCount === 0 || $isKeyFrame, $outputDts, 0);
+        // B 模式（GOP worker 已按编码序产出并附 cts）：DTS 由输出侧按写出序号×帧时长推导，
+        // 保证跨 GOP 全局单调、与编码序一致（源时间戳属显示序，不可作 B 帧 DTS）；PTS = DTS + CTS。
+        $outputCts = $job['cts'] ?? null;
+        if ($outputCts !== null) {
+            $fps = $this->effectiveTargetFps ?? $this->sourceFps;
+            $frameDurMs = ($fps !== null && $fps > 0) ? 1000.0 / $fps : 40.0;
+            $outputDts = (int)round($this->outputVideoFrameCount * $frameDurMs);
+        } else {
+            $outputCts = 0;
+            // 重编码器不生成 B 帧，CTS 必须为0。
+            // 抽帧输出按目标帧率生成 CFR 时间轴（帧序号 × 帧时长）：选中帧虽落在对应
+            // 网格点附近，但保留源 DTS 会使帧间隔随源帧率抖动，下游按 avg_frame_rate
+            // 时基（如 1/10）量化时相邻帧会撞相同整数 DTS。与 Mp4Recoder 保持一致。
+            // 不抽帧（直通/无 fps 变换）时保留源 DTS。
+            $outputDts = $this->dropFrames && $this->effectiveTargetFps !== null && $this->effectiveTargetFps > 0
+                ? (int)round($this->outputVideoFrameCount * 1000 / $this->effectiveTargetFps)
+                : $job['relativeTime'];
+        }
+        $this->writeEncodedVideoFrame($encodedNals, $this->outputVideoFrameCount === 0 || $isKeyFrame, $outputDts, $outputCts);
     }
 
     /**
      * GOP worker 已编码帧的直封装入口：构造与 prepareTranscodeVideoFrame 兼容的 job，
      * 走同一双缓冲管线（startFrame 已在 worker 内完成，此处只维护 pendingVideoJob 时序）。
      */
-    private function appendPipelineEncodedFrame(array $nals, bool $forcedIdr, int $timestamp): void
+    private function appendPipelineEncodedFrame(array $nals, bool $forcedIdr, int $timestamp, ?int $cts = null): void
     {
         if ($this->baseTimestamp === null) $this->baseTimestamp = $timestamp;
         $job = [
@@ -713,6 +953,7 @@ class FlvRecoder
             'isKey' => false,
             'forcedIdr' => $forcedIdr,
             'pipelineEncoded' => $nals,
+            'cts' => $cts,
         ];
         if ($this->pendingVideoJob !== null) {
             $pendingJob = $this->pendingVideoJob;
@@ -790,6 +1031,8 @@ class FlvRecoder
     /** 冲刷最后一帧的延迟编码及排队音频（EOF/分片结束前调用） */
     public function flushPendingVideo(): void
     {
+        // B 模式：先把显示序缓冲残留帧按 P 补齐（单进程用 bQueue，分布式输出 worker 为空、无副作用）
+        if ($this->bframes) $this->drainBQueue(true);
         if ($this->pendingVideoJob !== null) {
             $job = $this->pendingVideoJob;
             $this->pendingVideoJob = null;

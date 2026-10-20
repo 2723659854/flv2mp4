@@ -46,6 +46,7 @@ final class HlsDecoderWorkerServer
         foreach ($profiles as $name => $profile) {
             $encoder = new H264Encoder();
             $encoder->motionWorkers = max(1, (int)($profile['motionWorkers'] ?? 8));
+            $encoder->setProfile($profile['profile'] ?? 'baseline');
             if (!empty($profile['fastMotion'])) $encoder->setFastMotion(true);
             $this->encoders[$name] = $encoder;
         }

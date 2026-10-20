@@ -47,19 +47,19 @@ trait SliceDecodingTrait
             if ($isIDR) {
                 $this->currPicOrderCntMsb = 0;
             } else {
-                // spec 8.2.1.1（frame-only，无 frame_num 断档）
+                // spec 8.2.1.1（frame-only，无 frame_num 断档）：以最近参考帧的 (msb,lsb) 为基准，
+                // 按 lsb 差阈值推导 msb。阈值判定保证 POC 在整个序列内单调递增，
+                // 而不是折叠回单个 lsb 周期 —— 否则越过 MaxPicOrderCntLsb 后 B 片 past/future
+                // 判定与显示序重排（reorderByPoc）都会错位。
                 $lsbDiff = $pocLsb - $this->prevPicOrderCntLsb;
-                if ($lsbDiff > ($maxPocLsb >> 1)) {
-                    $lsbDiff -= $maxPocLsb;
-                } elseif ($lsbDiff <= -($maxPocLsb >> 1)) {
-                    $lsbDiff += $maxPocLsb;
+                $halfPoc = $maxPocLsb >> 1;
+                if ($lsbDiff > $halfPoc) {
+                    $this->currPicOrderCntMsb = $this->prevPicOrderCntMsb - $maxPocLsb;
+                } elseif ($lsbDiff <= -$halfPoc) {
+                    $this->currPicOrderCntMsb = $this->prevPicOrderCntMsb + $maxPocLsb;
+                } else {
+                    $this->currPicOrderCntMsb = $this->prevPicOrderCntMsb;
                 }
-                $msb = $this->prevPicOrderCntMsb;
-                $sum = $msb + $this->prevPicOrderCntLsb + $lsbDiff;
-                if ($sum < 0 || $sum >= $maxPocLsb) {
-                    $msb += $lsbDiff < 0 ? $maxPocLsb : -$maxPocLsb;
-                }
-                $this->currPicOrderCntMsb = $msb;
             }
             $this->currPicOrderCnt = $this->currPicOrderCntMsb + $pocLsb;
         }

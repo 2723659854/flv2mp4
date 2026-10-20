@@ -42,6 +42,7 @@ final class Mp4DecoderWorkerServer
         // 编码在 GOP worker 内完成：每个 worker 独立编码器 + 独立运动估计子进程
         $this->encoder = new H264Encoder();
         $this->encoder->motionWorkers = max(1, (int)($config['motionWorkers'] ?? 8));
+        $this->encoder->setProfile($config['profile'] ?? 'baseline');
         if (!empty($config['fastMotion'])) {
             $this->encoder->setFastMotion(true);
             $this->fast = true;

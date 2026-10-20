@@ -339,6 +339,12 @@ class H264Encoder
     public $mbType = self::MB_TYPE_I16x16;
 
     /**
+     * 输出 H.264 profile：baseline | main | high（非法/缺失值回落 baseline）。
+     * 仅影响 SPS/PPS 的 profile_idc 与高等级扩展语法字段，不改变宏块编码路径。
+     */
+    public $profile = 'baseline';
+
+    /**
      * P帧QP偏移量（相对于I帧QP）
      * 默认 +2，即 P 帧 QP = I 帧 QP + 2
      */
@@ -368,6 +374,25 @@ class H264Encoder
     public $refInts = null;        // 参考帧Y平面整数数组缓存（优化运动估计速度）
     public $enableInter = true;   // 是否启用P帧
     public $numRefFrames = 1;      // 参考帧数量
+
+    /**
+     * 是否启用 B 帧（IBBP）编码。关闭时完全保持原 I/P 编码行为。
+     */
+    public bool $bFrames = false;
+
+    /** B 帧 L0（过去锚点）参考平面：编码锚点前由驱动层快照 */
+    public $bRefL0YPlane = null;
+    public $bRefL0UPlane = null;
+    public $bRefL0VPlane = null;
+
+    /** B 片 MVP 邻居缓存（双 list，与解码器 bMvLeftCol/bMvTopRow/bMvTopLeft 一一对应） */
+    public $bMvLeftCol = [];
+    public $bMvTopRow = [];
+    public $bMvTopLeft = [null, null];
+
+    /** B 片两个参考帧（L0=过去锚点 / L1=未来锚点）的 Y 平面整数缓存，每片仅 unpack 一次 */
+    public $bRefIntsL0 = null;
+    public $bRefIntsL1 = null;
 
     // 本地解码重建帧（用于正确更新参考帧，避免编解码器失配）
     public $reconYPlane = '';
@@ -438,6 +463,14 @@ class H264Encoder
         $this->scenePrevAw = 0;
         $this->scenePrevAh = 0;
         $this->sceneHighRun = 0;
+        $this->bRefL0YPlane = null;
+        $this->bRefL0UPlane = null;
+        $this->bRefL0VPlane = null;
+        $this->bMvLeftCol = [];
+        $this->bMvTopRow = [];
+        $this->bMvTopLeft = [null, null];
+        $this->bRefIntsL0 = null;
+        $this->bRefIntsL1 = null;
     }
 
     public function setQp(int $qp): void
@@ -450,6 +483,38 @@ class H264Encoder
     public function setMbType(int $type): void
     {
         $this->mbType = $type;
+    }
+
+    /**
+     * 设置输出 profile：baseline | main | high；其它值一律回落 baseline。
+     */
+    public function setProfile(string $profile): void
+    {
+        $profile = strtolower(trim($profile));
+        if (!in_array($profile, ['baseline', 'main', 'high'], true)) {
+            $profile = 'baseline';
+        }
+        $this->profile = $profile;
+    }
+
+    /**
+     * 开启/关闭 B 帧编码。开启后 SPS 的 num_ref_frames≥2、log2_max_poc_lsb 扩展为 256，
+     * 由驱动层按 IBBP 解码序调用 encodeBFrame()。
+     */
+    public function enableBFrames(bool $enabled = true): void
+    {
+        $this->bFrames = $enabled;
+        if ($enabled && $this->numRefFrames < 2) {
+            $this->numRefFrames = 2;
+        }
+    }
+
+    /** 编码锚点帧（I/P）前，把当前参考帧快照为 B 的 L0（过去）参考平面。 */
+    public function snapshotBRefL0(): void
+    {
+        $this->bRefL0YPlane = $this->refYPlane;
+        $this->bRefL0UPlane = $this->refUPlane;
+        $this->bRefL0VPlane = $this->refVPlane;
     }
 
     public function setFps(int $fps): void
@@ -498,6 +563,8 @@ class H264Encoder
     public int $motionWorkers = 4;
     public int $motionRange = 32;
     public bool $fastMotion = false;
+    /** 静止宏块提前跳过精搜（量化死区内残差归零，不影响正确性）；B 帧在主进程内联跑 ME 时同样生效 */
+    public bool $earlySkip = true;
     /** I4x4 帧内模式剪枝：只评估常用 4 种 (DC/Vertical/Horizontal/DiagonalDownLeft)，跳过 5-8 角模式 */
     public bool $fastIntraPrune = false;
     public array $motionWorkerResults = [];

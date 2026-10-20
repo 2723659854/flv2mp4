@@ -17,7 +17,8 @@ trait InterPredTrait
         string $refYPlane,
         string $refUPlane,
         string $refVPlane,
-        int $motionRange = 32
+        int $motionRange = 32,
+        ?array $forcedMv = null
     ): array {
         $curFlat = array_values(unpack('C*', $luma));
 
@@ -27,7 +28,7 @@ trait InterPredTrait
         // 此时直接产出 MV=(0,0)、cbp=0、与 (0,0) 运动补偿完全一致的重建帧，
         // 跳过整/半/四像素运动搜索与全部 DCT/量化。主进程仍按 skipMVP 决定 P_Skip，
         // 故与"完整搜索恰好得到同结果"位级等价。
-        if ($this->earlySkip) {
+        if ($forcedMv === null && $this->earlySkip) {
             $zeroT = $this->zeroResidualBlockSad($this->qp);
             $stride = $this->mbAlignedWidth;
             if ($this->refInts === null) $this->refInts = unpack('C*', $refYPlane);
@@ -72,7 +73,14 @@ trait InterPredTrait
             }
         }
 
-        [$mvX, $mvY, $sad] = $this->motionEstimate16x16($curFlat, $refYPlane, $mbX, $mbY, $motionRange);
+        if ($forcedMv !== null) {
+            // B 帧：MV 已由 prepareBMacroblock 双参考择优，跳过运动搜索直接使用
+            $mvX = $forcedMv[0];
+            $mvY = $forcedMv[1];
+            $sad = $forcedMv[2] ?? 0;
+        } else {
+            [$mvX, $mvY, $sad] = $this->motionEstimate16x16($curFlat, $refYPlane, $mbX, $mbY, $motionRange);
+        }
         $refX = $mbX * 64 + $mvX;
         $refY = $mbY * 64 + $mvY;
         $predBlock = $this->mcLumaBlock($refYPlane, $refX, $refY, $this->mbAlignedWidth, $this->mbAlignedHeight);
@@ -675,6 +683,195 @@ trait InterPredTrait
         $this->mvTopRow[$mbX * 4 + 1] = $mv;
         $this->mvTopRow[$mbX * 4 + 2] = $mv;
         $this->mvTopRow[$mbX * 4 + 3] = $mv;
+    }
+
+    // ====================== B 帧（IBBP）宏块编码 ======================
+
+    /**
+     * B 帧宏块准备：分别对 L0（过去锚点）/ L1（未来锚点）做运动估计，按 SAD 择优，
+     * 再以选中 MV 复用 P 的 MC+残差+色度路径。返回数组第 12 位附带选中的 list。
+     */
+    public function prepareBMacroblock(
+        int $mbX,
+        int $mbY,
+        string $luma,
+        string $curU,
+        string $curV,
+        string $refL0Y,
+        string $refL0U,
+        string $refL0V,
+        string $refL1Y,
+        string $refL1U,
+        string $refL1V,
+        int $motionRange = 32
+    ): array {
+        $curFlat = array_values(unpack('C*', $luma));
+
+        // 两次 ME 各自指向对应参考帧的整数缓存（片级已 unpack，避免每宏块重建整帧数组）
+        $this->refInts = $this->bRefIntsL0 ?? unpack('C*', $refL0Y);
+        [$mv0X, $mv0Y, $sad0] = $this->motionEstimate16x16($curFlat, $refL0Y, $mbX, $mbY, $motionRange);
+        $this->refInts = $this->bRefIntsL1 ?? unpack('C*', $refL1Y);
+        [$mv1X, $mv1Y, $sad1] = $this->motionEstimate16x16($curFlat, $refL1Y, $mbX, $mbY, $motionRange);
+
+        if ($sad0 <= $sad1) {
+            $list = 0; $mvX = $mv0X; $mvY = $mv0Y; $sad = $sad0;
+            $ry = $refL0Y; $ru = $refL0U; $rv = $refL0V;
+            $this->refInts = $this->bRefIntsL0 ?? unpack('C*', $refL0Y);
+        } else {
+            $list = 1; $mvX = $mv1X; $mvY = $mv1Y; $sad = $sad1;
+            $ry = $refL1Y; $ru = $refL1U; $rv = $refL1V;
+            $this->refInts = $this->bRefIntsL1 ?? unpack('C*', $refL1Y);
+        }
+
+        // 复用 P 路径做 MC+残差+重建；forcedMv 已选定，early-skip 与 ME 均跳过。
+        // refInts 已指向所选参考平面，保证 mcLumaBlock 使用正确缓存。
+        $prepared = $this->preparePMacroblock($mbX, $mbY, $luma, $curU, $curV, $ry, $ru, $rv, $motionRange, [$mvX, $mvY, $sad]);
+        $prepared[12] = $list;
+        return $prepared;
+    }
+
+    /** B 帧 16x16 宏块 CAVLC：mb_skip_run=0 + mb_type(B_L0/B_L1) + mvd + cbp + 残差 */
+    public function encodeBMacroblock(
+        int $mbX,
+        int $mbY,
+        array $prepared,
+        bool $leftAvailable,
+        array &$leftNz,
+        bool $topAvailable,
+        array &$topNzLuma,
+        array &$topNzCb,
+        array &$topNzCr
+    ): string {
+        [$mvX, $mvY, , $cbpLuma, $nzCache, $quantResidual] = $prepared;
+        $cbpChroma = $prepared[9] ?? 0;
+        $chromaDc = $prepared[10] ?? [];
+        $chromaAc = $prepared[11] ?? [];
+        $list = $prepared[12] ?? 0;
+        $refIdx = 0;
+
+        $bits = '';
+        $bits .= $this->ue(0); // mb_skip_run = 0（本编码器不使用 B_Skip/B_Direct）
+        $bits .= $this->ue($list === 0 ? 1 : 2); // mb_type: 1=B_L0_16x16, 2=B_L1_16x16
+
+        // MVP：与解码器 getB16x16MvPrediction 一致（双 list 独立邻居缓存）
+        list($mvpX, $mvpY) = $this->getMvpB16x16($mbX, $mbY, $list, $refIdx);
+        $bits .= $this->se($mvX - $mvpX);
+        $bits .= $this->se($mvY - $mvpY);
+
+        // CBP（与 P 一致的 Inter 映射表反查）
+        static $cbpFullToCode = null;
+        if ($cbpFullToCode === null) {
+            $interCbpMap = [
+                0, 16, 1, 2, 4, 8, 32, 3, 5, 10, 12, 15, 47, 7, 11, 13,
+                14, 6, 9, 31, 35, 37, 42, 44, 33, 34, 36, 40, 39, 43, 45, 46,
+                17, 18, 20, 24, 19, 21, 26, 28, 23, 27, 29, 30, 22, 25, 38, 41,
+            ];
+            $cbpFullToCode = array_flip($interCbpMap);
+        }
+        $cbpFull = ($cbpLuma & 0x0F) | (($cbpChroma & 0x03) << 4);
+        $bits .= $this->ue($cbpFullToCode[$cbpFull] ?? 0);
+        if ($cbpFull > 0) $bits .= $this->se(0);
+
+        if ($cbpLuma > 0) {
+            $blockGroups = [
+                [0, 1, 4, 5],
+                [2, 3, 6, 7],
+                [8, 9, 12, 13],
+                [10, 11, 14, 15],
+            ];
+            for ($blk8 = 0; $blk8 < 4; $blk8++) {
+                if (!($cbpLuma & (1 << $blk8))) continue;
+                foreach ($blockGroups[$blk8] as $rasterIdx) {
+                    $by = (int)($rasterIdx / 4);
+                    $bx = $rasterIdx % 4;
+                    $ac = $this->scan4x4DcAc($quantResidual[$rasterIdx]);
+                    $acNc = $this->computeNC($rasterIdx, $mbX, $bx, $by, $leftAvailable, $leftNz, $topAvailable, $topNzLuma, $nzCache);
+                    $bits .= $this->writeBlockResidualCavlc($ac, 15, false, $acNc);
+                }
+            }
+        }
+
+        if ($cbpChroma > 0) {
+            $bits .= $this->writeBlockResidualCavlc(array_slice($chromaDc, 0, 4), 3, true, -1);
+            $bits .= $this->writeBlockResidualCavlc(array_slice($chromaDc, 4, 4), 3, true, -1);
+            if ($cbpChroma >= 2) {
+                for ($i = 0; $i < 4; $i++) {
+                    $acNc = $this->computeNC(16 + $i, $mbX, $i % 2, intdiv($i, 2), $leftAvailable, $leftNz, $topAvailable, $topNzCb, $nzCache);
+                    $bits .= $this->writeBlockResidualCavlc($this->scan4x4Ac($chromaAc[$i]), 14, false, $acNc);
+                }
+                for ($i = 0; $i < 4; $i++) {
+                    $acNc = $this->computeNC(20 + $i, $mbX, $i % 2, intdiv($i, 2), $leftAvailable, $leftNz, $topAvailable, $topNzCr, $nzCache);
+                    $bits .= $this->writeBlockResidualCavlc($this->scan4x4Ac($chromaAc[4 + $i]), 14, false, $acNc);
+                }
+            }
+        }
+
+        // 更新亮度邻居 nz
+        for ($by = 0; $by < 4; $by++) {
+            $leftNz[$by] = $nzCache[$by * 4 + 3];
+        }
+        for ($bx = 0; $bx < 4; $bx++) {
+            $topBlkX = $mbX * 4 + $bx;
+            if ($topBlkX < count($topNzLuma)) $topNzLuma[$topBlkX] = $nzCache[$bx + 12];
+        }
+        // 更新色度邻居 nz
+        for ($by = 0; $by < 2; $by++) {
+            $cbBlk = $by * 2 + 1;
+            $leftNz[4 + $by] = $nzCache[16 + $cbBlk];
+            $leftNz[6 + $by] = $nzCache[20 + $cbBlk];
+        }
+        $topCbx0 = $mbX * 2;
+        $topCbx1 = $mbX * 2 + 1;
+        if ($topCbx1 < count($topNzCb)) {
+            $topNzCb[$topCbx0] = $nzCache[18];
+            $topNzCb[$topCbx1] = $nzCache[19];
+            $topNzCr[$topCbx0] = $nzCache[22];
+            $topNzCr[$topCbx1] = $nzCache[23];
+        }
+
+        // 保存 B 双 list MV 供后续宏块预测（未使用 list 填 [0,0,-1]）
+        $this->saveBListMvs16x16($mbX, $mvX, $mvY, $refIdx, $list);
+
+        return $bits;
+    }
+
+    /** B 帧 16x16 宏块 MVP：镜像解码器 getB16x16MvPrediction（双 list 独立缓存） */
+    private function getMvpB16x16(int $mbX, int $mbY, int $list, int $refIdx): array
+    {
+        $mbWidth = $this->picWidthInMbs;
+        $mvLeft = null;
+        $mvTop = null;
+        $mvC = null;
+        if ($mbX > 0 && isset($this->bMvLeftCol[$list][0])) {
+            $mvLeft = $this->bMvLeftCol[$list][0];
+        }
+        if ($mbY > 0) {
+            $mvTop = $this->bMvTopRow[$list][$mbX * 4] ?? null;
+            if ($mbX + 1 < $mbWidth) {
+                $mvC = $this->bMvTopRow[$list][($mbX + 1) * 4] ?? null;
+            }
+            if ($mvC === null && $mbX > 0) {
+                $mvC = $this->bMvTopLeft[$list] ?? null;
+            }
+        }
+        return $this->predictMvP16x16($mvLeft, $mvTop, $mvC, $refIdx);
+    }
+
+    /** 保存 B 双 list MV（镜像解码器 saveBListMvs；未使用 list 统一 [0,0,-1]） */
+    private function saveBListMvs16x16(int $mbX, int $mvX, int $mvY, int $refIdx, int $list): void
+    {
+        $used = [$mvX, $mvY, $refIdx];
+        $unused = [0, 0, -1];
+        $l0 = $list === 0 ? $used : $unused;
+        $l1 = $list === 1 ? $used : $unused;
+        if (!isset($this->bMvLeftCol[0])) $this->bMvLeftCol = [[null, null, null, null], [null, null, null, null]];
+        if (!isset($this->bMvTopRow[0])) $this->bMvTopRow = [[], []];
+        $this->bMvLeftCol[0] = [$l0, $l0, $l0, $l0];
+        $this->bMvLeftCol[1] = [$l1, $l1, $l1, $l1];
+        for ($i = 0; $i < 4; $i++) {
+            $this->bMvTopRow[0][$mbX * 4 + $i] = $l0;
+            $this->bMvTopRow[1][$mbX * 4 + $i] = $l1;
+        }
     }
 
     /**
