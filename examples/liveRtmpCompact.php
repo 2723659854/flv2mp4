@@ -28,6 +28,11 @@ $config = [
     'fps'          => 10,       // 目标帧率；流水线按时间间隔抽帧，0=不抽帧
     'qp'           => 30,      // 量化参数 0-51
     'audioBitrate' => 64000,   // 音频码率 bps
+    // 输出 profile 等级：baseline / main / high；取值不匹配时默认 baseline
+    // baseline 不允许 B 帧；若同时开启 bframes，则 baseline 自动提升为 main
+    'profile'=>'main',
+    // 是否开启 B 帧（IBBP）。开启后需 main/high profile；关闭则保持原有 I/P 路径
+    'bframes'=> true,
 
     // —— GOP并行/输出 ——
     // 每个decodeWorker现在是一个独立GOP worker：解码+缩放+编码。
