@@ -9,10 +9,9 @@ use Xiaosongshu\Flv2mp4\Codec\Scaler\VideoScaler;
 use Xiaosongshu\Flv2mp4\Flv\FlvParse;
 
 /**
- * @purpose flv转hls多码率
+ * @purpose flv转hls重编码（单profile单码率）
  * @author yanglong
  * @time 2026年7月23日14:05:53
- * @note 本转码器目前仅支持baseline profile
  */
 class PurePhpHlsGenerator
 {
@@ -23,18 +22,21 @@ class PurePhpHlsGenerator
     private int $audioPid = 0x101;
     private int $pmtPid = 0x1000;
 
-    /** 视频质量等级 baseline ,main ,high profile */
-    private array $profiles;
+    /** 单路转码配置（与 FlvRecoder/Mp4Recoder 同形的一维数组） */
+    private array $profile;
     private string $outputDir;
-    private array $segmentWriters = [];
-    /** index.m3u8 追加写句柄（每 profile 一个），开流后保持打开直到写入 ENDLIST */
-    private array $playlistHandles = [];
-    private array $spsPpsData = [];
+    /** 当前分片写状态：sequence=分片序号，handle=TS 文件句柄，startTime/endTime=分片时间范围 */
+    private array $segmentWriter = ['sequence' => 0, 'handle' => null, 'startTime' => 0, 'endTime' => 0];
+    /** index.m3u8 追加写句柄，开流后保持打开直到写入 ENDLIST */
+    private $playlistHandle = null;
+    /** 前置到分片首帧的 SPS/PPS（AnnexB） */
+    private string $spsPps = '';
+    /** 各 PID 连续计数器 */
     private array $continuityCounters = [];
 
     private ?int $baseTimestamp = null;
-    private array $segmentStartTimes = [];
-    private array $currentSegmentLastTimes = [];
+    private int $segmentStartTime = 0;
+    private int $currentSegmentLastTime = 0;
 
     private string $audioSpecificConfig = '';
     private int $audioObjectType = 2;
@@ -43,31 +45,27 @@ class PurePhpHlsGenerator
     private bool $sbrPresent = false;
     private ?int $extensionSamplingIndex = null;
 
-    private array $audioFrameCounts = [];
-    private array $audioBasePts = [];
+    private int $audioFrameCount = 0;
+    private ?int $audioBasePts = null;
 
     /** 解码器 */
     private H264Decoder $decoder;
 
-    /** 编码器（每个profile独立一个，避免参考帧互相污染） */
-    private array $encoders = [];
+    /** 编码器 */
+    private H264Encoder $encoder;
 
     /** 视频尺寸缩放器 */
     private VideoScaler $scaler;
-    // 多分辨率解码帧缓存，避免多profile覆盖
-    private array $decodedFrameCache = [];
-    private string $frameCacheKey = '';
 
     private int $srcWidth = 0;
     private int $srcHeight = 0;
     private bool $srcInitialized = false;
 
-    private array $profileWatermark = [];
+    /** 水印（解码后的 YUV 平面数据），null 表示无水印 */
+    private ?array $watermark = null;
 
     /** 最大处理帧数 调试用 */
     private ?int $maxFrames = null;
-    private array $videoFrameCounts = [];
-    private array $lastDts = [];
     /** 已写入 TS 的最大视频 dts（90kHz tick），用于全局单调钳制（跨分片持续有效） */
     private ?int $lastVideoDtsTick = null;
     /** B 模式（IBBP）全局编码序帧计数器，跨 GOP 不重置——保证 DTS 全局单调递增 */
@@ -79,19 +77,16 @@ class PurePhpHlsGenerator
     private int $tsPtsOffsetTicks = 0;
     /** pipeline 元数据缓存：worker 传来的 encoded/ctsMs/dtsMs 在 processPipelineEvent 里暂存，handleVideoFrame 里消费 */
     private ?array $pipelineFrameMeta = null;
-    private array $segmentFirstFrame = [];
+    private bool $segmentFirstFrame = true;
     private string $srcSpsData = '';
     private string $srcPpsData = '';
     private bool $multi;
     private int $decodeWorkers;
-    /** 单 profile 模式（与 recode 同形的一维配置）：分片/索引直接输出到 outputDir 根部，不生成 master.m3u8 */
-    private bool $singleProfile = false;
-    private ?array $pipelineVariants = null;
-    private string $pipelineYuvPayload = '';
     private string $pipelineEncodedPayload = '';
-    private array $pipelineEncodedVariants = [];
+    /** pipeline 元数据中的编码帧变体（offset/length/width/height），null 表示直通帧 */
+    private ?array $pipelineEncodedVariant = null;
 
-    // 帧级双缓冲：一个已 startFrame（所有 profile）的视频帧延后到下一帧到达后再 finish
+    // 帧级双缓冲：一个已 startFrame 的视频帧延后到下一帧到达后再 finish
     private ?array $pendingVideoJob = null;
 
     /** @var array<int,object> 在途视频帧之后到达的音频 tag，待该帧写出后按原顺序回放 */
@@ -104,31 +99,18 @@ class PurePhpHlsGenerator
     /**
      * 转码器初始化
      *
-     * 支持两种配置形态：
-     * 1. 一维单路配置（与 FlvRecoder/Mp4Recoder 同形，推荐）：
+     * @param array $config 单路一维配置（与 FlvRecoder/Mp4Recoder 同形）：
      *    ['width'=>..,'height'=>..,'bitrate'=>..,'fps'=>..,'qp'=>..,'decodeWorkers'=>6,'motionWorkers'=>6,...]
-     *    分片与 index.m3u8 直接输出到 outputDir 根部，不生成 master.m3u8；
-     *    decode_workers 从配置读取，避免与 recode 入口配置不一致。
-     * 2. 多码率 profile map（向后兼容）：['360p' => [...], '240p' => [...]]
-     *    每路输出到 outputDir/{name}/ 子目录并生成 master.m3u8；
-     *    单元素 map 且键名为空字符串时视为单路模式（worker 进程据此还原布局）。
-     *
-     * @param array $configOrProfiles 单路一维配置或多码率 profile map
+     *    分片与 index.m3u8 直接输出到 outputDir 根部；
+     *    decodeWorkers 从配置读取，避免与 recode 入口配置不一致。
      * @param string $outputDir 输出目录
      * @param bool $multi 是否开启多进程
-     * @param int $decodeWorkers 多进程解码worker数（仅多码率形态使用；单路形态取配置中的 decode_workers）
+     * @param int $decodeWorkers 多进程解码worker数（配置中的 decodeWorkers 优先）
      */
-    public function __construct(array $configOrProfiles, string $outputDir = '', bool $multi = false, int $decodeWorkers = 6)
+    public function __construct(array $config, string $outputDir = '', bool $multi = false, int $decodeWorkers = 6)
     {
-        // 一维配置：所有值均为标量；profile map：值均为数组
-        if ($configOrProfiles !== [] && count(array_filter($configOrProfiles, 'is_array')) === 0) {
-            $this->singleProfile = true;
-            $decodeWorkers = (int)($configOrProfiles['decodeWorkers'] ?? $decodeWorkers);
-            $this->profiles = ['' => $configOrProfiles];
-        } else {
-            $this->profiles = $configOrProfiles;
-            $this->singleProfile = count($this->profiles) === 1 && array_key_first($this->profiles) === '';
-        }
+        $this->profile = $config;
+        $decodeWorkers = (int)($config['decodeWorkers'] ?? $decodeWorkers);
         $this->outputDir = rtrim($outputDir, '/');
         $this->multi = $multi;
         $this->decodeWorkers = $decodeWorkers;
@@ -136,39 +118,21 @@ class PurePhpHlsGenerator
         $this->decoder = new H264Decoder();
         $this->scaler = new VideoScaler();
 
-        foreach ($this->profiles as $name => $profile) {
-            $this->encoders[$name] = new H264Encoder();
-            $this->encoders[$name]->motionWorkers = max(1, (int)($profile['motionWorkers'] ?? 8));
-            $this->encoders[$name]->setProfile($profile['profile'] ?? 'baseline');
-            if (!empty($profile['fastMotion'])) $this->encoders[$name]->setFastMotion(true);
-            $dir = $this->profileDir($name) . '/';
-            if (!is_dir($dir)) mkdir($dir, 0777, true);
+        $this->encoder = new H264Encoder();
+        $this->encoder->motionWorkers = max(1, (int)($config['motionWorkers'] ?? 8));
+        $this->encoder->setProfile($config['profile'] ?? 'baseline');
+        if (!empty($config['fastMotion'])) $this->encoder->setFastMotion(true);
+        if (!is_dir($this->outputDir)) mkdir($this->outputDir, 0777, true);
 
-            $this->segmentWriters[$name] = ['sequence' => 0, 'handle' => null, 'startTime' => 0, 'endTime' => 0];
-            $this->playlistHandles[$name] = null;
-            $this->spsPpsData[$name] = '';
-            $this->continuityCounters[$name] = [];
-            $this->segmentStartTimes[$name] = 0;
-            $this->currentSegmentLastTimes[$name] = 0;
-            $this->audioFrameCounts[$name] = 0;
-            $this->audioBasePts[$name] = null;
-            $this->videoFrameCounts[$name] = 0;
-            $this->lastDts[$name] = -1;
-            $this->segmentFirstFrame[$name] = true;
-
-            if (!empty($profile['watermark']) && !empty($profile['watermarkFile'])) {
-                $this->profileWatermark[$name] = $this->loadWatermarkFile($profile['watermarkFile']);
-            } else {
-                $this->profileWatermark[$name] = null;
-            }
+        if (!empty($config['watermark']) && !empty($config['watermarkFile'])) {
+            $this->watermark = $this->loadWatermarkFile($config['watermarkFile']);
         }
 
         // B 帧模式：TS 层 PTS 统一后移 2 帧时长（重排延迟），保证每帧 pts>=dts。
-        // 音视频同移同一常量，A/V 相对同步不变；偏移量用 profile fps 计算（常数即可，
+        // 音视频同移同一常量，A/V 相对同步不变；偏移量用 fps 计算（常数即可，
         // 只需大于最大 pts<dts 缺口 1 帧，无需与 worker 有效帧时长严格相等）
-        $firstProfile = $this->profiles[array_key_first($this->profiles)] ?? [];
-        if (!empty($firstProfile['bframes'])) {
-            $offsetFps = max(1, (int)($firstProfile['fps'] ?? 25));
+        if (!empty($config['bframes'])) {
+            $offsetFps = max(1, (int)($config['fps'] ?? 25));
             $this->tsPtsOffsetTicks = (int)round(2 * (1000.0 / $offsetFps) * 90);
         }
 
@@ -176,21 +140,13 @@ class PurePhpHlsGenerator
         $this->ensureInitialPlaylist();
     }
 
-    /** 单路模式文件直接落在输出目录根部；多码率模式落在 {outputDir}/{profile}/ 子目录 */
-    private function profileDir(string $profile): string
-    {
-        return $this->singleProfile ? $this->outputDir : "{$this->outputDir}/{$profile}";
-    }
-
     /**
-     * 预热各 profile 的运动估计子进程（输出 worker 启动时调用，
+     * 预热运动估计子进程（输出 worker 启动时调用，
      * 让 PHP 冷启动与解码首 GOP 并行发生）
      */
     public function warmupMotionWorkers(): void
     {
-        foreach ($this->encoders as $encoder) {
-            $encoder->warmupMotionWorkers();
-        }
+        $this->encoder->warmupMotionWorkers();
     }
 
     /**
@@ -212,11 +168,7 @@ class PurePhpHlsGenerator
     public function setSegmentDuration(int $segmentDuration = 3)
     {
         $this->segmentDuration = $segmentDuration;
-        $started = false;
-        foreach ($this->segmentWriters as $writer) {
-            if (($writer['sequence'] ?? 0) > 0) { $started = true; break; }
-        }
-        if (!$started) $this->resetPlaylists();
+        if (($this->segmentWriter['sequence'] ?? 0) === 0) $this->resetPlaylists();
     }
 
     private function loadWatermarkFile(string $watermarkFile): array
@@ -310,7 +262,7 @@ class PurePhpHlsGenerator
         if ($this->multi) {
             // 严格按配置值创建——motionWorkers 配置多少就是每解码 worker 带多少运动进程。
             // fastMotion 只在 H264Encoder.setFastMotion 里缩小运动搜索范围到 8px，不干预进程数。
-            (new HlsPipelineClient($this->profiles, $this->outputDir, $this->maxFrames, $this->decodeWorkers))->process($flvFile);
+            (new HlsPipelineClient($this->profile, $this->outputDir, $this->maxFrames, $this->decodeWorkers))->process($flvFile);
             return;
         }
 
@@ -354,14 +306,13 @@ class PurePhpHlsGenerator
     }
 
     /**
-     * 结束流式喂入：冲刷双缓冲末帧、关闭全部分片，多码率时生成 master.m3u8
+     * 结束流式喂入：冲刷双缓冲末帧、关闭分片并写入 ENDLIST
      */
     public function finishStream(): void
     {
         // 冲刷双缓冲中最后一帧及排队音频，保证分片完整后再关闭
         $this->flushPendingVideo();
         $this->closeAllSegments();
-        if (count($this->profiles) > 1) $this->generateMasterPlaylist();
     }
 
     public function processPipelineEvent(array $metadata, string $payload): void
@@ -388,10 +339,8 @@ class PurePhpHlsGenerator
         if (!empty($metadata['decoded']) || !empty($metadata['encoded'])) {
             $bodyLength = unpack('N', substr($payload, 0, 4))[1];
             $tag->body = substr($payload, 4, $bodyLength);
-            $this->pipelineVariants = $metadata['variants'] ?? null;
-            $this->pipelineYuvPayload = substr($payload, 4 + $bodyLength);
-            $this->pipelineEncodedPayload = $this->pipelineYuvPayload;
-            $this->pipelineEncodedVariants = $metadata['encodedVariants'] ?? [];
+            $this->pipelineEncodedPayload = substr($payload, 4 + $bodyLength);
+            $this->pipelineEncodedVariant = $metadata['encodedVariant'] ?? null;
             // 暂存 worker 传来的 B 帧关键元数据（encoded/ctsTicks/dtsMs），handleVideoFrame 里消费
             $this->pipelineFrameMeta = [
                 'encoded' => !empty($metadata['encoded']),
@@ -403,25 +352,22 @@ class PurePhpHlsGenerator
         }
         // 抽帧丢弃帧：decoder 已解码维持参考链，输出端不编码、不写 TS，时间轴由保留帧推进
         if ($tag->tagType === 9 && !empty($metadata['drop'])) {
-            $this->pipelineVariants = null;
-            $this->pipelineYuvPayload = '';
+            $this->pipelineEncodedPayload = '';
+            $this->pipelineEncodedVariant = null;
             return;
         }
         if ($tag->tagType === 9) $this->handleVideoFrame($tag);
         elseif ($tag->tagType === 8) $this->handleAudioFrame($tag);
-        $this->pipelineVariants = null;
-        $this->pipelineYuvPayload = '';
         $this->pipelineEncodedPayload = '';
-        $this->pipelineEncodedVariants = [];
+        $this->pipelineEncodedVariant = null;
         $this->pipelineFrameMeta = null;
     }
 
-    public function finishPipelineOutput(bool $generateMasterPlaylist = true): void
+    public function finishPipelineOutput(): void
     {
         // 冲刷双缓冲中最后一帧及排队音频，保证分片完整后再关闭
         $this->flushPendingVideo();
         $this->closeAllSegments();
-        if ($generateMasterPlaylist) $this->generateMasterPlaylist();
     }
 
     /**
@@ -459,10 +405,8 @@ class PurePhpHlsGenerator
         if ($this->baseTimestamp === null) {
             if (!$isKeyFrame) return;
             $this->baseTimestamp = $timestamp;
-            foreach ($this->profiles as $name => $profile) {
-                $this->segmentStartTimes[$name] = 0;
-                $this->startSegment($name);
-            }
+            $this->segmentStartTime = 0;
+            $this->startSegment();
         }
 
         // 重编码流：worker 带 ctsTicks 时（B 帧 IBBP）直接用它（90kHz tick，无毫秒取整误差）；
@@ -471,7 +415,7 @@ class PurePhpHlsGenerator
         $pm = $this->pipelineFrameMeta;
         if (is_array($pm) && !empty($pm['encoded']) && $pm['ctsTicks'] !== null) {
             $ctsTicks = (int)$pm['ctsTicks'];
-        } elseif (!empty($this->pipelineEncodedVariants)) {
+        } elseif ($this->pipelineEncodedVariant !== null) {
             $ctsTicks = 0;
         } else {
             $ctsMs = (int)($avc['compositionTime'] ?? 0);
@@ -497,43 +441,28 @@ class PurePhpHlsGenerator
         $this->replayQueuedAudio();
 
         // 上一帧与期间音频都已写入旧分片，此刻再为新帧切换分片
-        foreach ($job['segmentSwitches'] as $name => $switch) {
-            if (!$switch) continue;
-            $this->closeSegment($name, $job['relativeTime']);
-            $this->audioFrameCounts[$name] = 0;
-            $this->audioBasePts[$name] = (int)($job['relativeTime'] * 90);
-            $this->lastDts[$name] = -1;
-            $this->segmentStartTimes[$name] = $job['relativeTime'];
-            $this->segmentFirstFrame[$name] = true;
-            $this->startSegment($name);
-        }
-        if (in_array(true, $job['segmentSwitches'], true)) {
-            // 切换分片清空帧缓存（原实现语义：边界处释放）
-            $this->decodedFrameCache = [];
+        if ($job['segmentSwitch']) {
+            $this->closeSegment($job['relativeTime']);
+            $this->audioFrameCount = 0;
+            $this->audioBasePts = (int)($job['relativeTime'] * 90);
+            $this->segmentStartTime = $job['relativeTime'];
+            $this->segmentFirstFrame = true;
+            $this->startSegment();
         }
 
         $this->pendingVideoJob = $job;
     }
 
     /**
-     * 每帧预处理：解码/缩放/水印 + 各 profile startFrame，并计算分片切换决策（不执行切换）。
+     * 每帧预处理：解码/缩放/水印 + startFrame，并计算分片切换决策（不执行切换）。
      */
     private function prepareVideoJob(string $avcData, bool $isKeyFrame, int $relativeTime, int $ctsTicks, ?int $workerDtsMs = null, ?float $workerFrameDurMs = null): ?array
     {
         // 注意：CTS 补码处理（FLV 24-bit compositionTime）已移到 handleVideoFrame，
         // 此处接收的 ctsTicks 已是 90kHz tick（源流毫秒×90 或 worker 直接提供），不再二次转换
 
-        $segmentSwitches = [];
-        foreach ($this->profiles as $name => $profile) {
-            $segmentSwitches[$name] = $isKeyFrame
-                && ($relativeTime - $this->segmentStartTimes[$name]) >= ($this->segmentDuration * 1000);
-        }
-
-        $cacheKey = md5($avcData);
-        if (!isset($this->frameCacheKey) || $this->frameCacheKey !== $cacheKey) {
-            $this->decodedFrameCache = [];
-            $this->frameCacheKey = $cacheKey;
-        }
+        $segmentSwitch = $isKeyFrame
+            && ($relativeTime - $this->segmentStartTime) >= ($this->segmentDuration * 1000);
 
         // B 模式（IBBP）：worker 在 GOP 边界会重置 bEncodeCounter，
         // 所以不能直接用 workerDtsMs（会从 0 重新开始导致跨 GOP DTS 非单调）。
@@ -542,10 +471,10 @@ class PurePhpHlsGenerator
         // CTS 用 worker 的 ctsTicks（只在 GOP 内做相对差，绝对值不受 GOP 边界 reset 影响）。
         // PTS = 全局编码序×帧时长 + ctsTicks = 绝对显示序×帧时长，跨 GOP 连续递增。
         if ($workerDtsMs !== null) {
-            // 帧时长优先用 worker 实际值（抽帧后有效帧率 = target/source 取小），回退 profile fps
+            // 帧时长优先用 worker 实际值（抽帧后有效帧率 = target/source 取小），回退配置 fps
             $frameDurMs = ($workerFrameDurMs !== null && $workerFrameDurMs > 0)
                 ? $workerFrameDurMs
-                : 1000.0 / max(1, (int)(($this->profiles[array_key_first($this->profiles)]['fps'] ?? 25)));
+                : 1000.0 / max(1, (int)(($this->profile['fps'] ?? 25)));
             $dtsMs = $this->videoEncodeCounter * $frameDurMs;
             $dts = (int)($dtsMs * 90);
             $this->videoEncodeCounter++;
@@ -561,70 +490,37 @@ class PurePhpHlsGenerator
         // 非 B 模式 cts 来自源流（非负 tick），所以 pts >= dts 自动成立
         $pts = $dts + $ctsTicks;
 
-        $profileJobs = [];
-        $encodedPayload = $this->pipelineEncodedPayload;
-        $encodedVariants = $this->pipelineEncodedVariants;
-        foreach ($this->profiles as $name => $profile) {
-            $writer = &$this->segmentWriters[$name];
-            if (!is_resource($writer['handle'])) {
-                $profileJobs[$name] = ['transcode' => false, 'skip' => true];
-                continue;
-            }
-            if (!empty($encodedVariants[$name])) {
-                $profileJobs[$name] = ['transcode' => false, 'encoded' => true, 'skip' => false];
-                continue;
-            }
-
-            $targetW = $profile['width'] > 0 ? $profile['width'] : $this->srcWidth;
-            $targetH = $profile['height'] > 0 ? $profile['height'] : $this->srcHeight;
+        $skip = !is_resource($this->segmentWriter['handle']);
+        $transcode = false;
+        if (!$skip && $this->pipelineEncodedVariant === null) {
+            $targetW = $this->profile['width'] > 0 ? $this->profile['width'] : $this->srcWidth;
+            $targetH = $this->profile['height'] > 0 ? $this->profile['height'] : $this->srcHeight;
             $needTranscode = $this->srcInitialized && (
-                $this->pipelineVariants !== null ||
-                ($profile['width'] > 0 && $this->srcWidth !== $profile['width']) ||
-                ($profile['height'] > 0 && $this->srcHeight !== $profile['height']) ||
-                $this->profileWatermark[$name] !== null
+                ($this->profile['width'] > 0 && $this->srcWidth !== $this->profile['width']) ||
+                ($this->profile['height'] > 0 && $this->srcHeight !== $this->profile['height']) ||
+                $this->watermark !== null
             );
 
-            if (!$needTranscode) {
-                $profileJobs[$name] = ['transcode' => false, 'skip' => false];
-                continue;
-            }
-
-            $resolutionKey = "{$targetW}_{$targetH}";
-            if ($this->pipelineVariants !== null && isset($this->pipelineVariants[$name])) {
-                $variant = $this->pipelineVariants[$name];
-                $this->decodedFrameCache[$resolutionKey] = substr($this->pipelineYuvPayload, $variant['offset'], $variant['length']);
-            } elseif (!isset($this->decodedFrameCache[$resolutionKey])) {
+            if ($needTranscode) {
                 $rawYuv = $this->decodeNaluToYuv($avcData);
                 if ($rawYuv !== null) {
                     $scaledYuv = ($targetW !== $this->srcWidth || $targetH !== $this->srcHeight)
                         ? $this->scaler->scaleYUV420P($rawYuv, $this->srcWidth, $this->srcHeight, $targetW, $targetH)
                         : $rawYuv;
-                    $this->decodedFrameCache[$resolutionKey] = $scaledYuv;
+                    if ($this->watermark !== null) {
+                        $scaledYuv = $this->applyWatermarkToFrame($scaledYuv, $targetW, $targetH, $this->watermark);
+                    }
+                    $this->encoder->setResolution($targetW, $targetH);
+                    $this->encoder->setBitrate($this->profile['bitrate']);
+                    $this->encoder->setFps($this->profile['fps']);
+                    $this->encoder->setQp($this->profile['qp'] ?? 26);
+                    // 异步开始编码：worker 运动估计与上一帧的主进程 CAVLC 重叠
+                    $this->encoder->startFrame($scaledYuv, $isKeyFrame);
+                    $transcode = true;
                 }
+                // 解码失败：退化为直通（transcode 保持 false）
             }
-
-            if (!isset($this->decodedFrameCache[$resolutionKey])) {
-                // 解码失败：退化为直通（与原实现 isset 分支一致）
-                $profileJobs[$name] = ['transcode' => false, 'skip' => false];
-                continue;
-            }
-
-            $scaledYuv = $this->decodedFrameCache[$resolutionKey];
-            if ($this->pipelineVariants === null && $this->profileWatermark[$name] !== null) {
-                $scaledYuv = $this->applyWatermarkToFrame($scaledYuv, $targetW, $targetH, $this->profileWatermark[$name]);
-            }
-
-            $encoder = $this->encoders[$name];
-            $encoder->setResolution($targetW, $targetH);
-            $encoder->setBitrate($profile['bitrate']);
-            $encoder->setFps($profile['fps']);
-            $encoder->setQp($profile['qp'] ?? 26);
-            // 异步开始编码：worker 运动估计与上一帧的主进程 CAVLC 重叠
-            $encoder->startFrame($scaledYuv, $isKeyFrame);
-
-            $profileJobs[$name] = ['transcode' => true, 'skip' => false];
         }
-        unset($writer);
 
         return [
             'relativeTime' => $relativeTime,
@@ -632,77 +528,75 @@ class PurePhpHlsGenerator
             'avcData' => $avcData,
             'dts' => $dts,
             'pts' => $pts,
-            'segmentSwitches' => $segmentSwitches,
-            'profiles' => $profileJobs,
-            'encodedPayload' => $encodedPayload,
-            'encodedVariants' => $encodedVariants,
+            'segmentSwitch' => $segmentSwitch,
+            'transcode' => $transcode,
+            'skip' => $skip,
+            'encodedPayload' => $this->pipelineEncodedPayload,
+            'encodedVariant' => $this->pipelineEncodedVariant,
         ];
     }
 
-    /** finishFrame 取出各 profile 在途编码结果并写 TS（其 CAVLC 与下一帧 worker 计算重叠） */
+    /** finishFrame 取出在途编码结果并写 TS（其 CAVLC 与下一帧 worker 计算重叠） */
     private function emitPendingVideoFrame(array $job): void
     {
-        foreach ($this->profiles as $name => $profile) {
-            $pjob = $job['profiles'][$name] ?? null;
-            if ($pjob === null || !empty($pjob['skip'])) continue;
+        if (!empty($job['skip'])) return;
 
-            $outputData = $job['avcData'];
-            $outputSpsPps = $this->spsPpsData[$name];
-            $isTranscoded = false;
+        $outputData = $job['avcData'];
+        $outputSpsPps = $this->spsPps;
+        $isTranscoded = false;
 
-            if (!empty($pjob['encoded'])) {
-                $variant = $job['encodedVariants'][$name];
-                $outputData = substr($job['encodedPayload'], $variant['offset'], $variant['length']);
-                $outputSpsPps = '';
-                $isTranscoded = true;
-            } elseif (!empty($pjob['transcode'])) {
-                $encodedNals = $this->encoders[$name]->finishFrame();
-                $outputData = '';
-                $outputSpsPps = '';
-                foreach ($encodedNals as $nal) {
-                    $nalHeaderPos = $this->findNalHeaderPos($nal);
-                    // encoder 返回裸 NAL（无 start code）时按位置 0 处理，不能跳过丢帧
-                    if ($nalHeaderPos < 0) $nalHeaderPos = 0;
-                    $nalType = ord($nal[$nalHeaderPos]) & 0x1F;
-                    if ($nalType === 7 || $nalType === 8) {
-                        $outputSpsPps .= "\x00\x00\x00\x01" . substr($nal, $nalHeaderPos);
-                    } else {
-                        $outputData .= "\x00\x00\x00\x01" . substr($nal, $nalHeaderPos);
-                    }
-                }
-                if ($outputSpsPps !== '') {
-                    $this->spsPpsData[$name] = $outputSpsPps;
-                }
-                $isTranscoded = true;
-            }
-
-            $annexb = $isTranscoded ? $outputData : $this->avccToAnnexB($outputData);
-            // 只在每个分片的第一帧前置SPS/PPS，避免重复导致FFmpeg解码错误
-            // 注意：转码路径（encoded/transcode）的 IDR 帧已自带新 profile 的 SPS/PPS，
-            // 不能再前置源流的 SPS/PPS——旧 profile SPS 声明了错误尺寸且无 B 帧重排声明，
-            // 播放端会按"无 B 帧"判定 pts<dts 为非法时间戳
-            if ($this->segmentFirstFrame[$name]) {
-                $this->segmentFirstFrame[$name] = false;
-                if ($isTranscoded) {
-                    // 本进程转码：SPS/PPS 已从 encoder 输出中抽离（outputData 仅含 slice），需前置回去
-                    if ($outputSpsPps !== '') $annexb = $outputSpsPps . $annexb;
+        if ($job['encodedVariant'] !== null) {
+            $variant = $job['encodedVariant'];
+            $outputData = substr($job['encodedPayload'], $variant['offset'], $variant['length']);
+            $outputSpsPps = '';
+            $isTranscoded = true;
+        } elseif (!empty($job['transcode'])) {
+            $encodedNals = $this->encoder->finishFrame();
+            $outputData = '';
+            $outputSpsPps = '';
+            foreach ($encodedNals as $nal) {
+                $nalHeaderPos = $this->findNalHeaderPos($nal);
+                // encoder 返回裸 NAL（无 start code）时按位置 0 处理，不能跳过丢帧
+                if ($nalHeaderPos < 0) $nalHeaderPos = 0;
+                $nalType = ord($nal[$nalHeaderPos]) & 0x1F;
+                if ($nalType === 7 || $nalType === 8) {
+                    $outputSpsPps .= "\x00\x00\x00\x01" . substr($nal, $nalHeaderPos);
                 } else {
-                    // 直通路径：无 SPS 时前置源流 SPS/PPS（avcc 已转 AnnexB）
-                    $prefixNal = $outputSpsPps ?: $this->spsPpsData[$name];
-                    if ($prefixNal !== '') {
-                        $annexb = $prefixNal . $annexb;
-                    }
+                    $outputData .= "\x00\x00\x00\x01" . substr($nal, $nalHeaderPos);
                 }
             }
-
-            // PTS 统一后移重排延迟（B 模式非 0），DTS 保持编码序网格不变
-            $pes = $this->createPES(0xE0, $annexb, $job['pts'] + $this->tsPtsOffsetTicks, ($job['pts'] !== $job['dts']) ? $job['dts'] : null);
-            // 视频首包携带PCR同步播放器
-            $this->writeTSPackets($name, $this->videoPid, $pes, true, $job['dts']);
-
-            $this->currentSegmentLastTimes[$name] = $job['relativeTime'];
-            $this->segmentWriters[$name]['endTime'] = $job['relativeTime'];
+            if ($outputSpsPps !== '') {
+                $this->spsPps = $outputSpsPps;
+            }
+            $isTranscoded = true;
         }
+
+        $annexb = $isTranscoded ? $outputData : $this->avccToAnnexB($outputData);
+        // 只在每个分片的第一帧前置SPS/PPS，避免重复导致FFmpeg解码错误
+        // 注意：转码路径（encoded/transcode）的 IDR 帧已自带新编码参数的 SPS/PPS，
+        // 不能再前置源流的 SPS/PPS——旧 SPS 声明了错误尺寸且无 B 帧重排声明，
+        // 播放端会按"无 B 帧"判定 pts<dts 为非法时间戳
+        if ($this->segmentFirstFrame) {
+            $this->segmentFirstFrame = false;
+            if ($isTranscoded) {
+                // 本进程转码：SPS/PPS 已从 encoder 输出中抽离（outputData 仅含 slice），需前置回去
+                if ($outputSpsPps !== '') $annexb = $outputSpsPps . $annexb;
+            } else {
+                // 直通路径：无 SPS 时前置源流 SPS/PPS（avcc 已转 AnnexB）
+                $prefixNal = $outputSpsPps ?: $this->spsPps;
+                if ($prefixNal !== '') {
+                    $annexb = $prefixNal . $annexb;
+                }
+            }
+        }
+
+        // PTS 统一后移重排延迟（B 模式非 0），DTS 保持编码序网格不变
+        $pes = $this->createPES(0xE0, $annexb, $job['pts'] + $this->tsPtsOffsetTicks, ($job['pts'] !== $job['dts']) ? $job['dts'] : null);
+        // 视频首包携带PCR同步播放器
+        $this->writeTSPackets($this->videoPid, $pes, true, $job['dts']);
+
+        $this->currentSegmentLastTime = $job['relativeTime'];
+        $this->segmentWriter['endTime'] = $job['relativeTime'];
     }
 
     private function replayQueuedAudio(): void
@@ -820,19 +714,16 @@ class PurePhpHlsGenerator
         $sampleRate = $sampleRates[$this->samplingFrequencyIndex] ?? 44100;
         $frameDuration = (int)((1024 * 90000) / $sampleRate);
 
-        foreach ($this->profiles as $name => $profile) {
-            $writer = &$this->segmentWriters[$name];
-            if (!is_resource($writer['handle'])) continue;
-
-            if ($this->audioBasePts[$name] === null) {
-                $this->audioBasePts[$name] = (int)($relativeTime * 90);
+        if (is_resource($this->segmentWriter['handle'])) {
+            if ($this->audioBasePts === null) {
+                $this->audioBasePts = (int)($relativeTime * 90);
             }
-            $pts = $this->audioBasePts[$name] + ($this->audioFrameCounts[$name] * $frameDuration);
-            $this->audioFrameCounts[$name]++;
+            $pts = $this->audioBasePts + ($this->audioFrameCount * $frameDuration);
+            $this->audioFrameCount++;
 
             // 音频与视频同步后移同一常量，保持 A/V 同步
             $pes = $this->createPES(0xC0, $payload, $pts + $this->tsPtsOffsetTicks, null);
-            $this->writeTSPackets($name, $this->audioPid, $pes, false, 0);
+            $this->writeTSPackets($this->audioPid, $pes, false, 0);
         }
     }
 
@@ -882,9 +773,7 @@ class PurePhpHlsGenerator
 
         }
 
-        foreach ($this->profiles as $name => $_) {
-            $this->spsPpsData[$name] = $spsPpsBuf;
-        }
+        $this->spsPps = $spsPpsBuf;
     }
 
     /**
@@ -1055,18 +944,18 @@ class PurePhpHlsGenerator
     /**
      * 写入PAT表
      */
-    private function writePAT(string $profile): void
+    private function writePAT(): void
     {
         $section = "\x00\xB0\x0D\x00\x01\xC1\x00\x00\x00\x01" . pack('n', 0xE000 | $this->pmtPid);
         $section .= pack('N', $this->crc32mpeg($section));
         $payload = "\x00" . $section;
-        $this->writeTSPacketsRaw($profile, 0x0000, $payload);
+        $this->writeTSPacketsRaw(0x0000, $payload);
     }
 
     /**
      * 写入PMT表
      */
-    private function writePMT(string $profile): void
+    private function writePMT(): void
     {
         $body = "\x00\x01\xC1\x00\x00"
             . pack('n', 0xE000 | $this->videoPid) . "\xF0\x00"
@@ -1076,15 +965,15 @@ class PurePhpHlsGenerator
         $section = "\x02" . chr(0xB0 | (($sectLen >> 8) & 0x0F)) . chr($sectLen & 0xFF) . $body;
         $section .= pack('N', $this->crc32mpeg($section));
         $payload = "\x00" . $section;
-        $this->writeTSPacketsRaw($profile, $this->pmtPid, $payload);
+        $this->writeTSPacketsRaw($this->pmtPid, $payload);
     }
 
     /**
      * 无自适应字段TS包写入（PAT/PMT专用）
      */
-    private function writeTSPacketsRaw(string $profile, int $pid, string $payload): void
+    private function writeTSPacketsRaw(int $pid, string $payload): void
     {
-        $cc = &$this->continuityCounters[$profile][$pid];
+        $cc = &$this->continuityCounters[$pid];
         if (!isset($cc)) $cc = 0;
         $offset = 0;
         $totalPayload = strlen($payload);
@@ -1099,7 +988,7 @@ class PurePhpHlsGenerator
             $chunk = substr($payload, $offset, min($rem, 184));
             $ts .= $chunk;
             $ts = str_pad($ts, 188, "\xFF");
-            fwrite($this->segmentWriters[$profile]['handle'], $ts);
+            fwrite($this->segmentWriter['handle'], $ts);
             $offset += strlen($chunk);
             $first = false;
         }
@@ -1108,9 +997,9 @@ class PurePhpHlsGenerator
     /**
      * 标准PES TS打包，支持PCR自适应字段
      */
-    private function writeTSPackets(string $profile, int $pid, string $payload, bool $writePCR = false, int $pcr = 0): void
+    private function writeTSPackets(int $pid, string $payload, bool $writePCR = false, int $pcr = 0): void
     {
-        $cc = &$this->continuityCounters[$profile][$pid];
+        $cc = &$this->continuityCounters[$pid];
         if (!isset($cc)) $cc = 0;
         $offset = 0;
         $totalPayload = strlen($payload);
@@ -1152,7 +1041,7 @@ class PurePhpHlsGenerator
             $cc = ($cc + 1) & 0x0F;
             $tsPacket = $tsHeader . $adaptField . substr($payload, $offset, $payloadSpace);
             $tsPacket = str_pad($tsPacket, 188, "\xFF");
-            fwrite($this->segmentWriters[$profile]['handle'], $tsPacket);
+            fwrite($this->segmentWriter['handle'], $tsPacket);
             $offset += $payloadSpace;
             $first = false;
         }
@@ -1161,55 +1050,51 @@ class PurePhpHlsGenerator
     /**
      * 新建TS分片
      */
-    private function startSegment(string $profile): void
+    private function startSegment(): void
     {
-        $writer = &$this->segmentWriters[$profile];
+        $writer = &$this->segmentWriter;
         $writer['sequence']++;
-        $this->continuityCounters[$profile] = [];
-        $filePath = $this->profileDir($profile) . "/segment_{$writer['sequence']}.ts";
+        $this->continuityCounters = [];
+        $filePath = $this->outputDir . "/segment_{$writer['sequence']}.ts";
         $writer['handle'] = fopen($filePath, 'wb');
         // 首个分片开启时接管 index.m3u8 追加句柄，并清空上一次运行的残留条目
-        $this->openPlaylistHandle($profile, $writer['sequence'] === 1);
+        $this->openPlaylistHandle($writer['sequence'] === 1);
         // 分片头部写入PAT/PMT，兼容播放器
-        $this->writePAT($profile);
-        $this->writePMT($profile);
-        
-        $this->audioFrameCounts[$profile] = 0;
+        $this->writePAT();
+        $this->writePMT();
+
+        $this->audioFrameCount = 0;
     }
 
     /**
      * 关闭分片并向 index.m3u8 追加条目
      */
-    private function closeSegment(string $profile, int $endTime = 0): void
+    private function closeSegment(int $endTime = 0): void
     {
-        $writer = &$this->segmentWriters[$profile];
+        $writer = &$this->segmentWriter;
         if (!is_resource($writer['handle'])) return;
         fflush($writer['handle']);
         fclose($writer['handle']);
         $writer['handle'] = null;
 
-        $endTs = $endTime ?: $this->currentSegmentLastTimes[$profile];
-        $durSec = max(0.001, round(($endTs - $this->segmentStartTimes[$profile]) / 1000.0, 3));
+        $endTs = $endTime ?: $this->currentSegmentLastTime;
+        $durSec = max(0.001, round(($endTs - $this->segmentStartTime) / 1000.0, 3));
         // 单次 fwrite 写入完整条目块（EXTINF + URI），避免读到半行
-        $handle = $this->playlistHandles[$profile] ?? null;
-        if (is_resource($handle)) {
-            fwrite($handle, "#EXTINF:" . number_format($durSec, 3, '.', '') . ",\nsegment_{$writer['sequence']}.ts\n");
-            fflush($handle);
+        if (is_resource($this->playlistHandle)) {
+            fwrite($this->playlistHandle, "#EXTINF:" . number_format($durSec, 3, '.', '') . ",\nsegment_{$writer['sequence']}.ts\n");
+            fflush($this->playlistHandle);
         }
     }
 
     /**
-     * 关闭所有分片
+     * 关闭分片
      */
     private function closeAllSegments(): void
     {
-        foreach ($this->profiles as $name => $_) {
-            $writer = $this->segmentWriters[$name];
-            if (is_resource($writer['handle'])) {
-                $this->closeSegment($name, $writer['endTime']);
-            }
-            $this->addEndList($name);
+        if (is_resource($this->segmentWriter['handle'])) {
+            $this->closeSegment($this->segmentWriter['endTime']);
         }
+        $this->addEndList();
     }
 
     /**
@@ -1234,11 +1119,9 @@ class PurePhpHlsGenerator
      */
     private function ensureInitialPlaylist(): void
     {
-        foreach ($this->profiles as $name => $_) {
-            $m3u8Path = $this->profileDir($name) . '/index.m3u8';
-            if (!file_exists($m3u8Path)) {
-                file_put_contents($m3u8Path, $this->playlistHeader());
-            }
+        $m3u8Path = $this->outputDir . '/index.m3u8';
+        if (!file_exists($m3u8Path)) {
+            file_put_contents($m3u8Path, $this->playlistHeader());
         }
     }
 
@@ -1247,10 +1130,8 @@ class PurePhpHlsGenerator
      */
     private function resetPlaylists(): void
     {
-        foreach ($this->profiles as $name => $_) {
-            if (is_resource($this->playlistHandles[$name] ?? null)) continue;
-            file_put_contents($this->profileDir($name) . '/index.m3u8', $this->playlistHeader());
-        }
+        if (is_resource($this->playlistHandle)) return;
+        file_put_contents($this->outputDir . '/index.m3u8', $this->playlistHeader());
     }
 
     /**
@@ -1270,62 +1151,37 @@ class PurePhpHlsGenerator
     /**
      * 取得 index.m3u8 追加写句柄；$reset 为真时截断旧内容重写 header
      */
-    private function openPlaylistHandle(string $profile, bool $reset): void
+    private function openPlaylistHandle(bool $reset): void
     {
-        if (!$reset && is_resource($this->playlistHandles[$profile] ?? null)) return;
-        $path = $this->profileDir($profile) . '/index.m3u8';
-        $existing = $this->playlistHandles[$profile] ?? null;
-        if (is_resource($existing)) fclose($existing);
+        if (!$reset && is_resource($this->playlistHandle)) return;
+        $path = $this->outputDir . '/index.m3u8';
+        if (is_resource($this->playlistHandle)) fclose($this->playlistHandle);
         if ($reset || !file_exists($path)) {
             file_put_contents($path, $this->playlistHeader());
         }
         $handle = @fopen($path, 'ab');
         if ($handle === false) throw new \RuntimeException("无法打开索引文件写入: {$path}");
-        $this->playlistHandles[$profile] = $handle;
+        $this->playlistHandle = $handle;
     }
 
     /**
      * 末尾追加ENDLIST标记并关闭句柄；重复调用幂等
      */
-    private function addEndList(string $profile): void
+    private function addEndList(): void
     {
-        $handle = $this->playlistHandles[$profile] ?? null;
-        if (is_resource($handle)) {
-            fwrite($handle, "#EXT-X-ENDLIST\n");
-            fflush($handle);
-            fclose($handle);
-            $this->playlistHandles[$profile] = null;
+        if (is_resource($this->playlistHandle)) {
+            fwrite($this->playlistHandle, "#EXT-X-ENDLIST\n");
+            fflush($this->playlistHandle);
+            fclose($this->playlistHandle);
+            $this->playlistHandle = null;
             return;
         }
         // 无句柄（仅做收尾的实例）：直接对文件追加，已存在 ENDLIST 则跳过
-        $path = $this->profileDir($profile) . '/index.m3u8';
+        $path = $this->outputDir . '/index.m3u8';
         if (!file_exists($path)) return;
         $buf = file_get_contents($path);
         if ($buf === false || strpos($buf, '#EXT-X-ENDLIST') !== false) return;
         file_put_contents($path, rtrim($buf, "\n") . "\n#EXT-X-ENDLIST\n");
-    }
-
-    /**
-     * 生成主m3u8多清晰度列表
-     */
-    private function generateMasterPlaylist(): void
-    {
-        $lines = ['#EXTM3U', '#EXT-X-VERSION:6'];
-        // 码率从高到低排序
-        $sorted = $this->profiles;
-        uasort($sorted, fn($a, $b) => $b['bitrate'] <=> $a['bitrate']);
-        foreach ($sorted as $name => $cfg) {
-            $audioBr = $cfg['audioBitrate'] ?? 128000;
-            $bandwidth = $cfg['bitrate'] + $audioBr;
-            $res = "{$cfg['width']}x{$cfg['height']}";
-            $lines[] = sprintf(
-                '#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=%s,CODECS="avc1.64001F,mp4a.40.2"',
-                $bandwidth,
-                $res
-            );
-            $lines[] = "{$name}/index.m3u8";
-        }
-        file_put_contents("{$this->outputDir}/master.m3u8", implode("\n", $lines) . "\n");
     }
 
     /**

@@ -11,7 +11,7 @@ use Throwable;
  */
 final class HlsOutputWorkerServer
 {
-    public function __construct(private array $profiles, private string $outputDir)
+    public function __construct(private array $config, private string $outputDir)
     {
     }
 
@@ -29,10 +29,9 @@ final class HlsOutputWorkerServer
             if ($ctrlServer === false) throw new RuntimeException("编码进程控制端口监听失败: {$error} ({$errno})");
             stream_set_blocking($ctrlServer, false);
         }
-        $generator = new PurePhpHlsGenerator($this->profiles, $this->outputDir, false);
-        // 直播切片时长经 profile 透传（默认 3 秒）
-        $firstProfile = $this->profiles[array_key_first($this->profiles)] ?? [];
-        $segmentDuration = (int)($firstProfile['segmentDuration'] ?? 3);
+        $generator = new PurePhpHlsGenerator($this->config, $this->outputDir, false);
+        // 直播切片时长经配置透传（默认 3 秒）
+        $segmentDuration = (int)($this->config['segmentDuration'] ?? 3);
         if ($segmentDuration > 0) $generator->setSegmentDuration($segmentDuration);
         // 先接受全部 decoder 连接，避免运动估计子进程冷启动阻塞流水线建链。
         // warmup 放到连接完成后执行，decoder 的媒体连接可在内核缓冲中等待。
@@ -54,8 +53,8 @@ final class HlsOutputWorkerServer
         }
         // 媒体和控制连接全部建立后再预热运动估计进程。
         // 主进程此时可以立即完成流水线就绪，不再等待运动 worker 冷启动。
-        // 单 profile 分布式路径下视频帧已在解码 worker 编码完成，输出 worker 的编码器
-        // 永远不会被调用，跳过预热，避免白启动 2 个 PHP 子进程（多 profile 输出 worker 仍需要）。
+        // 分布式单 profile 路径下视频帧已在解码 worker 编码完成，输出 worker 的编码器
+        // 永远不会被调用，跳过预热，避免白启动 2 个 PHP 子进程。
         if (!$preEncoded) $generator->warmupMotionWorkers();
         $inputs = array_fill(0, $workers, '');
         $outputs = array_fill(0, $workers, '');
@@ -140,7 +139,7 @@ final class HlsOutputWorkerServer
                 // 只有所有 decoder 都报告 END，且重排队列已经连续排空后，才关闭分片。
                 // 控制连接 finish 仅作为异常收尾兜底，不清空已收到的媒体事件。
                 if (!$finished && $endCount >= $workers && $pending === []) {
-                    $generator->finishPipelineOutput(count($this->profiles) > 1);
+                    $generator->finishPipelineOutput();
                     $frame = HlsPipelineProtocol::frame(HlsPipelineProtocol::FINISHED, $expected);
                     for ($i = 0; $i < $workers; $i++) $outputs[$i] .= $frame;
                     $finished = true;
@@ -150,13 +149,13 @@ final class HlsOutputWorkerServer
                     unset($pending[$expected]);
                     $pendingBytes -= $eventBytes;
                     if ($event['type'] === HlsPipelineProtocol::END) {
-                        if ($pool !== null) $pool->finish($this->profiles, $replay);
-                        $generator->finishPipelineOutput(count($this->profiles) > 1);
+                        if ($pool !== null) $pool->finish($this->config, $replay);
+                        $generator->finishPipelineOutput();
                         $frame = HlsPipelineProtocol::frame(HlsPipelineProtocol::FINISHED, $event['sequence']);
                         for ($i = 0; $i < $workers; $i++) $outputs[$i] .= $frame;
                         $finished = true;
                     } elseif ($event['type'] === HlsPipelineProtocol::EVENT) {
-                        if ($pool !== null) $pool->push($event, $this->profiles, $replay);
+                        if ($pool !== null) $pool->push($event, $this->config, $replay);
                         else $generator->processPipelineEvent($event['metadata'], $event['payload']);
                     } else throw new RuntimeException('编码进程收到未知事件');
                     $expected++;

@@ -18,13 +18,12 @@ final class HlsDecoderWorkerServer
     private H264Decoder $decoder;
     private H264Encoder $encoder;
     private ?VideoScaler $scaler;
-    private array $encoders = []; // 保留：run() 里 warmupMotionWorkers 还 foreach
     private string $sps = '';
     private string $pps = '';
     private int $width = 0;
     private int $height = 0;
     /**
-     * 帧级双缓冲中已 startFrame（所有 profile）、等待下一帧到来后 finish 的在途编码帧。
+     * 帧级双缓冲中已 startFrame、等待下一帧到来后 finish 的在途编码帧。
      * 运动子进程计算 N+1 与主进程 CAVLC 编码 N 重叠，缺少这层重叠时每帧都要
      * "派运动→等结果→CAVLC" 串行（与 FLV/MP4 worker 同款优化，输出 NAL 不变）。
      */
@@ -55,23 +54,19 @@ final class HlsDecoderWorkerServer
     /** B 模式显示序计数（GOP 内） */
     private int $bDisplayCounter = 0;
 
-    public function __construct(private array $profiles)
+    public function __construct(private array $config)
     {
         $this->decoder = new H264Decoder();
-        // 单 profile 架构：HLS 只取第一个 profile
-        $profileName = array_key_first($profiles);
-        $profile = $profiles[$profileName];
         $encoder = new H264Encoder();
-        $encoder->motionWorkers = max(1, (int)($profile['motionWorkers'] ?? 8));
-        $profileStr = strtolower(trim($profile['profile'] ?? 'baseline'));
+        $encoder->motionWorkers = max(1, (int)($config['motionWorkers'] ?? 8));
+        $profileStr = strtolower(trim($config['profile'] ?? 'baseline'));
         if (!in_array($profileStr, ['baseline', 'main', 'high'], true)) $profileStr = 'baseline';
-        $this->bframes = !empty($profile['bframes']);
+        $this->bframes = !empty($config['bframes']);
         if ($this->bframes && $profileStr === 'baseline') $profileStr = 'main';
         $encoder->setProfile($profileStr);
         if ($this->bframes) $encoder->enableBFrames(true);
-        if (!empty($profile['fastMotion'])) $encoder->setFastMotion(true);
+        if (!empty($config['fastMotion'])) $encoder->setFastMotion(true);
         $this->encoder = $encoder;
-        $this->encoders = [$profileName => $encoder]; // run() warmupMotionWorkers 循环用
         $this->scaler = new VideoScaler();
     }
 
@@ -92,8 +87,8 @@ final class HlsDecoderWorkerServer
         if ($upstream === false) throw new RuntimeException('解码进程等待主进程连接超时');
         stream_set_blocking($upstream, false);
         stream_set_blocking($downstream, false);
-        // 立即拉起各 profile 的运动估计子进程，让 PHP 冷启动与主进程派发/读文件并行
-        foreach ($this->encoders as $encoder) $encoder->warmupMotionWorkers();
+        // 立即拉起运动估计子进程，让 PHP 冷启动与主进程派发/读文件并行
+        $this->encoder->warmupMotionWorkers();
         $input = '';
         $output = '';
         $upOutput = '';
@@ -316,12 +311,10 @@ final class HlsDecoderWorkerServer
         // 必须用解码帧的 isIdr 决定编码关键帧，否则切片 IDR 缺失导致首段无画面
         $isKeyFrame = !empty($frame['isIdr']);
         $this->lastVideoTs = (int)($meta['outTimestamp'] ?? $meta['timestamp'] ?? 0);
-        // 单 profile：取第一个（去除多 profile 重编码）
-        $profileName = array_key_first($this->profiles);
-        $profile = $this->profiles[$profileName];
+        $profile = $this->config;
         $targetWidth = ($profile['width'] ?? 0) > 0 ? (int)$profile['width'] : $this->width;
         $targetHeight = ($profile['height'] ?? 0) > 0 ? (int)$profile['height'] : $this->height;
-        $encoder = $this->encoders[$profileName];
+        $encoder = $this->encoder;
         $yuv = ($targetWidth !== $this->width || $targetHeight !== $this->height)
             ? $this->scaler->scaleYUV420P($frame['data'], $this->width, $this->height, $targetWidth, $targetHeight) : $frame['data'];
         if (!empty($profile['watermark']) && !empty($profile['watermarkFile'])) {
@@ -351,11 +344,11 @@ final class HlsDecoderWorkerServer
     }
 
     /**
-     * 帧级双缓冲喂帧：调用前各 profile 均已 startFrame（当前帧运动估计在途）。
-     * 首帧只登记不产出；后续帧 finishFrame() 取上一帧各 profile 的 NAL，
+     * 帧级双缓冲喂帧：调用前已 startFrame（当前帧运动估计在途）。
+     * 首帧只登记不产出；后续帧 finishFrame() 取上一帧的 NAL，
      * 返回上一帧协议帧（连同被延后的直通帧）；首帧返回空串。
      *
-     * @param array<int|string,array{0:int,1:int}> $variantDims 各 profile 输出尺寸
+     * @param array{0:int,1:int} $variantDims 输出尺寸
      */
     private function feedEncoder(array $event, array $meta, string $body, bool $isKeyFrame, array $variantDims): string
     {
@@ -391,8 +384,7 @@ final class HlsDecoderWorkerServer
         if ($tailMax > 0) {
             $frames = $this->width > 0 ? $this->decoder->flushOutput() : [];
             $frameDurMs = $this->sourceFps > 0.0 ? 1000 / $this->sourceFps : 40;
-            $profileName = array_key_first($this->profiles);
-            $profile = $this->profiles[$profileName];
+            $profile = $this->config;
             $targetWidth = ($profile['width'] ?? 0) > 0 ? (int)$profile['width'] : $this->width;
             $targetHeight = ($profile['height'] ?? 0) > 0 ? (int)$profile['height'] : $this->height;
             foreach ($frames as $f) {
@@ -438,12 +430,11 @@ final class HlsDecoderWorkerServer
         [$w, $h] = $p['dims'];
         $meta = $p['meta'];
         $body = $p['body'];
-        $profileName = array_key_first($this->profiles);
         // PurePhpHlsGenerator 的 pipelineEncodedPayload 是拆分后的纯 AnnexB（不含 4 字节前缀 + body），
         // 所以 offset 必须为 0
         $meta['encoded'] = true;
         $meta['keyFrame'] = $p['isKey'];
-        $meta['encodedVariants'] = [$profileName => ['offset' => 0, 'length' => strlen($annexb), 'width' => $w, 'height' => $h]];
+        $meta['encodedVariant'] = ['offset' => 0, 'length' => strlen($annexb), 'width' => $w, 'height' => $h];
         $meta['timestamp'] = $meta['timestamp'] ?? 0;
         $meta['pts'] = (int)(($meta['outTimestamp'] ?? $meta['timestamp']) * 90);
         $meta['dts'] = (int)($meta['timestamp'] * 90);
@@ -560,8 +551,7 @@ final class HlsDecoderWorkerServer
     /** B 模式帧时长（毫秒）——按抽帧后实际编码帧率（target 与 source 取小），与 B 队列帧间隔一致 */
     private function bFrameDurMs(): float
     {
-        $profileName = array_key_first($this->profiles);
-        $targetFps = (float)($this->profiles[$profileName]['fps'] ?? 0);
+        $targetFps = (float)($this->config['fps'] ?? 0);
         if ($targetFps > 0 && $this->sourceFps > 0 && $targetFps < $this->sourceFps - 0.01) {
             return 1000.0 / $targetFps;
         }
@@ -589,7 +579,6 @@ final class HlsDecoderWorkerServer
         // TS 封装需要最小 AVCC NALU 包头（frameType/codecId/packetType）
         $body = chr((($isKey ? 1 : 2) << 4) | 7) . chr(1) . "\0\0\0";
         // PurePhpHlsGenerator 的 pipelineEncodedPayload 是拆分后的纯 AnnexB，offset 必须为 0
-        $profileName = array_key_first($this->profiles);
         $meta = [
             'tagType' => 9,
             'encoded' => true,
@@ -600,8 +589,6 @@ final class HlsDecoderWorkerServer
             'timestamp' => $dtsMs,
             'encodedVariant' => ['offset' => 0, 'length' => strlen($annexb),
                 'width' => (int)($e['outW'] ?? 0), 'height' => (int)($e['outH'] ?? 0)],
-            'encodedVariants' => [$profileName => ['offset' => 0, 'length' => strlen($annexb),
-                'width' => (int)($e['outW'] ?? 0), 'height' => (int)($e['outH'] ?? 0)]],
             'pts' => (int)($dtsMs * 90) + $ctsTicks,
             'dts' => (int)($dtsMs * 90),
         ];
@@ -616,11 +603,10 @@ final class HlsDecoderWorkerServer
     {
         $tailUsed = 0;
         if ($tailMax > 0 && $this->width > 0) {
-            $profileName = array_key_first($this->profiles);
-            $profile = $this->profiles[$profileName];
+            $profile = $this->config;
             $targetWidth = ($profile['width'] ?? 0) > 0 ? (int)$profile['width'] : $this->width;
             $targetHeight = ($profile['height'] ?? 0) > 0 ? (int)$profile['height'] : $this->height;
-            $encoder = $this->encoders[$profileName];
+            $encoder = $this->encoder;
             $encoder->setResolution($targetWidth, $targetHeight);
             $encoder->setBitrate((int)($profile['bitrate'] ?? 500000));
             $encoder->setFps((int)($profile['fps'] ?? 25));
@@ -665,17 +651,12 @@ final class HlsDecoderWorkerServer
             $this->width = $this->decoder->getWidth();
             $this->height = $this->decoder->getHeight();
         }
-        foreach ($this->encoders as $encoder) $encoder->resetGopState();
+        $this->encoder->resetGopState();
         // 每个 GOP 边界主动收一次 cycle GC：把 GC 开销从随机热时刻挪到已知空闲点。
         // PHP 默认 GC root buffer = 10K roots，帧内宏块数组/变换结果堆到 ~60s 触发 full collection。
         // 12 个 decoder worker 同步启动时间戳接近，显式 GC 主动清空能打散下一次 full collection 的同步停顿。
         // 实测对比：显式 GC → 归零 10s、累计 8666 tags；无显式 GC → 归零 15s、累计 7051 tags
         gc_collect_cycles();
-    }
-
-    private function resetEncoders(): void
-    {
-        foreach ($this->encoders as $encoder) $encoder->resetGopState();
     }
 
     private function parseConfiguration(string $data): void

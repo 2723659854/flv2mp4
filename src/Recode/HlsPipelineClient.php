@@ -18,7 +18,7 @@ final class HlsPipelineClient
     /** 每个解码worker待写入主进程缓冲区的软上限 */
     private const PER_WORKER_SOFT_LIMIT = 8388608;
 
-    public function __construct(private array $profiles, private string $outputDir, private ?int $maxFrames, private int $decodeWorkers = 4)
+    public function __construct(private array $config, private string $outputDir, private ?int $maxFrames, private int $decodeWorkers = 4)
     {
     }
 
@@ -33,13 +33,8 @@ final class HlsPipelineClient
         $workerCount = $gopCount > 0
             ? min($gopCount, $cpuCores, $configMax)
             : min($cpuCores, $configMax);
-        // 抽帧目标帧率：各 profile fps>0 的最小值（多 profile 共享一路解码，只能按最低帧率抽一次）；
-        // fps=0 表示该 profile 保持源帧率；仅当目标帧率低于源帧率时才抽帧（不升帧）
-        $targetFps = 0.0;
-        foreach ($this->profiles as $profile) {
-            $fps = (int)($profile['fps'] ?? 0);
-            if ($fps > 0 && ($targetFps <= 0 || $fps < $targetFps)) $targetFps = $fps;
-        }
+        // 抽帧目标帧率：fps=0 表示保持源帧率；仅当目标帧率低于源帧率时才抽帧（不升帧）
+        $targetFps = (int)($this->config['fps'] ?? 0);
         $sourceFps = $sourceInfo['fps'];
         $dropFrames = $targetFps > 0 && $sourceFps !== null && $targetFps < $sourceFps - 0.01;
         $autoload = $this->locateAutoload();
@@ -48,26 +43,13 @@ final class HlsPipelineClient
         for ($i = 0; $i < $workerCount; $i++) $decoderAddresses[] = $this->reserveAddress();
         $sockets = [];
         try {
-            if (count($this->profiles) === 1) {
-                [, $outputPort] = $this->reserveAddress();
-                // 单 profile：视频帧在解码 worker 内已完成编码，输出 worker 只做 TS 封装，
-                // 传 --preencoded 跳过其编码器运动子进程预热（白冷启动 2 个永不使用的 PHP 进程）
-                $this->startWorker([$worker, '--mode', 'output', '--autoload', $autoload, '--port', (string)$outputPort, '--workers', (string)$workerCount, '--profiles', $this->encodeOption($this->profiles), '--output', $this->outputDir, '--preencoded']);
-                $decoderDownstreamPort = $outputPort;
-            } else {
-                [, $scalePort] = $this->reserveAddress();
-                $profilePorts = [];
-                foreach ($this->profiles as $name => $profile) {
-                    [, $port] = $this->reserveAddress();
-                    $profilePorts[$name] = $port;
-                    $singleProfile = [$name => $profile];
-                    $this->startWorker([$worker, '--mode', 'output', '--autoload', $autoload, '--port', (string)$port, '--profiles', $this->encodeOption($singleProfile), '--output', $this->outputDir]);
-                }
-                $this->startWorker([$worker, '--mode', 'scale', '--autoload', $autoload, '--port', (string)$scalePort, '--workers', (string)$workerCount, '--output-ports', $this->encodeOption($profilePorts), '--profiles', $this->encodeOption($this->profiles), '--output', $this->outputDir]);
-                $decoderDownstreamPort = $scalePort;
-            }
+            [, $outputPort] = $this->reserveAddress();
+            // 单 profile：视频帧在解码 worker 内已完成编码，输出 worker 只做 TS 封装，
+            // 传 --preencoded 跳过其编码器运动子进程预热（白冷启动 2 个永不使用的 PHP 进程）
+            $this->startWorker([$worker, '--mode', 'output', '--autoload', $autoload, '--port', (string)$outputPort, '--workers', (string)$workerCount, '--config', $this->encodeOption($this->config), '--output', $this->outputDir, '--preencoded']);
+            $decoderDownstreamPort = $outputPort;
             foreach ($decoderAddresses as [$decoderAddress, $decoderPort]) {
-                $this->startWorker([$worker, '--mode', 'decoder', '--autoload', $autoload, '--port', (string)$decoderPort, '--output-port', (string)$decoderDownstreamPort, '--profiles', $this->encodeOption($this->profiles)]);
+                $this->startWorker([$worker, '--mode', 'decoder', '--autoload', $autoload, '--port', (string)$decoderPort, '--output-port', (string)$decoderDownstreamPort, '--config', $this->encodeOption($this->config)]);
             }
             foreach ($decoderAddresses as [$decoderAddress]) {
                 $socket = $this->connect($decoderAddress);

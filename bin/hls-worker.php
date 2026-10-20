@@ -6,40 +6,29 @@ ini_set('memory_limit', '2048M');
 gc_disable();
 if (function_exists('pcntl_signal')) pcntl_signal(SIGINT, SIG_IGN);
 try {
-    $options = getopt('', ['mode:', 'autoload:', 'port:', 'control-port:', 'output-port:', 'output-ports:', 'profiles:', 'output:', 'workers:', 'preencoded']);
+    $options = getopt('', ['mode:', 'autoload:', 'port:', 'control-port:', 'output-port:', 'config:', 'output:', 'workers:', 'preencoded']);
     $mode = $options['mode'] ?? '';
-    if (empty($options['autoload']) || empty($options['port']) || empty($options['profiles'])) {
+    if (empty($options['autoload']) || empty($options['port']) || empty($options['config'])) {
         throw new RuntimeException('HLS worker 参数不完整');
     }
     if (!is_file($options['autoload'])) {
         throw new RuntimeException("Composer autoload 文件不存在: {$options['autoload']}");
     }
     require $options['autoload'];
-    $profiles = json_decode(base64_decode($options['profiles'], true), true, 32, JSON_THROW_ON_ERROR);
+    $config = json_decode(base64_decode($options['config'], true), true, 32, JSON_THROW_ON_ERROR);
     $workers = (int)($options['workers'] ?? 1);
     if ($mode === 'decoder') {
         if (ini_set('memory_limit', '2048M') === false) throw new RuntimeException('无法设置解码 worker 内存上限');
         if (empty($options['output-port'])) throw new RuntimeException('解码 worker 缺少 output-port');
-        (new \Xiaosongshu\Flv2mp4\Recode\HlsDecoderWorkerServer($profiles))->run(
+        (new \Xiaosongshu\Flv2mp4\Recode\HlsDecoderWorkerServer($config))->run(
             'tcp://127.0.0.1:' . (int)$options['port'],
             'tcp://127.0.0.1:' . (int)$options['output-port'],
             isset($options['control-port']) ? 'tcp://127.0.0.1:' . (int)$options['control-port'] : ''
         );
-    } elseif ($mode === 'scale') {
-        if (ini_set('memory_limit', '512M') === false) throw new RuntimeException('无法设置缩放 worker 内存上限');
-        if (!isset($options['output'], $options['output-ports'])) throw new RuntimeException('缩放 worker 参数不完整');
-        $outputPorts = json_decode(base64_decode($options['output-ports'], true), true, 32, JSON_THROW_ON_ERROR);
-        $outputAddresses = [];
-        foreach ($outputPorts as $name => $port) $outputAddresses[$name] = 'tcp://127.0.0.1:' . (int)$port;
-        (new \Xiaosongshu\Flv2mp4\Recode\HlsScaleWorkerServer($profiles, $options['output']))->run(
-            'tcp://127.0.0.1:' . (int)$options['port'],
-            $outputAddresses,
-            $workers
-        );
     } elseif ($mode === 'output') {
         if (ini_set('memory_limit', '512M') === false) throw new RuntimeException('无法设置输出 worker 内存上限');
         if (!isset($options['output'])) throw new RuntimeException('输出 worker 缺少 output');
-        (new \Xiaosongshu\Flv2mp4\Recode\HlsOutputWorkerServer($profiles, $options['output']))->run(
+        (new \Xiaosongshu\Flv2mp4\Recode\HlsOutputWorkerServer($config, $options['output']))->run(
             'tcp://127.0.0.1:' . (int)$options['port'],
             $workers,
             isset($options['control-port']) ? 'tcp://127.0.0.1:' . (int)$options['control-port'] : '',

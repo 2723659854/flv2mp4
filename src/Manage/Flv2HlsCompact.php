@@ -52,7 +52,7 @@ class Flv2HlsCompact
      *   输出worker负责编码/TS/HLS，主进程只做拉流转发与端到端反压
      */
     private int $decodeWorkers = 2;
-    private array $workerProfile = [];
+    private array $workerConfig = [];
 
     // ===== 拉流子进程参数 =====
     private int $maxRetries = 5;
@@ -215,7 +215,7 @@ class Flv2HlsCompact
             $profile['segmentDuration'] = $segmentDuration > 0 ? $segmentDuration : 3;
             // 缩放由解码worker并行完成：缩放是纯PHP重操作（768x432→640x360约80-160ms/帧），
             // 放在输出进程会成为串行瓶颈（实测仅~5fps），2个decoder并行缩放下放到~10fps以上
-            $this->workerProfile = ['' => $profile];
+            $this->workerConfig = $profile;
         } else {
             $this->generator = new PurePhpHlsGenerator($profile, rtrim($this->streamDir, '/'), false);
             $this->generator->setSegmentDuration($segmentDuration > 0 ? $segmentDuration : 3);
@@ -587,7 +587,7 @@ class Flv2HlsCompact
         $n = $this->decodeWorkers;
         $autoload = dirname((new \ReflectionClass(\Composer\Autoload\ClassLoader::class))->getFileName(), 2) . '/autoload.php';
         $entry = dirname(__DIR__, 2) . '/bin/hls-worker.php';
-        $profilesOpt = base64_encode(json_encode($this->workerProfile, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR));
+        $configOpt = base64_encode(json_encode($this->workerConfig, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR));
 
         [, $outputPort] = $this->reserveAddress();
         [, $outputCtrlPort] = $this->reserveAddress();
@@ -606,7 +606,7 @@ class Flv2HlsCompact
             '--port', (string)$outputPort,
             '--control-port', (string)$outputCtrlPort,
             '--workers', (string)$n,
-            '--profiles', $profilesOpt,
+            '--config', $configOpt,
             '--output', rtrim($this->streamDir, '/\\') . '/',
             '--preencoded',
         ]);
@@ -617,7 +617,7 @@ class Flv2HlsCompact
                 '--port', (string)$decoderPorts[$i],
                 '--control-port', (string)$controlPorts[$i],
                 '--output-port', (string)$outputPort,
-                '--profiles', $profilesOpt,
+                '--config', $configOpt,
             ]);
             $this->plOut[$i] = '';
             $this->plIn[$i] = '';
