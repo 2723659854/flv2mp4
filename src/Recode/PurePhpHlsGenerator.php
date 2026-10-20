@@ -70,6 +70,15 @@ class PurePhpHlsGenerator
     private array $lastDts = [];
     /** 已写入 TS 的最大视频 dts（90kHz tick），用于全局单调钳制（跨分片持续有效） */
     private ?int $lastVideoDtsTick = null;
+    /** B 模式（IBBP）全局编码序帧计数器，跨 GOP 不重置——保证 DTS 全局单调递增 */
+    private int $videoEncodeCounter = 0;
+    /** TS 音视频 PTS 统一偏移（90kHz tick）：IBBP 下 B 帧解码序天然晚于显示序（pts<dts），
+     *  TS 要求每帧 pts>=dts（ISO 13818-1：解码不得晚于呈现；ffmpeg 对 pts<dts 的包报
+     *  Invalid timestamps）。标准做法与 x264/ffmpeg mpegts muxer 一致：PTS 整体后移
+     *  重排延迟（2 帧时长），音视频同移保持 A/V 同步；非 B 模式为 0 */
+    private int $tsPtsOffsetTicks = 0;
+    /** pipeline 元数据缓存：worker 传来的 encoded/ctsMs/dtsMs 在 processPipelineEvent 里暂存，handleVideoFrame 里消费 */
+    private ?array $pipelineFrameMeta = null;
     private array $segmentFirstFrame = [];
     private string $srcSpsData = '';
     private string $srcPpsData = '';
@@ -152,6 +161,15 @@ class PurePhpHlsGenerator
             } else {
                 $this->profileWatermark[$name] = null;
             }
+        }
+
+        // B 帧模式：TS 层 PTS 统一后移 2 帧时长（重排延迟），保证每帧 pts>=dts。
+        // 音视频同移同一常量，A/V 相对同步不变；偏移量用 profile fps 计算（常数即可，
+        // 只需大于最大 pts<dts 缺口 1 帧，无需与 worker 有效帧时长严格相等）
+        $firstProfile = $this->profiles[array_key_first($this->profiles)] ?? [];
+        if (!empty($firstProfile['bframes'])) {
+            $offsetFps = max(1, (int)($firstProfile['fps'] ?? 25));
+            $this->tsPtsOffsetTicks = (int)round(2 * (1000.0 / $offsetFps) * 90);
         }
 
         /** 初始化空m3u8 */
@@ -374,6 +392,13 @@ class PurePhpHlsGenerator
             $this->pipelineYuvPayload = substr($payload, 4 + $bodyLength);
             $this->pipelineEncodedPayload = $this->pipelineYuvPayload;
             $this->pipelineEncodedVariants = $metadata['encodedVariants'] ?? [];
+            // 暂存 worker 传来的 B 帧关键元数据（encoded/ctsTicks/dtsMs），handleVideoFrame 里消费
+            $this->pipelineFrameMeta = [
+                'encoded' => !empty($metadata['encoded']),
+                'ctsTicks' => isset($metadata['ctsTicks']) ? (int)$metadata['ctsTicks'] : null,
+                'dtsMs' => isset($metadata['dtsMs']) ? (int)$metadata['dtsMs'] : null,
+                'frameDurMs' => isset($metadata['frameDurMs']) && (float)$metadata['frameDurMs'] > 0 ? (float)$metadata['frameDurMs'] : null,
+            ];
             $metadata['compositionTime'] = (int)($metadata['compositionTime'] ?? 0);
         }
         // 抽帧丢弃帧：decoder 已解码维持参考链，输出端不编码、不写 TS，时间轴由保留帧推进
@@ -388,6 +413,7 @@ class PurePhpHlsGenerator
         $this->pipelineYuvPayload = '';
         $this->pipelineEncodedPayload = '';
         $this->pipelineEncodedVariants = [];
+        $this->pipelineFrameMeta = null;
     }
 
     public function finishPipelineOutput(bool $generateMasterPlaylist = true): void
@@ -439,12 +465,24 @@ class PurePhpHlsGenerator
             }
         }
 
-        // 重编码流无 B 帧（呈现序=解码序），pts 必须等于 dts 单调递增。
-        // 分布式预编码事件的 cts 属于源流且与重排后的实际内容不配对，
-        // 沿用会让 pts 倒挂 → ffmpeg h264 parser 推导出非单调 dts（muxer 报错），
-        // 故强制 cts=0 按均匀网格推进；非分布式路径内容与 tag 一一对应，保留源 cts
-        $cts = !empty($this->pipelineEncodedVariants) ? 0 : ($avc['compositionTime'] ?? 0);
-        $job = $this->prepareVideoJob($avc['data'], $isKeyFrame, $timestamp - $this->baseTimestamp, $cts);
+        // 重编码流：worker 带 ctsTicks 时（B 帧 IBBP）直接用它（90kHz tick，无毫秒取整误差）；
+        // 否则强制 cts=0 按均匀网格推进
+        // 避免源流 cts 与重排后内容不配对导致 pts 倒挂（非单调 dts → muxer 报错）
+        $pm = $this->pipelineFrameMeta;
+        if (is_array($pm) && !empty($pm['encoded']) && $pm['ctsTicks'] !== null) {
+            $ctsTicks = (int)$pm['ctsTicks'];
+        } elseif (!empty($this->pipelineEncodedVariants)) {
+            $ctsTicks = 0;
+        } else {
+            $ctsMs = (int)($avc['compositionTime'] ?? 0);
+            // FLV compositionTime 是 24-bit 有符号补码，转成 PHP int
+            if ($ctsMs & 0x800000) $ctsMs -= 0x1000000;
+            $ctsTicks = $ctsMs * 90;
+        }
+        // B 模式编码序帧：worker 给出了真正的编码序 DTS（均匀网格），不走源流 timestamp
+        $workerDtsMs = (is_array($pm) && !empty($pm['encoded']) && $pm['dtsMs'] !== null) ? (int)$pm['dtsMs'] : null;
+        $workerFrameDurMs = (is_array($pm) && !empty($pm['encoded']) && $pm['frameDurMs'] !== null) ? (float)$pm['frameDurMs'] : null;
+        $job = $this->prepareVideoJob($avc['data'], $isKeyFrame, $timestamp - $this->baseTimestamp, $ctsTicks, $workerDtsMs, $workerFrameDurMs);
         if ($job === null) return;
 
         // 关键顺序：新帧各 profile 已 startFrame（worker 在途）→ 此时 finish 上一帧，
@@ -480,9 +518,10 @@ class PurePhpHlsGenerator
     /**
      * 每帧预处理：解码/缩放/水印 + 各 profile startFrame，并计算分片切换决策（不执行切换）。
      */
-    private function prepareVideoJob(string $avcData, bool $isKeyFrame, int $relativeTime, int $cts): ?array
+    private function prepareVideoJob(string $avcData, bool $isKeyFrame, int $relativeTime, int $ctsTicks, ?int $workerDtsMs = null, ?float $workerFrameDurMs = null): ?array
     {
-        if ($cts & 0x800000) $cts -= 0x1000000;
+        // 注意：CTS 补码处理（FLV 24-bit compositionTime）已移到 handleVideoFrame，
+        // 此处接收的 ctsTicks 已是 90kHz tick（源流毫秒×90 或 worker 直接提供），不再二次转换
 
         $segmentSwitches = [];
         foreach ($this->profiles as $name => $profile) {
@@ -496,18 +535,31 @@ class PurePhpHlsGenerator
             $this->frameCacheKey = $cacheKey;
         }
 
-        $dts = (int)($relativeTime * 90);
-        $pts = (int)(($relativeTime + $cts) * 90);
-        if ($pts < $dts) $pts = $dts;
-        // 分布式管线 GOP 尾帧为合成时间戳，可能与下一 GOP 首帧网格时间戳碰撞；
-        // 重编码流无 B 帧（呈现序=解码序），TS 要求 dts 严格递增，
-        // 钳制到上一帧 dts+1 tick（0.011ms，人眼不可感知），否则播放器
-        // （VLC 硬解）会因时间轴错乱报非单调 dts 并出现大面积灰色
-        if ($this->lastVideoDtsTick !== null && $dts <= $this->lastVideoDtsTick) {
-            $dts = $this->lastVideoDtsTick + 1;
-            if ($pts < $dts) $pts = $dts;
+        // B 模式（IBBP）：worker 在 GOP 边界会重置 bEncodeCounter，
+        // 所以不能直接用 workerDtsMs（会从 0 重新开始导致跨 GOP DTS 非单调）。
+        // 改用本进程的全局编码序计数器 videoEncodeCounter（跨 GOP 不重置）×帧时长推导 DTS。
+        // B 模式编码序帧：worker 给出了真正的编码序 DTS（均匀网格），不走源流 timestamp。
+        // CTS 用 worker 的 ctsTicks（只在 GOP 内做相对差，绝对值不受 GOP 边界 reset 影响）。
+        // PTS = 全局编码序×帧时长 + ctsTicks = 绝对显示序×帧时长，跨 GOP 连续递增。
+        if ($workerDtsMs !== null) {
+            // 帧时长优先用 worker 实际值（抽帧后有效帧率 = target/source 取小），回退 profile fps
+            $frameDurMs = ($workerFrameDurMs !== null && $workerFrameDurMs > 0)
+                ? $workerFrameDurMs
+                : 1000.0 / max(1, (int)(($this->profiles[array_key_first($this->profiles)]['fps'] ?? 25)));
+            $dtsMs = $this->videoEncodeCounter * $frameDurMs;
+            $dts = (int)($dtsMs * 90);
+            $this->videoEncodeCounter++;
+        } else {
+            $dts = (int)($relativeTime * 90);
+            // 非 B 模式仍保留钳制（源流 timestamp 可能有碰撞）
+            if ($this->lastVideoDtsTick !== null && $dts <= $this->lastVideoDtsTick) {
+                $dts = $this->lastVideoDtsTick + 1;
+            }
+            $this->lastVideoDtsTick = $dts;
         }
-        $this->lastVideoDtsTick = $dts;
+        // B 帧合法 PTS<DTS（TS 容器原生支持），不能钳制
+        // 非 B 模式 cts 来自源流（非负 tick），所以 pts >= dts 自动成立
+        $pts = $dts + $ctsTicks;
 
         $profileJobs = [];
         $encodedPayload = $this->pipelineEncodedPayload;
@@ -609,12 +661,13 @@ class PurePhpHlsGenerator
                 $outputSpsPps = '';
                 foreach ($encodedNals as $nal) {
                     $nalHeaderPos = $this->findNalHeaderPos($nal);
-                    if ($nalHeaderPos < 0) continue;
+                    // encoder 返回裸 NAL（无 start code）时按位置 0 处理，不能跳过丢帧
+                    if ($nalHeaderPos < 0) $nalHeaderPos = 0;
                     $nalType = ord($nal[$nalHeaderPos]) & 0x1F;
                     if ($nalType === 7 || $nalType === 8) {
-                        $outputSpsPps .= $nal;
+                        $outputSpsPps .= "\x00\x00\x00\x01" . substr($nal, $nalHeaderPos);
                     } else {
-                        $outputData .= $nal;
+                        $outputData .= "\x00\x00\x00\x01" . substr($nal, $nalHeaderPos);
                     }
                 }
                 if ($outputSpsPps !== '') {
@@ -625,15 +678,25 @@ class PurePhpHlsGenerator
 
             $annexb = $isTranscoded ? $outputData : $this->avccToAnnexB($outputData);
             // 只在每个分片的第一帧前置SPS/PPS，避免重复导致FFmpeg解码错误
+            // 注意：转码路径（encoded/transcode）的 IDR 帧已自带新 profile 的 SPS/PPS，
+            // 不能再前置源流的 SPS/PPS——旧 profile SPS 声明了错误尺寸且无 B 帧重排声明，
+            // 播放端会按"无 B 帧"判定 pts<dts 为非法时间戳
             if ($this->segmentFirstFrame[$name]) {
-                $prefixNal = $outputSpsPps ?: $this->spsPpsData[$name];
-                if ($prefixNal !== '') {
-                    $annexb = $prefixNal . $annexb;
-                }
                 $this->segmentFirstFrame[$name] = false;
+                if ($isTranscoded) {
+                    // 本进程转码：SPS/PPS 已从 encoder 输出中抽离（outputData 仅含 slice），需前置回去
+                    if ($outputSpsPps !== '') $annexb = $outputSpsPps . $annexb;
+                } else {
+                    // 直通路径：无 SPS 时前置源流 SPS/PPS（avcc 已转 AnnexB）
+                    $prefixNal = $outputSpsPps ?: $this->spsPpsData[$name];
+                    if ($prefixNal !== '') {
+                        $annexb = $prefixNal . $annexb;
+                    }
+                }
             }
 
-            $pes = $this->createPES(0xE0, $annexb, $job['pts'], ($job['pts'] !== $job['dts']) ? $job['dts'] : null);
+            // PTS 统一后移重排延迟（B 模式非 0），DTS 保持编码序网格不变
+            $pes = $this->createPES(0xE0, $annexb, $job['pts'] + $this->tsPtsOffsetTicks, ($job['pts'] !== $job['dts']) ? $job['dts'] : null);
             // 视频首包携带PCR同步播放器
             $this->writeTSPackets($name, $this->videoPid, $pes, true, $job['dts']);
 
@@ -767,7 +830,8 @@ class PurePhpHlsGenerator
             $pts = $this->audioBasePts[$name] + ($this->audioFrameCounts[$name] * $frameDuration);
             $this->audioFrameCounts[$name]++;
 
-            $pes = $this->createPES(0xC0, $payload, $pts, null);
+            // 音频与视频同步后移同一常量，保持 A/V 同步
+            $pes = $this->createPES(0xC0, $payload, $pts + $this->tsPtsOffsetTicks, null);
             $this->writeTSPackets($name, $this->audioPid, $pes, false, 0);
         }
     }
