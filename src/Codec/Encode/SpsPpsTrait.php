@@ -101,9 +101,7 @@ trait SpsPpsTrait
 
         $bits = '';
         // 标准 VUI（Annex E.1.1）在 bitstream_restriction_flag 前共有 8 个 present flag，
-        // 与 ffmpeg h2645_vui.c 的读取顺序严格一致（aspect/overscan/video_signal/chroma_loc/
         // timing/nal_hrd/vcl_hrd/pic_struct）。漏写任何一个都会让后续位整体左移，
-        // ffmpeg 读到 rbsp trailing 位后报 "Overread VUI by 1 bits"
         // aspect_ratio_info_present_flag = 0
         $bits .= '0';
         // overscan_info_present_flag = 0
