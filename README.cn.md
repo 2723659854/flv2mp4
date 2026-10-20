@@ -50,20 +50,20 @@
 
 ## 🎯 核心功能
 
-| 功能            | 方向                               | 说明                                  |
-|---------------|----------------------------------|-------------------------------------|
-| 封装转换          | FLV ↔ MP4 / FMP4                 | 生成标准 MP4 或分离的 fMP4 切片（兼容 MSE）       |
-| HLS 切片        | FLV → HLS                        | 生成 M3U8 + TS 切片，兼容 hls.js、VLC 等     |
-| HLS 还原        | HLS → FLV                        | 将 HLS 切片合并还原为单 FLV 文件               |
-| MP4 ↔ FLV     | MP4 → FLV / FMP4 → FLV           | 多容器格式互转                             |
-| 直播网关          | FLV 网关                           | 高性能多级转发，支持高并发连接                     |
-| 静态文件服务        | HTTP 文件网关                        | 轻量级文件服务器，支持目录浏览                     |
-| 推流客户端         | FLV / MP4 → RTMP/HTTP-FLV/WS-FLV | 将静态文件以伪直播方式推流                       |
-| 拉流客户端         | RTMP/HTTP-FLV/WS-FLV → FLV       | 从直播流拉取并保存为本地 FLV                    |
-| 转播客户端         | 多协议输入 → 多协议输出                    | 一路拉流，多路转发                           |
-| **H.264 重编码** | 解码 → 缩放 → 编码                     | 输入兼容 Baseline/Main/High Profile，输出 Baseline，为多码率 HLS 提供核心支持 |
-| **OPUS→AAC**  | opus→pcm→aac                     | 支持 webrtc的音频opus转码为AAC-LC           |
-| **opus/aac/mp3/wav格式互转** | 原始格式音频→pcm→目标格式音频                | 支持 opus/aac/mp3/wav格式音频相互转码         |
+| 功能            | 方向                               | 说明                                                 |
+|---------------|----------------------------------|----------------------------------------------------|
+| 封装转换          | FLV ↔ MP4 / FMP4                 | 生成标准 MP4 或分离的 fMP4 切片（兼容 MSE）                      |
+| HLS 切片        | FLV → HLS                        | 生成 M3U8 + TS 切片，兼容 hls.js、VLC 等                    |
+| HLS 还原        | HLS → FLV                        | 将 HLS 切片合并还原为单 FLV 文件                              |
+| MP4 ↔ FLV     | MP4 → FLV / FMP4 → FLV           | 多容器格式互转                                            |
+| 直播网关          | FLV 网关                           | 高性能多级转发，支持高并发连接                                    |
+| 静态文件服务        | HTTP 文件网关                        | 轻量级文件服务器，支持目录浏览                                    |
+| 推流客户端         | FLV / MP4 → RTMP/HTTP-FLV/WS-FLV | 将静态文件以伪直播方式推流                                      |
+| 拉流客户端         | RTMP/HTTP-FLV/WS-FLV → FLV       | 从直播流拉取并保存为本地 FLV                                   |
+| 转播客户端         | 多协议输入 → 多协议输出                    | 一路拉流，多路转发                                          |
+| **H.264 重编码** | 解码 → 缩放 → 编码                     | 输入/输出兼容 Baseline/Main/High Profile，为 HLS 压缩转码提供核心支持 |
+| **OPUS→AAC**  | opus→pcm→aac                     | 支持 webrtc的音频opus转码为AAC-LC                          |
+| **opus/aac/mp3/wav格式互转** | 原始格式音频→pcm→目标格式音频                | 支持 opus/aac/mp3/wav格式音频相互转码                        |
 ---
 ## 环境依赖
 
@@ -297,7 +297,7 @@ php forward.php
 - **离线批处理**：批量转换 FLV / MP4 格式
 - **伪直播推流**：点播文件伪装为直播流推送
 - **跨平台转播**：一次拉流，同时转发到多个平台
-- **多码率 HLS**：纯 PHP 实现的 H.264 重编码，生成自适应码率 HLS
+- **HLS 压缩转码**：纯 PHP 实现的 H.264 重编码，生成压缩后的 HLS 切片
 
 ---
 
@@ -306,7 +306,7 @@ php forward.php
 
 支持 H.264 解码、缩放、重新编码，为以下场景提供核心能力：
 - 这是一个完整的 **H.264 像素处理管道**（解码 → 处理 → 编码），不依赖 FFmpeg，纯 PHP 实现。
-- 当前支持baseline/main/high profile 输入，输出统一为baseline profile。含 B 帧的 Main/High 输入会被解码后转为 P 帧编码，输出流无 B 帧（dts 与 pts 一致、时间戳单调）。
+- 当前支持 baseline/main/high profile 输入与输出，其中 main/high 支持输出 B 帧（IBBP）；关闭 bframes 时，含 B 帧的 Main/High 输入会被解码后转为 P 帧编码，输出流无 B 帧（dts 与 pts 一致、时间戳单调）。
 
 ---
 ####  flv/mp4/hls压缩转码
@@ -321,6 +321,8 @@ $config = [
     'fps' => 15,
     'audioBitrate' => 48000,
     'qp' => 30,
+    'profile'=>'baseline',
+    'bframes'=> false,
     'watermark'      => false,
     'watermarkFile'  => __DIR__."/watermark_80x16.yuv",
     'fastMotion'     => true,
@@ -337,6 +339,7 @@ $config = [
 ```
 - 添加水印的时候，文件名格式：（watermark_{width}x{height}.yuv）。
 - 重编码模块提供了 **YUV 像素级操作接口**，你可以基于此实现自定义功能，如添加字幕、画中画、视频拼接等。
+- 本项目支持输出baseline/main/high profile,其中main/high支持输出B帧。
 
 ---
 
@@ -354,6 +357,8 @@ $config = [
     'fps'          => 10,
     'qp'           => 30,
     'audioBitrate' => 64000,
+    'profile'=>'baseline',
+    'bframes'=> false,
     'motionWorkers'   => 1,
     'decodeWorkers'   => 12,
     'segmentDuration' => 3,
@@ -377,6 +382,7 @@ $config = [
 - `motionWorkers`和`decodeWorkers`输入分辨率越高，越应增加 decodeWorkers；输出分辨率越高，越应增加 motionWorkers。两者之和不要超过服务器逻辑处理器数（运动估计进程是解码进程的子进程）。
 - 测试使用 OBS 推流：输入 960×540、30fps、每 1 秒一个关键帧、Baseline Profile、H.264 + AAC；输出 480×270、15fps、HLS 切片 3 秒。连续运行 30 分钟无跳帧、无积压。
 - ⚠️ 直播压缩转码仅支持 CLI 模式运行，请勿在 FPM 请求中直接调用，否则会阻塞 Web 服务的 worker 进程。
+- 直播场景建议输入和输出都选择baseline profile，压缩速度最快。
 
 ----
 
@@ -390,9 +396,9 @@ $config = [
 - [x] **CAVLC 熵编码**（Baseline Profile）
 - [x] **分辨率缩放**（解码后 YUV 缩放 → 重新编码）
 - [x] **码率控制**（通过 QP 参数调节）
-- [x] **B 帧解码**（Main/High Profile，CABAC，含 Direct 模式；重编码时 B 帧转为 P 帧输出）
+- [x] **B 帧解码**（Main/High Profile，CABAC，含 Direct 模式）
 - [x] **CABAC 熵解码**（Main/High Profile 支持）
-- [ ] **B 帧编码**（计划中，需双向预测）
+- [x] **B 帧编码**（Main/High Profile 支持）
 ---
 
 ### 水印生成工具

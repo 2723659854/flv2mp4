@@ -63,7 +63,7 @@ Supports FLV, FMP4, MP4, HLS mutual conversion, live streaming gateway, pushing,
 | Pushing client        | FLV / MP4 → RTMP/HTTP-FLV/WS-FLV             | Push static files as a pseudo-live stream                          |
 | Pulling client        | RTMP/HTTP-FLV/WS-FLV → FLV                   | Pull live stream and save as local FLV                             |
 | Rebroadcasting        | Multi-protocol input → Multi-protocol output | One pull, multiple forwards                                        |
-| **H.264 re-encoding** | Decode → Scale → Encode                      | Input: Baseline/Main/High Profile; output Baseline. Core support for multi-bitrate HLS      |
+| **H.264 re-encoding** | Decode → Scale → Encode                      | Input/output compatible with Baseline/Main/High Profile; core support for HLS compression transcoding |
 | **OPUS→AAC**          | opus→pcm→aac                                 | Convert WebRTC Opus audio to AAC-LC                                |
 | **opus/aac/mp3/wav format conversion** | Source audio → PCM → target format audio | Supports mutual conversion among Opus/AAC/MP3/WAV audio formats |
 ---
@@ -316,13 +316,14 @@ php forward.php
 - **Offline batch processing**: Bulk FLV / MP4 conversion.
 - **Pseudo‑live streaming**: Push on‑demand files as live streams.
 - **Cross‑platform rebroadcasting**: One pull, multiple pushes to different platforms.
-- **Multi‑bitrate HLS**: Pure PHP H.264 re‑encoding to generate adaptive‑bitrate HLS.
+- **HLS compression transcoding**: Pure PHP H.264 re-encoding to generate compressed HLS segments.
 
 ---
 ### 🔥 H.264 Decoding + Scaling + Re-encoding
 
-Supports H.264 decoding, scaling, and re-encoding with Baseline/Main/High Profile input (output is always Baseline Profile; B frames from Main/High input are decoded and re-encoded as P frames, so the output stream contains no B frames and dts equals pts with monotonic timestamps), providing core capabilities for the following scenarios:
-**Technical positioning**: This is a complete **H.264 pixel processing pipeline** (decode → process → encode), implemented in pure PHP without FFmpeg.
+Supports H.264 decoding, scaling, and re-encoding, providing core capabilities for the following scenarios:
+- A complete **H.264 pixel processing pipeline** (decode → process → encode), implemented in pure PHP without FFmpeg.
+- Currently supports Baseline/Main/High Profile for both input and output; Main/High supports B-frame encoding (IBBP). When `bframes` is disabled, Main/High input containing B frames is decoded and re-encoded as P frames, so the output stream contains no B frames (dts equals pts with monotonic timestamps).
 
 ---
 #### FLV/MP4/HLS Compression Transcoding
@@ -337,6 +338,8 @@ $config = [
     'fps' => 15,
     'audioBitrate' => 48000,
     'qp' => 30,
+    'profile'=>'baseline',
+    'bframes'=> false,
     'watermark'      => false,
     'watermarkFile'  => __DIR__."/watermark_80x16.yuv",
     'fastMotion'     => true,
@@ -353,6 +356,7 @@ $config = [
 ```
 - When adding a watermark, the file name format is: `watermark_{width}x{height}.yuv`.
 - The re-encoding module provides a **YUV pixel-level operation interface**, which you can use to implement custom features such as subtitles, picture-in-picture, video stitching, etc.
+- This project supports Baseline/Main/High Profile output; Main/High supports B-frame output.
 
 ---
 
@@ -370,6 +374,8 @@ $config = [
     'fps'          => 10,
     'qp'           => 30,
     'audioBitrate' => 64000,
+    'profile'=>'baseline',
+    'bframes'=> false,
     'motionWorkers'   => 1,
     'decodeWorkers'   => 12,
     'segmentDuration' => 3,
@@ -393,6 +399,7 @@ $config = [
 - `motionWorkers` and `decodeWorkers`: the higher the input resolution, the more you should increase `decodeWorkers`; the higher the output resolution, the more you should increase `motionWorkers`. The sum of both should not exceed the number of logical processors on the server (motion estimation processes are child processes of decoding processes).
 - Tested with OBS push: input 960×540, 30 fps, one keyframe per second, Baseline Profile, H.264 + AAC; output 480×270, 15 fps, 3-second HLS segments. Ran continuously for 30 minutes with no dropped frames and no backlog.
 - ⚠️ Live stream compression transcoding only supports CLI mode. Do not call it directly in an FPM request, otherwise it will block the web service worker processes.
+- For live streaming, it is recommended to select Baseline Profile for both input and output for the fastest compression.
 
 ----
 
@@ -406,9 +413,9 @@ $config = [
 - [x] **CAVLC entropy coding** (Baseline Profile)
 - [x] **Resolution scaling** (YUV scaling after decoding → re-encoding)
 - [x] **Bitrate control** (via QP parameter)
-- [x] **B-frame decoding** (Main/High Profile, CABAC, including Direct mode; B frames are re-encoded as P frames on output)
+- [x] **B-frame decoding** (Main/High Profile, CABAC, including Direct mode)
 - [x] **CABAC entropy decoding** (Main/High Profile support)
-- [ ] **B-frame encoding** (planned, requires bidirectional prediction)
+- [x] **B-frame encoding** (Main/High Profile support)
 ---
 
 ### Watermark Generation Tool
