@@ -444,6 +444,7 @@ final class HlsDecoderWorkerServer
     /** 显示序帧入队（B 模式，单 profile 版）——$yuv 已缩放/水印完毕。 */
     private function feedBFrame(array $event, string $yuv, int $outW, int $outH, bool $isKeyFrame): string
     {
+        $meta = $event['metadata'];
         $this->bQueue[] = [
             'yuv' => $yuv,
             'isKey' => $isKeyFrame,
@@ -451,6 +452,9 @@ final class HlsDecoderWorkerServer
             'seq' => $event['sequence'],
             'outW' => $outW,
             'outH' => $outH,
+            // 回传主进程下发的流级时间戳：输出端分片切换/EXTINF 依赖它。
+            // 不能用 GOP 本地 dtsMs（resetGopState 每 GOP 归零会导致切换永不触发）
+            'srcTs' => (int)($meta['outTimestamp'] ?? $meta['timestamp'] ?? 0),
         ];
         $tail = 0;
         return $this->drainBQueue(false, 0, $tail);
@@ -587,6 +591,9 @@ final class HlsDecoderWorkerServer
             'dtsMs' => $dtsMs,
             'frameDurMs' => $frameDurMs,
             'timestamp' => $dtsMs,
+            // 流级时间戳（feedBFrame/flushGopTailB 填充）：输出端 getTime() 优先取它，
+            // 分片切换按它计时；timestamp 是 GOP 本地编码序 DTS，仅作回退
+            'outTimestamp' => (int)($e['srcTs'] ?? 0),
             'encodedVariant' => ['offset' => 0, 'length' => strlen($annexb),
                 'width' => (int)($e['outW'] ?? 0), 'height' => (int)($e['outH'] ?? 0)],
             'pts' => (int)($dtsMs * 90) + $ctsTicks,
@@ -601,6 +608,7 @@ final class HlsDecoderWorkerServer
      */
     private function flushGopTailB(int $tailSeq, int $tailMax): string
     {
+        $out = '';
         $tailUsed = 0;
         if ($tailMax > 0 && $this->width > 0) {
             $profile = $this->config;
@@ -611,6 +619,11 @@ final class HlsDecoderWorkerServer
             $encoder->setBitrate((int)($profile['bitrate'] ?? 500000));
             $encoder->setFps((int)($profile['fps'] ?? 25));
             $encoder->setQp((int)($profile['qp'] ?? 26));
+            // 尾帧无原始事件：从最近一个真实帧的流级时间戳按帧时长延续，
+            // 保证输出端分片计时跨 GOP 单调（尾帧非关键帧，仅影响末段 EXTINF 精度）
+            $lastTs = !empty($this->bQueue)
+                ? (int)end($this->bQueue)['srcTs']
+                : $this->lastVideoTs;
             foreach ($this->decoder->flushOutput() as $f) {
                 if (empty($f['data'])) continue;
                 $yuv = ($targetWidth !== $this->width || $targetHeight !== $this->height)
@@ -618,9 +631,10 @@ final class HlsDecoderWorkerServer
                 if (!empty($profile['watermark']) && !empty($profile['watermarkFile'])) {
                     $yuv = $this->applyWatermark($yuv, $targetWidth, $targetHeight, $profile['watermarkFile']);
                 }
+                $lastTs = (int)round($lastTs + $this->bFrameDurMs());
                 $this->bQueue[] = ['yuv' => $yuv, 'isKey' => !empty($f['isIdr']),
                     'idx' => $this->bDisplayCounter++, 'seq' => null,
-                    'outW' => $targetWidth, 'outH' => $targetHeight];
+                    'outW' => $targetWidth, 'outH' => $targetHeight, 'srcTs' => $lastTs];
             }
         }
         $out = $this->drainBQueue(true, $tailSeq, $tailUsed);
