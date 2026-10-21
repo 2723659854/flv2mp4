@@ -137,7 +137,8 @@ trait SpsPpsTrait
 
         $bits .= $this->ue(0);              // pic_parameter_set_id = 0
         $bits .= $this->ue(0);              // seq_parameter_set_id = 0
-        $bits .= '0';                       // entropy_coding_mode_flag = 0 (CAVLC)
+        // entropy_coding_mode_flag：main/high 用 CABAC，baseline 用 CAVLC
+        $bits .= ($this->profile === 'baseline') ? '0' : '1';
         $bits .= '0';                       // bottom_field_pic_order_in_frame_present_flag = 0
         $bits .= $this->ue(0);              // num_slice_groups_minus1 = 0
         $bits .= $this->ue(0);              // num_ref_idx_l0_default_active_minus1 = 0

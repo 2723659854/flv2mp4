@@ -353,6 +353,18 @@ trait InterPredTrait
         if ($cbpLuma == 0 && $cbpChroma == 0 && $mvX == $skipMvpX && $mvY == $skipMvpY) {
             $this->lastMbWasSkip = true;
 
+            // CABAC：mb_skip_flag=1（语法序镜像解码器 decodeCabacPMb skip 路径）
+            if (!empty($this->useCabac)) {
+                $this->cabMbBegin($mbX, $mbY);
+                $mbIdx = $this->cabMbIdx;
+                $this->picChromaPred[$mbIdx] = 0;
+                $this->picIsSkip[$mbIdx] = 0;
+                $this->encWriteMbSkip(false, true);
+                $this->picIsSkip[$mbIdx] = 1;
+                $this->picCbp[$mbIdx] = 0;   // 跳过宏块：cbp_table 置 0
+                $this->cabLastQpDiff = 0;    // last_qscale_diff 置 0
+            }
+
             // 更新邻居nz缓存（亮度 + 色度全部清零）
             for ($by = 0; $by < 8; $by++) {
                 $leftNz[$by] = 0;
@@ -394,11 +406,54 @@ trait InterPredTrait
         // 非Skip宏块
         $this->lastMbWasSkip = false;
 
+        $refIdx = 0;
+        if (!empty($this->useCabac)) {
+            // ---- CABAC 写码分支：语法序镜像解码器 decodeCabacPMb 非 skip 路径（P_L0_16x16）----
+            $this->cabMbBegin($mbX, $mbY);
+            $mbIdx = $this->cabMbIdx;
+            $this->picChromaPred[$mbIdx] = 0;
+            $this->picIsSkip[$mbIdx] = 0;
+            $this->encWriteMbSkip(false, false);
+            $this->encWritePMbType(0); // P_L0_16x16
+            // inter MB：不可用邻居 nz 哨兵转 0（!IS_INTRA -> 0）
+            $this->cabFixUnavailNz(false);
+            // ref_idx：单参考帧（numRefIdxL0Active<=1）解码器不读任何 bin；
+            // 渐进 ref 覆盖仍镜像解码器填 0，保持簿记一致
+            $this->cabOvRefBox(0, 0, 0, 4, 4, $refIdx);
+            // 运动向量预测(MVP) - 使用与解码器一致的predictMvP16x16
+            list($mvpX, $mvpY) = $this->getMvpP16x16($mbX, $mbY, $refIdx);
+            // MVD = MV - MVP (1/4像素单位)
+            $mvdX = $mvX - $mvpX;
+            $mvdY = $mvY - $mvpY;
+            $this->encWriteMvd(0, 0, 0, $mvdX);
+            $this->encWriteMvd(0, 1, 0, $mvdY);
+            // mvd 写回邻居簿记（后续宏块 mvd 上下文依赖）
+            $this->cabStoreMvd(0, $mbIdx, 0, 0, 4, 4, $mvdX, $mvdY);
+            $this->encWriteCbpLuma($cbpLuma);
+            $this->encWriteCbpChroma($cbpChroma);
+            // cbp_table 在残差写入前赋值（色度 DC 的 CBF 标志位在其上 OR）
+            $cbp = $cbpLuma | ($cbpChroma << 4);
+            $this->picCbp[$mbIdx] = $cbp;
+            $this->cabCbp = $cbp;
+            if ($cbp !== 0) {
+                $this->encWriteQpDelta(0);
+            } else {
+                $this->cabLastQpDiff = 0;
+            }
+            $this->encWriteInterResidual(
+                $cbpLuma,
+                $cbpChroma,
+                $quantResidual,
+                [array_slice($chromaDc, 0, 4), array_slice($chromaDc, 4, 4)],
+                [array_slice($chromaAc, 0, 4), array_slice($chromaAc, 4, 4)],
+                0
+            );
+            $this->encFinishInter();
+        } else {
         // P_L0_16x16模式: mb_type = 0 in P slice (1 partition, 1 MV)
         $bits .= $this->ue(0); // mb_type = 0 for P_L0_16x16
 
         // 运动向量预测(MVP) - 使用与解码器一致的predictMvP16x16
-        $refIdx = 0;
         list($mvpX, $mvpY) = $this->getMvpP16x16($mbX, $mbY, $refIdx);
 
         // MVD = MV - MVP (1/4像素单位)
@@ -474,6 +529,8 @@ trait InterPredTrait
                 }
             }
         }
+
+        } // end CAVLC
 
         // 更新亮度邻居nz缓存
         for ($by = 0; $by < 4; $by++) {
@@ -730,7 +787,7 @@ trait InterPredTrait
         return $prepared;
     }
 
-    /** B 帧 16x16 宏块 CAVLC：mb_skip_run=0 + mb_type(B_L0/B_L1) + mvd + cbp + 残差 */
+    /** B 帧 16x16 宏块写码（CAVLC：mb_skip_run=0 + mb_type(B_L0/B_L1) + mvd + cbp + 残差；CABAC 双后端） */
     public function encodeBMacroblock(
         int $mbX,
         int $mbY,
@@ -750,6 +807,48 @@ trait InterPredTrait
         $refIdx = 0;
 
         $bits = '';
+        if (!empty($this->useCabac)) {
+            // ---- CABAC 写码分支：语法序镜像解码器 decodeCabacBMb（显式 B_L0/B_L1_16x16）----
+            $this->cabMbBegin($mbX, $mbY);
+            $mbIdx = $this->cabMbIdx;
+            $this->picChromaPred[$mbIdx] = 0;
+            $this->picIsSkip[$mbIdx] = 0;
+            $this->picIsDirectMb[$mbIdx] = 0;
+            $this->encWriteMbSkip(true, false); // 本编码器不产生 B_Skip/B_Direct
+            $this->encWriteBMbTypeInter($list === 0 ? 1 : 2);
+            // 显式 inter 分区：不可用邻居 nz 哨兵转 0
+            $this->cabFixUnavailNz(false);
+            // ref_idx：双 list 均单参考帧（numRefIdxLxActive<=1）解码器不读 bin；
+            // 渐进 ref 覆盖仍镜像解码器填 0，保持簿记一致
+            $this->cabOvRefBox($list, 0, 0, 4, 4, $refIdx);
+            // MVP：与解码器 getB16x16MvPrediction 一致（双 list 独立邻居缓存）
+            list($mvpX, $mvpY) = $this->getMvpB16x16($mbX, $mbY, $list, $refIdx);
+            $mvdX = $mvX - $mvpX;
+            $mvdY = $mvY - $mvpY;
+            $this->encWriteMvd($list, 0, 0, $mvdX);
+            $this->encWriteMvd($list, 1, 0, $mvdY);
+            $this->cabStoreMvd($list, $mbIdx, 0, 0, 4, 4, $mvdX, $mvdY);
+            $this->encWriteCbpLuma($cbpLuma);
+            $this->encWriteCbpChroma($cbpChroma);
+            // cbp_table 在残差写入前赋值（色度 DC 的 CBF 标志位在其上 OR）
+            $cbp = $cbpLuma | ($cbpChroma << 4);
+            $this->picCbp[$mbIdx] = $cbp;
+            $this->cabCbp = $cbp;
+            if ($cbp !== 0) {
+                $this->encWriteQpDelta(0);
+            } else {
+                $this->cabLastQpDiff = 0;
+            }
+            $this->encWriteInterResidual(
+                $cbpLuma,
+                $cbpChroma,
+                $quantResidual,
+                [array_slice($chromaDc, 0, 4), array_slice($chromaDc, 4, 4)],
+                [array_slice($chromaAc, 0, 4), array_slice($chromaAc, 4, 4)],
+                0
+            );
+            $this->encFinishInter();
+        } else {
         $bits .= $this->ue(0); // mb_skip_run = 0（本编码器不使用 B_Skip/B_Direct）
         $bits .= $this->ue($list === 0 ? 1 : 2); // mb_type: 1=B_L0_16x16, 2=B_L1_16x16
 
@@ -805,6 +904,8 @@ trait InterPredTrait
                 }
             }
         }
+
+        } // end CAVLC
 
         // 更新亮度邻居 nz
         for ($by = 0; $by < 4; $by++) {

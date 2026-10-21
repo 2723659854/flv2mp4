@@ -187,8 +187,7 @@ trait CabacDecodingTrait
 
     private function cabGet(int $ctxIdx): int
     {
-        $sBefore = $this->cabacStates[$ctxIdx];
-        $s = $sBefore;
+        $s = $this->cabacStates[$ctxIdx];
         $range = $this->cabacRange;
         $low = $this->cabacLow;
 

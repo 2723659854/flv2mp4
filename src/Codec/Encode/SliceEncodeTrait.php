@@ -400,6 +400,7 @@ trait SliceEncodeTrait
         $mbWidth = $ctx['mbWidth'];
         $mbHeight = $ctx['mbHeight'];
         $this->picWidthInMbs = $mbWidth;
+        $this->picHeightInMbs = $mbHeight; // CABAC 帧级簿记画布按此尺寸分配，漏设会导致 picMbType 全空
         $this->mbAlignedWidth = $ctx['aw'];
         $this->mbAlignedHeight = $ctx['ah'];
 
@@ -444,6 +445,10 @@ trait SliceEncodeTrait
             $bits .= '0';
         }
 
+        // CABAC：cabac_init_idc 必须写在 slice_qp_delta 之前（spec 7.3.3 顺序，；写在 qp_delta 之后会导致 P/B 片头错位）
+        if (!empty($this->useCabac) && $sliceType !== 2) {
+            $bits .= $this->ue($this->cabacInitIdc);
+        }
         if ($sliceType === 0) {
             $bits .= $this->se($this->pFrameQpDelta);
         } else {
@@ -452,6 +457,15 @@ trait SliceEncodeTrait
 
         // 禁用deblocking filter（编码器未实现去块滤波，需与解码器保持一致）
         $bits .= $this->ue(1);
+
+        if (!empty($this->useCabac)) {
+            // 片头字节对齐（alignment_bit_equal_to_one + 0 填充），CABAC 数据自字节边界开始
+            $bits .= '1';
+            while (strlen($bits) % 8 != 0) $bits .= '0';
+            // 帧级簿记复位 + 引擎复位/上下文初始化（每帧单片，各调用一次）
+            $this->encFrameBegin();
+            $this->encSliceBegin($this->qp, $sliceType === 0 ? 0 : 2);
+        }
 
         $topNzLuma = array_fill(0, $mbWidth * 4, 0);
         $topNzCb = array_fill(0, $mbWidth * 2, 0);
@@ -503,7 +517,9 @@ trait SliceEncodeTrait
                         $leftIntra4x4Mode, $topIntra4x4Mode,
                         $this->refYPlane
                     );
-                    if ($this->lastMbWasSkip) {
+                    if (!empty($this->useCabac)) {
+                        // CABAC：mb_skip_flag 已在 encodePMacroblock 内逐宏块写入（返回恒空串）
+                    } elseif ($this->lastMbWasSkip) {
                         $mbSkipRun++;
                     } else {
                         $bits .= $this->ue($mbSkipRun);
@@ -528,15 +544,25 @@ trait SliceEncodeTrait
                 }
                 $this->mvTopLeft = $nextMvTopLeft;
                 $leftAvailable = true;
+                // end_of_slice_flag：CABAC 每个宏块后必须写 terminate bin（解码端逐宏块读取，
+                // 该 bin 会使 range-=2，漏写将导致算术引擎逐步失步）；末宏块由片尾 encTerminate(1) 承担
+                if (!empty($this->useCabac) && !($mbX === $mbWidth - 1 && $mbY === $mbHeight - 1)) {
+                    $this->encTerminate(0);
+                }
             }
         }
-        if ($isPSlice && $mbSkipRun > 0) {
+        if ($isPSlice && $mbSkipRun > 0 && empty($this->useCabac)) {
             $bits .= $this->ue($mbSkipRun);
         }
-        $bits .= '1';
-        while (strlen($bits) % 8 != 0) $bits .= '0';
-
-        $rbsp = $this->bitsToBytes($bits);
+        if (!empty($this->useCabac)) {
+            // CABAC 片尾：terminate bin（end_of_slice_flag=1）+ flush，字节流拼在片头之后
+            $this->encTerminate(1);
+            $rbsp = $this->bitsToBytes($bits) . $this->encGetBytes();
+        } else {
+            $bits .= '1';
+            while (strlen($bits) % 8 != 0) $bits .= '0';
+            $rbsp = $this->bitsToBytes($bits);
+        }
         $nalType = $isIDR ? 5 : 1;
         $nal = $this->rbspToNal($rbsp, $nalType);
 
@@ -581,6 +607,7 @@ trait SliceEncodeTrait
     {
         [$yPlane, $uPlane, $vPlane, $mbWidth, $mbHeight, $aw, $ah] = $this->padYuvPlanes($yuvData);
         $this->picWidthInMbs = $mbWidth;
+        $this->picHeightInMbs = $mbHeight; // CABAC 帧级簿记画布按此尺寸分配，漏设会导致 picMbType 全空
         $this->mbAlignedWidth = $aw;
         $this->mbAlignedHeight = $ah;
 
@@ -603,8 +630,20 @@ trait SliceEncodeTrait
         $bits .= '0';  // num_ref_idx_active_override_flag
         $bits .= '0';  // ref_pic_list_modification_flag_l0
         $bits .= '0';  // ref_pic_list_modification_flag_l1
+        // CABAC：cabac_init_idc 必须写在 slice_qp_delta 之前（spec 7.3.3 顺序）
+        if (!empty($this->useCabac)) {
+            $bits .= $this->ue($this->cabacInitIdc);
+        }
         $bits .= $this->se($this->pFrameQpDelta); // slice_qp_delta
         $bits .= $this->ue(1); // disable_deblocking_filter_idc = 1（与解码器一致）
+
+        if (!empty($this->useCabac)) {
+            // CABAC：片头字节对齐 + 引擎启动
+            $bits .= '1';
+            while (strlen($bits) % 8 != 0) $bits .= '0';
+            $this->encFrameBegin();
+            $this->encSliceBegin($this->qp, 1);
+        }
 
         $topNzLuma = array_fill(0, $mbWidth * 4, 0);
         $topNzCb = array_fill(0, $mbWidth * 2, 0);
@@ -656,12 +695,22 @@ trait SliceEncodeTrait
                 $this->bMvTopLeft[0] = $nextBTL0;
                 $this->bMvTopLeft[1] = $nextBTL1;
                 $leftAvailable = true;
+                // end_of_slice_flag：CABAC 每个宏块后必须写 terminate bin；末宏块由片尾 encTerminate(1) 承担
+                if (!empty($this->useCabac) && !($mbX === $mbWidth - 1 && $mbY === $mbHeight - 1)) {
+                    $this->encTerminate(0);
+                }
             }
         }
-        $bits .= '1';
-        while (strlen($bits) % 8 != 0) $bits .= '0';
+        if (!empty($this->useCabac)) {
+            // CABAC 片尾：terminate bin + flush，字节流拼在片头之后
+            $this->encTerminate(1);
+            $rbsp = $this->bitsToBytes($bits) . $this->encGetBytes();
+        } else {
+            $bits .= '1';
+            while (strlen($bits) % 8 != 0) $bits .= '0';
+            $rbsp = $this->bitsToBytes($bits);
+        }
 
-        $rbsp = $this->bitsToBytes($bits);
         $nal = $this->rbspToNal($rbsp, 1, 0); // B 片：nal_ref_idc = 0
         return [$nal];
     }

@@ -387,6 +387,40 @@ trait IntraPredTrait
         $i16Mode = $mapModeI16x16[$lumaPredMode];
         $chromaMode = $mapModeChroma[$chromaPredMode];
 
+        if (!empty($this->useCabac)) {
+            // ---- CABAC 写码分支：语法序镜像解码器 cabDecodeI16x16 ----
+            // I16 的 cbp 内嵌于 mb_type bins（解码器由 bins 推出 luma15/chromaCbp，无独立 CBP 语法元素）
+            $this->cabMbBegin($mbX, $mbY);
+            $this->encWriteIntraMbTypeI(true, $cbpLuma !== 0 ? 1 : 0, $cbpChroma, $i16Mode);
+            $this->cabFixUnavailNz(true);
+            $this->encWriteChromaPred($chromaMode);
+            $cbp = $cbpLuma | ($cbpChroma << 4);
+            $this->cabCbp = $cbp;
+            $this->picCbp[$this->cabMbIdx] = $cbp;
+            $this->encWriteQpDelta(0);
+            $this->encWriteLumaDcI16($dcFlat);
+            if ($cbpLuma !== 0) {
+                // 亮度 AC：n 序（scan8），cat1（15 系数 zz15），镜像解码器无条件读全部 16 块
+                // quant4x4Luma 按 raster 块号构造，scan8 块号 n 须经 N2R 映射回 raster
+                for ($n = 0; $n < 16; $n++) {
+                    $this->encWriteAcBlock(1, $n, $quant4x4Luma[self::$N2R[$n]], true);
+                }
+            }
+            if ($cbpChroma > 0) {
+                $this->encWriteChromaDc(0, $qCbDc);
+                $this->encWriteChromaDc(1, $qCrDc);
+            }
+            if ($cbpChroma >= 2) {
+                // 色度 AC：Cb×4 → Cr×4（zz15，15 系数）
+                for ($b = 0; $b < 4; $b++) {
+                    $this->encWriteAcBlock(4, 16 + $b, $quantCb4x4[$b], true);
+                }
+                for ($b = 0; $b < 4; $b++) {
+                    $this->encWriteAcBlock(4, 32 + $b, $quantCr4x4[$b], true);
+                }
+            }
+            $this->encFinishI16();
+        } else {
         $cbpIdx = ($cbpLuma == 0 ? 0 : 3) + $cbpChroma;
         $mbTypeValue = 1 + $i16Mode + ($cbpIdx << 2);
         $bits .= $this->ue($mbTypeValue);
@@ -469,6 +503,7 @@ trait IntraPredTrait
                 $topNzCr[$topCbx1] = 0;
             }
         }
+        } // end CAVLC
 
         // === 本地解码重建（用于正确更新参考帧）===
         // 1. 反量化DC Hadamard系数
@@ -1344,6 +1379,61 @@ trait IntraPredTrait
 
         // I_4x4编码顺序：mb_type -> intra4x4_pred_mode -> intra_chroma_pred_mode -> CBP -> mb_qp_delta -> residual
 
+        if (!empty($this->useCabac)) {
+            // ---- CABAC 写码分支：语法序镜像解码器 cabDecodeI4x4（模式/残差均 n 序）----
+            $this->cabMbBegin($mbX, $mbY);
+            $this->encWriteIntraMbTypeI(false, 0, 0, 0);
+            $this->cabFixUnavailNz(true);
+            for ($n = 0; $n < 16; $n++) {
+                $this->encWriteI4Mode($n, $intra4x4PredModes[self::$N2R[$n]]);
+            }
+            $this->encWriteChromaPred($chromaPredMode);
+            $cbp = ($cbpChroma << 4) | $cbpLuma;
+            // I4 的 CBP 是独立语法元素（I16 才内嵌于 mb_type），漏写会使解码端读飞错位
+            $this->encWriteCbpLuma($cbpLuma);
+            $this->encWriteCbpChroma($cbpChroma);
+            $this->cabCbp = $cbp;
+            $this->picCbp[$this->cabMbIdx] = $cbp;
+            if ($cbp !== 0) {
+                $this->encWriteQpDelta(0);
+            } else {
+                $this->cabLastQpDiff = 0;
+            }
+            // 亮度残差：n 序，cbp 位 = n>>2，cat2（16 系数含 DC）；跳过块清 nzCache（镜像解码器）
+            for ($n = 0; $n < 16; $n++) {
+                if (($cbpLuma & (1 << ($n >> 2))) !== 0) {
+                    $this->encWriteAcBlock(2, $n, $quant4x4Luma[self::$N2R[$n]], false);
+                } else {
+                    $this->cabNzCache[self::$SCAN8[$n]] = 0;
+                }
+            }
+            if ($cbpChroma > 0) {
+                $this->encWriteChromaDc(0, $qCbDc);
+                $this->encWriteChromaDc(1, $qCrDc);
+            }
+            if ($cbpChroma >= 2) {
+                // 色度 AC：Cb×4 → Cr×4（zz15，15 系数）
+                for ($b = 0; $b < 4; $b++) {
+                    $this->encWriteAcBlock(4, 16 + $b, $quantCb4x4[$b], true);
+                }
+                for ($b = 0; $b < 4; $b++) {
+                    $this->encWriteAcBlock(4, 32 + $b, $quantCr4x4[$b], true);
+                }
+            } else {
+                // cbp<2 时清色度 AC nz，防陈旧值经 48-store 污染后续 MB 的 CBF 邻居（镜像 cabWriteChroma）
+                foreach (self::$CELL_CB_ST as $cell) {
+                    $this->cabNzCache[$cell] = 0;
+                }
+                foreach (self::$CELL_CR_ST as $cell) {
+                    $this->cabNzCache[$cell] = 0;
+                }
+            }
+            $modesN = [];
+            for ($n = 0; $n < 16; $n++) {
+                $modesN[$n] = $intra4x4PredModes[self::$N2R[$n]];
+            }
+            $this->encFinishI4($modesN);
+        } else {
         // 1. mb_type = 0 for I_NxN
         $bits .= $this->ue(0);
 
@@ -1511,6 +1601,7 @@ trait IntraPredTrait
                 $topNzCr[$topCbx1] = 0;
             }
         }
+        } // end CAVLC
 
         return $bits;
     }

@@ -3,6 +3,7 @@
 namespace Xiaosongshu\Flv2mp4\Codec;
 
 use Xiaosongshu\Flv2mp4\Codec\Encode\BitstreamTrait;
+use Xiaosongshu\Flv2mp4\Codec\Encode\CabacEncodingTrait;
 use Xiaosongshu\Flv2mp4\Codec\Encode\CavlcTrait;
 use Xiaosongshu\Flv2mp4\Codec\Encode\InterPredTrait;
 use Xiaosongshu\Flv2mp4\Codec\Encode\IntraPredTrait;
@@ -18,7 +19,10 @@ use Xiaosongshu\Flv2mp4\Codec\Encode\TransformTrait;
  */
 class H264Encoder
 {
-    use BitstreamTrait, TransformTrait, CavlcTrait, IntraPredTrait, MotionTrait, InterPredTrait, SpsPpsTrait, SliceEncodeTrait;
+    use BitstreamTrait, TransformTrait, CavlcTrait, CabacEncodingTrait, IntraPredTrait, MotionTrait, InterPredTrait, SpsPpsTrait, SliceEncodeTrait;
+
+    /** CABAC 熵编码开关（main/high profile 置 true；baseline 保持 CAVLC） */
+    public bool $useCabac = false;
     public const DEQUANT4_COEFF_INIT = [
         [10, 13, 16],
         [11, 14, 18],
@@ -495,6 +499,8 @@ class H264Encoder
             $profile = 'baseline';
         }
         $this->profile = $profile;
+        // CABAC 开关与 PPS entropy_coding_mode_flag 保持一致：main/high 用 CABAC
+        $this->useCabac = ($profile === 'main' || $profile === 'high');
     }
 
     /**
