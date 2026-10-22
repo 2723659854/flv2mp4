@@ -435,6 +435,11 @@ trait InterPredTrait
             $cbp = $cbpLuma | ($cbpChroma << 4);
             $this->picCbp[$mbIdx] = $cbp;
             $this->cabCbp = $cbp;
+            // transform_size_8x8_flag：PPS transform_8x8_mode_flag=1（high）且 cbpLuma 低 4 位
+            // 非零时解码器在 qp delta 前读该 bin（CabacDecodingTrait:2094）；本阶段 inter 恒 4x4，写 0
+            if ($this->transform8x8ModeFlag && ($cbpLuma & 15) !== 0) {
+                $this->encDecision(399 + $this->cabNeighborTransformSize(), 0);
+            }
             if ($cbp !== 0) {
                 $this->encWriteQpDelta(0);
             } else {
@@ -450,7 +455,7 @@ trait InterPredTrait
             );
             $this->encFinishInter();
         } else {
-        // P_L0_16x16模式: mb_type = 0 in P slice (1 partition, 1 MV)
+        $bits .= $this->ue(0); // mb_type = 0 for P_L0_16x16模式: mb_type = 0 in P slice (1 partition, 1 MV)
         $bits .= $this->ue(0); // mb_type = 0 for P_L0_16x16
 
         // 运动向量预测(MVP) - 使用与解码器一致的predictMvP16x16
@@ -834,6 +839,11 @@ trait InterPredTrait
             $cbp = $cbpLuma | ($cbpChroma << 4);
             $this->picCbp[$mbIdx] = $cbp;
             $this->cabCbp = $cbp;
+            // transform_size_8x8_flag：PPS transform_8x8_mode_flag=1（high）且 cbpLuma 低 4 位
+            // 非零时解码器在 qp delta 前读该 bin（CabacDecodingTrait:2180）；本阶段 inter 恒 4x4，写 0
+            if ($this->transform8x8ModeFlag && ($cbpLuma & 15) !== 0) {
+                $this->encDecision(399 + $this->cabNeighborTransformSize(), 0);
+            }
             if ($cbp !== 0) {
                 $this->encWriteQpDelta(0);
             } else {

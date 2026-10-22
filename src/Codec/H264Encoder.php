@@ -23,6 +23,14 @@ class H264Encoder
 
     /** CABAC 熵编码开关（main/high profile 置 true；baseline 保持 CAVLC） */
     public bool $useCabac = false;
+    /** PPS transform_8x8_mode_flag（high=true，镜像解码端 parsePPS，8x8 变换语法开关） */
+    public bool $transform8x8ModeFlag = false;
+    /** SPS direct_8x8_inference_flag（high=true，镜像解码端 parseSPS，B_Direct 8x8 推理） */
+    public bool $direct8x8InferenceFlag = true;
+    /** I 片 8x8 变换开关（high=true；供对比实验/后续决策关闭用） */
+    public bool $intra8x8Enabled = true;
+    /** I 片 8x8 QP 补偿偏移（8x8 同 QP 步长约为 4x4 的 2 倍，降低 I 片 QP 保参考质量） */
+    public int $intra8x8QpOffset = -4;
     public const DEQUANT4_COEFF_INIT = [
         [10, 13, 16],
         [11, 14, 18],
@@ -501,6 +509,9 @@ class H264Encoder
         $this->profile = $profile;
         // CABAC 开关与 PPS entropy_coding_mode_flag 保持一致：main/high 用 CABAC
         $this->useCabac = ($profile === 'main' || $profile === 'high');
+        // 8x8 变换开关镜像解码端 parseSPS/parsePPS 语义：high 开、main/baseline 关
+        $this->transform8x8ModeFlag = ($profile === 'high');
+        $this->direct8x8InferenceFlag = ($profile === 'high');
     }
 
     /**

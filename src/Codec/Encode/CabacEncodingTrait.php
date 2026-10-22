@@ -370,11 +370,21 @@ trait CabacEncodingTrait
         $this->encDecision(35, $mode & 1);
     }
 
-    /** intra4x4 预测模式（most_probable_mode 路径 + LSB 先行 3 bin） */
-    private function encWriteI4Mode(int $n, int $mode): void
+    /**
+     * intra4x4 预测模式（most_probable_mode 路径 + LSB 先行 3 bin）。
+     * $dct8=true（I8x8）：镜像解码端 fill_rectangle——模式同时填 2x2 cache 单元，
+     * 后续 8x8 分组的 mostProbableMode 邻居推导依赖该填充。
+     */
+    private function encWriteI4Mode(int $n, int $mode, bool $dct8 = false): void
     {
         $pred = $this->cabPredModeN($n);
-        $this->cabI4Cache[self::$SCAN8[$n]] = $mode;
+        $cell = self::$SCAN8[$n];
+        $this->cabI4Cache[$cell] = $mode;
+        if ($dct8) {
+            $this->cabI4Cache[$cell + 1] = $mode;
+            $this->cabI4Cache[$cell + 8] = $mode;
+            $this->cabI4Cache[$cell + 9] = $mode;
+        }
         if ($mode === $pred) {
             $this->encDecision(68, 1);
             return;
@@ -613,6 +623,101 @@ trait CabacEncodingTrait
     }
 
     /**
+     * 单个 8x8 亮度残差（cat5，cabResidualLuma8x8 镜像）：
+     * 无 CBF bin（cbp 位门控，由调用方保证非零）；sig/last 按扫描位 k 查
+     * SIG8_FRAME/LAST8_FRAME（非 raster 位）；k=63 为隐含显著位（无 bin）；
+     * level 复用 LV1/GT1/TRANS 状态机；结束后 nzCache 2x2 四 cell 同值写回。
+     *
+     * @param int   $p8     8x8 块号 0..3
+     * @param array $levels 扫描位 k => 带符号量化 level（0 系数不出现）
+     */
+    private function encWriteResidual8x8(int $p8, array $levels): void
+    {
+        $sigBase = self::$SIG_BASE[5];
+        $lastBase = self::$LAST_BASE[5];
+        $levBase = self::$LEV_BASE[5];
+
+        // 最后显著扫描位（k=63 隐含，无需 sig/last bin）
+        $lastSig = -1;
+        for ($k = 63; $k >= 0; $k--) {
+            if (isset($levels[$k]) && $levels[$k] !== 0) {
+                $lastSig = $k;
+                break;
+            }
+        }
+        // 调用方 cbp 位=1 保证至少一个非零系数；防御性返回保持引擎同步（无 bin）
+        if ($lastSig < 0) {
+            $cell = self::$SCAN8[4 * $p8];
+            $this->cabNzCache[$cell] = 0;
+            $this->cabNzCache[$cell + 1] = 0;
+            $this->cabNzCache[$cell + 8] = 0;
+            $this->cabNzCache[$cell + 9] = 0;
+            return;
+        }
+        for ($k = 0; $k < $lastSig; $k++) {
+            $nz = isset($levels[$k]) && $levels[$k] !== 0;
+            $this->encDecision($sigBase + self::$SIG8_FRAME[$k], $nz ? 1 : 0);
+            if ($nz) {
+                $this->encDecision($lastBase + self::$LAST8_FRAME[$k], 0);
+            }
+        }
+        if ($lastSig < 63) {
+            $this->encDecision($sigBase + self::$SIG8_FRAME[$lastSig], 1);
+            $this->encDecision($lastBase + self::$LAST8_FRAME[$lastSig], 1);
+        }
+
+        // level 逆序（从最后显著位到首个），状态机与 encWriteResidualCore 一致
+        $ks = array_keys($levels);
+        $nodeCtx = 0;
+        for ($i = count($ks) - 1; $i >= 0; $i--) {
+            $k = $ks[$i];
+            $lv = abs($levels[$k]);
+            $ctx = $levBase + self::$LV1_CTX[$nodeCtx];
+            if ($lv === 1) {
+                $this->encDecision($ctx, 0);
+                $nodeCtx = self::$TRANS_L1[$nodeCtx];
+            } else {
+                $this->encDecision($ctx, 1);
+                $ctxG = $levBase + self::$GT1_CTX[$nodeCtx];
+                $nodeCtx = self::$TRANS_GT1[$nodeCtx];
+                if ($lv < 15) {
+                    for ($t = 0; $t < $lv - 2; $t++) {
+                        $this->encDecision($ctxG, 1);
+                    }
+                    $this->encDecision($ctxG, 0);
+                } else {
+                    // 13 个 1 推到 coeffAbs=15 后走 escape
+                    for ($t = 0; $t < 13; $t++) {
+                        $this->encDecision($ctxG, 1);
+                    }
+                    $v = $lv - 14;
+                    $e = 0;
+                    while ((1 << ($e + 1)) <= $v) {
+                        $e++;
+                    }
+                    $rem = $v - (1 << $e);
+                    for ($t = 0; $t < $e; $t++) {
+                        $this->encBypass(1);
+                    }
+                    $this->encBypass(0);
+                    for ($t = $e - 1; $t >= 0; $t--) {
+                        $this->encBypass(($rem >> $t) & 1);
+                    }
+                }
+            }
+            $this->encBypass($levels[$k] < 0 ? 1 : 0);
+        }
+
+        // nz：四个 4x4 块同值（fill_rectangle(&nz_cache[scan8[4*i8x8]],2,2,8)）
+        $nz = count($ks);
+        $cell = self::$SCAN8[4 * $p8];
+        $this->cabNzCache[$cell] = $nz;
+        $this->cabNzCache[$cell + 1] = $nz;
+        $this->cabNzCache[$cell + 8] = $nz;
+        $this->cabNzCache[$cell + 9] = $nz;
+    }
+
+    /**
      * 单个 4x4 非 DC 残差块（含 CBF 与 nzCache 写回）。
      * @param array $block 16 项 raster 系数（zz15 时仅 raster[1..15] 参与编码）
      */
@@ -734,10 +839,14 @@ trait CabacEncodingTrait
     // 宏块收尾（写回 scan8 持久存储 + picMbType 标志）
     // ============================================================
 
-    /** I4 宏块收尾：modesN 为 n 序（0..15）的 intra4x4 预测模式 */
-    private function encFinishI4(array $modesN): void
+    /**
+     * I4 宏块收尾：modesN 为 n 序（0..15）的 intra4x4 预测模式。
+     * $dct8=true（I8x8）：picMbType 额外 OR CAB_FLG_DCT8，
+     * 后续宏块 transform_size_8x8_flag 的邻居 ctx（399+n）依赖该标志。
+     */
+    private function encFinishI4(array $modesN, bool $dct8 = false): void
     {
-        $this->picMbType[$this->cabMbIdx] |= self::$CAB_FLG_I4;
+        $this->picMbType[$this->cabMbIdx] |= self::$CAB_FLG_I4 | ($dct8 ? self::$CAB_FLG_DCT8 : 0);
         $this->cabStoreWriteBack(true, $modesN);
     }
 

@@ -67,7 +67,9 @@ trait SpsPpsTrait
 
         $bits .= '1';
 
-        $bits .= '0';
+        // direct_8x8_inference_flag：high 启用 8x8 变换时按规范写 1；
+        // main/baseline 保持 0 不变（输出逐比特零回归）
+        $bits .= ($this->profile === 'high') ? '1' : '0';
 
         $cropLeft = 0;
         $cropRight = ($picWidthInMbs * 16 - $this->width);
@@ -154,7 +156,7 @@ trait SpsPpsTrait
 
         // High profile PPS 扩展（规范 7.3.2.2）：与解码端 parsePPS 的读取顺序严格一致
         if ($this->profile === 'high') {
-            $bits .= '0';                   // transform_8x8_mode_flag = 0（不使用 8x8 变换）
+            $bits .= '1';                   // transform_8x8_mode_flag = 1（high 启用 8x8 变换）
             $bits .= '0';                   // pic_scaling_matrix_present_flag = 0
             $bits .= $this->se(0);          // second_chroma_qp_index_offset = 0
         }

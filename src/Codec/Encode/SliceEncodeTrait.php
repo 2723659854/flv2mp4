@@ -417,6 +417,16 @@ trait SliceEncodeTrait
             $prefixNals[] = $this->generatePPS();
         }
 
+        // I 片 8x8 变换 QP 补偿：标准 DEQUANT8 缩放使 8x8 同 QP 的量化步长约为 4x4 的 2 倍，
+        // I 帧重建劣化会放大后续全部 P/B 帧残差（实测全片 +16.8%），按偏移降低 I 片 QP。
+        // 仅 high 且 I8x8 启用时生效；整片（qp_delta/量化/重建/cabQp 初始化）统一用补偿后 QP，
+        // P/B 片独立起算不受影响。片尾 return 前恢复原 QP。
+        $savedQp = null;
+        if ($sliceType === 2 && $this->profile === 'high' && $this->intra8x8Enabled && $this->intra8x8QpOffset !== 0) {
+            $savedQp = $this->qp;
+            $this->qp = max(0, min(51, $this->qp + $this->intra8x8QpOffset));
+        }
+
         $bits = '';
         $bits .= $this->ue(0);           // first_mb_in_slice
         $bits .= $this->ue($sliceType);  // slice_type
@@ -451,6 +461,8 @@ trait SliceEncodeTrait
         }
         if ($sliceType === 0) {
             $bits .= $this->se($this->pFrameQpDelta);
+        } elseif ($savedQp !== null) {
+            $bits .= $this->se($this->qp - $savedQp); // I8x8 QP 补偿（片头与宏块量化同源）
         } else {
             $bits .= $this->se(0);
         }
@@ -578,6 +590,9 @@ trait SliceEncodeTrait
         $this->poc += 2;
 
         $prefixNals[] = $nal;
+        if ($savedQp !== null) {
+            $this->qp = $savedQp; // 恢复 I8x8 QP 补偿前的原值
+        }
         return $prefixNals;
     }
 
