@@ -565,7 +565,6 @@ trait InterPredTrait
             $this->encFinishInter($dct8 && ($cbpLuma & 15) !== 0);
         } else {
         $bits .= $this->ue(0); // mb_type = 0 for P_L0_16x16模式: mb_type = 0 in P slice (1 partition, 1 MV)
-        $bits .= $this->ue(0); // mb_type = 0 for P_L0_16x16
 
         // 运动向量预测(MVP) - 使用与解码器一致的predictMvP16x16
         list($mvpX, $mvpY) = $this->getMvpP16x16($mbX, $mbY, $refIdx);
