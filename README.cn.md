@@ -390,15 +390,21 @@ $config = [
 
 - [x] **I 帧解码与编码**（完全精确，INF dB）
 - [x] **P 帧解码与编码**（Baseline Profile）
-- [x] **帧内预测**：4x4（9种模式）+ 16x16（4种模式）
+- [x] **帧内预测**：4x4（9种模式）+ 16x16（4种模式）+ 8x8（9种模式，High Profile I 帧，逐 8x8 块 SSE 择优）
 - [x] **帧间预测**：P 帧运动估计（菱形搜索优化）
 - [x] **1/4 像素精度**：6-tap 滤波器插值
-- [x] **CAVLC 熵编码**（Baseline Profile）
+- [x] **CAVLC 熵解码/编码**（Baseline Profile 支持）
 - [x] **分辨率缩放**（解码后 YUV 缩放 → 重新编码）
 - [x] **码率控制**（通过 QP 参数调节）
 - [x] **B 帧解码**（Main/High Profile，CABAC，含 Direct 模式）
-- [x] **CABAC 熵解码**（Main/High Profile 支持）
-- [x] **B 帧编码**（Main/High Profile 支持）
+- [x] **CABAC 熵解码/编码**（Main/High Profile 支持）
+- [x] **B 帧编码**（Main/High Profile，IBBP GOP：锚点 P + 2 B 帧，B_L0/B_L1 16x16 双向预测）
+- [x] **High Profile 8x8 变换**（transform_size_8x8_flag：I 片 8x8DCT；P/B 帧间残差按 RD 代价自适应选择 8x8/4x4）
+- [x] **解码器 Profile 兼容**（Baseline/Main/High 码流解码，含 x264 产物回环验证）
+- [x] **水印叠加**（解码后 YUV 平面混合，文字/图片水印生成工具见下文）
+- [x] **AAC 音频封装**（ASC 解析 + 透传，重对齐时间戳）
+- [x] **多容器封装输出**：FLV / MP4（stts/ctts/elst，B 帧 DTS 前移 + 非负 ctts）/ HLS（TS 分片 + m3u8，重新生成自动清理旧分片）
+- [x] **GOP 分布式多进程**（解码 worker + 运动估计 worker，多核加速）
 ---
 
 ### 水印生成工具

@@ -407,7 +407,7 @@ $config = [
 
 - [x] **I-frame decoding and encoding** (fully exact, INF dB)
 - [x] **P-frame decoding and encoding** (Baseline Profile)
-- [x] **Intra prediction**: 4x4 (9 modes) + 16x16 (4 modes)
+- [x] **Intra prediction**: 4x4 (9 modes) + 16x16 (4 modes) + 8x8 (9 modes, High Profile I-frames, per-8x8-block SSE selection)
 - [x] **Inter prediction**: P-frame motion estimation (diamond search optimized)
 - [x] **1/4-pixel precision**: 6-tap filter interpolation
 - [x] **CAVLC entropy coding** (Baseline Profile)
@@ -415,7 +415,13 @@ $config = [
 - [x] **Bitrate control** (via QP parameter)
 - [x] **B-frame decoding** (Main/High Profile, CABAC, including Direct mode)
 - [x] **CABAC entropy decoding** (Main/High Profile support)
-- [x] **B-frame encoding** (Main/High Profile support)
+- [x] **B-frame encoding** (Main/High Profile, IBBP GOP: anchor P + 2 B-frames, B_L0/B_L1 16x16 bidirectional prediction)
+- [x] **High Profile 8x8 transform** (transform_size_8x8_flag: 8x8DCT for I slices; RD-cost adaptive 8x8/4x4 selection for P/B inter residuals)
+- [x] **Decoder profile compatibility** (Baseline/Main/High bitstream decoding, verified with x264 round-trip)
+- [x] **Watermark overlay** (blended onto YUV planes after decoding; text/image watermark generation tool below)
+- [x] **AAC audio muxing** (ASC parsing + passthrough with timestamp realignment)
+- [x] **Multi-container muxing output**: FLV / MP4 (stts/ctts/elst, B-frame DTS shift + non-negative ctts) / HLS (TS segments + m3u8, stale segments auto-cleaned on regeneration)
+- [x] **GOP distributed multiprocessing** (decode workers + motion-estimation workers for multi-core acceleration)
 ---
 
 ### Watermark Generation Tool
