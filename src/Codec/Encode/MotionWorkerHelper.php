@@ -32,6 +32,8 @@ final class MotionWorkerHelper
     public $refInts = null;
     /** early-skip 开关：静止宏块提前跳过精搜（量化死区内残差归零，不影响正确性） */
     public bool $earlySkip = true;
+    /** T5：inter 8x8DCT 双路决策开关（batch 头标志注入，镜像主进程 encoder->inter8x8Enabled） */
+    public bool $inter8x8Enabled = false;
     private static ?array $sharedDequantTable = null;
 
     public function __construct(int $width, int $height, int $aw, int $ah, int $qp, private string $refY, private string $refU, private string $refV)

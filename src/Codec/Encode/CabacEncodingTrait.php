@@ -800,8 +800,10 @@ trait CabacEncodingTrait
     /**
      * inter/I4 残差全套（cabDecodeInterResidual 镜像，非 8x8 路径）：
      * 亮度 16 块（cat2）→ 色度 DC（cat3，cbpChroma>0）→ 色度 AC 平面优先（cat4，cbpChroma≥2）。
+     * $dct8=true（T5 inter 8x8DCT）：亮度逐 p8 重装 64 系数写 encWriteResidual8x8
+     *（无逐块 CBF，cbp 位门控），色度仍 4x4。
      *
-     * @param array $lumaBlocks 16 个 raster 16 系数块
+     * @param array $lumaBlocks 16 个 raster 16 系数块（dct8 时为 8x8 系数按 4x4 子块 raster 重装）
      * @param array $chromaDc    [cb 4 系数, cr 4 系数]（扫描序）
      * @param array $chromaAc    [cb 4 块 raster, cr 4 块 raster]
      */
@@ -811,14 +813,56 @@ trait CabacEncodingTrait
         array $lumaBlocks,
         array $chromaDc,
         array $chromaAc,
-        int $chromaQp
+        int $chromaQp,
+        bool $dct8 = false
     ): void {
-        for ($n = 0; $n < 16; $n++) {
-            if ($cbpLuma & (1 << ($n >> 2))) {
-                // lumaBlocks 按 raster 块号构造，scan8 块号 n 须经 N2R 映射回 raster
-                $this->encWriteAcBlock(2, $n, $lumaBlocks[self::$N2R[$n]], false);
-            } else {
-                $this->cabNzCache[self::$SCAN8[$n]] = 0;
+        if ($dct8) {
+            $zz8 = self::$ZZ8_SCAN;
+            $scanJ = [];
+            for ($k = 0; $k < 64; $k++) {
+                $scanJ[$k] = ($zz8[$k] >> 3) | (($zz8[$k] & 7) << 3);
+            }
+            for ($p8 = 0; $p8 < 4; $p8++) {
+                if (($cbpLuma & (1 << $p8)) !== 0) {
+                    // 4x4 子块 raster 重装回 8x8 存储布局（与 prepare 端打包互逆）
+                    $base = ($p8 >> 1) * 8 + ($p8 & 1) * 2;
+                    $stored = array_fill(0, 64, 0);
+                    for ($sub = 0; $sub < 4; $sub++) {
+                        $subY = $sub >> 1;
+                        $subX = $sub & 1;
+                        // 4x4 子块 raster 序：blkIdx = base + subY*4 + subX
+                        $blk = $lumaBlocks[$base + $subY * 4 + $subX];
+                        for ($yy = 0; $yy < 4; $yy++) {
+                            for ($xx = 0; $xx < 4; $xx++) {
+                                $stored[($subY * 4 + $yy) * 8 + $subX * 4 + $xx] = $blk[$yy * 4 + $xx];
+                            }
+                        }
+                    }
+                    // 扫描位 k → 存储位 scanJ[k]（TRANSPOSE8(ZZ8)，镜像 cabResidualLuma8x8）
+                    $levels = [];
+                    for ($k = 0; $k < 64; $k++) {
+                        $v = $stored[$scanJ[$k]];
+                        if ($v !== 0) {
+                            $levels[$k] = $v;
+                        }
+                    }
+                    $this->encWriteResidual8x8($p8, $levels);
+                } else {
+                    $cell = self::$SCAN8[4 * $p8];
+                    $this->cabNzCache[$cell] = 0;
+                    $this->cabNzCache[$cell + 1] = 0;
+                    $this->cabNzCache[$cell + 8] = 0;
+                    $this->cabNzCache[$cell + 9] = 0;
+                }
+            }
+        } else {
+            for ($n = 0; $n < 16; $n++) {
+                if ($cbpLuma & (1 << ($n >> 2))) {
+                    // lumaBlocks 按 raster 块号构造，scan8 块号 n 须经 N2R 映射回 raster
+                    $this->encWriteAcBlock(2, $n, $lumaBlocks[self::$N2R[$n]], false);
+                } else {
+                    $this->cabNzCache[self::$SCAN8[$n]] = 0;
+                }
             }
         }
         if ($cbpChroma > 0) {
@@ -857,9 +901,12 @@ trait CabacEncodingTrait
         $this->cabStoreWriteBack(false, []);
     }
 
-    /** inter 宏块收尾（picMbType 保持 0，邻居 i4/ctx 按非 intra 处理） */
-    private function encFinishInter(): void
+    /** inter 宏块收尾（picMbType 保持 0；$dct8 时 OR CAB_FLG_DCT8 供邻居 transform_size ctx） */
+    private function encFinishInter(bool $dct8 = false): void
     {
+        if ($dct8) {
+            $this->picMbType[$this->cabMbIdx] |= self::$CAB_FLG_DCT8;
+        }
         $this->cabStoreWriteBack(false, []);
     }
 }

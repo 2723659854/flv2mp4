@@ -122,6 +122,7 @@ class PurePhpHlsGenerator
         $this->encoder->motionWorkers = max(1, (int)($config['motionWorkers'] ?? 8));
         $this->encoder->setProfile($config['profile'] ?? 'baseline');
         if (!empty($config['fastMotion'])) $this->encoder->setFastMotion(true);
+        if (isset($config['intra8x8QpOffset'])) $this->encoder->intra8x8QpOffset = max(-51, min(51, (int)$config['intra8x8QpOffset']));
         if (!is_dir($this->outputDir)) mkdir($this->outputDir, 0777, true);
 
         if (!empty($config['watermark']) && !empty($config['watermarkFile'])) {

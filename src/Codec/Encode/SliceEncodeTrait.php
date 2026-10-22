@@ -334,7 +334,8 @@ trait SliceEncodeTrait
             $ctx['vPlane'],
             $mbWidth,
             $mbHeight,
-            $jobs
+            $jobs,
+            $this->inter8x8Enabled
         );
     }
 
@@ -389,8 +390,44 @@ trait SliceEncodeTrait
         return end($nals) ?: '';
     }
 
-    /** slice 头 + 宏块 CAVLC 主循环（严格光栅顺序），P 帧结果由参数传入 */
+    /**
+     * high 档 IDR 的 I16/I8 逐 GOP 决策入口：两条路径各自按最终配置完整试编一遍
+     * （I16@qp 与 I8x8@qp+intra8x8QpOffset），取片 NAL 字节更小者（平手取 I8x8，
+     * 其 QP 补偿带来更高重建质量）。每个 IDR 独立决策（IDR 即输出 GOP 的起点，
+     * 场景切换强制 IDR 亦逐帧独立），P/B 片路径不受影响。
+     * 重编无状态残留：每遍 encFrameBegin/encSliceBegin 复位 CABAC 引擎与帧级簿记、
+     * recon 平面重建为中性灰，isIDR 分支复位参考平面/frameNum/poc；
+     * 仅 idrPicId 保存/恢复避免双遍重复自增；I16 胜出时回填 I16 遍的重建参考帧，
+     * 保证后续 P/B 的运动估计参考与码流内容一致。
+     */
     private function encodeSliceBody(array $ctx, ?array $motionResults): array
+    {
+        if ($ctx['isIDR'] && $ctx['sliceType'] === 2
+            && $this->profile === 'high' && $this->intra8x8Enabled
+            && $this->intraGopDecisionEnabled) {
+            $savedIdrPicId = $this->idrPicId;
+            $this->forceIntra16Slice = true;
+            $nals16 = $this->encodeSliceBodyOnce($ctx, $motionResults);
+            $this->forceIntra16Slice = false;
+            $ref16 = [$this->refYPlane, $this->refUPlane, $this->refVPlane];
+            $this->idrPicId = $savedIdrPicId; // I16 遍已自增一次，I8x8 遍重写同一值
+            $nals8 = $this->encodeSliceBodyOnce($ctx, $motionResults);
+            $this->idrPicId = $savedIdrPicId + 1; // 按单次 IDR 语义归位
+            $len16 = strlen(end($nals16));
+            $len8 = strlen(end($nals8));
+            if ($len8 <= $len16) {
+                $this->gopI8Wins++;
+                return $nals8; // I8x8 胜出：参考帧已是 I8x8 遍重建
+            }
+            [$this->refYPlane, $this->refUPlane, $this->refVPlane] = $ref16;
+            $this->gopI16Wins++;
+            return $nals16;
+        }
+        return $this->encodeSliceBodyOnce($ctx, $motionResults);
+    }
+
+    /** slice 头 + 宏块 CAVLC 主循环（严格光栅顺序），P 帧结果由参数传入 */
+    private function encodeSliceBodyOnce(array $ctx, ?array $motionResults): array
     {
         $isIDR = $ctx['isIDR'];
         $sliceType = $ctx['sliceType'];
@@ -422,7 +459,9 @@ trait SliceEncodeTrait
         // 仅 high 且 I8x8 启用时生效；整片（qp_delta/量化/重建/cabQp 初始化）统一用补偿后 QP，
         // P/B 片独立起算不受影响。片尾 return 前恢复原 QP。
         $savedQp = null;
-        if ($sliceType === 2 && $this->profile === 'high' && $this->intra8x8Enabled && $this->intra8x8QpOffset !== 0) {
+        if ($sliceType === 2 && $this->profile === 'high' && $this->intra8x8Enabled
+            && !$this->forceIntra16Slice && $this->intra8x8QpOffset !== 0) {
+            // I16 试编遍（forceIntra16Slice）不应用 8x8 QP 补偿：与 main 的 I16@qp 同配置
             $savedQp = $this->qp;
             $this->qp = max(0, min(51, $this->qp + $this->intra8x8QpOffset));
         }

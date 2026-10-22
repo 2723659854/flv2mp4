@@ -141,6 +141,7 @@ class FlvRecoder
         $this->encoder->setProfile($profile);
         if ($this->bframes) $this->encoder->enableBFrames(true);
         if (!empty($config['fastMotion'])) $this->encoder->setFastMotion(true);
+        if (isset($config['intra8x8QpOffset'])) $this->encoder->intra8x8QpOffset = max(-51, min(51, (int)$config['intra8x8QpOffset']));
         $this->scaler = new VideoScaler();
     }
 
@@ -249,6 +250,7 @@ class FlvRecoder
         $this->encoder->setProfile($this->profileName);
         if ($this->bframes) $this->encoder->enableBFrames(true);
         if (!empty($this->config['fastMotion'])) $this->encoder->setFastMotion(true);
+        if (isset($this->config['intra8x8QpOffset'])) $this->encoder->intra8x8QpOffset = max(-51, min(51, (int)$this->config['intra8x8QpOffset']));
         $this->srcWidth = 0;
         $this->srcHeight = 0;
         $this->srcInitialized = false;

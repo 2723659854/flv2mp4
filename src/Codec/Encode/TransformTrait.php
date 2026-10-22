@@ -13,6 +13,18 @@ trait TransformTrait
      * 将raster顺序的16个系数转换为zigzag扫描顺序
      * 用于I16x16 DC系数和I4x4全部系数
      */
+    /**
+     * 8x8 zigzag 扫描表（解码端 CabacDecodingTrait::$ZZ8 镜像）：k(扫描位)→自然序 j。
+     * 放在 TransformTrait 是因为 InterPredTrait（计算端，MotionWorkerHelper 无 CABAC trait）
+     * 与 CabacEncodingTrait（写码端）都要用，两者组合进宿主类后 private static 互通。
+     */
+    private static array $ZZ8_SCAN = [
+        0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5,
+        12, 19, 26, 33, 40, 48, 41, 34, 27, 20, 13, 6, 7, 14, 21, 28,
+        35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51,
+        58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
+    ];
+
     public function scan4x4DcAc(array $raster): array
     {
         $out = array_fill(0, 16, 0);

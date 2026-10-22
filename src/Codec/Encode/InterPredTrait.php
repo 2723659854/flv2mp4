@@ -110,6 +110,109 @@ trait InterPredTrait
             if (!($cbpLuma & (1 << $block8x8Idx))) $nzCache[$blkIdx] = 0;
         }
 
+        // === T5 inter 8x8DCT 候选：high 档下与 4x4 并行量化，按 Σ|level| 取优（平手保持 4x4）===
+        // 8x8 基保留低频更省 bits，但高频细节损失更大；x264 同款廉价系数代价比较。
+        // 胜出时 quantResidual 仍按 16 个 4x4 子块结构打包（协议 payload 不变），
+        // dct8 标志经 result[13] 传给写码端（[12] 是 B 帧的 list 槽位，不可占用）。
+        $use8 = false;
+        $stored8 = null;
+        $nz8Arr = null;
+        $qmul8 = null;
+        if (!empty($this->inter8x8Enabled)) {
+            [$qmul8, $mf8] = $this->buildQuant8Tables($this->qp, false);
+            $zz8 = self::$ZZ8_SCAN;
+            $stored8 = [];
+            $nz8Arr = [];
+            $cost8 = 0;
+            $cost4 = 0;
+            for ($p8 = 0; $p8 < 4; $p8++) {
+                $oy0 = ($p8 >> 1) * 8;
+                $ox0 = ($p8 & 1) * 8;
+                $res = array_fill(0, 64, 0);
+                for ($yy = 0; $yy < 8; $yy++) {
+                    $row = $oy0 + $yy;
+                    for ($xx = 0; $xx < 8; $xx++) {
+                        $col = $ox0 + $xx;
+                        $res[$yy * 8 + $xx] = $curFlat[$row * 16 + $col] - $predBlock[$row * 16 + $col];
+                    }
+                }
+                $c = $this->forward8x8($res);
+                $nz = $this->quantize8($c, $mf8, 1); // 帧间 ff=1
+                $stored8[$p8] = $c;
+                $nz8Arr[$p8] = $nz;
+                if ($nz > 0) {
+                    for ($j = 0; $j < 64; $j++) {
+                        $v = $c[$j];
+                        $cost8 += ($v < 0 ? -$v : $v);
+                    }
+                }
+            }
+            for ($b = 0; $b < 16; $b++) {
+                foreach ($quantResidual[$b] as $v) {
+                    $cost4 += ($v < 0 ? -$v : $v);
+                }
+            }
+            $use8 = $cost8 < $cost4;
+        }
+
+        if ($use8) {
+            // cbp 按 8x8 块重建；nzCache 四子块同值（fill_rectangle 语义，与 encWriteResidual8x8 写回一致）
+            $cbpLuma = 0;
+            for ($p8 = 0; $p8 < 4; $p8++) {
+                $base = ($p8 >> 1) * 8 + ($p8 & 1) * 2;
+                $nz = $nz8Arr[$p8];
+                if ($nz > 0) {
+                    $cbpLuma |= 1 << $p8;
+                    $nzCache[$base] = min(15, $nz);
+                    $nzCache[$base + 1] = min(15, $nz);
+                    $nzCache[$base + 4] = min(15, $nz);
+                    $nzCache[$base + 5] = min(15, $nz);
+                } else {
+                    $nzCache[$base] = 0;
+                    $nzCache[$base + 1] = 0;
+                    $nzCache[$base + 4] = 0;
+                    $nzCache[$base + 5] = 0;
+                }
+            }
+            // 64 系数按 4x4 子块 raster 位置重装（写码端反向重装回存储布局）
+            $quantResidual = [];
+            for ($p8 = 0; $p8 < 4; $p8++) {
+                $base = ($p8 >> 1) * 8 + ($p8 & 1) * 2;
+                $c = $stored8[$p8];
+                for ($subY = 0; $subY < 2; $subY++) {
+                    for ($subX = 0; $subX < 2; $subX++) {
+                        $blk = array_fill(0, 16, 0);
+                        for ($yy = 0; $yy < 4; $yy++) {
+                            for ($xx = 0; $xx < 4; $xx++) {
+                                $blk[$yy * 4 + $xx] = $c[($subY * 4 + $yy) * 8 + $subX * 4 + $xx];
+                            }
+                        }
+                        $quantResidual[$base + $subY * 4 + $subX] = $blk;
+                    }
+                }
+            }
+            // 重建：dequantize8 + inverse8x8（与解码端 idct8AddToPlane 逐比特一致）
+            $reconY = str_repeat("\0", 256);
+            for ($p8 = 0; $p8 < 4; $p8++) {
+                $by = ($p8 >> 1) * 8;
+                $bx = ($p8 & 1) * 8;
+                if ($nz8Arr[$p8] > 0) {
+                    $c = $stored8[$p8];
+                    $this->dequantize8($c, $qmul8);
+                    $resid = $this->inverse8x8($c);
+                } else {
+                    $resid = array_fill(0, 64, 0);
+                }
+                for ($yy = 0; $yy < 8; $yy++) {
+                    $row = $by + $yy;
+                    for ($xx = 0; $xx < 8; $xx++) {
+                        $col = $bx + $xx;
+                        $value = $predBlock[$row * 16 + $col] + $resid[$yy * 8 + $xx];
+                        $reconY[$row * 16 + $col] = chr(max(0, min(255, $value)));
+                    }
+                }
+            }
+        } else {
         $reconY = str_repeat("\0", 256);
         for ($by = 0; $by < 4; $by++) {
             for ($bx = 0; $bx < 4; $bx++) {
@@ -134,6 +237,7 @@ trait InterPredTrait
                 }
             }
         }
+        } // end 4x4/8x8 recon
 
         // 色度：1/8 MC + DCT + inter 量化 + 本地解码重建（始终保证色度质量）
         $chr = $this->processChroma($mbX, $mbY, $mvX, $mvY, $refUPlane, $refVPlane, $curU, $curV);
@@ -142,6 +246,7 @@ trait InterPredTrait
             $mvX, $mvY, $sad, $cbpLuma, $nzCache, $quantResidual,
             $reconY, $chr['reconU'], $chr['reconV'],
             $chr['cbpChroma'], $chr['chromaDc'], $chr['chromaAc'],
+            13 => $use8 ? 1 : 0,
         ];
     }
 
@@ -336,6 +441,7 @@ trait InterPredTrait
         $cbpChroma = $prepared[9] ?? 0;
         $chromaDc = $prepared[10] ?? [];   // 8 个量化 Hadamard DC：Cb4 + Cr4
         $chromaAc = $prepared[11] ?? [];  // 8 块量化系数：Cb0-3 + Cr0-3
+        $dct8 = !empty($prepared[13]);    // T5 inter 8x8DCT（prepare 双路决策结果）
 
         //$reconStride = $this->mbAlignedWidth;
 
@@ -436,9 +542,9 @@ trait InterPredTrait
             $this->picCbp[$mbIdx] = $cbp;
             $this->cabCbp = $cbp;
             // transform_size_8x8_flag：PPS transform_8x8_mode_flag=1（high）且 cbpLuma 低 4 位
-            // 非零时解码器在 qp delta 前读该 bin（CabacDecodingTrait:2094）；本阶段 inter 恒 4x4，写 0
+            // 非零时解码器在 qp delta 前读该 bin（CabacDecodingTrait:2094）
             if ($this->transform8x8ModeFlag && ($cbpLuma & 15) !== 0) {
-                $this->encDecision(399 + $this->cabNeighborTransformSize(), 0);
+                $this->encDecision(399 + $this->cabNeighborTransformSize(), $dct8 ? 1 : 0);
             }
             if ($cbp !== 0) {
                 $this->encWriteQpDelta(0);
@@ -451,9 +557,12 @@ trait InterPredTrait
                 $quantResidual,
                 [array_slice($chromaDc, 0, 4), array_slice($chromaDc, 4, 4)],
                 [array_slice($chromaAc, 0, 4), array_slice($chromaAc, 4, 4)],
-                0
+                0,
+                $dct8
             );
-            $this->encFinishInter();
+            // 邻居簿记置位必须与 flag bin 写 1 的条件一致（cbpLuma&15==0 时解码器不读该 bin，
+            // 不置 transform_size 邻居标志；否则后续宏块 ctx 399+n 失步 → bytestream 错误）
+            $this->encFinishInter($dct8 && ($cbpLuma & 15) !== 0);
         } else {
         $bits .= $this->ue(0); // mb_type = 0 for P_L0_16x16模式: mb_type = 0 in P slice (1 partition, 1 MV)
         $bits .= $this->ue(0); // mb_type = 0 for P_L0_16x16
@@ -809,6 +918,7 @@ trait InterPredTrait
         $chromaDc = $prepared[10] ?? [];
         $chromaAc = $prepared[11] ?? [];
         $list = $prepared[12] ?? 0;
+        $dct8 = !empty($prepared[13]);    // T5 inter 8x8DCT（preparePMacroblock 双路决策结果）
         $refIdx = 0;
 
         $bits = '';
@@ -840,9 +950,9 @@ trait InterPredTrait
             $this->picCbp[$mbIdx] = $cbp;
             $this->cabCbp = $cbp;
             // transform_size_8x8_flag：PPS transform_8x8_mode_flag=1（high）且 cbpLuma 低 4 位
-            // 非零时解码器在 qp delta 前读该 bin（CabacDecodingTrait:2180）；本阶段 inter 恒 4x4，写 0
+            // 非零时解码器在 qp delta 前读该 bin（CabacDecodingTrait:2180）
             if ($this->transform8x8ModeFlag && ($cbpLuma & 15) !== 0) {
-                $this->encDecision(399 + $this->cabNeighborTransformSize(), 0);
+                $this->encDecision(399 + $this->cabNeighborTransformSize(), $dct8 ? 1 : 0);
             }
             if ($cbp !== 0) {
                 $this->encWriteQpDelta(0);
@@ -855,9 +965,11 @@ trait InterPredTrait
                 $quantResidual,
                 [array_slice($chromaDc, 0, 4), array_slice($chromaDc, 4, 4)],
                 [array_slice($chromaAc, 0, 4), array_slice($chromaAc, 4, 4)],
-                0
+                0,
+                $dct8
             );
-            $this->encFinishInter();
+            // 同 P 路径：仅 flag bin 真正写入 1 时才置邻居 transform_size 簿记
+            $this->encFinishInter($dct8 && ($cbpLuma & 15) !== 0);
         } else {
         $bits .= $this->ue(0); // mb_skip_run = 0（本编码器不使用 B_Skip/B_Direct）
         $bits .= $this->ue($list === 0 ? 1 : 2); // mb_type: 1=B_L0_16x16, 2=B_L1_16x16

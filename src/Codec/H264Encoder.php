@@ -31,6 +31,15 @@ class H264Encoder
     public bool $intra8x8Enabled = true;
     /** I 片 8x8 QP 补偿偏移（8x8 同 QP 步长约为 4x4 的 2 倍，降低 I 片 QP 保参考质量） */
     public int $intra8x8QpOffset = -4;
+    /** high 档 IDR 的 I16/I8 逐 GOP 决策开关（IDR 双路试编取片 NAL 更小者） */
+    public bool $intraGopDecisionEnabled = true;
+    /** P/B 16x16 inter 8x8DCT 开关（T5，high=true）：prepare 端 4x4/8x8 双路量化按 Σ|level| 取优 */
+    public bool $inter8x8Enabled = false;
+    /** 逐 GOP 决策内部标记：当前片强制走 I16 路径（I16 试编遍置位） */
+    public bool $forceIntra16Slice = false;
+    /** 逐 GOP 决策统计：I16 胜出 / I8x8 胜出的 GOP 数（供 qp 补偿调参观察） */
+    public int $gopI16Wins = 0;
+    public int $gopI8Wins = 0;
     public const DEQUANT4_COEFF_INIT = [
         [10, 13, 16],
         [11, 14, 18],
@@ -512,6 +521,8 @@ class H264Encoder
         // 8x8 变换开关镜像解码端 parseSPS/parsePPS 语义：high 开、main/baseline 关
         $this->transform8x8ModeFlag = ($profile === 'high');
         $this->direct8x8InferenceFlag = ($profile === 'high');
+        // T5：inter 8x8DCT 决策随 high 同步启停（batch 头标志一并透传给 motion worker）
+        $this->inter8x8Enabled = ($profile === 'high');
     }
 
     /**

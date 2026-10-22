@@ -69,6 +69,7 @@ final class Mp4DecoderWorkerServer
             $this->encoder->setFastMotion(true);
             $this->fast = true;
         }
+        if (isset($config['intra8x8QpOffset'])) $this->encoder->intra8x8QpOffset = max(-51, min(51, (int)$config['intra8x8QpOffset']));
     }
 
     public function run(string $listenAddress, string $outputAddress): void

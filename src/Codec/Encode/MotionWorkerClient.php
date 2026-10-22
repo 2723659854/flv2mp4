@@ -50,7 +50,8 @@ final class MotionWorkerClient
         string $curV,
         int $mbWidth,
         int $mbHeight,
-        array $jobs
+        array $jobs,
+        bool $dct8 = false
     ): void {
         if ($this->pending !== null) throw new RuntimeException('Motion worker batch already in flight');
         $this->connectAll();
@@ -100,7 +101,7 @@ final class MotionWorkerClient
                 $this->outputs[$worker] .= $referenceFrame;
                 $this->workerSeq[$worker] = $seq;
             }
-            $this->outputs[$worker] .= MotionWorkerProtocol::batch($id, $seq, $qp, $chunk, $strips, $stripOffset, $stripCount, $aw, $chromaStrips);
+            $this->outputs[$worker] .= MotionWorkerProtocol::batch($id, $seq, $qp, $chunk, $strips, $stripOffset, $stripCount, $aw, $chromaStrips, $dct8 ? 1 : 0);
         }
         $this->pending = ['ids' => $ids, 'total' => $total];
         // 尽力立即把请求刷出去，剩余部分由 collect 的 event loop 排空
@@ -165,9 +166,10 @@ final class MotionWorkerClient
         string $curV,
         int $mbWidth,
         int $mbHeight,
-        array $jobs
+        array $jobs,
+        bool $dct8 = false
     ): array {
-        $this->dispatch($width, $height, $aw, $ah, $qp, $refY, $refU, $refV, $curY, $curU, $curV, $mbWidth, $mbHeight, $jobs);
+        $this->dispatch($width, $height, $aw, $ah, $qp, $refY, $refU, $refV, $curY, $curU, $curV, $mbWidth, $mbHeight, $jobs, $dct8);
         return $this->collect();
     }
 

@@ -62,6 +62,8 @@ final class MotionWorkerServer
                         if (!isset($connections[$connectionId]['frames'][$seq])) throw new RuntimeException('Unknown motion worker reference seq');
                         [$width, $height, $aw, $ah, $refY, $refU, $refV] = $connections[$connectionId]['frames'][$seq];
                         $helper = new MotionWorkerHelper($width, $height, $aw, $ah, $qp, $refY, $refU, $refV);
+                        // T5：batch 头 bit0 = 允许 inter 8x8DCT 双路决策（旧主进程载荷默认 0）
+                        $helper->inter8x8Enabled = (($message[6] ?? 0) & 0x01) !== 0;
                         $result = [];
                         foreach ($blocks as $index => $block) $result[$index] = $helper->prepare($block);
                         $connections[$connectionId]['output'] .= MotionWorkerProtocol::response($request, $result);

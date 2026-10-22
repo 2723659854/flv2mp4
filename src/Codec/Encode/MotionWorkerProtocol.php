@@ -19,6 +19,8 @@ final class MotionWorkerProtocol
     private const JOB_META_LENGTH = 16;
     private const FLAG_HAS_LUMA_RESIDUAL = 0x01;
     private const FLAG_HAS_CHROMA_RESIDUAL = 0x02;
+    private const FLAG_DCT8 = 0x04;          // 该 MB 亮度残差为 8x8DCT 域（T5）
+    private const BATCH_FLAG_DCT8 = 0x01;    // batch 头标志：允许 worker 做 inter 8x8DCT 双路决策
 
     public static function frame(string $body): string
     {
@@ -61,8 +63,9 @@ final class MotionWorkerProtocol
      * @param int    $stripCount   条带数
      * @param int    $aw           宏块对齐宽度（条带跨距）
      * @param string $chromaStrips 色度条带拼接串（stripCount*8*aw 字节）
+     * @param int    $flags        batch 头标志（bit0=BATCH_FLAG_DCT8 允许 inter 8x8DCT 决策；旧主进程默认 0）
      */
-    public static function batch(int $id, int $seq, int $qp, array $jobs, string $strips, int $stripOffset, int $stripCount, int $aw, string $chromaStrips): string
+    public static function batch(int $id, int $seq, int $qp, array $jobs, string $strips, int $stripOffset, int $stripCount, int $aw, string $chromaStrips, int $flags = 0): string
     {
         self::validateSeq($seq);
         if ($stripCount < 0 || $stripOffset < 0 || $aw <= 0 || strlen($strips) !== $stripCount * 16 * $aw) {
@@ -73,7 +76,9 @@ final class MotionWorkerProtocol
             throw new InvalidArgumentException('Invalid motion worker chroma strips');
         }
         $body = self::REQUEST_MAGIC . chr(self::JOB_BATCH) . "\0\0\0" . pack('N', $seq)
-            . pack('N6', $id, $qp, count($jobs), $stripOffset, $stripCount, $aw) . $strips;
+            . pack('N6', $id, $qp, count($jobs), $stripOffset, $stripCount, $aw)
+            . chr($flags)
+            . $strips;
         $body .= $chromaStrips;
         // job 元数据批量打包（index,x,y,range），避免每 job 一次 pack 调用
         $flat = [];
@@ -116,14 +121,22 @@ final class MotionWorkerProtocol
         $cw = intdiv($aw, 2);
         $stripsLength = $stripCount * 16 * $aw;
         $chromaStripsLength = $stripCount * 16 * $cw; // 每宏块行 8行U+8行V
-        if (strlen($body) !== 36 + $stripsLength + $chromaStripsLength + $count * self::JOB_META_LENGTH) {
+        // batch 头标志（T5）：新格式头 37 字节（N6 后 1 字节 flags）；旧格式 36 字节，flags 默认 0（向后兼容）
+        $legacyLength = 36 + $stripsLength + $chromaStripsLength + $count * self::JOB_META_LENGTH;
+        $bodyLength = strlen($body);
+        $base = 36;
+        $flags = 0;
+        if ($bodyLength === $legacyLength + 1) {
+            $flags = ord($body[36]);
+            $base = 37;
+        } elseif ($bodyLength !== $legacyLength) {
             throw new UnexpectedValueException('Invalid motion worker batch length');
         }
         // 条带只保留引用（零拷贝），块提取按 job 所在宏块行惰性切片
-        $strips = $stripCount > 0 ? substr($body, 36, $stripsLength) : '';
-        $chromaStrips = substr($body, 36 + $stripsLength, $chromaStripsLength);
+        $strips = $stripCount > 0 ? substr($body, $base, $stripsLength) : '';
+        $chromaStrips = substr($body, $base + $stripsLength, $chromaStripsLength);
         $blocks = [];
-        $offset = 36 + $stripsLength + $chromaStripsLength;
+        $offset = $base + $stripsLength + $chromaStripsLength;
         $stripRows = $stripCount > 0 ? [] : null;
         $cStripRows = $stripCount > 0 ? [] : null;
         for ($i = 0; $i < $count; $i++) {
@@ -147,7 +160,7 @@ final class MotionWorkerProtocol
             $blocks[$job['index']] = [$job['x'], $job['y'], $luma, $job['range'], $cu, $cv];
             $offset += self::JOB_META_LENGTH;
         }
-        return [$type, $seq, $header['id'], $header['qp'], $blocks, true];
+        return [$type, $seq, $header['id'], $header['qp'], $blocks, true, $flags];
     }
 
     public static function response(int $id, array $results): string
@@ -158,13 +171,15 @@ final class MotionWorkerProtocol
             $cbpChroma = $result[9] ?? 0;
             $chromaDc = $result[10] ?? [];
             $chromaAc = $result[11] ?? [];
+            $dct8 = !empty($result[13]); // T5：8x8DCT 域标志（仅亮度残差非零时有意义）
             if (count($nzCache) !== 24 || strlen($reconY) !== 256 || strlen($reconU) !== 64 || strlen($reconV) !== 64) throw new InvalidArgumentException('Invalid motion worker result');
             $hasLuma = $cbpLuma > 0;
             $hasChroma = $cbpChroma > 0;
             // 第5个N为完整CBP：低4位luma，高2位chroma
             $cbpFull = ($cbpLuma & 0x0F) | (($cbpChroma & 0x03) << 4);
             $body .= pack('N5', $index, $mvX, $mvY, $sad, $cbpFull);
-            $flags = ($hasLuma ? self::FLAG_HAS_LUMA_RESIDUAL : 0) | ($hasChroma ? self::FLAG_HAS_CHROMA_RESIDUAL : 0);
+            $flags = ($hasLuma ? self::FLAG_HAS_LUMA_RESIDUAL : 0) | ($hasChroma ? self::FLAG_HAS_CHROMA_RESIDUAL : 0)
+                | ($hasLuma && $dct8 ? self::FLAG_DCT8 : 0);
             if (!$hasLuma && !$hasChroma) {
                 // 全零宏块：主进程不读取 nz/残差，省掉打包传输（与旧瘦身一致）
                 $body .= "\0\0\0\0";
@@ -223,6 +238,7 @@ final class MotionWorkerProtocol
             $cbpChroma = ($cbpFull >> 4) & 0x03;
             $hasLuma = ($packed['flags'] & self::FLAG_HAS_LUMA_RESIDUAL) !== 0;
             $hasChroma = ($packed['flags'] & self::FLAG_HAS_CHROMA_RESIDUAL) !== 0;
+            $dct8 = ($packed['flags'] & self::FLAG_DCT8) !== 0 ? 1 : 0; // T5（旧载荷默认 0）
             $nzCache = array_fill(0, 24, 0);
             $quantResidual = [];
             $chromaDc = [];
@@ -268,7 +284,7 @@ final class MotionWorkerProtocol
             $mvX = $packed['h2']; if ($mvX >= 0x80000000) $mvX -= 0x100000000;
             $mvY = $packed['h3']; if ($mvY >= 0x80000000) $mvY -= 0x100000000;
             $sad = $packed['h4']; if ($sad >= 0x80000000) $sad -= 0x100000000;
-            $results[$index] = [$mvX, $mvY, $sad, $cbpLuma, $nzCache, $quantResidual, $reconY, $reconU, $reconV, $cbpChroma, $chromaDc, $chromaAc];
+            $results[$index] = [$mvX, $mvY, $sad, $cbpLuma, $nzCache, $quantResidual, $reconY, $reconU, $reconV, $cbpChroma, $chromaDc, $chromaAc, 0, $dct8];
         }
         if ($offset !== strlen($body)) throw new UnexpectedValueException('Invalid motion worker response trailer');
         return [$header['id'], true, $results];

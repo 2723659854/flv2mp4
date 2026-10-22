@@ -15,8 +15,8 @@ trait IntraPredTrait
         &$leftIntra4x4Mode = null, &$topIntra4x4Mode = null
     )
     {
-        if (($this->profile === 'high') && $this->intra8x8Enabled) {
-            // high profile：I 片恒用 I8x8（无宏块级选型，用户决策）
+        if (($this->profile === 'high') && $this->intra8x8Enabled && !$this->forceIntra16Slice) {
+            // high profile：I 片用 I8x8（forceIntra16Slice 置位时走 I16——逐 GOP 决策的 I16 试编遍）
             return $this->encodeMacroblockI8x8($mbX, $mbY, $yPlane, $uPlane, $vPlane, $leftAvailable, $leftNz, $topAvailable, $topNzLuma, $topNzCb, $topNzCr);
         }
         if ($this->mbType === self::MB_TYPE_I16x16) {

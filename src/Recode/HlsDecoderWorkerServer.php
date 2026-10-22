@@ -66,6 +66,7 @@ final class HlsDecoderWorkerServer
         $encoder->setProfile($profileStr);
         if ($this->bframes) $encoder->enableBFrames(true);
         if (!empty($config['fastMotion'])) $encoder->setFastMotion(true);
+        if (isset($config['intra8x8QpOffset'])) $encoder->intra8x8QpOffset = max(-51, min(51, (int)$config['intra8x8QpOffset']));
         $this->encoder = $encoder;
         $this->scaler = new VideoScaler();
     }
