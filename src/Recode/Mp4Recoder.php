@@ -687,7 +687,8 @@ class Mp4Recoder
         $data = $this->extractVideoAvccFromNals($nals);
         if ($data === '') return;
         // 与逐帧转码路径一致：抽帧时按目标帧率生成 CFR 时间轴（帧序号 × 帧时长），不抽帧保留源 DTS；
-        // B 模式 cts 由 worker 透传（MP4 容器原生支持负 CTS，直接写入 ctts box）
+        // B 模式 cts 由 worker 透传。注意 ctts version 0 的 offset 按规范是无符号数
+        // （负 CTS 仅 version 1 合法），本路径 DTS 网格前移保证 cts 恒非负，version 0 直接写入
         $frameIndex = count($this->videoSamples);
         $timestamp = ($this->dropFrames && $this->effectiveTargetFps !== null && $this->effectiveTargetFps > 0)
             ? (int)round($frameIndex * 1000 / $this->effectiveTargetFps)
@@ -1223,7 +1224,9 @@ class Mp4Recoder
     /**
      * 显示序缓冲 → 编码序落盘（与 FLV Recoder / MP4 Worker 同构）。
      * 固定 3 帧延迟的 IBBP：锚点在显示序 0、3、6…，编码序 = 锚点 → B1 → B2。
-     * MP4 原生支持负 CTS（ctts box offset 有符号），不做 FLV 的 ctsShift 偏移。
+     * ctts version 0 的 offset 按规范无符号（负 CTS 仅 version 1 合法）；
+     * 本路径 DTS 网格前移（B 帧解码槽=显示槽，锚点 cts=+3 帧时长）保证 cts 恒非负，
+     * 故无需 FLV 的 ctsShift 偏移，version 0 直接写入。
      */
     private function drainBQueue(bool $flush): void
     {
@@ -1306,7 +1309,9 @@ class Mp4Recoder
 
     /**
      * B 模式编码序落盘一帧：DTS 按编码序步进，CTS =（显示序 − 编码序）×帧时长。
-     * MP4 容器原生支持负 CTS，直接写入 ctts box，不做偏移。
+     * DTS 网格前移使 cts 恒非负（B 帧 cts=0、锚点 cts=+3 帧时长），
+     * ctts version 0（无符号 offset）直接写入即合法；若未来 cts 可能出现负值，
+     * 必须升级 ctts version 1（有符号 offset）。
      */
     private function emitBFrame(array $nals, int $displayIdx, bool $isKey): void
     {
@@ -2031,6 +2036,8 @@ class Mp4Recoder
 
     private function buildCtts(): string
     {
+        // version 0：offset 无符号（ISO 14496-12），负 CTS 必须用 version 1（有符号）。
+        // 本类 cts 恒非负（DTS 网格前移，见 drainBQueue/emitBFrame 注释），version 0 即合法。
         $samples = $this->videoSamples;
         $count = count($samples);
 
