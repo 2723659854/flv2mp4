@@ -123,7 +123,17 @@ class PurePhpHlsGenerator
         $this->encoder->setProfile($config['profile'] ?? 'baseline');
         if (!empty($config['fastMotion'])) $this->encoder->setFastMotion(true);
         if (isset($config['intra8x8QpOffset'])) $this->encoder->intra8x8QpOffset = max(-51, min(51, (int)$config['intra8x8QpOffset']));
-        if (!is_dir($this->outputDir)) mkdir($this->outputDir, 0777, true);
+        if (!is_dir($this->outputDir)) {
+            mkdir($this->outputDir, 0777, true);
+        } else {
+            // 重新生成前清理旧分片与索引：分片按 segment_N.ts 固定命名覆盖写，
+            // 残留的上一轮旧段（如超出新时长/中断残留）会与新一轮切片混存，
+            // 播放器按 index.m3u8 顺序播到旧段即出现画质错乱
+            foreach (glob($this->outputDir . '/segment_*.ts') ?: [] as $oldSegment) {
+                @unlink($oldSegment);
+            }
+            if (is_file($this->outputDir . '/index.m3u8')) @unlink($this->outputDir . '/index.m3u8');
+        }
 
         if (!empty($config['watermark']) && !empty($config['watermarkFile'])) {
             $this->watermark = $this->loadWatermarkFile($config['watermarkFile']);
@@ -591,8 +601,13 @@ class PurePhpHlsGenerator
             }
         }
 
-        // PTS 统一后移重排延迟（B 模式非 0），DTS 保持编码序网格不变
-        $pes = $this->createPES(0xE0, $annexb, $job['pts'] + $this->tsPtsOffsetTicks, ($job['pts'] !== $job['dts']) ? $job['dts'] : null);
+        // PTS 统一后移重排延迟（B 模式非 0），DTS 保持编码序网格不变。
+        // DTS 必须无条件传递：B 模式 GOP 首帧（IDR）cts=0 时 job.pts==job.dts，
+        // 若据此省略 DTS 字段，解码端推断 DTS=PTS（已后移 +12000），而后续帧 DTS
+        // 仍在真实编码序网格上 → 每个分片开头 DTS 倒退 6000 且与 B 帧重复，
+        // VLC 按 DTS 调度会把 P 帧排在 IDR 之前解码（参考帧错误 → 花屏变形）。
+        // createPES 内部 dts===pts 时仍会省略字段，非 B 模式（offset=0）行为不变。
+        $pes = $this->createPES(0xE0, $annexb, $job['pts'] + $this->tsPtsOffsetTicks, $job['dts']);
         // 视频首包携带PCR同步播放器
         $this->writeTSPackets($this->videoPid, $pes, true, $job['dts']);
 
