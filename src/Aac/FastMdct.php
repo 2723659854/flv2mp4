@@ -23,20 +23,24 @@ final class FastMdct
     public static function transform(array $input): array
     {
         self::initialize();
+        $inputReal = self::$inputReal;
+        $inputImaginary = self::$inputImaginary;
         $real = [];
         $imaginary = [];
         for ($i = 0; $i < self::SIZE; ++$i) {
             $sample = $input[$i];
-            $real[$i] = $sample * self::$inputReal[$i];
-            $imaginary[$i] = $sample * self::$inputImaginary[$i];
+            $real[$i] = $sample * $inputReal[$i];
+            $imaginary[$i] = $sample * $inputImaginary[$i];
         }
 
         self::fft($real, $imaginary);
 
+        $outputReal = self::$outputReal;
+        $outputImaginary = self::$outputImaginary;
         $output = [];
         for ($k = 0; $k < self::COEFFICIENTS; ++$k) {
-            $output[$k] = ($real[$k] * self::$outputReal[$k]
-                - $imaginary[$k] * self::$outputImaginary[$k]) * 32768.0;
+            $output[$k] = ($real[$k] * $outputReal[$k]
+                - $imaginary[$k] * $outputImaginary[$k]) * 32768.0;
         }
         return $output;
     }
@@ -81,8 +85,11 @@ final class FastMdct
 
     private static function fft(array &$real, array &$imaginary): void
     {
+        $bitReverse = self::$bitReverse;
+        $twiddleReal = self::$twiddleReal;
+        $twiddleImaginary = self::$twiddleImaginary;
         for ($i = 0; $i < self::SIZE; ++$i) {
-            $j = self::$bitReverse[$i];
+            $j = $bitReverse[$i];
             if ($j <= $i) {
                 continue;
             }
@@ -101,10 +108,10 @@ final class FastMdct
                 for ($j = 0, $twiddle = 0; $j < $half; ++$j, $twiddle += $stride) {
                     $even = $start + $j;
                     $odd = $even + $half;
-                    $oddReal = $real[$odd] * self::$twiddleReal[$twiddle]
-                        - $imaginary[$odd] * self::$twiddleImaginary[$twiddle];
-                    $oddImaginary = $real[$odd] * self::$twiddleImaginary[$twiddle]
-                        + $imaginary[$odd] * self::$twiddleReal[$twiddle];
+                    $cos = $twiddleReal[$twiddle];
+                    $sin = $twiddleImaginary[$twiddle];
+                    $oddReal = $real[$odd] * $cos - $imaginary[$odd] * $sin;
+                    $oddImaginary = $real[$odd] * $sin + $imaginary[$odd] * $cos;
                     $real[$odd] = $real[$even] - $oddReal;
                     $imaginary[$odd] = $imaginary[$even] - $oddImaginary;
                     $real[$even] += $oddReal;

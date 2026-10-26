@@ -24,6 +24,44 @@ final class AacLcEncoder
     private int $pendingOffset = 0;
     private array $overlap = [[], []];
     private int $frameCount = 0;
+    private static ?array $bandIndex = null;
+    private static ?array $pow43Table = null;
+
+    /**
+     * 整数 4/3 次幂重建值表：pow(v, 4/3)，v 覆盖 0..64，超界回落 pow 原式。
+     * 与 pow($value / $quantizer, 4/3) 存在 ~1ulp 浮点差异，仅影响失真评分排序，音质等价。
+     */
+    private static function pow43Table(): array
+    {
+        if (self::$pow43Table !== null) {
+            return self::$pow43Table;
+        }
+        $table = [0 => 0.0];
+        for ($v = 1; $v <= 64; ++$v) {
+            $table[$v] = pow((float) $v, 4.0 / 3.0);
+        }
+        return self::$pow43Table = $table;
+    }
+
+    /**
+     * 预计算每个频谱样本所属的 scalefactor band（-1 表示超出 SWB_48K[MAX_SFB]，不参与能量统计），
+     * 与逐样本 while 推进逻辑位等价，仅省去每样本的边界判断。
+     */
+    private static function bandIndexTable(): array
+    {
+        if (self::$bandIndex !== null) {
+            return self::$bandIndex;
+        }
+        $table = [];
+        $band = 0;
+        for ($i = 0; $i < self::FRAME_SAMPLES; ++$i) {
+            while ($band + 1 < self::MAX_SFB && $i >= AacTables::SWB_48K[$band + 1]) {
+                ++$band;
+            }
+            $table[$i] = $i < AacTables::SWB_48K[self::MAX_SFB] ? $band : -1;
+        }
+        return self::$bandIndex = $table;
+    }
 
     public function __construct(int $bitrate = 128000, int $channels = 2)
     {
@@ -130,18 +168,16 @@ final class AacLcEncoder
             $pow34 = [];
             $energy = array_fill(0, self::MAX_SFB, 0.0);
             $maxPow34 = array_fill(0, self::MAX_SFB, 0.0);
-            $band = 0;
+            $bandTable = self::bandIndexTable();
             for ($i = 0; $i < 1024; ++$i) {
                 $value = $mdct[$i];
                 $magnitude = pow(abs($value), 0.75);
                 $pow34[$i] = $value < 0.0 ? -$magnitude : $magnitude;
-                if ($band < self::MAX_SFB) {
-                    while ($band + 1 < self::MAX_SFB && $i >= AacTables::SWB_48K[$band + 1]) {
-                        ++$band;
-                    }
-                    if ($i < AacTables::SWB_48K[self::MAX_SFB]) {
-                        $energy[$band] += $value * $value;
-                        $maxPow34[$band] = max($maxPow34[$band], $magnitude);
+                $band = $bandTable[$i];
+                if ($band >= 0) {
+                    $energy[$band] += $value * $value;
+                    if ($magnitude > $maxPow34[$band]) {
+                        $maxPow34[$band] = $magnitude;
                     }
                 }
             }
@@ -159,9 +195,10 @@ final class AacLcEncoder
         $attempts = 0;
         $plans = null;
         if ($this->previousGlobalOffset !== null) {
+            // 码率估计阶段无需失真数据（estimateRawBytes 只消费缓存 bits）
             $candidate = [];
             foreach ($spectra as $spectrum) {
-                $candidate[] = $this->analyzeChannel($spectrum, $this->previousGlobalOffset);
+                $candidate[] = $this->analyzeChannel($spectrum, $this->previousGlobalOffset, false);
             }
             ++$attempts;
             $candidateBytes = $this->estimateRawBytes($candidate);
@@ -178,7 +215,7 @@ final class AacLcEncoder
                 $offset = ($low + $high) >> 1;
                 $candidate = [];
                 foreach ($spectra as $spectrum) {
-                    $candidate[] = $this->analyzeChannel($spectrum, $offset);
+                    $candidate[] = $this->analyzeChannel($spectrum, $offset, false);
                 }
                 ++$attempts;
                 if ($this->estimateRawBytes($candidate) <= $targetBytes) {
@@ -195,6 +232,13 @@ final class AacLcEncoder
                     $bestPlans[] = $this->analyzeChannel($spectrum, 64);
                 }
                 ++$attempts;
+            } else {
+                // analyzeChannel 是确定性函数：按 bestOffset 用完整模式重建，失真数据与旧逻辑一致
+                $withDistortion = [];
+                foreach ($spectra as $spectrum) {
+                    $withDistortion[] = $this->analyzeChannel($spectrum, $bestOffset);
+                }
+                $bestPlans = $withDistortion;
             }
             $this->previousGlobalOffset = $bestOffset;
             $plans = $this->adjustToBudget($spectra, $bestPlans, $targetBytes, $attempts);
@@ -205,7 +249,7 @@ final class AacLcEncoder
         return $this->adtsHeader(strlen($raw) + 7) . $raw;
     }
 
-    private function analyzeChannel(array $spectrum, int $offset): array
+    private function analyzeChannel(array $spectrum, int $offset, bool $withDistortion = true): array
     {
         $scaleFactors = [];
         for ($band = 0; $band < self::MAX_SFB; ++$band) {
@@ -221,7 +265,7 @@ final class AacLcEncoder
         $scaleFactors = $this->constrainScaleFactors($scaleFactors, $spectrum);
         $bands = [];
         for ($band = 0; $band < self::MAX_SFB; ++$band) {
-            $bands[$band] = $this->quantizeBand($spectrum, $band, $scaleFactors[$band]);
+            $bands[$band] = $this->quantizeBand($spectrum, $band, $scaleFactors[$band], $withDistortion);
         }
         return $this->finishPlan($bands);
     }
@@ -247,25 +291,38 @@ final class AacLcEncoder
         return $scaleFactors;
     }
 
-    private function quantizeBand(array $spectrum, int $band, int $scaleFactor): array
+    /**
+     * 对单个 scalefactor band 量化。$withDistortion=false 时跳过失真/重建值计算
+     * （仅用于码率估计阶段，量化值 q、qMax 与完整模式位等价，scaleFactor 推进逻辑不受影响）。
+     */
+    private function quantizeBand(array $spectrum, int $band, int $scaleFactor, bool $withDistortion = true): array
     {
         $start = AacTables::SWB_48K[$band];
         $end = AacTables::SWB_48K[$band + 1];
+        $pow34 = $spectrum['pow34'];
+        $mdct = $spectrum['mdct'];
+        $pow43 = self::$pow43Table ?? self::pow43Table();
         do {
             $quantizer = pow(2.0, (104 - $scaleFactor) * 3.0 / 16.0);
+            $quantizer34 = pow(2.0, (104 - $scaleFactor) / 4.0);
             $q = [];
             $qMax = 0;
             $distortion = 0.0;
             for ($i = $start; $i < $end; ++$i) {
-                $value = (int) floor(abs($spectrum['pow34'][$i]) * $quantizer + 0.4054);
-                $qMax = max($qMax, $value);
-                $q[] = $spectrum['pow34'][$i] < 0.0 ? -$value : $value;
-                $reconstructed = $value === 0 ? 0.0 : pow($value / $quantizer, 4.0 / 3.0);
-                if ($spectrum['mdct'][$i] < 0.0) {
-                    $reconstructed = -$reconstructed;
+                $magnitude = abs($pow34[$i]);
+                $value = (int) floor($magnitude * $quantizer + 0.4054);
+                if ($value > $qMax) {
+                    $qMax = $value;
                 }
-                $error = $spectrum['mdct'][$i] - $reconstructed;
-                $distortion += $error * $error;
+                $q[] = $pow34[$i] < 0.0 ? -$value : $value;
+                if ($withDistortion) {
+                    $reconstructed = $value <= 64 ? $pow43[$value] / $quantizer34 : pow($value / $quantizer, 4.0 / 3.0);
+                    if ($mdct[$i] < 0.0) {
+                        $reconstructed = -$reconstructed;
+                    }
+                    $error = $mdct[$i] - $reconstructed;
+                    $distortion += $error * $error;
+                }
             }
             if ($qMax <= 7 || $scaleFactor === 255) {
                 break;
@@ -279,19 +336,25 @@ final class AacLcEncoder
         while ($qMax === 0 && $significant && $scaleFactor > 0) {
             --$scaleFactor;
             $quantizer = pow(2.0, (104 - $scaleFactor) * 3.0 / 16.0);
+            $quantizer34 = pow(2.0, (104 - $scaleFactor) / 4.0);
             $q = [];
             $qMax = 0;
             $distortion = 0.0;
             for ($i = $start; $i < $end; ++$i) {
-                $value = (int) floor(abs($spectrum['pow34'][$i]) * $quantizer + 0.4054);
-                $qMax = max($qMax, $value);
-                $q[] = $spectrum['pow34'][$i] < 0.0 ? -$value : $value;
-                $reconstructed = $value === 0 ? 0.0 : pow($value / $quantizer, 4.0 / 3.0);
-                if ($spectrum['mdct'][$i] < 0.0) {
-                    $reconstructed = -$reconstructed;
+                $magnitude = abs($pow34[$i]);
+                $value = (int) floor($magnitude * $quantizer + 0.4054);
+                if ($value > $qMax) {
+                    $qMax = $value;
                 }
-                $error = $spectrum['mdct'][$i] - $reconstructed;
-                $distortion += $error * $error;
+                $q[] = $pow34[$i] < 0.0 ? -$value : $value;
+                if ($withDistortion) {
+                    $reconstructed = $value <= 64 ? $pow43[$value] / $quantizer34 : pow($value / $quantizer, 4.0 / 3.0);
+                    if ($mdct[$i] < 0.0) {
+                        $reconstructed = -$reconstructed;
+                    }
+                    $error = $mdct[$i] - $reconstructed;
+                    $distortion += $error * $error;
+                }
             }
         }
 
