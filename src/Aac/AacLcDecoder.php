@@ -88,8 +88,8 @@ final class AacLcDecoder
 
     private function readRawData(AacBitReader $r, int $channels, int $rateIndex): array
     {
-        $audioType = $channels === 1 ? 0 : 1;
-        $audio = null;
+        /** 已解码通道（时域样本数组），顺序 = raw_data_block 元素出现顺序 */
+        $decoded = [];
         while (true) {
             $element = $r->read(3);
             if ($element === 7) break;
@@ -114,47 +114,74 @@ final class AacLcDecoder
                 $r->skip($count * 8);
                 continue;
             }
-            if ($element !== $audioType || $audio !== null) {
-                throw new RuntimeException('Unsupported or duplicate AAC audio element');
+            if ($element === 0) {
+                // SCE：单通道元素。立体声流允许由两个独立 SCE 组成（无公共窗即无 M/S）
+                $decoded[] = $this->readSingleChannel($r, $rateIndex, count($decoded));
+                continue;
             }
-
-            $ics = null;
-            if ($channels === 2) {
-                $common = $r->read(1);
-                if (!$common) throw new RuntimeException('Only common-window stereo AAC is supported');
-                $ics = $this->readIcsInfo($r);
-                $msMask = $r->read(2);
-                $msFlags = [];
-                if ($msMask === 1) {
-                    for ($group = 0; $group < count($ics[3]); ++$group) {
-                        for ($band = 0; $band < $ics[0]; ++$band) {
-                            $msFlags[$group][$band] = $r->read(1);
-                        }
-                    }
+            if ($element === 1) {
+                // CPE：通道对。common_window=1 共享窗（可含 M/S/强度立体声）；
+                // common_window=0 两通道各自独立 ics_info，无 M/S、无强度立体声
+                foreach ($this->readChannelPair($r, $rateIndex) as $pcm) {
+                    $decoded[] = $pcm;
                 }
-                $gain = $r->read(8);
-                $this->readingChannel = 0;
-                $a = $this->readChannel($r, $gain, $ics, $rateIndex);
-                $gain = $r->read(8);
-                $this->readingChannel = 1;
-                $b = $this->readChannel($r, $gain, $ics, $rateIndex);
-                if ($msMask !== 0) {
-                    $this->applyMsStereo($a, $b, $ics, $msMask, $msFlags);
-                }
-                $this->applyIntensityStereo($a, $b, $ics, $msMask);
-                $this->applyTns($a, $this->channelTns[0], $ics[2], $ics[3], $ics[2] === 2 ? [0, 4, 8, 12, 16, 20, 28, 36, 44, 56, 68, 80, 96, 112, 128] : AacTables::SWB_48K, $ics[0], $rateIndex);
-                $this->applyTns($b, $this->channelTns[1], $ics[2], $ics[3], $ics[2] === 2 ? [0, 4, 8, 12, 16, 20, 28, 36, 44, 56, 68, 80, 96, 112, 128] : AacTables::SWB_48K, $ics[0], $rateIndex);
-            } else {
-                $gain = $r->read(8); $ics = $this->readIcsInfo($r);
-                $this->readingChannel = 0;
-                $a = $this->readChannel($r, $gain, $ics, $rateIndex); $b = null;
-                $offsets = $ics[2] === 2 ? [0, 4, 8, 12, 16, 20, 28, 36, 44, 56, 68, 80, 96, 112, 128] : AacTables::SWB_48K;
-                $this->applyTns($a, $this->channelTns[0], $ics[2], $ics[3], $offsets, $ics[0], $rateIndex);
+                continue;
             }
-            $audio = $channels === 1 ? [$this->imdct($a, 0, $ics[1], $ics[2])] : [$this->imdct($a, 0, $ics[1], $ics[2]), $this->imdct($b, 1, $ics[1], $ics[2])];
+            throw new RuntimeException("Unsupported AAC element type {$element}");
         }
-        if ($audio === null) throw new RuntimeException('AAC raw_data_block has no audio element');
-        return $audio;
+        if (!$decoded) throw new RuntimeException('AAC raw_data_block has no audio element');
+        if (count($decoded) !== $channels) {
+            throw new RuntimeException('AAC element channel count mismatch: expected ' . $channels . ', got ' . count($decoded));
+        }
+        return $decoded;
+    }
+
+    /** 单通道元素解码（SCE，或非公共窗 CPE 的每个通道）：gain → ics_info → 谱 → TNS → IMDCT */
+    private function readSingleChannel(AacBitReader $r, int $rateIndex, int $channelIndex): array
+    {
+        $gain = $r->read(8);
+        $ics = $this->readIcsInfo($r);
+        $this->readingChannel = $channelIndex;
+        $spectrum = $this->readChannel($r, $gain, $ics, $rateIndex);
+        $offsets = $ics[2] === 2 ? [0, 4, 8, 12, 16, 20, 28, 36, 44, 56, 68, 80, 96, 112, 128] : AacTables::SWB_48K;
+        $this->applyTns($spectrum, $this->channelTns[$channelIndex] ?? [], $ics[2], $ics[3], $offsets, $ics[0], $rateIndex);
+        return $this->imdct($spectrum, $channelIndex, $ics[1], $ics[2]);
+    }
+
+    /** CPE 通道对解码：按 common_window 分流 */
+    private function readChannelPair(AacBitReader $r, int $rateIndex): array
+    {
+        $common = $r->read(1);
+        if (!$common) {
+            // 非公共窗：ISO 14496-3 individual_channel_stream(!common_window) ——
+            // 每通道依次 global_gain → ics_info → section/scalefactor/tns/spectral，
+            // 两通道窗型可不同，无 M/S/强度立体声
+            return [$this->readSingleChannel($r, $rateIndex, 0), $this->readSingleChannel($r, $rateIndex, 1)];
+        }
+        $ics = $this->readIcsInfo($r);
+        $msMask = $r->read(2);
+        $msFlags = [];
+        if ($msMask === 1) {
+            for ($group = 0; $group < count($ics[3]); ++$group) {
+                for ($band = 0; $band < $ics[0]; ++$band) {
+                    $msFlags[$group][$band] = $r->read(1);
+                }
+            }
+        }
+        $gain = $r->read(8);
+        $this->readingChannel = 0;
+        $a = $this->readChannel($r, $gain, $ics, $rateIndex);
+        $gain = $r->read(8);
+        $this->readingChannel = 1;
+        $b = $this->readChannel($r, $gain, $ics, $rateIndex);
+        if ($msMask !== 0) {
+            $this->applyMsStereo($a, $b, $ics, $msMask, $msFlags);
+        }
+        $this->applyIntensityStereo($a, $b, $ics, $msMask);
+        $offsets = $ics[2] === 2 ? [0, 4, 8, 12, 16, 20, 28, 36, 44, 56, 68, 80, 96, 112, 128] : AacTables::SWB_48K;
+        $this->applyTns($a, $this->channelTns[0], $ics[2], $ics[3], $offsets, $ics[0], $rateIndex);
+        $this->applyTns($b, $this->channelTns[1], $ics[2], $ics[3], $offsets, $ics[0], $rateIndex);
+        return [$this->imdct($a, 0, $ics[1], $ics[2]), $this->imdct($b, 1, $ics[1], $ics[2])];
     }
 
     private function readIcsInfo(AacBitReader $r): array
