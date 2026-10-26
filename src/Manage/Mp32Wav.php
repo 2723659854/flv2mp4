@@ -6,6 +6,7 @@ use RuntimeException;
 
 /**
  * @purpose MPEG-1 Layer III MP3 解码并封装为 WAV
+ * 并行模式：MP3 解码子进程与 WAV 封装子进程通过管道同时进行。
  * @author yanglong
  * @time 2026年9月8日15:09:48
  */
@@ -22,22 +23,16 @@ final class Mp32Wav
 
     public function run(): array
     {
-        $pcmFile = $this->outputFile . '.pcm.' . bin2hex(random_bytes(6));
-        try {
-            $pcm = (new Mp32Pcm($this->inputFile, $pcmFile))->run();
-            $wav = (new Pcm2Wav(
-                $pcmFile,
-                $this->outputFile,
-                $pcm['sampleRate'],
-                $pcm['channels']
-            ))->run();
-            $wav['source'] = $this->inputFile;
-            $wav['pcmBytes'] = $pcm['bytes'];
-            return $wav;
-        } finally {
-            if (is_file($pcmFile)) {
-                @unlink($pcmFile);
-            }
-        }
+        $result = AudioParallelPipeline::run('mp3', $this->inputFile, 'wav', $this->outputFile);
+        return [
+            'output' => $this->outputFile,
+            'sampleRate' => $result['decode']['sampleRate'],
+            'channels' => $result['decode']['channels'],
+            'bitsPerSample' => $result['encode']['bitsPerSample'],
+            'bytes' => $result['encode']['bytes'],
+            'duration' => $result['encode']['duration'],
+            'source' => $this->inputFile,
+            'pcmBytes' => $result['decode']['bytes'],
+        ];
     }
 }

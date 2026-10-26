@@ -993,9 +993,9 @@ class Client
      * @param int $preSkip Opus pre-skip
      * @return array
      */
-    public static function runAac2Opus(string $inputFile, string $outputFile, int $preSkip = 312): array
+    public static function runAac2Opus(string $inputFile, string $outputFile, int $preSkip = 312, ?callable $progress = null): array
     {
-        return (new \Xiaosongshu\Flv2mp4\Manage\Aac2Opus($inputFile, $outputFile, $preSkip))->run();
+        return (new \Xiaosongshu\Flv2mp4\Manage\Aac2Opus($inputFile, $outputFile, $preSkip, $progress))->run();
     }
 
     /**

@@ -24,7 +24,9 @@ final class Pcm2Opus
         private readonly string $outputFile,
         private readonly int $sampleRate = self::SAMPLE_RATE,
         private readonly int $channels = 1,
-        private readonly int $preSkip = 312
+        private readonly int $preSkip = 312,
+        /** 进度回调 fn(int $packets, float $audioSeconds)，每 500 包回调一次 */
+        private readonly ?\Closure $onProgress = null
     ) {
         if (!is_file($inputFile)) {
             throw new RuntimeException("PCM 文件不存在: {$inputFile}");
@@ -78,6 +80,9 @@ final class Pcm2Opus
                     );
                     $inputSamples += self::FRAME_SAMPLES;
                     ++$packets;
+                    if ($this->onProgress !== null && $packets % 500 === 0) {
+                        ($this->onProgress)($packets, $inputSamples / self::SAMPLE_RATE);
+                    }
                 }
             }
 

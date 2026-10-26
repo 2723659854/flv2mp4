@@ -7,6 +7,7 @@ use RuntimeException;
 
 /**
  * @purpose 将PCM WAV封装为 Ogg Opus。
+ * 并行模式：WAV 解码子进程与 Opus 编码子进程（编码侧流式下混）通过管道同时进行。
  * @author yanglong
  * @time 2026年9月15日10:40:36
  */
@@ -27,99 +28,33 @@ final class Wav2Opus
 
     public function run(): array
     {
-        $directory = dirname($this->outputFile);
-        if (!is_dir($directory) && !mkdir($directory, 0777, true) && !is_dir($directory)) {
-            throw new RuntimeException("无法创建输出目录: {$directory}");
-        }
-
-        $prefix = $directory . DIRECTORY_SEPARATOR . '.wav2opus.' . bin2hex(random_bytes(6));
-        $pcmFile = $prefix . '.pcm';
-        $monoFile = $prefix . '.mono.pcm';
-
-        try {
-            $wav = (new Wav2Pcm($this->inputFile, $pcmFile))->run();
-            if ($wav['audioFormat'] !== 1 || $wav['bitsPerSample'] !== 16) {
-                throw new InvalidArgumentException('纯 PHP Opus 编码器只支持 16-bit 未压缩 PCM WAV');
-            }
-            if ($wav['sampleRate'] !== 48000) {
-                throw new InvalidArgumentException('纯 PHP Opus 编码器只支持 48000 Hz WAV');
-            }
-            if ($wav['channels'] !== 1 && $wav['channels'] !== 2) {
-                throw new InvalidArgumentException('纯 PHP Opus 编码器只支持单声道或双声道 WAV');
-            }
-
-            $encodePcmFile = $pcmFile;
-            $channels = 1;
-            if ($wav['channels'] === 2) {
-                $this->downmixStereoToMono($pcmFile, $monoFile);
-                $encodePcmFile = $monoFile;
-            }
-
-            $opus = (new Pcm2Opus(
-                $encodePcmFile,
-                $this->outputFile,
-                $wav['sampleRate'],
-                $channels,
-                $this->preSkip
-            ))->run();
-
-            return [
-                'output' => $opus['output'],
-                'sampleRate' => $opus['sampleRate'],
-                'channels' => $opus['channels'],
-                'preSkip' => $opus['preSkip'],
-                'bytes' => $opus['bytes'],
-                'packets' => $opus['packets'],
-                'samples' => $opus['samples'],
-                'duration' => $opus['duration'],
-            ];
-        } finally {
-            foreach ([$pcmFile, $monoFile] as $file) {
-                if (is_file($file)) {
-                    @unlink($file);
+        $result = AudioParallelPipeline::run(
+            'wav',
+            $this->inputFile,
+            'opus',
+            $this->outputFile,
+            ['preSkip' => $this->preSkip],
+            function (array $meta): void {
+                if ($meta['audioFormat'] !== 1 || $meta['bitsPerSample'] !== 16) {
+                    throw new InvalidArgumentException('纯 PHP Opus 编码器只支持 16-bit 未压缩 PCM WAV');
+                }
+                if ($meta['sampleRate'] !== 48000) {
+                    throw new InvalidArgumentException('纯 PHP Opus 编码器只支持 48000 Hz WAV');
+                }
+                if ($meta['channels'] !== 1 && $meta['channels'] !== 2) {
+                    throw new InvalidArgumentException('纯 PHP Opus 编码器只支持单声道或双声道 WAV');
                 }
             }
-        }
-    }
-
-    private function downmixStereoToMono(string $inputFile, string $outputFile): void
-    {
-        $input = fopen($inputFile, 'rb');
-        $output = fopen($outputFile, 'wb');
-        if ($input === false || $output === false) {
-            if (is_resource($input)) fclose($input);
-            if (is_resource($output)) fclose($output);
-            throw new RuntimeException('无法创建 WAV 单声道下混文件');
-        }
-
-        try {
-            $buffer = '';
-            while (!feof($input)) {
-                $data = fread($input, 1024 * 1024);
-                if ($data === false) {
-                    throw new RuntimeException('读取立体声 PCM 失败');
-                }
-                $buffer .= $data;
-                $usable = strlen($buffer) - (strlen($buffer) % 4);
-                for ($offset = 0; $offset < $usable; $offset += 4) {
-                    $left = unpack('v', substr($buffer, $offset))[1];
-                    $right = unpack('v', substr($buffer, $offset + 2))[1];
-                    if ($left >= 32768) $left -= 65536;
-                    if ($right >= 32768) $right -= 65536;
-                    $mono = (int) max(-32768, min(32767, round(($left + $right) * 0.5)));
-                    $packed = pack('v', $mono < 0 ? $mono + 65536 : $mono);
-                    if (fwrite($output, $packed) !== 2) {
-                        throw new RuntimeException('写入单声道 PCM 失败');
-                    }
-                }
-                $buffer = substr($buffer, $usable);
-            }
-            if ($buffer !== '') {
-                throw new RuntimeException('立体声 PCM 数据不完整');
-            }
-        } finally {
-            fclose($input);
-            fclose($output);
-        }
+        );
+        return [
+            'output' => $this->outputFile,
+            'sampleRate' => $result['encode']['sampleRate'],
+            'channels' => $result['encode']['channels'],
+            'preSkip' => $result['encode']['preSkip'],
+            'bytes' => $result['encode']['bytes'],
+            'packets' => $result['encode']['packets'],
+            'samples' => $result['encode']['samples'],
+            'duration' => $result['encode']['duration'],
+        ];
     }
 }

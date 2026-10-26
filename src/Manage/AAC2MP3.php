@@ -23,6 +23,22 @@ final class AAC2MP3
             throw new InvalidArgumentException('输出格式仅允许 aac 或 mp3');
         }
         if (!is_file($inputFile)) throw new RuntimeException("输入文件不存在: {$inputFile}");
+        if (strtolower($format) === 'mp3') {
+            // 并行路径：解码子进程（含 AAC/MP4/FLV 提取）与 MP3 编码子进程同时进行
+            $result = AudioParallelPipeline::run('aac', $inputFile, 'mp3', $outputFile, [], function (array $meta): void {
+                if (!in_array($meta['sampleRate'], Config::SAMPLE_RATES, true)) {
+                    throw new RuntimeException("MP3 编码器不支持 {$meta['sampleRate']} Hz AAC 音频");
+                }
+            });
+            return [
+                'output' => $outputFile,
+                'format' => 'mp3',
+                'sampleRate' => $result['decode']['sampleRate'],
+                'channels' => $result['decode']['channels'],
+                'bytes' => $result['encode']['bytes'],
+                'frames' => $result['decode']['frames'],
+            ];
+        }
         $input = fopen($inputFile, 'rb');
         if (!$input) throw new RuntimeException('无法读取输入文件');
         try {
