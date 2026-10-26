@@ -1,5 +1,6 @@
 <?php
 ini_set('memory_limit', '2048M');
+gc_disable(); // 常驻转码进程无循环引用临时数据，省去GC根缓冲簿记（与 audio-worker.php 一致）
 use Xiaosongshu\Flv2mp4\Opus\OpusWorkerServer;
 
 try {

@@ -46,13 +46,15 @@ final class AudioParallelPipeline
             throw new RuntimeException("找不到 audio-worker 脚本: {$script}");
         }
         $nullDevice = DIRECTORY_SEPARATOR === '\\' ? 'NUL' : '/dev/null';
+        // 转码为 CPU 密集型纯 PHP 计算，子进程启用 OPcache+JIT（JIT 不改变输出码流）
+        $jitArgs = PHP_VERSION_ID >= 80000 ? ['-d', 'opcache.enable_cli=1', '-d', 'opcache.jit_buffer_size=64M'] : [];
 
         $dec = null;
         $enc = null;
         $dPipes = [];
         $ePipes = [];
         try {
-            $decCmd = [PHP_BINARY, $script, 'decode', $decodeFormat, $inputFile];
+            $decCmd = [PHP_BINARY, ...$jitArgs, $script, 'decode', $decodeFormat, $inputFile];
             foreach ($decodeOptions as $key => $value) {
                 $decCmd[] = '--' . $key . '=' . $value;
             }
@@ -75,7 +77,10 @@ final class AudioParallelPipeline
             }
 
             $options = $encodeOptions instanceof Closure ? $encodeOptions($decMeta) : $encodeOptions;
-            $encCmd = [PHP_BINARY, $script, 'encode', $encodeFormat, $outputFile,
+            // opus 编码器（RangeEncoder）在 JIT 下存在数值偏差（不同输入可能改写码流或触发
+            // "Invalid range interval"），实测 mp3/aac 编码与 aac/mp3/opus 解码均逐字节一致，仅此处排除
+            $encJitArgs = $encodeFormat === 'opus' ? [] : $jitArgs;
+            $encCmd = [PHP_BINARY, ...$encJitArgs, $script, 'encode', $encodeFormat, $outputFile,
                 '--rate=' . (int)$decMeta['sampleRate'], '--channels=' . (int)$decMeta['channels']];
             if (isset($options['bitrate'])) {
                 $encCmd[] = '--bitrate=' . (int)$options['bitrate'];
@@ -104,12 +109,14 @@ final class AudioParallelPipeline
                 }
             } catch (RuntimeException $relayError) {
                 // 写入失败通常是编码器已崩溃：取回其 stderr 中的真实错误原因
+                stream_set_blocking($ePipes[2], false);
+                $encStderr = (string)stream_get_contents($ePipes[2]);
                 $status = proc_get_status($enc);
                 if (!$status['running']) {
                     [, $encError] = self::readEvents($ePipes[2], null, 'encode', false);
                     throw new RuntimeException($encError ?? $relayError->getMessage(), 0, $relayError);
                 }
-                throw $relayError;
+                throw new RuntimeException($relayError->getMessage() . '；编码器 stderr: ' . $encStderr, 0, $relayError);
             }
             // 解码器提前崩溃时中止整条管线，避免产出截断文件
             $status = proc_get_status($dec);
