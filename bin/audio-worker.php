@@ -54,6 +54,23 @@ function writeAll($handle, string $data): void
     }
 }
 
+/**
+ * Windows 下刚 fclose 的文件可能被防病毒/索引服务短暂锁定导致 rename 拒绝，
+ * 失败时以 500ms 间隔重试（总窗口约 10 秒），仍失败则按原错误语义抛出。
+ */
+function renameWithRetry(string $part, string $outputFile, string $error): void
+{
+    for ($i = 0; ; ++$i) {
+        if (@rename($part, $outputFile)) {
+            return;
+        }
+        if ($i >= 20) {
+            throw new RuntimeException($error);
+        }
+        usleep(500000);
+    }
+}
+
 /** 解析 --key=value 形式的命令行选项 */
 function cliOptions(array $argv): array
 {
@@ -219,6 +236,8 @@ function decodeOpus(string $inputFile, string $gainQ8): void
     $decoder = new OpusDecoder($channels, $rate);
     $samplesTotal = 0;
     $nextProgress = 0;
+    // 逐包写 stdout（每包仅 ~2KB）在 Windows 管道上开销大，缓冲到 256KB 再写
+    $buffer = '';
     foreach ($packets as $packet) {
         $samples = $decoder->decodeFloat($packet['data']);
         $trimStart = $packet['trimStartSamples'];
@@ -232,30 +251,56 @@ function decodeOpus(string $inputFile, string $gainQ8): void
             }
             unset($sample);
         }
-        writeAll(STDOUT, Pcm16::floatsToS16le($samples, $channels));
+        $buffer .= Pcm16::floatsToS16le($samples, $channels);
+        if (strlen($buffer) >= 262144) {
+            writeAll(STDOUT, $buffer);
+            $buffer = '';
+        }
         $samplesTotal += $packet['durationSamples'] - $trimStart - $trimEnd;
         emitSecondsProgress($samplesTotal / $rate, $nextProgress);
+    }
+    if ($buffer !== '') {
+        writeAll(STDOUT, $buffer);
     }
     sendEvent(['ev' => 'done', 'seconds' => $samplesTotal / $rate, 'samples' => $samplesTotal, 'packets' => count($packets)]);
 }
 
-/** MP3 → PCM：Mp3L3Decoder 仅支持整文件解码（mp3 解码本身很快），meta 在解码后发出 */
+/** MP3 → PCM：decodeStreaming 逐帧解码输出（meta 首帧发出），内存 O(单帧) */
 function decodeMp3(string $inputFile): void
 {
     $data = file_get_contents($inputFile);
     if ($data === false) {
         throw new RuntimeException('无法读取 MP3 文件');
     }
-    $decoded = (new Mp3L3Decoder())->decode($data);
-    unset($data);
-    $rate = $decoded['sampleRate'];
-    $channels = $decoded['channels'];
-    sendEvent(['ev' => 'meta', 'sampleRate' => $rate, 'channels' => $channels]);
-    $pcm = interleaveS16($decoded['planes'], $channels);
-    $length = strlen($pcm);
-    writeAll(STDOUT, $pcm);
-    unset($pcm);
-    sendEvent(['ev' => 'done', 'seconds' => $length / ($channels * 2) / $rate, 'bytes' => $length]);
+    $rate = 0;
+    $channels = 0;
+    $metaSent = false;
+    $bytes = 0;
+    // 按帧写 stdout（每帧仅 ~4.6KB）在 Windows 管道上开销极大（~10ms/次），
+    // 缓冲到 256KB 再写，让生产端写粒度与 wav 解码器一致
+    $buffer = '';
+    (new Mp3L3Decoder())->decodeStreaming($data, function (array $planes, int $ch, int $sr) use (&$rate, &$channels, &$metaSent, &$bytes, &$buffer): void {
+        if (!$metaSent) {
+            $rate = $sr;
+            $channels = $ch;
+            sendEvent(['ev' => 'meta', 'sampleRate' => $rate, 'channels' => $channels]);
+            $metaSent = true;
+        }
+        $buffer .= interleaveS16($planes, $channels);
+        if (strlen($buffer) >= 262144) {
+            writeAll(STDOUT, $buffer);
+            $bytes += strlen($buffer);
+            $buffer = '';
+        }
+    });
+    if (!$metaSent) {
+        throw new RuntimeException('MP3 文件中没有可解码的帧');
+    }
+    if ($buffer !== '') {
+        writeAll(STDOUT, $buffer);
+        $bytes += strlen($buffer);
+    }
+    sendEvent(['ev' => 'done', 'seconds' => $bytes / ($channels * 2) / $rate, 'bytes' => $bytes]);
 }
 
 // ---------------------------------------------------------------- encode
@@ -308,9 +353,7 @@ function encodeWav(string $outputFile, int $rate, int $channels): void
         }
         writeAll($output, wavHeader($dataBytes, $rate, $blockAlign));
         fclose($output);
-        if (!rename($part, $outputFile)) {
-            throw new RuntimeException("无法生成 WAV 文件: {$outputFile}");
-        }
+        renameWithRetry($part, $outputFile, "无法生成 WAV 文件: {$outputFile}");
         sendEvent([
             'ev' => 'done',
             'sampleRate' => $rate,
@@ -371,9 +414,7 @@ function encodeMp3(string $outputFile, int $rate, int $channels, int $bitrate): 
             throw new RuntimeException('未生成输出');
         }
         fclose($output);
-        if (!rename($part, $outputFile)) {
-            throw new RuntimeException("无法生成 MP3 文件: {$outputFile}");
-        }
+        renameWithRetry($part, $outputFile, "无法生成 MP3 文件: {$outputFile}");
         sendEvent([
             'ev' => 'done',
             'sampleRate' => $rate,
@@ -436,9 +477,7 @@ function encodeAac(string $outputFile, int $rate, int $channels, int $bitrate): 
             throw new RuntimeException('未生成输出');
         }
         fclose($output);
-        if (!rename($part, $outputFile)) {
-            throw new RuntimeException("无法生成 AAC 文件: {$outputFile}");
-        }
+        renameWithRetry($part, $outputFile, "无法生成 AAC 文件: {$outputFile}");
         sendEvent([
             'ev' => 'done',
             'sampleRate' => $rate,
@@ -533,9 +572,7 @@ function encodeOpus(string $outputFile, int $rate, int $channels, int $preSkip):
         if (file_put_contents($part, $data) !== strlen($data)) {
             throw new RuntimeException("无法写入 Opus 文件: {$part}");
         }
-        if (!rename($part, $outputFile)) {
-            throw new RuntimeException("无法生成 Opus 文件: {$outputFile}");
-        }
+        renameWithRetry($part, $outputFile, "无法生成 Opus 文件: {$outputFile}");
         sendEvent([
             'ev' => 'done',
             'sampleRate' => 48000,

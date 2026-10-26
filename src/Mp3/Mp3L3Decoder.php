@@ -276,6 +276,70 @@ final class Mp3L3Decoder
         return ['sampleRate' => $this->sampleRate, 'channels' => $this->channels, 'planes' => $planes];
     }
 
+    /**
+     * 流式解码：逐帧回调本帧的 planar float 采样，不累积全量数组，
+     * 供子进程管线按帧向管道写出，内存占用 O(单帧)。
+     * 回调签名 fn(array $framePlanes, int $channels, int $sampleRate): void
+     */
+    public function decodeStreaming(string $data, \Closure $onFrames): void
+    {
+        $this->reservoir = '';
+        $this->sampleRate = 0;
+        $this->channels = 0;
+        $this->synthOff = [0, 0];
+
+        $total = strlen($data);
+        $off = $this->skipId3v2($data);
+
+        while ($off + 4 <= $total) {
+            // 帧同步
+            $v = $this->peekU32($data, $off);
+            if (($v >> 21 & 0x7ff) !== 0x7ff) { $off++; continue; }
+            // ID3v1 尾部标签直接结束
+            if (($v & 0xffffff00) === (ord('T') << 24 | ord('A') << 16 | ord('G') << 8)) break;
+
+            $id = ($v >> 19) & 3;
+            $layer = ($v >> 17) & 3;
+            if ($id !== 3 || $layer !== 1) { $off++; continue; }
+            $bi = ($v >> 12) & 15;
+            $si = ($v >> 10) & 3;
+            $padding = ($v >> 9) & 1;
+            $errorProtection = (($v >> 16) & 1) === 0;
+            $mode = ($v >> 6) & 3;
+            $modeExt = ($v >> 4) & 3;
+            if ($bi === 0 || $si === 3) { $off++; continue; }
+
+            $bitrate = self::BITRATES[$bi] * 1000;
+            $sr = self::SAMPLERATES[$si];
+            $frameLen = intdiv(144 * $bitrate, $sr) + $padding;
+            if ($off + $frameLen > $total) break;
+            if ($frameLen < 4) { $off++; continue; }
+
+            $channels = $mode === 3 ? 1 : 2;
+            if ($this->sampleRate === 0) {
+                $this->sampleRate = $sr;
+                $this->channels = $channels;
+                $this->mdctOv = array_fill(0, $channels, array_fill(0, 32, array_fill(0, 18, 0.0)));
+                $this->synthBuf = array_fill(0, $channels, array_fill(0, 1024, 0.0));
+            } else if ($channels !== $this->channels) {
+                // 声道数变化，重置状态
+                $this->channels = $channels;
+                $this->mdctOv = array_fill(0, $channels, array_fill(0, 32, array_fill(0, 18, 0.0)));
+                $this->synthBuf = array_fill(0, $channels, array_fill(0, 1024, 0.0));
+                $this->synthOff = array_fill(0, $channels, 0);
+            }
+
+            $frame = substr($data, $off, $frameLen);
+            // 每帧独立小数组（decodeFrame 仅向其追加，跨帧状态全在 synthBuf/mdctOv），
+            // 不累积全量样本，内存 O(单帧)
+            $framePlanes = array_fill(0, $channels, []);
+            $this->decodeFrame($frame, $si, $channels, $mode, $modeExt, $errorProtection, $framePlanes);
+            $off += $frameLen;
+
+            $onFrames($framePlanes, $this->channels, $this->sampleRate);
+        }
+    }
+
     private function skipId3v2(string $data): int
     {
         if (strlen($data) >= 10 && substr($data, 0, 3) === 'ID3') {
