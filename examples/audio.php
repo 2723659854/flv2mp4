@@ -21,7 +21,7 @@ require_once __DIR__ . '/vendor/autoload.php';
 
 use Xiaosongshu\Flv2mp4\Client;
 
-$source = $argv[1] ?? __DIR__ . '/test1.mp4';
+$source = $argv[1] ?? __DIR__ . '/base.mp4';
 $outDir = $argv[2] ?? __DIR__ . '/audio_test';
 $tolerance = 1.0; // 产物时长与源素材的最大允许偏差（秒）
 
@@ -45,22 +45,29 @@ function record(string $label, callable $task, string $productFile, float $srcDu
 {
     global $results, $failures;
     $start = microtime(true);
+    if (is_file($productFile)) {
+        @unlink($productFile); // 清掉上一轮残留，FAIL 时表格不会误读旧产物大小
+    }
     try {
         $task();
+        $convTime = microtime(true) - $start;
         if (!is_file($productFile) || filesize($productFile) === 0) {
             throw new RuntimeException('输出文件缺失或为空');
         }
+        $verifyStart = microtime(true);
         $productDuration = wavDurationOf($productFile);
+        $verifyTime = microtime(true) - $verifyStart;
         $drift = abs($productDuration - $srcDuration);
         if ($drift > $tolerance) {
             throw new RuntimeException(sprintf('时长偏差 %.3fs 超出容差 %.1fs', $drift, $tolerance));
         }
-        $results[] = [$label, microtime(true) - $start, filesize($productFile), $srcDuration, $productDuration, 'PASS', ''];
-        echo "  [PASS] {$label} (" . sprintf('%.2fs', microtime(true) - $start) . ')' . PHP_EOL;
+        $results[] = [$label, $convTime, $verifyTime, filesize($productFile), $srcDuration, $productDuration, 'PASS', ''];
+        echo "  [PASS] {$label} (转换 " . sprintf('%.2fs', $convTime)
+            . ' + 校验 ' . sprintf('%.2fs', $verifyTime) . ')' . PHP_EOL;
         return true;
     } catch (Throwable $e) {
         $failures++;
-        $results[] = [$label, microtime(true) - $start, is_file($productFile) ? filesize($productFile) : 0, $srcDuration, null, 'FAIL', $e->getMessage()];
+        $results[] = [$label, microtime(true) - $start, 0.0, is_file($productFile) ? filesize($productFile) : 0, $srcDuration, null, 'FAIL', $e->getMessage()];
         echo "  [FAIL] {$label}: {$e->getMessage()}" . PHP_EOL;
         return false;
     }
@@ -140,97 +147,137 @@ function readWavDuration(string $file): float
 }
 
 /**
- * S16LE 交错 PCM 线性插值重采样（块化，内存平稳）
+ * 流式线性插值重采样：输入 44 字节头 PCM16 WAV（runAac2Wav 产物）→ 48kHz WAV。
+ * 分块读取、跨块 carry 单帧，内存峰值仅单块（~数 MB），支持任意时长素材。
  */
-function resamplePcm(string $pcm, int $srcRate, int $channels, int $outRate): string
+function resampleWav48k(string $inFile, string $outFile, int $srcRate, int $channels): void
 {
-    $frameBytes = $channels * 2;
-    $step = $srcRate / $outRate;
-    $framesIn = intdiv(strlen($pcm), $frameBytes);
-    $out = '';
-    $pos = 0.0; // 输入帧位置
-    while ($pos + 1.0 < $framesIn) {
-        $idx = (int) floor($pos);
-        $frac = $pos - $idx;
-        $chunk = '';
-        for ($ch = 0; $ch < $channels; $ch++) {
-            $o = $idx * $frameBytes + $ch * 2;
-            $a = unpack('v', substr($pcm, $o, 2))[1];
-            $b = unpack('v', substr($pcm, $o + $frameBytes, 2))[1];
-            $a = $a >= 32768 ? $a - 65536 : $a;
-            $b = $b >= 32768 ? $b - 65536 : $b;
-            $v = (int) round($a * (1.0 - $frac) + $b * $frac);
-            if ($v > 32767) {
-                $v = 32767;
-            } elseif ($v < -32768) {
-                $v = -32768;
-            }
-            $chunk .= pack('v', $v < 0 ? $v + 65536 : $v);
-        }
-        $out .= $chunk;
-        $pos += $step;
+    $in = fopen($inFile, 'rb');
+    if ($in === false) {
+        throw new RuntimeException("无法读取 WAV: {$inFile}");
     }
-    return $out;
-}
-
-/**
- * 写标准 44 字节头 WAV
- */
-function writeWav(string $file, string $pcm, int $rate, int $channels): void
-{
-    $dataSize = strlen($pcm);
-    $header = 'RIFF' . pack('V', 36 + $dataSize) . 'WAVE'
-        . 'fmt ' . pack('V', 16) . pack('v', 1) . pack('v', $channels)
-        . pack('V', $rate) . pack('V', $rate * $channels * 2)
-        . pack('v', $channels * 2) . pack('v', 16)
-        . 'data' . pack('V', $dataSize);
-    file_put_contents($file, $header . $pcm);
+    fseek($in, 44); // 跳过标准 44 字节头
+    $out = fopen($outFile, 'wb');
+    if ($out === false) {
+        fclose($in);
+        throw new RuntimeException("无法创建 WAV: {$outFile}");
+    }
+    try {
+        $frameBytes = $channels * 2;
+        $outRate = 48000;
+        $step = $srcRate / $outRate;
+        // 占位头，写完 data 后回卷补真实长度
+        fwrite($out, 'RIFF' . pack('V', 36) . 'WAVE'
+            . 'fmt ' . pack('V', 16) . pack('v', 1) . pack('v', $channels)
+            . pack('V', $outRate) . pack('V', $outRate * $frameBytes)
+            . pack('v', $frameBytes) . pack('v', 16)
+            . 'data' . pack('V', 0));
+        $pos = 0.0;      // 输入帧浮点位置（全局连续）
+        $base = 0;       // 已消费的输入帧数
+        $prevFrame = null; // 上一块最后一帧（跨块插值）
+        $written = 0;
+        while (!feof($in)) {
+            $data = fread($in, 1024 * 1024);
+            if ($data === false || $data === '') {
+                break;
+            }
+            $usable = intdiv(strlen($data), $frameBytes) * $frameBytes;
+            if ($usable === 0) {
+                break;
+            }
+            $samples = unpack('v*', substr($data, 0, $usable));
+            $framesIn = intdiv($usable, $frameBytes);
+            $end = $base + $framesIn;
+            $chunk = '';
+            while ($pos + 1.0 < $end) {
+                $idx = (int) floor($pos);
+                $frac = $pos - $idx;
+                $i0 = $idx - $base; // 块内索引，-1 表示需要上一块尾帧
+                for ($ch = 0; $ch < $channels; ++$ch) {
+                    $a = $i0 < 0 ? $prevFrame[$ch] : $samples[$i0 * $channels + $ch + 1];
+                    $b = $samples[($i0 + 1) * $channels + $ch + 1];
+                    $a = $a >= 32768 ? $a - 65536 : $a;
+                    $b = $b >= 32768 ? $b - 65536 : $b;
+                    $v = (int) round($a * (1.0 - $frac) + $b * $frac);
+                    if ($v > 32767) {
+                        $v = 32767;
+                    } elseif ($v < -32768) {
+                        $v = -32768;
+                    }
+                    $chunk .= pack('v', $v < 0 ? $v + 65536 : $v);
+                }
+                $pos += $step;
+            }
+            $last = ($framesIn - 1) * $channels;
+            $prevFrame = [];
+            for ($ch = 0; $ch < $channels; ++$ch) {
+                $prevFrame[$ch] = $samples[$last + $ch + 1];
+            }
+            $base = $end;
+            fwrite($out, $chunk);
+            $written += strlen($chunk);
+        }
+        // 回卷补真实头长度
+        fseek($out, 0);
+        fwrite($out, 'RIFF' . pack('V', 36 + $written) . 'WAVE'
+            . 'fmt ' . pack('V', 16) . pack('v', 1) . pack('v', $channels)
+            . pack('V', $outRate) . pack('V', $outRate * $frameBytes)
+            . pack('v', $frameBytes) . pack('v', 16)
+            . 'data' . pack('V', $written));
+    } finally {
+        fclose($in);
+        fclose($out);
+    }
 }
 
 $run = static fn(string $m, array $a): mixed => Client::{$m}(...$a);
 $totalStart = microtime(true);
 
+// 每轮产物写入独立 run 子目录：rename 目标永远是全新路径，
+// 规避 Windows 上残留句柄（文件监视/杀毒）占名导致的 rename 失败，且各轮产物可留存对比
+$runDir = $outDir . '/run_' . date('Ymd_His');
+if (!is_dir($runDir) && !mkdir($runDir, 0777, true) && !is_dir($runDir)) {
+    fwrite(STDERR, "无法创建运行目录: {$runDir}" . PHP_EOL);
+    exit(1);
+}
+
 echo "=== 音频转码自检（素材: " . basename($source) . "）===" . PHP_EOL;
 
 echo PHP_EOL . '[1/4] 从 MP4 提取音频 -> WAV' . PHP_EOL;
-$tmpWav = $outDir . '/tmp44k.wav';
+$tmpWav = $runDir . '/tmp44k.wav';
 record('MP4 -> WAV (runAac2Wav)', static fn() => $run('runAac2Wav', [$source, $tmpWav]), $tmpWav, 0, PHP_FLOAT_MAX);
 // 素材准备阶段无法预知源时长，仅要求成功产出
 
 echo PHP_EOL . '[2/4] 重采样 44.1kHz -> 48kHz 作为公共源素材' . PHP_EOL;
-$srcWav = $outDir . '/s.wav';
+$srcWav = $runDir . '/s.wav';
 $wav = readWavMeta($tmpWav);
 if ($wav === null) {
     fwrite(STDERR, '素材准备失败：无法解析提取的 WAV' . PHP_EOL);
     exit(1);
 }
-$pcm = file_get_contents($tmpWav);
-$header = 44; // 提取产物为标准 44 字节头
-$srcPcm = substr($pcm, $header);
-$resampled = resamplePcm($srcPcm, $wav['sampleRate'], $wav['channels'], 48000);
-writeWav($srcWav, $resampled, 48000, $wav['channels']);
+resampleWav48k($tmpWav, $srcWav, $wav['sampleRate'], $wav['channels']);
 $srcDuration = readWavDuration($srcWav);
 printf("  源素材: %d Hz, %d 声道, 时长 %.3f 秒%s", 48000, $wav['channels'], $srcDuration, PHP_EOL);
 
 echo PHP_EOL . '[3/4] 由 WAV 派生 aac/mp3/opus 源素材' . PHP_EOL;
-$srcAac = $outDir . '/s.aac';
-$srcMp3 = $outDir . '/s.mp3';
-$srcOpus = $outDir . '/s.opus';
+$srcAac = $runDir . '/s.aac';
+$srcMp3 = $runDir . '/s.mp3';
+$srcOpus = $runDir . '/s.opus';
 record('WAV -> AAC (runWav2Aac)', static fn() => $run('runWav2Aac', [$srcWav, $srcAac, 128000]), $srcAac, $srcDuration, $tolerance);
 record('WAV -> MP3 (runWav2Mp3)', static fn() => $run('runWav2Mp3', [$srcWav, $srcMp3, 128000]), $srcMp3, $srcDuration, $tolerance);
 record('WAV -> OPUS (runWav2Opus)', static fn() => $run('runWav2Opus', [$srcWav, $srcOpus]), $srcOpus, $srcDuration, $tolerance);
 
 echo PHP_EOL . '[4/4] 12 条转换（4 源 x 3 目标，产物均回环解码校验时长）' . PHP_EOL;
 $matrix = [
-    ['AAC -> MP3', 'runAac2Mp3', [$srcAac, $outDir . '/aac2mp3.mp3', 'mp3'], $outDir . '/aac2mp3.mp3'],
-    ['AAC -> WAV', 'runAac2Wav', [$srcAac, $outDir . '/aac2wav.wav'], $outDir . '/aac2wav.wav'],
-    ['AAC -> OPUS', 'runAac2Opus', [$srcAac, $outDir . '/aac2opus.opus'], $outDir . '/aac2opus.opus'],
-    ['MP3 -> WAV', 'runMp32Wav', [$srcMp3, $outDir . '/mp32wav.wav'], $outDir . '/mp32wav.wav'],
-    ['MP3 -> AAC', 'runMp32Aac', [$srcMp3, $outDir . '/mp32aac.aac', 128000], $outDir . '/mp32aac.aac'],
-    ['MP3 -> OPUS', 'runMp32Opus', [$srcMp3, $outDir . '/mp32opus.opus'], $outDir . '/mp32opus.opus'],
-    ['OPUS -> WAV', 'runOpus2Wav', [$srcOpus, $outDir . '/opus2wav.wav'], $outDir . '/opus2wav.wav'],
-    ['OPUS -> AAC', 'runOpus2Aac', [$srcOpus, $outDir . '/opus2aac.aac', 128000], $outDir . '/opus2aac.aac'],
-    ['OPUS -> MP3', 'runOpus2Mp3', [$srcOpus, $outDir . '/opus2mp3.mp3', 128000], $outDir . '/opus2mp3.mp3'],
+    ['AAC -> MP3', 'runAac2Mp3', [$srcAac, $runDir . '/aac2mp3.mp3', 'mp3'], $runDir . '/aac2mp3.mp3'],
+    ['AAC -> WAV', 'runAac2Wav', [$srcAac, $runDir . '/aac2wav.wav'], $runDir . '/aac2wav.wav'],
+    ['AAC -> OPUS', 'runAac2Opus', [$srcAac, $runDir . '/aac2opus.opus'], $runDir . '/aac2opus.opus'],
+    ['MP3 -> WAV', 'runMp32Wav', [$srcMp3, $runDir . '/mp32wav.wav'], $runDir . '/mp32wav.wav'],
+    ['MP3 -> AAC', 'runMp32Aac', [$srcMp3, $runDir . '/mp32aac.aac', 128000], $runDir . '/mp32aac.aac'],
+    ['MP3 -> OPUS', 'runMp32Opus', [$srcMp3, $runDir . '/mp32opus.opus'], $runDir . '/mp32opus.opus'],
+    ['OPUS -> WAV', 'runOpus2Wav', [$srcOpus, $runDir . '/opus2wav.wav'], $runDir . '/opus2wav.wav'],
+    ['OPUS -> AAC', 'runOpus2Aac', [$srcOpus, $runDir . '/opus2aac.aac', 128000], $runDir . '/opus2aac.aac'],
+    ['OPUS -> MP3', 'runOpus2Mp3', [$srcOpus, $runDir . '/opus2mp3.mp3', 128000], $runDir . '/opus2mp3.mp3'],
 ];
 foreach ($matrix as [$label, $method, $args, $product]) {
     record($label, static fn() => $run($method, $args), $product, $srcDuration, $tolerance);
@@ -239,17 +286,17 @@ foreach ($matrix as [$label, $method, $args, $product]) {
 @unlink($tmpWav);
 
 echo PHP_EOL . '=== 汇总 ===' . PHP_EOL;
-printf("%-16s %8s %10s %9s %9s %6s%s", '转换', '耗时s', '输出B', '源时长s', '产物s', '结果', PHP_EOL);
-foreach ($results as [$label, $elapsed, $bytes, $sd, $pd, $verdict, $error]) {
-    printf("%-16s %8.2f %10d %9.3f %9s %6s%s",
-        $label, $elapsed, $bytes, $sd, $pd === null ? '-' : sprintf('%.3f', $pd), $verdict, PHP_EOL);
+printf("%-16s %8s %8s %10s %9s %9s %6s%s", '转换', '转换s', '校验s', '输出B', '源时长s', '产物s', '结果', PHP_EOL);
+foreach ($results as [$label, $elapsed, $verify, $bytes, $sd, $pd, $verdict, $error]) {
+    printf("%-16s %8.2f %8.2f %10d %9.3f %9s %6s%s",
+        $label, $elapsed, $verify, $bytes, $sd, $pd === null ? '-' : sprintf('%.3f', $pd), $verdict, PHP_EOL);
     if ($error !== '') {
         printf("  └ %s%s", $error, PHP_EOL);
     }
 }
 printf("%s共 %d 条，通过 %d 条，失败 %d 条，总耗时 %.1f 秒%s",
     PHP_EOL, count($results), count($results) - $failures, $failures, microtime(true) - $totalStart, PHP_EOL);
-echo "产物目录: {$outDir}" . PHP_EOL;
+echo "产物目录: {$runDir}" . PHP_EOL;
 exit($failures === 0 ? 0 : 1);
 
 /**
