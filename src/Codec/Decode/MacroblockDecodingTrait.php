@@ -1618,6 +1618,24 @@ trait MacroblockDecodingTrait
         $mbIdx = $mbY * $this->picWidthInMbs + $mbX;
         $this->picMbType[$mbIdx] |= $flags;
         $base = $mbIdx * 16;
+        // 每个 8x8 象限内部一致（构造保证），四象限角点相等 ⇒ 全 16 块一致：
+        // 全部 4x4 块共享同一 mv 数组 zval（COW），免去每 MB 新建 32 个小数组
+        $c00 = $gridL0[0][0];
+        $c10 = $gridL1[0][0];
+        if ($c00 === $gridL0[0][2] && $c00 === $gridL0[2][0] && $c00 === $gridL0[2][2]
+            && $c10 === $gridL1[0][2] && $c10 === $gridL1[2][0] && $c10 === $gridL1[2][2]) {
+            $mv0 = [$c00[0], $c00[1]];
+            $mv1 = [$c10[0], $c10[1]];
+            $r0 = $c00[2];
+            $r1 = $c10[2];
+            for ($i4 = $base, $end = $base + 16; $i4 < $end; $i4++) {
+                $this->picMv0[$i4] = $mv0;
+                $this->picRef0[$i4] = $r0;
+                $this->picMv1[$i4] = $mv1;
+                $this->picRef1[$i4] = $r1;
+            }
+            return;
+        }
         for ($y = 0; $y < 4; $y++) {
             for ($x = 0; $x < 4; $x++) {
                 $i4 = $base + $y * 4 + $x;
@@ -1637,6 +1655,18 @@ trait MacroblockDecodingTrait
             return;
         }
         $mbIdx = $mbY * $this->picWidthInMbs + $mbX;
+        // 与 storeBPicBlocks 同思路：四象限一致时用 array_fill 共享同一 mv zval，
+        // 免去每 MB 新建 4 个 16 项数组 + 32 个 mv 子数组的分配
+        $c00 = $gridL0[0][0];
+        $c10 = $gridL1[0][0] ?? [0, 0, -1];
+        if ($c00 === ($gridL0[0][2] ?? null) && $c00 === ($gridL0[2][0] ?? null) && $c00 === ($gridL0[2][2] ?? null)
+            && $c10 === ($gridL1[0][2] ?? null) && $c10 === ($gridL1[2][0] ?? null) && $c10 === ($gridL1[2][2] ?? null)) {
+            $this->mbMvForDeblock[$mbIdx] = array_fill(0, 16, [$c00[0], $c00[1]]);
+            $this->mbRefForDeblock[$mbIdx] = array_fill(0, 16, $c00[2]);
+            $this->mbMvL1ForDeblock[$mbIdx] = array_fill(0, 16, [$c10[0], $c10[1]]);
+            $this->mbRefL1ForDeblock[$mbIdx] = array_fill(0, 16, $c10[2]);
+            return;
+        }
         $mvArr0 = [];
         $refArr0 = [];
         $mvArr1 = [];
@@ -1739,19 +1769,39 @@ trait MacroblockDecodingTrait
         }
 
         // 运动补偿（网格在每个 8x8 内一致）
-        for ($i8 = 0; $i8 < 4; $i8++) {
-            $bx = ($i8 & 1) * 2;
-            $by = ($i8 >> 1) * 2;
-            $l0 = $gridL0[$by][$bx];
-            $l1 = $gridL1[$by][$bx];
-            $dstX = $mbX * 16 + $bx * 4;
-            $dstY = $mbY * 16 + $by * 4;
-            if ($l0[2] >= 0 && $l1[2] >= 0) {
-                $this->performBiPredBlock($dstX, $dstY, 8, 8, $l0[0], $l0[1], $l0[2], $l1[0], $l1[1], $l1[2]);
-            } elseif ($l0[2] >= 0) {
-                $this->mcBBlockTo($dstX, $dstY, 8, 8, $l0[0], $l0[1], 0, $l0[2]);
-            } elseif ($l1[2] >= 0) {
-                $this->mcBBlockTo($dstX, $dstY, 8, 8, $l1[0], $l1[1], 1, $l1[2]);
+        // 四象限 (mv,ref) 完全一致时合并为一次 16x16 MC。等价性：luma 相位
+        // (dstX*4+mv)&3 与 chroma 相位 (dstX*4+mv)&7 中 dstX 为 8/16 对齐贡献 0，
+        // 相位仅由 mv 低位决定，与象限内位置无关；interior/非 interior 两条路径
+        // 本身对合并前后逐像素严格等价（clamp 为逐像素独立判定）→ bit 级一致。
+        $a0 = $gridL0[0][0];
+        $a1 = $gridL1[0][0];
+        $merged = $a0 === $gridL0[0][2] && $a0 === $gridL0[2][0] && $a0 === $gridL0[2][2]
+            && $a1 === $gridL1[0][2] && $a1 === $gridL1[2][0] && $a1 === $gridL1[2][2];
+        if ($merged) {
+            $dstX = $mbX * 16;
+            $dstY = $mbY * 16;
+            if ($a0[2] >= 0 && $a1[2] >= 0) {
+                $this->performBiPredBlock($dstX, $dstY, 16, 16, $a0[0], $a0[1], $a0[2], $a1[0], $a1[1], $a1[2]);
+            } elseif ($a0[2] >= 0) {
+                $this->mcBBlockTo($dstX, $dstY, 16, 16, $a0[0], $a0[1], 0, $a0[2]);
+            } elseif ($a1[2] >= 0) {
+                $this->mcBBlockTo($dstX, $dstY, 16, 16, $a1[0], $a1[1], 1, $a1[2]);
+            }
+        } else {
+            for ($i8 = 0; $i8 < 4; $i8++) {
+                $bx = ($i8 & 1) * 2;
+                $by = ($i8 >> 1) * 2;
+                $l0 = $gridL0[$by][$bx];
+                $l1 = $gridL1[$by][$bx];
+                $dstX = $mbX * 16 + $bx * 4;
+                $dstY = $mbY * 16 + $by * 4;
+                if ($l0[2] >= 0 && $l1[2] >= 0) {
+                    $this->performBiPredBlock($dstX, $dstY, 8, 8, $l0[0], $l0[1], $l0[2], $l1[0], $l1[1], $l1[2]);
+                } elseif ($l0[2] >= 0) {
+                    $this->mcBBlockTo($dstX, $dstY, 8, 8, $l0[0], $l0[1], 0, $l0[2]);
+                } elseif ($l1[2] >= 0) {
+                    $this->mcBBlockTo($dstX, $dstY, 8, 8, $l1[0], $l1[1], 1, $l1[2]);
+                }
             }
         }
 

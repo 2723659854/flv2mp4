@@ -100,6 +100,22 @@ trait MotionCompensationTrait
                     }
                     return;
                 }
+                // B_Direct/B_Skip 主体是 8 宽块（4 象限 8x8）：整数 MV 高频，同样展开
+                if ($blockW === 8) {
+                    for ($j = 0; $j < $blockH; $j++) {
+                        $s = ($intY + $j) * $refStride + $intX;
+                        $d = ($dstY + $j) * $dstStride + $dstX;
+                        $dstPlane[$d]     = $refPlane[$s];
+                        $dstPlane[$d + 1] = $refPlane[$s + 1];
+                        $dstPlane[$d + 2] = $refPlane[$s + 2];
+                        $dstPlane[$d + 3] = $refPlane[$s + 3];
+                        $dstPlane[$d + 4] = $refPlane[$s + 4];
+                        $dstPlane[$d + 5] = $refPlane[$s + 5];
+                        $dstPlane[$d + 6] = $refPlane[$s + 6];
+                        $dstPlane[$d + 7] = $refPlane[$s + 7];
+                    }
+                    return;
+                }
                 for ($j = 0; $j < $blockH; $j++) {
                     $srcBase = ($intY + $j) * $refStride + $intX;
                     $dstBase = ($dstY + $j) * $dstStride + $dstX;
