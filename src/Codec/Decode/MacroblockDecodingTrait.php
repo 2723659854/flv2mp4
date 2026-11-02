@@ -1105,6 +1105,26 @@ trait MacroblockDecodingTrait
         if ($this->refFrameY === null) {
             return;
         }
+        $lumaRefX0 = $dstX * 4 + $mv0X;
+        $lumaRefY0 = $dstY * 4 + $mv0Y;
+        $lumaRefX1 = $dstX * 4 + $mv1X;
+        $lumaRefY1 = $dstY * 4 + $mv1Y;
+        // 双参考均全整数（luma &3==0 且 chroma &7==0，后者蕴含前者）时，
+        // 原路径 = L0 拷入当前面 + L1 拷入临时面 + 合并趟（共 3 趟 + 临时面分配）。
+        // 融合为直读双参考面的单趟写出，像素级 bit 等价（B_Direct 零 MV 主体全走此路径）。
+        if ((($lumaRefX0 | $lumaRefY0 | $lumaRefX1 | $lumaRefY1) & 7) === 0) {
+            $this->ensureBRefBytes(0, $refIdx0, false, false);
+            $this->ensureBRefBytes(1, $refIdx1, false, false);
+            $r0 = $this->getBRefPlanes(0, $refIdx0);
+            $r1 = $this->getBRefPlanes(1, $refIdx1);
+            $w0 = 32;
+            if ($this->weightedBipredIdc === 2) {
+                $w0 = $this->getBImplicitWeight0($refIdx0, $refIdx1);
+            }
+            $this->biPredFusedInt($r0, $r1, $lumaRefX0, $lumaRefY0, $lumaRefX1, $lumaRefY1,
+                $dstX, $dstY, $blockW, $blockH, $w0);
+            return;
+        }
         // L0 直接写入当前平面；L1 写临时平面后按隐式权重合并（见下方合并循环）
         $this->mcBBlockTo($dstX, $dstY, $blockW, $blockH, $mv0X, $mv0Y, 0, $refIdx0);
         $tmpY = array_fill(0, $blockH * $blockW, 0);
@@ -1112,8 +1132,8 @@ trait MacroblockDecodingTrait
         $ch = intdiv($blockH, 2);
         $tmpU = array_fill(0, $ch * $cw, 0);
         $tmpV = array_fill(0, $ch * $cw, 0);
-        $lumaRefX = $dstX * 4 + $mv1X;
-        $lumaRefY = $dstY * 4 + $mv1Y;
+        $lumaRefX = $lumaRefX1;
+        $lumaRefY = $lumaRefY1;
         $needLuma = ($lumaRefX & 3) !== 0 || ($lumaRefY & 3) !== 0;
         $needChroma = ($lumaRefX & 7) !== 0 || ($lumaRefY & 7) !== 0;
         $this->ensureBRefBytes(1, $refIdx1, $needLuma, $needChroma);
@@ -1177,6 +1197,225 @@ trait MacroblockDecodingTrait
                     $avg = ($w0 * $this->vPlane[$urow + $x] + $w1 * $tmpV[$trow + $x] + 32) >> 6;
                     $this->vPlane[$urow + $x] = $avg < 0 ? 0 : ($avg > 255 ? 255 : $avg);
                 }
+            }
+        }
+    }
+
+    /**
+     * 双参考全整数 bi-pred 融合：直读 L0/L1 参考面单趟写出，等价于
+     * 「L0 整数拷入 dst + L1 整数拷入 tmp + (p0+p1+1)>>1 合并」三趟的 bit 级结果。
+     * 输入像素均在 [0,255]（解码残差加法已裁剪），等权 (p0+p1+1)>>1 ≤ 255、
+     * 加权 (w0*p0+w1*p1+32)>>6 ≤ 255（w0+w1=64），故合并结果无需再裁剪。
+     */
+    private function biPredFusedInt(
+        array $r0, array $r1,
+        int $lx0, int $ly0, int $lx1, int $ly1,
+        int $dstX, int $dstY, int $blockW, int $blockH, int $w0
+    ): void {
+        // 亮度：luma 1/4pel >> 2 即整数位（此路径已保证 &7==0，即 &3==0）
+        $this->biPredMergePlane(
+            $r0['y'], $r0['strideY'], $lx0 >> 2, $ly0 >> 2, $r0['widthY'], $r0['heightY'],
+            $r1['y'], $r1['strideY'], $lx1 >> 2, $ly1 >> 2, $r1['widthY'], $r1['heightY'],
+            $this->yPlane, $this->width, $dstX, $dstY, $blockW, $blockH, $w0
+        );
+        // 色度：chroma 坐标（chroma 像素）= luma 1/4pel / 8（&7==0 已保证整数）
+        $cw = $blockW >> 1;
+        $ch = $blockH >> 1;
+        $u0 = $r0['u']; $v0 = $r0['v']; $u1 = $r1['u']; $v1 = $r1['v'];
+        $s0 = $r0['strideUv']; $s1 = $r1['strideUv'];
+        $ax = $lx0 >> 3; $ay = $ly0 >> 3;
+        $bx = $lx1 >> 3; $by = $ly1 >> 3;
+        $in0 = $ax >= 0 && $ay >= 0 && $ax + $cw <= $r0['widthUv'] && $ay + $ch <= $r0['heightUv'];
+        $in1 = $bx >= 0 && $by >= 0 && $bx + $cw <= $r1['widthUv'] && $by + $ch <= $r1['heightUv'];
+        $cs = intdiv($this->width, 2);
+        $dcx = $dstX >> 1;
+        $dcy = $dstY >> 1;
+        if ($in0 && $in1) {
+            for ($j = 0; $j < $ch; $j++) {
+                $ra = ($ay + $j) * $s0 + $ax;
+                $rb = ($by + $j) * $s1 + $bx;
+                $d = ($dcy + $j) * $cs + $dcx;
+                if ($w0 === 32) {
+                    for ($i = 0; $i < $cw; $i++) {
+                        $this->uPlane[$d + $i] = ($u0[$ra + $i] + $u1[$rb + $i] + 1) >> 1;
+                        $this->vPlane[$d + $i] = ($v0[$ra + $i] + $v1[$rb + $i] + 1) >> 1;
+                    }
+                } else {
+                    $w1 = 64 - $w0;
+                    for ($i = 0; $i < $cw; $i++) {
+                        $this->uPlane[$d + $i] = ($w0 * $u0[$ra + $i] + $w1 * $u1[$rb + $i] + 32) >> 6;
+                        $this->vPlane[$d + $i] = ($w0 * $v0[$ra + $i] + $w1 * $v1[$rb + $i] + 32) >> 6;
+                    }
+                }
+            }
+            return;
+        }
+        // 越界回退：逐像素 clamp（与 mcChromaPairToCore 越界路径同口径）
+        $mw0 = $r0['widthUv'] - 1; $mh0 = $r0['heightUv'] - 1;
+        $mw1 = $r1['widthUv'] - 1; $mh1 = $r1['heightUv'] - 1;
+        if ($w0 === 32) {
+            for ($j = 0; $j < $ch; $j++) {
+                $ayj = $ay + $j; $ayj = $ayj < 0 ? 0 : ($ayj > $mh0 ? $mh0 : $ayj);
+                $byj = $by + $j; $byj = $byj < 0 ? 0 : ($byj > $mh1 ? $mh1 : $byj);
+                $ra = $ayj * $s0;
+                $rb = $byj * $s1;
+                $d = ($dcy + $j) * $cs + $dcx;
+                for ($i = 0; $i < $cw; $i++) {
+                    $axi = $ax + $i; $axi = $axi < 0 ? 0 : ($axi > $mw0 ? $mw0 : $axi);
+                    $bxi = $bx + $i; $bxi = $bxi < 0 ? 0 : ($bxi > $mw1 ? $mw1 : $bxi);
+                    $this->uPlane[$d + $i] = ($u0[$ra + $axi] + $u1[$rb + $bxi] + 1) >> 1;
+                    $this->vPlane[$d + $i] = ($v0[$ra + $axi] + $v1[$rb + $bxi] + 1) >> 1;
+                }
+            }
+            return;
+        }
+        $w1 = 64 - $w0;
+        for ($j = 0; $j < $ch; $j++) {
+            $ayj = $ay + $j; $ayj = $ayj < 0 ? 0 : ($ayj > $mh0 ? $mh0 : $ayj);
+            $byj = $by + $j; $byj = $byj < 0 ? 0 : ($byj > $mh1 ? $mh1 : $byj);
+            $ra = $ayj * $s0;
+            $rb = $byj * $s1;
+            $d = ($dcy + $j) * $cs + $dcx;
+            for ($i = 0; $i < $cw; $i++) {
+                $axi = $ax + $i; $axi = $axi < 0 ? 0 : ($axi > $mw0 ? $mw0 : $axi);
+                $bxi = $bx + $i; $bxi = $bxi < 0 ? 0 : ($bxi > $mw1 ? $mw1 : $bxi);
+                $this->uPlane[$d + $i] = ($w0 * $u0[$ra + $axi] + $w1 * $u1[$rb + $bxi] + 32) >> 6;
+                $this->vPlane[$d + $i] = ($w0 * $v0[$ra + $axi] + $w1 * $v1[$rb + $bxi] + 32) >> 6;
+            }
+        }
+    }
+
+    /**
+     * 双参考全整数平面的加权合并（亮度）：等价于
+     * 「L0 拷入 dst + L1 拷入 tmp + (w0*p0+w1*p1+32)>>6 合并」的 bit 级结果。
+     */
+    private function biPredMergePlane(
+        array $p0, int $s0, int $x0, int $y0, int $wd0, int $hd0,
+        array $p1, int $s1, int $x1, int $y1, int $wd1, int $hd1,
+        array &$dst, int $dStride, int $dX, int $dY,
+        int $blockW, int $blockH, int $w0
+    ): void {
+        $in0 = $x0 >= 0 && $y0 >= 0 && $x0 + $blockW <= $wd0 && $y0 + $blockH <= $hd0;
+        $in1 = $x1 >= 0 && $y1 >= 0 && $x1 + $blockW <= $wd1 && $y1 + $blockH <= $hd1;
+        if ($in0 && $in1) {
+            if ($blockW === 16) {
+                for ($j = 0; $j < $blockH; $j++) {
+                    $a = ($y0 + $j) * $s0 + $x0;
+                    $b = ($y1 + $j) * $s1 + $x1;
+                    $d = ($dY + $j) * $dStride + $dX;
+                    if ($w0 === 32) {
+                        $dst[$d]      = ($p0[$a]      + $p1[$b]      + 1) >> 1;
+                        $dst[$d + 1]  = ($p0[$a + 1]  + $p1[$b + 1]  + 1) >> 1;
+                        $dst[$d + 2]  = ($p0[$a + 2]  + $p1[$b + 2]  + 1) >> 1;
+                        $dst[$d + 3]  = ($p0[$a + 3]  + $p1[$b + 3]  + 1) >> 1;
+                        $dst[$d + 4]  = ($p0[$a + 4]  + $p1[$b + 4]  + 1) >> 1;
+                        $dst[$d + 5]  = ($p0[$a + 5]  + $p1[$b + 5]  + 1) >> 1;
+                        $dst[$d + 6]  = ($p0[$a + 6]  + $p1[$b + 6]  + 1) >> 1;
+                        $dst[$d + 7]  = ($p0[$a + 7]  + $p1[$b + 7]  + 1) >> 1;
+                        $dst[$d + 8]  = ($p0[$a + 8]  + $p1[$b + 8]  + 1) >> 1;
+                        $dst[$d + 9]  = ($p0[$a + 9]  + $p1[$b + 9]  + 1) >> 1;
+                        $dst[$d + 10] = ($p0[$a + 10] + $p1[$b + 10] + 1) >> 1;
+                        $dst[$d + 11] = ($p0[$a + 11] + $p1[$b + 11] + 1) >> 1;
+                        $dst[$d + 12] = ($p0[$a + 12] + $p1[$b + 12] + 1) >> 1;
+                        $dst[$d + 13] = ($p0[$a + 13] + $p1[$b + 13] + 1) >> 1;
+                        $dst[$d + 14] = ($p0[$a + 14] + $p1[$b + 14] + 1) >> 1;
+                        $dst[$d + 15] = ($p0[$a + 15] + $p1[$b + 15] + 1) >> 1;
+                    } else {
+                        $w1 = 64 - $w0;
+                        $dst[$d]      = ($w0 * $p0[$a]      + $w1 * $p1[$b]      + 32) >> 6;
+                        $dst[$d + 1]  = ($w0 * $p0[$a + 1]  + $w1 * $p1[$b + 1]  + 32) >> 6;
+                        $dst[$d + 2]  = ($w0 * $p0[$a + 2]  + $w1 * $p1[$b + 2]  + 32) >> 6;
+                        $dst[$d + 3]  = ($w0 * $p0[$a + 3]  + $w1 * $p1[$b + 3]  + 32) >> 6;
+                        $dst[$d + 4]  = ($w0 * $p0[$a + 4]  + $w1 * $p1[$b + 4]  + 32) >> 6;
+                        $dst[$d + 5]  = ($w0 * $p0[$a + 5]  + $w1 * $p1[$b + 5]  + 32) >> 6;
+                        $dst[$d + 6]  = ($w0 * $p0[$a + 6]  + $w1 * $p1[$b + 6]  + 32) >> 6;
+                        $dst[$d + 7]  = ($w0 * $p0[$a + 7]  + $w1 * $p1[$b + 7]  + 32) >> 6;
+                        $dst[$d + 8]  = ($w0 * $p0[$a + 8]  + $w1 * $p1[$b + 8]  + 32) >> 6;
+                        $dst[$d + 9]  = ($w0 * $p0[$a + 9]  + $w1 * $p1[$b + 9]  + 32) >> 6;
+                        $dst[$d + 10] = ($w0 * $p0[$a + 10] + $w1 * $p1[$b + 10] + 32) >> 6;
+                        $dst[$d + 11] = ($w0 * $p0[$a + 11] + $w1 * $p1[$b + 11] + 32) >> 6;
+                        $dst[$d + 12] = ($w0 * $p0[$a + 12] + $w1 * $p1[$b + 12] + 32) >> 6;
+                        $dst[$d + 13] = ($w0 * $p0[$a + 13] + $w1 * $p1[$b + 13] + 32) >> 6;
+                        $dst[$d + 14] = ($w0 * $p0[$a + 14] + $w1 * $p1[$b + 14] + 32) >> 6;
+                        $dst[$d + 15] = ($w0 * $p0[$a + 15] + $w1 * $p1[$b + 15] + 32) >> 6;
+                    }
+                }
+                return;
+            }
+            if ($blockW === 8) {
+                for ($j = 0; $j < $blockH; $j++) {
+                    $a = ($y0 + $j) * $s0 + $x0;
+                    $b = ($y1 + $j) * $s1 + $x1;
+                    $d = ($dY + $j) * $dStride + $dX;
+                    if ($w0 === 32) {
+                        $dst[$d]     = ($p0[$a]     + $p1[$b]     + 1) >> 1;
+                        $dst[$d + 1] = ($p0[$a + 1] + $p1[$b + 1] + 1) >> 1;
+                        $dst[$d + 2] = ($p0[$a + 2] + $p1[$b + 2] + 1) >> 1;
+                        $dst[$d + 3] = ($p0[$a + 3] + $p1[$b + 3] + 1) >> 1;
+                        $dst[$d + 4] = ($p0[$a + 4] + $p1[$b + 4] + 1) >> 1;
+                        $dst[$d + 5] = ($p0[$a + 5] + $p1[$b + 5] + 1) >> 1;
+                        $dst[$d + 6] = ($p0[$a + 6] + $p1[$b + 6] + 1) >> 1;
+                        $dst[$d + 7] = ($p0[$a + 7] + $p1[$b + 7] + 1) >> 1;
+                    } else {
+                        $w1 = 64 - $w0;
+                        $dst[$d]     = ($w0 * $p0[$a]     + $w1 * $p1[$b]     + 32) >> 6;
+                        $dst[$d + 1] = ($w0 * $p0[$a + 1] + $w1 * $p1[$b + 1] + 32) >> 6;
+                        $dst[$d + 2] = ($w0 * $p0[$a + 2] + $w1 * $p1[$b + 2] + 32) >> 6;
+                        $dst[$d + 3] = ($w0 * $p0[$a + 3] + $w1 * $p1[$b + 3] + 32) >> 6;
+                        $dst[$d + 4] = ($w0 * $p0[$a + 4] + $w1 * $p1[$b + 4] + 32) >> 6;
+                        $dst[$d + 5] = ($w0 * $p0[$a + 5] + $w1 * $p1[$b + 5] + 32) >> 6;
+                        $dst[$d + 6] = ($w0 * $p0[$a + 6] + $w1 * $p1[$b + 6] + 32) >> 6;
+                        $dst[$d + 7] = ($w0 * $p0[$a + 7] + $w1 * $p1[$b + 7] + 32) >> 6;
+                    }
+                }
+                return;
+            }
+            for ($j = 0; $j < $blockH; $j++) {
+                $a = ($y0 + $j) * $s0 + $x0;
+                $b = ($y1 + $j) * $s1 + $x1;
+                $d = ($dY + $j) * $dStride + $dX;
+                if ($w0 === 32) {
+                    for ($i = 0; $i < $blockW; $i++) {
+                        $dst[$d + $i] = ($p0[$a + $i] + $p1[$b + $i] + 1) >> 1;
+                    }
+                } else {
+                    $w1 = 64 - $w0;
+                    for ($i = 0; $i < $blockW; $i++) {
+                        $dst[$d + $i] = ($w0 * $p0[$a + $i] + $w1 * $p1[$b + $i] + 32) >> 6;
+                    }
+                }
+            }
+            return;
+        }
+        // 越界回退：逐像素 clamp（与 mcLumaTo 整数越界路径同口径）
+        $mw0 = $wd0 - 1; $mh0 = $hd0 - 1;
+        $mw1 = $wd1 - 1; $mh1 = $hd1 - 1;
+        if ($w0 === 32) {
+            for ($j = 0; $j < $blockH; $j++) {
+                $y0j = $y0 + $j; $y0j = $y0j < 0 ? 0 : ($y0j > $mh0 ? $mh0 : $y0j);
+                $y1j = $y1 + $j; $y1j = $y1j < 0 ? 0 : ($y1j > $mh1 ? $mh1 : $y1j);
+                $ra = $y0j * $s0;
+                $rb = $y1j * $s1;
+                $d = ($dY + $j) * $dStride + $dX;
+                for ($i = 0; $i < $blockW; $i++) {
+                    $x0i = $x0 + $i; $x0i = $x0i < 0 ? 0 : ($x0i > $mw0 ? $mw0 : $x0i);
+                    $x1i = $x1 + $i; $x1i = $x1i < 0 ? 0 : ($x1i > $mw1 ? $mw1 : $x1i);
+                    $dst[$d + $i] = ($p0[$ra + $x0i] + $p1[$rb + $x1i] + 1) >> 1;
+                }
+            }
+            return;
+        }
+        $w1 = 64 - $w0;
+        for ($j = 0; $j < $blockH; $j++) {
+            $y0j = $y0 + $j; $y0j = $y0j < 0 ? 0 : ($y0j > $mh0 ? $mh0 : $y0j);
+            $y1j = $y1 + $j; $y1j = $y1j < 0 ? 0 : ($y1j > $mh1 ? $mh1 : $y1j);
+            $ra = $y0j * $s0;
+            $rb = $y1j * $s1;
+            $d = ($dY + $j) * $dStride + $dX;
+            for ($i = 0; $i < $blockW; $i++) {
+                $x0i = $x0 + $i; $x0i = $x0i < 0 ? 0 : ($x0i > $mw0 ? $mw0 : $x0i);
+                $x1i = $x1 + $i; $x1i = $x1i < 0 ? 0 : ($x1i > $mw1 ? $mw1 : $x1i);
+                $dst[$d + $i] = ($w0 * $p0[$ra + $x0i] + $w1 * $p1[$rb + $x1i] + 32) >> 6;
             }
         }
     }

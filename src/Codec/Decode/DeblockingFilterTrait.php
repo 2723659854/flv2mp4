@@ -565,8 +565,11 @@ trait DeblockingFilterTrait
         // 快速路径（与规范判定逐位等价的充分条件）：当前 MB 及左/上邻块均为
         // 非 intra / 非 I_PCM，参与 BS 判定的 luma 4x4 块 nnz 全为 0，且当前 MB
         // 全部 16 块与左/上边界块的 MV 全等、参考索引相同 → 32 个边界强度均为 0。
+        // B 片扩展：额外要求 L1 参考与 L0 统一（ref0==ref1，保证跨列表比较
+        // pRef0==qRef1 / pRef1==qRef0 恒真）且 L1 MV 并入同一极差统计（极差<=3
+        // 保证 bMotionBoundaryDiffers 的全部跨列表分量差 < 4）→ 全部 bS=0。
         // 命中条件不满足时落回原逐对判定，结果完全一致。
-        if (!$isBslice && !$curIntra && !$curIpcm
+        if (!$curIntra && !$curIpcm
             && ($mbX === 0 || (!$leftIntra && !$leftIpcm))
             && ($mbY === 0 || (!$topIntra && !$topIpcm))
         ) {
@@ -600,6 +603,22 @@ trait DeblockingFilterTrait
                 $minY = $maxY = $zeroMv[1];
                 $zeroRef = $curRef[0] ?? 0;
                 $uniform = true;
+                if ($isBslice) {
+                    // 块 0 的 L1 MV 同样参与极差统计（内部边界配对会涉及块 0）
+                    $m1 = $curMv1[0] ?? $this->deblockZeroMv;
+                    $x = $m1[0];
+                    $y = $m1[1];
+                    if ($x < $minX) {
+                        $minX = $x;
+                    } elseif ($x > $maxX) {
+                        $maxX = $x;
+                    }
+                    if ($y < $minY) {
+                        $minY = $y;
+                    } elseif ($y > $maxY) {
+                        $maxY = $y;
+                    }
+                }
 
                 // cur 内部 24 对相邻边：16 个块参考索引全等、且 MV 分量极差 <= 3
                 // （任意相邻块分量差 <= 全局极差 < 4，与规范 bs=0 的 |Δmv| < 4 等价）。
@@ -621,6 +640,27 @@ trait DeblockingFilterTrait
                     } elseif ($y > $maxY) {
                         $maxY = $y;
                     }
+                    if ($isBslice) {
+                        // L1 参考必须与 L0 同值（ref0==ref1==R），否则跨列表参考比较失败；
+                        // L1 MV 并入同一极差，保证跨列表分量差也 < 4。
+                        if (($curRef1[$k] ?? 0) != $zeroRef) {
+                            $uniform = false;
+                            break;
+                        }
+                        $m1 = $curMv1[$k] ?? $this->deblockZeroMv;
+                        $x = $m1[0];
+                        $y = $m1[1];
+                        if ($x < $minX) {
+                            $minX = $x;
+                        } elseif ($x > $maxX) {
+                            $maxX = $x;
+                        }
+                        if ($y < $minY) {
+                            $minY = $y;
+                        } elseif ($y > $maxY) {
+                            $maxY = $y;
+                        }
+                    }
                 }
                 if ($uniform && ($maxX - $minX > 3 || $maxY - $minY > 3)) {
                     $uniform = false;
@@ -637,6 +677,23 @@ trait DeblockingFilterTrait
                             $uniform = false;
                             break;
                         }
+                        if ($isBslice) {
+                            // L0 检查已保证 pRef0 == qRef0 == R == qRef1（cur 参考统一），
+                            // 下方 L1 检查保证 pRef1 == qRef1 == R == qRef0，
+                            // 故跨列表参考比较恒真，只需再查跨列表 MV 分量差。
+                            $pM1 = $leftMv1[$k] ?? $this->deblockZeroMv;
+                            $qM1 = $curMv1[$qk] ?? $this->deblockZeroMv;
+                            if (($leftRef1[$k] ?? 0) != ($curRef1[$qk] ?? 0)
+                                || abs($pM1[0] - $qM1[0]) >= 4
+                                || abs($pM1[1] - $qM1[1]) >= 4
+                                || abs($pM[0] - $qM1[0]) >= 4
+                                || abs($pM[1] - $qM1[1]) >= 4
+                                || abs($pM1[0] - $qM[0]) >= 4
+                                || abs($pM1[1] - $qM[1]) >= 4) {
+                                $uniform = false;
+                                break;
+                            }
+                        }
                     }
                 }
                 // 水平跨 MB 边：top(12..15) 配对 cur(0..3)
@@ -649,6 +706,20 @@ trait DeblockingFilterTrait
                             || abs($pM[1] - $qM[1]) >= 4) {
                             $uniform = false;
                             break;
+                        }
+                        if ($isBslice) {
+                            $pM1 = $topMv1[$k] ?? $this->deblockZeroMv;
+                            $qM1 = $curMv1[$i] ?? $this->deblockZeroMv;
+                            if (($topRef1[$k] ?? 0) != ($curRef1[$i] ?? 0)
+                                || abs($pM1[0] - $qM1[0]) >= 4
+                                || abs($pM1[1] - $qM1[1]) >= 4
+                                || abs($pM[0] - $qM1[0]) >= 4
+                                || abs($pM[1] - $qM1[1]) >= 4
+                                || abs($pM1[0] - $qM[0]) >= 4
+                                || abs($pM1[1] - $qM[1]) >= 4) {
+                                $uniform = false;
+                                break;
+                            }
                         }
                     }
                 }
