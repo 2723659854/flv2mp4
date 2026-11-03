@@ -71,10 +71,19 @@ final class HlsDecoderWorkerServer
         $this->scaler = new VideoScaler();
     }
 
-    public function run(string $listenAddress, string $outputAddress, string $controlAddress = ''): void
+    public function run(string $rendezvousAddress, string $outputAddress, string $controlAddress = ''): void
     {
-        $server = @stream_socket_server($listenAddress, $errno, $error);
+        // 端口自选（bind :0 实测约 0ms），经 rendezvous 上报给主进程；
+        // 监听 socket 在收到上游连接后关闭（关闭监听 socket 在 Windows 上有 ~510ms
+        // 固定延迟，此处与主进程派发并行，不在关键路径）
+        $server = @stream_socket_server('tcp://127.0.0.1:0', $errno, $error);
         if ($server === false) throw new RuntimeException("解码进程监听失败: {$error} ({$errno})");
+        $srvName = stream_socket_get_name($server, false);
+        $srvPort = (int)substr(strrchr($srvName, ':'), 1);
+        $rv = @stream_socket_client($rendezvousAddress, $rErrno, $rError, 5);
+        if ($rv === false) throw new RuntimeException("无法连接 rendezvous: {$rError} ({$rErrno})");
+        fwrite($rv, "decoder {$srvPort}\n");
+        @fclose($rv);
         // 独立控制连接：finish 屏障走此通道，不被48MB媒体在途缓冲挡在后面
         $ctrlServer = null;
         if ($controlAddress !== '') {

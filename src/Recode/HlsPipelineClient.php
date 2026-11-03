@@ -39,20 +39,29 @@ final class HlsPipelineClient
         $dropFrames = $targetFps > 0 && $sourceFps !== null && $targetFps < $sourceFps - 0.01;
         $autoload = $this->locateAutoload();
         $worker = dirname(__DIR__, 2) . DIRECTORY_SEPARATOR . 'bin' . DIRECTORY_SEPARATOR . 'hls-worker.php';
-        $decoderAddresses = [];
-        for ($i = 0; $i < $workerCount; $i++) $decoderAddresses[] = $this->reserveAddress();
+        // 端口 rendezvous：各 worker 自行 bind tcp://127.0.0.1:0（实测 bind 约 0ms）后经
+        // rendezvous 连接上报端口。此前主进程为每个 worker 预留端口需 bind+close 监听
+        // socket 各一次，Windows 上关闭监听 socket 有实测 ~510ms 的固定系统延迟
+        // （WFP/防火墙检查），12 worker 即串行吃掉 ~6s 启动墙钟；本方案全程只有
+        // 本 rendezvous 监听 socket 一次关闭（发生在收尾，不在关键路径）。
+        $rendezvous = @stream_socket_server('tcp://127.0.0.1:0', $errno, $error);
+        if ($rendezvous === false) throw new RuntimeException("无法建立 rendezvous 监听: {$error}");
+        $rvName = stream_socket_get_name($rendezvous, false);
+        $rvPort = (int)substr(strrchr($rvName, ':'), 1);
+        $rendezvousAddress = "tcp://127.0.0.1:{$rvPort}";
         $sockets = [];
         try {
-            [, $outputPort] = $this->reserveAddress();
             // 单 profile：视频帧在解码 worker 内已完成编码，输出 worker 只做 TS 封装，
             // 传 --preencoded 跳过其编码器运动子进程预热（白冷启动 2 个永不使用的 PHP 进程）
-            $this->startWorker([$worker, '--mode', 'output', '--autoload', $autoload, '--port', (string)$outputPort, '--workers', (string)$workerCount, '--config', $this->encodeOption($this->config), '--output', $this->outputDir, '--preencoded']);
+            $this->startWorker([$worker, '--mode', 'output', '--autoload', $autoload, '--rendezvous', $rendezvousAddress, '--workers', (string)$workerCount, '--config', $this->encodeOption($this->config), '--output', $this->outputDir, '--preencoded']);
+            [$outputPort] = $this->collectWorkerPorts($rendezvous, 0);
             $decoderDownstreamPort = $outputPort;
-            foreach ($decoderAddresses as [$decoderAddress, $decoderPort]) {
-                $this->startWorker([$worker, '--mode', 'decoder', '--autoload', $autoload, '--port', (string)$decoderPort, '--output-port', (string)$decoderDownstreamPort, '--config', $this->encodeOption($this->config)]);
+            for ($i = 0; $i < $workerCount; $i++) {
+                $this->startWorker([$worker, '--mode', 'decoder', '--autoload', $autoload, '--rendezvous', $rendezvousAddress, '--output-port', (string)$decoderDownstreamPort, '--config', $this->encodeOption($this->config)]);
             }
-            foreach ($decoderAddresses as [$decoderAddress]) {
-                $socket = $this->connect($decoderAddress);
+            [, $decoderPorts] = $this->collectWorkerPorts($rendezvous, $workerCount, false);
+            foreach ($decoderPorts as $decoderPort) {
+                $socket = $this->connect("tcp://127.0.0.1:{$decoderPort}");
                 stream_set_blocking($socket, false);
                 $sockets[] = $socket;
             }
@@ -267,7 +276,41 @@ final class HlsPipelineClient
             foreach ($sockets as $socket) if (is_resource($socket)) @fclose($socket);
             $this->terminateWorkers();
             throw $e;
+        } finally {
+            @fclose($rendezvous);
         }
+    }
+
+    /**
+     * 从 rendezvous 收集 worker 自报的监听端口。
+     * worker 启动后 connect 上来发送一行 "mode port"（mode=output 仅一条，且其端口是
+     * decoder 的下游参数，必须先于 decoder 收集完成）。
+     * $needOutput=false 时不再等待 output 上报（解码阶段收集）。
+     */
+    private function collectWorkerPorts($rendezvous, int $decoders, bool $needOutput = true): array
+    {
+        $outputPort = 0;
+        $decoderPorts = [];
+        $deadline = microtime(true) + 30;
+        while (microtime(true) < $deadline
+            && (($needOutput && $outputPort === 0) || count($decoderPorts) < $decoders)) {
+            $conn = @stream_socket_accept($rendezvous, 2);
+            if ($conn === false) continue;
+            $line = fgets($conn);
+            @fclose($conn);
+            if ($line === false) continue;
+            $parts = explode(' ', trim($line));
+            if (count($parts) !== 2) continue;
+            [$mode, $port] = $parts;
+            $port = (int)$port;
+            if ($port <= 0) continue;
+            if ($mode === 'output') $outputPort = $port;
+            elseif ($mode === 'decoder') $decoderPorts[] = $port;
+        }
+        if (($needOutput && $outputPort === 0) || count($decoderPorts) < $decoders) {
+            throw new RuntimeException('worker 端口上报不完整（rendezvous 超时）');
+        }
+        return [$outputPort, $decoderPorts];
     }
 
     /**
@@ -404,15 +447,6 @@ final class HlsPipelineClient
             if ($status !== false && $status['running']) @proc_terminate($process);
             @proc_close($process); unset($this->processes[$key]);
         }
-    }
-
-    private function reserveAddress(): array
-    {
-        $server = stream_socket_server('tcp://127.0.0.1:0', $errno, $error);
-        if ($server === false) throw new RuntimeException("无法分配 loopback 端口: {$error}");
-        $name = stream_socket_get_name($server, false); fclose($server);
-        $port = (int)substr(strrchr($name, ':'), 1);
-        return ["tcp://127.0.0.1:{$port}", $port];
     }
 
     private function connect(string $address)

@@ -15,11 +15,19 @@ final class HlsOutputWorkerServer
     {
     }
 
-    public function run(string $listenAddress, int $workers = 1, string $controlAddress = '', bool $preEncoded = false): void
+    public function run(string $rendezvousAddress, int $workers = 1, string $controlAddress = '', bool $preEncoded = false): void
     {
         $workers = max(1, $workers);
-        $server = @stream_socket_server($listenAddress, $errno, $error);
+        // 端口自选（bind :0 实测约 0ms），经 rendezvous 上报后主进程才派发 decoder
+        // 进程（其 --output-port 依赖本端口），因此上报必须先于 accept 解码连接
+        $server = @stream_socket_server('tcp://127.0.0.1:0', $errno, $error);
         if ($server === false) throw new RuntimeException("编码进程监听失败: {$error} ({$errno})");
+        $srvName = stream_socket_get_name($server, false);
+        $srvPort = (int)substr(strrchr($srvName, ':'), 1);
+        $rv = @stream_socket_client($rendezvousAddress, $rErrno, $rError, 5);
+        if ($rv === false) throw new RuntimeException("无法连接 rendezvous: {$rError} ({$rErrno})");
+        fwrite($rv, "output {$srvPort}\n");
+        @fclose($rv);
         // 独立控制连接：主进程的finish屏障走此通道直达，与媒体FIFO完全隔离
         // （媒体流里可能正卡着一个已发出一半的大帧，任何插入都会破坏长度前缀分帧）
         $ctrlServer = null;

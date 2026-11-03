@@ -6,9 +6,9 @@ ini_set('memory_limit', '2048M');
 gc_disable();
 if (function_exists('pcntl_signal')) pcntl_signal(SIGINT, SIG_IGN);
 try {
-    $options = getopt('', ['mode:', 'autoload:', 'port:', 'control-port:', 'output-port:', 'config:', 'output:', 'workers:', 'preencoded']);
+    $options = getopt('', ['mode:', 'autoload:', 'port:', 'rendezvous:', 'control-port:', 'output-port:', 'config:', 'output:', 'workers:', 'preencoded']);
     $mode = $options['mode'] ?? '';
-    if (empty($options['autoload']) || empty($options['port']) || empty($options['config'])) {
+    if (empty($options['autoload']) || empty($options['rendezvous']) || empty($options['config'])) {
         throw new RuntimeException('HLS worker 参数不完整');
     }
     if (!is_file($options['autoload'])) {
@@ -21,7 +21,7 @@ try {
         if (ini_set('memory_limit', '2048M') === false) throw new RuntimeException('无法设置解码 worker 内存上限');
         if (empty($options['output-port'])) throw new RuntimeException('解码 worker 缺少 output-port');
         (new \Xiaosongshu\Flv2mp4\Recode\HlsDecoderWorkerServer($config))->run(
-            'tcp://127.0.0.1:' . (int)$options['port'],
+            $options['rendezvous'],
             'tcp://127.0.0.1:' . (int)$options['output-port'],
             isset($options['control-port']) ? 'tcp://127.0.0.1:' . (int)$options['control-port'] : ''
         );
@@ -29,7 +29,7 @@ try {
         if (ini_set('memory_limit', '512M') === false) throw new RuntimeException('无法设置输出 worker 内存上限');
         if (!isset($options['output'])) throw new RuntimeException('输出 worker 缺少 output');
         (new \Xiaosongshu\Flv2mp4\Recode\HlsOutputWorkerServer($config, $options['output']))->run(
-            'tcp://127.0.0.1:' . (int)$options['port'],
+            $options['rendezvous'],
             $workers,
             isset($options['control-port']) ? 'tcp://127.0.0.1:' . (int)$options['control-port'] : '',
             array_key_exists('preencoded', $options)
