@@ -1940,12 +1940,9 @@ trait MacroblockDecodingTrait
                 $tmpL0 = [];
                 $tmpL1 = [];
                 $this->applyBDirect8x8Temporal($mbX, $mbY, 0, $tmpL0, $tmpL1);
-                for ($y = 0; $y < 4; $y++) {
-                    for ($x = 0; $x < 4; $x++) {
-                        $gridL0[$y][$x] = $tmpL0[0][0];
-                        $gridL1[$y][$x] = $tmpL1[0][0];
-                    }
-                }
+                // 整 MB 单一 MV：嵌套 array_fill 共享 zval（值与逐格写完全一致）
+                $gridL0 = array_fill(0, 4, array_fill(0, 4, $tmpL0[0][0]));
+                $gridL1 = array_fill(0, 4, array_fill(0, 4, $tmpL1[0][0]));
             } else {
                 for ($i8 = 0; $i8 < 4; $i8++) {
                     $this->applyBDirect8x8Temporal($mbX, $mbY, $i8, $gridL0, $gridL1);
@@ -1973,12 +1970,12 @@ trait MacroblockDecodingTrait
                 $this->applyColZero($col, $ref0, $mv0x, $mv0y);
                 $this->applyColZero($col, $ref1, $mv1x, $mv1y);
             }
-            for ($y = 0; $y < 4; $y++) {
-                for ($x = 0; $x < 4; $x++) {
-                    $gridL0[$y][$x] = $ref0 >= 0 ? [$mv0x, $mv0y, $ref0] : [0, 0, -1];
-                    $gridL1[$y][$x] = $ref1 >= 0 ? [$mv1x, $mv1y, $ref1] : [0, 0, -1];
-                }
-            }
+            // 全 MB 网格基值唯一（[mv,ref] 三元组）：嵌套 array_fill 让 16 格共享同一
+            // 数组 zval（COW），替代逐格数组字面量的 32 次小数组分配；值语义完全一致
+            $m0 = $ref0 >= 0 ? [$mv0x, $mv0y, $ref0] : [0, 0, -1];
+            $m1 = $ref1 >= 0 ? [$mv1x, $mv1y, $ref1] : [0, 0, -1];
+            $gridL0 = array_fill(0, 4, array_fill(0, 4, $m0));
+            $gridL1 = array_fill(0, 4, array_fill(0, 4, $m1));
             if ($col !== null && ($col['mbFlags'] & 0x0F) === 0) {
                 for ($i8 = 0; $i8 < 4; $i8++) {
                     $c8 = $this->getColocatedBlockInfo($mbX, $mbY, $i8);

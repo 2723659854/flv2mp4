@@ -2190,21 +2190,15 @@ trait CabacDecodingTrait
             $mvdY = $this->cabReadMvd($list, 1, 0);
             $mvX = $px + $mvdX;
             $mvY = $py + $mvdY;
-            $gridL0 = array_fill(0, 4, array_fill(0, 4, [0, 0, -1]));
-            $gridL1 = array_fill(0, 4, array_fill(0, 4, [0, 0, -1]));
-            // 注意：PHP 数组为值语义（COW），不能用 $grid 别名写入——必须直接写目标 grid
+            // 整 MB 单一 (mv,ref)：嵌套 array_fill 共享同一数组 zval（值与逐格写一致）
+            $mvCell = [$mvX, $mvY, $refIdx];
+            $idleCell = [0, 0, -1];
             if ($list === 0) {
-                for ($y = 0; $y < 4; $y++) {
-                    for ($x = 0; $x < 4; $x++) {
-                        $gridL0[$y][$x] = [$mvX, $mvY, $refIdx];
-                    }
-                }
+                $gridL0 = array_fill(0, 4, array_fill(0, 4, $mvCell));
+                $gridL1 = array_fill(0, 4, array_fill(0, 4, $idleCell));
             } else {
-                for ($y = 0; $y < 4; $y++) {
-                    for ($x = 0; $x < 4; $x++) {
-                        $gridL1[$y][$x] = [$mvX, $mvY, $refIdx];
-                    }
-                }
+                $gridL0 = array_fill(0, 4, array_fill(0, 4, $idleCell));
+                $gridL1 = array_fill(0, 4, array_fill(0, 4, $mvCell));
             }
             $this->mcBBlockTo($mbX * 16, $mbY * 16, 16, 16, $mvX, $mvY, $list, $refIdx);
             $this->saveBListMvs($mbX, $gridL0, $gridL1);
