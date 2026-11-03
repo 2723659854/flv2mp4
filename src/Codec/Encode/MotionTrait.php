@@ -149,29 +149,29 @@ trait MotionTrait
         $minDy = max(-$searchRange, -$origY);
         $maxDy = min($searchRange, $this->mbAlignedHeight - $origY - $blockH);
 
-        $ldspPattern = [
-            [-2, 0], [2, 0], [0, -2], [0, 2],
-            [-1, -1], [1, -1], [-1, 1], [1, 1],
-        ];
-        $sdspPattern = [
-            [-1, 0], [1, 0], [0, -1], [0, 1],
-        ];
+        // 模板点预展开为 static 平面数组（顺序与原嵌套数组逐项一致），候选键改整数
+        // key=(dy-minDy)*spanX+(dx-minDx)（在钳制范围内单射），消除每调用的模式数组分配与字符串拼接。
+        static $ldspX = [-2, 2, 0, 0, -1, 1, -1, 1];
+        static $ldspY = [0, 0, -2, 2, -1, -1, 1, 1];
+        static $sdspX = [-1, 1, 0, 0];
+        static $sdspY = [0, 0, -1, 1];
+        $spanX = $maxDx - $minDx + 1;
 
         $bestDX = 0;
         $bestDY = 0;
         $bestSAD = $this->computeSADFast($curFlat, $origX, $origY, 0, 0, $blockW, $blockH, $refStride, PHP_INT_MAX);
-        $candidateSads = ['0,0' => $bestSAD];
+        $candidateSads = [(0 - $minDy) * $spanX + (0 - $minDx) => $bestSAD];
 
         $largeIterations = $searchRange <= 8 ? 4 : 10;
         for ($iter = 0; $iter < $largeIterations; $iter++) {
             $foundBetter = false;
-            foreach ($ldspPattern as [$px, $py]) {
-                $dx = $bestDX + $px;
-                $dy = $bestDY + $py;
+            for ($i = 0; $i < 8; $i++) {
+                $dx = $bestDX + $ldspX[$i];
+                $dy = $bestDY + $ldspY[$i];
                 if ($dx < $minDx || $dx > $maxDx || $dy < $minDy || $dy > $maxDy) {
                     continue;
                 }
-                $candidateKey = $dx . ',' . $dy;
+                $candidateKey = ($dy - $minDy) * $spanX + ($dx - $minDx);
                 if (isset($candidateSads[$candidateKey])) {
                     $sad = $candidateSads[$candidateKey];
                 } else {
@@ -198,13 +198,13 @@ trait MotionTrait
         $smallIterations = $searchRange <= 8 ? 1 : 3;
         for ($iter = 0; $iter < $smallIterations; $iter++) {
             $foundBetter = false;
-            foreach ($sdspPattern as [$px, $py]) {
-                $dx = $bestDX + $px;
-                $dy = $bestDY + $py;
+            for ($i = 0; $i < 4; $i++) {
+                $dx = $bestDX + $sdspX[$i];
+                $dy = $bestDY + $sdspY[$i];
                 if ($dx < $minDx || $dx > $maxDx || $dy < $minDy || $dy > $maxDy) {
                     continue;
                 }
-                $candidateKey = $dx . ',' . $dy;
+                $candidateKey = ($dy - $minDy) * $spanX + ($dx - $minDx);
                 if (isset($candidateSads[$candidateKey])) {
                     $sad = $candidateSads[$candidateKey];
                 } else {
@@ -233,7 +233,7 @@ trait MotionTrait
         //$bestMVx = $bestDX * 4;
         //$bestMVy = $bestDY * 4;
         // 整数 MV 的 MC 像素与整数 SAD 候选完全等价，复用已计算结果。
-        $bestSAD = $candidateSads[$bestDX . ',' . $bestDY];
+        $bestSAD = $candidateSads[($bestDY - $minDy) * $spanX + ($bestDX - $minDx)];
 
         // Tier2 early-skip：整数最优停在 (0,0) 且 SAD 落入量化死区量级时，
         // 跳过 6 抽头插值缓冲与半/四像素精搜（DCT 仍照常，结果合法）。
@@ -289,24 +289,49 @@ trait MotionTrait
         $hMaxY = $skipQuarter ? $blockH - 1 : $blockH + 8;
         $hMinX = $skipQuarter ? -1 : -6;
         $hMaxX = $skipQuarter ? $blockW - 1 : $blockW + 5;
-        for ($y = $hMinY; $y <= $hMaxY; $y++) {
-            $row = $ys[$y + 8] * $stride + 1;
-            for ($x = $hMinX; $x <= $hMaxX; $x++) {
-                $xi = $x + 8;
-                $full = $ref[$row + $xs[$xi - 2]] - 5 * $ref[$row + $xs[$xi - 1]]
-                    + 20 * $ref[$row + $xs[$xi]] + 20 * $ref[$row + $xs[$xi + 1]]
-                    - 5 * $ref[$row + $xs[$xi + 2]] + $ref[$row + $xs[$xi + 3]];
-                if (!$skipQuarter) $hFull[($y + 8) * $bufW + $x + 6] = $full;
-                if ($y >= -6 && $y <= $blockH + 5) {
+        if ($skipQuarter) {
+            // 半像素轴向模式：无 hFull 需求、y∈[-1,blockH-1] 全落在存储界内，去掉逐像素分支
+            for ($y = -1; $y <= $blockH - 1; $y++) {
+                $row = $ys[$y + 8] * $stride + 1;
+                $hRow = ($y + 6) * $bufW;
+                for ($x = -1; $x <= $blockW - 1; $x++) {
+                    $xi = $x + 8;
+                    $full = $ref[$row + $xs[$xi - 2]] - 5 * $ref[$row + $xs[$xi - 1]]
+                        + 20 * $ref[$row + $xs[$xi]] + 20 * $ref[$row + $xs[$xi + 1]]
+                        - 5 * $ref[$row + $xs[$xi + 2]] + $ref[$row + $xs[$xi + 3]];
                     $half = ($full + 16) >> 5;
-                    $h[($y + 6) * $bufW + $x + 6] = $half < 0 ? 0 : ($half > 255 ? 255 : $half);
+                    $h[$hRow + $x + 6] = $half < 0 ? 0 : ($half > 255 ? 255 : $half);
+                }
+            }
+        } else {
+            for ($y = $hMinY; $y <= $hMaxY; $y++) {
+                $row = $ys[$y + 8] * $stride + 1;
+                for ($x = $hMinX; $x <= $hMaxX; $x++) {
+                    $xi = $x + 8;
+                    $full = $ref[$row + $xs[$xi - 2]] - 5 * $ref[$row + $xs[$xi - 1]]
+                        + 20 * $ref[$row + $xs[$xi]] + 20 * $ref[$row + $xs[$xi + 1]]
+                        - 5 * $ref[$row + $xs[$xi + 2]] + $ref[$row + $xs[$xi + 3]];
+                    $hFull[($y + 8) * $bufW + $x + 6] = $full;
+                    if ($y >= -6 && $y <= $blockH + 5) {
+                        $half = ($full + 16) >> 5;
+                        $h[($y + 6) * $bufW + $x + 6] = $half < 0 ? 0 : ($half > 255 ? 255 : $half);
+                    }
                 }
             }
         }
 
         $v = [];
         $c = $skipQuarter ? null : [];
-        for ($y = -6; $y <= $blockH + 5; $y++) {
+        // skipQuarter（半像素轴向候选）下 v 的读集仅为 y∈[-1,blockH]、x∈[0,blockW-1]
+        // （候选行 = y+offY+6, offY∈{-1,1}；候选列 = x+6, offX=0），其余条目从不被读取，裁剪不改结果。
+        if ($skipQuarter) {
+            $vMinY = -1; $vMaxY = $blockH;
+            $vMinX = 0; $vMaxX = $blockW - 1;
+        } else {
+            $vMinY = -6; $vMaxY = $blockH + 5;
+            $vMinX = -6; $vMaxX = $blockW + 5;
+        }
+        for ($y = $vMinY; $y <= $vMaxY; $y++) {
             $yi = $y + 8;
             $r0 = $ys[$yi - 2] * $stride + 1;
             $r1 = $ys[$yi - 1] * $stride + 1;
@@ -314,7 +339,7 @@ trait MotionTrait
             $r3 = $ys[$yi + 1] * $stride + 1;
             $r4 = $ys[$yi + 2] * $stride + 1;
             $r5 = $ys[$yi + 3] * $stride + 1;
-            for ($x = -6; $x <= $blockW + 5; $x++) {
+            for ($x = $vMinX; $x <= $vMaxX; $x++) {
                 $idx = ($y + 6) * $bufW + $x + 6;
                 $rx = $xs[$x + 8];
                 $full = $ref[$r0 + $rx] - 5 * $ref[$r1 + $rx]
@@ -357,32 +382,62 @@ trait MotionTrait
             $offX = $dx - $bestDX;
             $offY = $dy - $bestDY;
             $sad = 0;
-            for ($y = 0; $y < $blockH; $y++) {
-                $bi = ($y + $offY + 6) * $bufW + $offX + 6;
-                $cur = $y * 16;
-                for ($x = 0; $x < $blockW; $x++, $bi++, $cur++) {
-                    if ($fracX === 0 && $fracY === 0) {
-                        $pred = $ref[$ys[$y + $offY + 8] * $stride + $xs[$x + $offX + 8] + 1];
-                    } elseif ($fracY === 0) {
-                        $pred = $h[$bi];
-                    } elseif ($fracX === 0) {
-                        $pred = $v[$bi];
-                    } else {
-                        $pred = $c[$bi];
+            $crossed = false;
+            // fracX/fracY 每候选固定：按预测来源特化内层循环（h/v/整数/对角），
+            // 截止判据移到行尾——候选 SAD 前缀和单调不减，行末 partial ≥ 截止值时
+            // 该候选不可能胜出（胜出者必为完整精确 SAD），与逐像素 break 2 决策一致。
+            if ($fracX !== 0 && $fracY === 0) {
+                for ($y = 0; $y < $blockH; $y++) {
+                    $bi = ($y + $offY + 6) * $bufW + $offX + 6;
+                    $cur = $y * 16;
+                    for ($x = 0; $x < $blockW; $x++, $bi++, $cur++) {
+                        $diff = $curFlat[$cur] - $h[$bi];
+                        $sad += $diff < 0 ? -$diff : $diff;
                     }
-                    $diff = $curFlat[$cur] - $pred;
-                    $sad += $diff < 0 ? -$diff : $diff;
-                    if ($sad >= $bestSAD) break 2;
+                    if ($sad >= $bestSAD) { $crossed = true; break; }
+                }
+            } elseif ($fracX === 0 && $fracY !== 0) {
+                for ($y = 0; $y < $blockH; $y++) {
+                    $bi = ($y + $offY + 6) * $bufW + $offX + 6;
+                    $cur = $y * 16;
+                    for ($x = 0; $x < $blockW; $x++, $bi++, $cur++) {
+                        $diff = $curFlat[$cur] - $v[$bi];
+                        $sad += $diff < 0 ? -$diff : $diff;
+                    }
+                    if ($sad >= $bestSAD) { $crossed = true; break; }
+                }
+            } elseif ($fracX === 0 && $fracY === 0) {
+                for ($y = 0; $y < $blockH; $y++) {
+                    $ry = $ys[$y + $offY + 8] * $stride;
+                    $xi = $offX + 8;
+                    $cur = $y * 16;
+                    for ($x = 0; $x < $blockW; $x++, $xi++, $cur++) {
+                        $diff = $curFlat[$cur] - $ref[$ry + $xs[$xi] + 1];
+                        $sad += $diff < 0 ? -$diff : $diff;
+                    }
+                    if ($sad >= $bestSAD) { $crossed = true; break; }
+                }
+            } else {
+                for ($y = 0; $y < $blockH; $y++) {
+                    $bi = ($y + $offY + 6) * $bufW + $offX + 6;
+                    $cur = $y * 16;
+                    for ($x = 0; $x < $blockW; $x++, $bi++, $cur++) {
+                        $diff = $curFlat[$cur] - $c[$bi];
+                        $sad += $diff < 0 ? -$diff : $diff;
+                    }
+                    if ($sad >= $bestSAD) { $crossed = true; break; }
                 }
             }
-            if ($sad < $bestSAD) {
+            if (!$crossed && $sad < $bestSAD) {
                 $bestSAD = $sad;
                 $bestMVx = $mvx;
                 $bestMVy = $mvy;
             }
         }
 
-        if ($skipQuarter) return [$bestMVx, $bestMVy, $bestSAD];
+        if ($skipQuarter) {
+            return [$bestMVx, $bestMVy, $bestSAD];
+        }
         $quarterPattern = [[-1, 0], [1, 0], [0, -1], [0, 1]];
         foreach ($quarterPattern as [$ox, $oy]) {
             $mvx = $bestMVx + $ox;
@@ -569,9 +624,10 @@ trait MotionTrait
         $sad = 0;
         $refInts = $this->refInts;
         for ($y = 0; $y < $blockH; $y += 2) {
-            $rowOffset = $refStart + $y * $refStride;
+            $ci = $y * 16;
+            $ri = $refStart + $y * $refStride;
             for ($x = 0; $x < $blockW; $x += 2) {
-                $diff = $curFlat[$y * 16 + $x] - $refInts[$rowOffset + $x];
+                $diff = $curFlat[$ci + $x] - $refInts[$ri + $x];
                 if ($diff < 0) $diff = -$diff;
                 $sad += $diff;
             }
@@ -587,12 +643,21 @@ trait MotionTrait
         $sad = 0;
         $refInts = $this->refInts;
 
+        // 8 宽分块批处理 + 游标递增：SAD 前缀和单调不减，批内任一点触发截止时
+        // 批末 partial ≥ 截止值，该候选仍不可能胜出（胜出者必为完整计算、逐位精确），
+        // 故搜索决策与返回的胜出 SAD 与逐像素截止完全一致。
         for ($y = 0; $y < $blockH; $y++) {
-            $rowOffset = $refStart + $y * $refStride;
-            for ($x = 0; $x < $blockW; $x++) {
-                $diff = $curFlat[$y * 16 + $x] - $refInts[$rowOffset + $x];
-                if ($diff < 0) $diff = -$diff;
-                $sad += $diff;
+            $ci = $y * 16;
+            $ri = $refStart + $y * $refStride;
+            $x = 0;
+            while ($x < $blockW) {
+                $end = ($x + 8 <= $blockW) ? $x + 8 : $blockW;
+                do {
+                    $diff = $curFlat[$ci] - $refInts[$ri];
+                    $sad += $diff < 0 ? -$diff : $diff;
+                    $ci++;
+                    $ri++;
+                } while (++$x < $end);
                 if ($sad >= $cutoff) {
                     return $sad;
                 }

@@ -20,7 +20,12 @@ trait InterPredTrait
         int $motionRange = 32,
         ?array $forcedMv = null
     ): array {
-        $curFlat = array_values(unpack('C*', $luma));
+        if ($forcedMv !== null && $this->bCurFlat !== null) {
+            // B 帧 forcedMv 路径：prepareBMacroblock 已对同一 $luma 做过 unpack，直接复用（内容逐位相同）
+            $curFlat = $this->bCurFlat;
+        } else {
+            $curFlat = array_values(unpack('C*', $luma));
+        }
 
         // === Tier1 early-skip（数学保证，零画质风险）===
         // 单次遍历计算 16 个 4x4 块在整数 (0,0) 的 SAD；全部 ≤ QP 死区阈值时，
@@ -876,6 +881,7 @@ trait InterPredTrait
         int $motionRange = 32
     ): array {
         $curFlat = array_values(unpack('C*', $luma));
+        $this->bCurFlat = $curFlat;
 
         // 两次 ME 各自指向对应参考帧的整数缓存（片级已 unpack，避免每宏块重建整帧数组）
         $this->refInts = $this->bRefIntsL0 ?? unpack('C*', $refL0Y);

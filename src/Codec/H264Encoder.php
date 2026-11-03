@@ -415,6 +415,9 @@ class H264Encoder
     public $bRefIntsL0 = null;
     public $bRefIntsL1 = null;
 
+    /** B 帧当前宏块的 curFlat 缓存：prepareBMacroblock 产出，forcedMv 路径的 preparePMacroblock 复用，免去二次 unpack */
+    public $bCurFlat = null;
+
     // 本地解码重建帧（用于正确更新参考帧，避免编解码器失配）
     public $reconYPlane = '';
     public $reconUPlane = '';
