@@ -4,6 +4,7 @@ namespace Xiaosongshu\Flv2mp4\Recode;
 
 use Xiaosongshu\Flv2mp4\Audio\AudioPolicy;
 use Xiaosongshu\Flv2mp4\Audio\AudioTranscoder;
+use Xiaosongshu\Flv2mp4\Audio\SilentAacSource;
 use Xiaosongshu\Flv2mp4\Codec\H264Decoder;
 use Xiaosongshu\Flv2mp4\Codec\H264Encoder;
 use Xiaosongshu\Flv2mp4\Codec\NalUtil;
@@ -75,6 +76,9 @@ class FlvRecoder
     /** 最近写入的未偏移音频时间戳（保证单调） */
     private ?int $audioLastPtsRaw = null;
     private bool $audioSequenceHeaderWritten = false;
+    /** 源音频无法解码时的静音 AAC 轨（内容全静音，时长随视频） */
+    private ?SilentAacSource $silentAudioSource = null;
+    private int $silentAudioFramesWritten = 0;
 
     private ?int $baseTimestamp = null;
     private int $videoFrameCount = 0;
@@ -493,6 +497,8 @@ class FlvRecoder
         $this->flushPendingVideo();
         // 音频转码器的尾部样本（编码器缓冲）必须在 metadata 计算前写完
         $this->flushAudioTranscoder();
+        // 源音频无解码器时，把静音 AAC 轨补齐到视频末尾
+        $this->finalizeSilentAudio();
 
         $actualHasVideo = $this->outputVideoFrameCount > 0;
         $actualHasAudio = $this->outputAudioFrameCount > 0;
@@ -1167,7 +1173,8 @@ class FlvRecoder
         $soundFormat = (ord($raw[0]) >> 4) & 0x0F;
         if (!$this->lockAudioPolicy($soundFormat, $raw)) return;
         if (str_starts_with($this->audioSourceCodec, AudioPolicy::CODEC_UNKNOWN)) {
-            // 未知源音频且未配置目标：保持旧行为，不写入输出
+            // 源音频无解码器（Nellymoser/PCM 等）：按最终策略生成静音 AAC 轨并如实写入
+            $this->handleUndecodableAudio($tag, $raw, $soundFormat);
             return;
         }
 
@@ -1210,6 +1217,63 @@ class FlvRecoder
         $payload = substr($raw, 1);
         if ($payload === '') return;
         $this->emitAudioPayload($payload, $tag->getTime() - $this->baseTimestamp);
+    }
+
+    /**
+     * 源音频无解码器（Nellymoser/PCM 等）：生成内容全静音的 AAC-LC 轨。
+     * 采样率/声道优先沿用 FLV 音频头声明，不可用时回落 44.1 kHz / 原声道数。
+     * 显式要求 MP3 时不生成静音 MP3（确定性报错，避免产出坏文件）。
+     */
+    private function handleUndecodableAudio(FlvTag $tag, string $raw, int $soundFormat): void
+    {
+        if ($this->audioTarget === AudioPolicy::CODEC_MP3) {
+            throw new \RuntimeException('源音频（SoundFormat=' . $soundFormat . '）无解码器，无法转为 MP3');
+        }
+        if ($this->silentAudioSource === null) {
+            $declaredRate = [5512, 11025, 22050, 44100][(ord($raw[0]) >> 2) & 3];
+            $declaredChannels = (ord($raw[0]) & 1) === 1 ? 2 : 1;
+            $this->silentAudioSource = new SilentAacSource($declaredRate, $declaredChannels);
+            $this->audioSampleRate = $this->silentAudioSource->rate();
+            $this->audioChannels = $this->silentAudioSource->channels();
+            $this->audioSpecificConfig = $this->silentAudioSource->audioSpecificConfig();
+            $this->audioConfigParsed = true;
+            $this->audioOutputCodec = AudioPolicy::CODEC_AAC;
+            $this->audioMode = AudioPolicy::MODE_SILENT;
+        }
+        if (!$this->flvHeaderWritten || $this->baseTimestamp === null) return;
+        $rel = max(0, $tag->getTime() - $this->baseTimestamp);
+        while ($this->silentAudioFramesWritten * $this->silentAudioSource->frameDurationMs() < $rel) {
+            $this->writeSilentAudioFrame();
+        }
+    }
+
+    /** 写一帧静音 AAC（时间戳 = 帧序号 * 1024/采样率），并保证序列头先写出 */
+    private function writeSilentAudioFrame(): void
+    {
+        $source = $this->silentAudioSource;
+        if ($source === null || $source->frame() === '') return;
+        $pts = (int)round($this->silentAudioFramesWritten * $source->frameDurationMs());
+        ++$this->silentAudioFramesWritten;
+        if ($this->audioLastPtsRaw !== null && $pts <= $this->audioLastPtsRaw) {
+            $pts = $this->audioLastPtsRaw + 1;
+        }
+        $this->audioLastPtsRaw = $pts;
+        $this->writeAudioSequenceHeaderIfNeeded();
+        $this->writeAudioTag($source->frame(), $pts);
+    }
+
+    /** 收尾：把静音轨补齐到视频末尾（含最后一帧的显示时长），保证音轨时长与视频对齐 */
+    private function finalizeSilentAudio(): void
+    {
+        $source = $this->silentAudioSource;
+        if ($source === null || $this->silentAudioFramesWritten === 0) return;
+        if (!$this->flvHeaderWritten || $this->lastVideoOutputTimestamp === null) return;
+        $fps = $this->effectiveTargetFps ?? $this->sourceFps;
+        $frameMs = ($fps !== null && $fps > 0) ? 1000.0 / $fps : 40.0;
+        $endMs = $this->lastVideoOutputTimestamp + $frameMs;
+        while ($this->silentAudioFramesWritten * $source->frameDurationMs() < $endMs) {
+            $this->writeSilentAudioFrame();
+        }
     }
 
     /**

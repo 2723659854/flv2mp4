@@ -10,9 +10,9 @@ use InvalidArgumentException;
  * @time 2026年11月5日
  *
  * 配置语义（flv / mp4 / hls 三条重编码路径共用）：
- *  - 未配置 audio           → 完全不动音频，原样直通；
- *  - 'audio' => 'aac'       → 源是 AAC 直通，否则转 AAC；
- *  - 'audio' => 'mp3'       → 源是 MP3 直通，否则转 MP3；
+ *  - 未配置 audio           → 目标=源：AAC/MP3 直通；其它格式无解码器 → 静音 AAC 轨；
+ *  - 'audio' => 'aac'       → 源是 AAC 直通，否则转 AAC；无解码器 → 静音 AAC 轨；
+ *  - 'audio' => 'mp3'       → 源是 MP3 直通，否则转 MP3；无解码器 → 确定性报错；
  *  - 其他取值               → 抛 InvalidArgumentException，不做静默回退。
  */
 final class AudioPolicy
@@ -23,6 +23,8 @@ final class AudioPolicy
 
     public const MODE_PASSTHROUGH = 'passthrough';
     public const MODE_TRANSCODE = 'transcode';
+    /** 源无解码器：输出一条内容全静音的 AAC-LC 轨（如实声明，不是幽灵流） */
+    public const MODE_SILENT = 'silent';
 
     /** MP3 编码器延迟（MPEG-1 Layer III 分析滤波器组，样本数） */
     public const MP3_ENCODER_DELAY = 576;
@@ -78,17 +80,17 @@ final class AudioPolicy
     public static function decide(string $sourceCodec, ?string $target): array
     {
         if (str_starts_with($sourceCodec, self::CODEC_UNKNOWN)) {
-            if ($target !== null) {
+            if ($target === self::CODEC_MP3) {
                 throw new InvalidArgumentException(
-                    "无法识别源音频格式（{$sourceCodec}），不能转码为 {$target}；请确认源为 AAC 或 MP3"
+                    "无法识别源音频格式（{$sourceCodec}），不能转码为 mp3：本项目的 MP3/Opus 解码器不覆盖该格式"
                 );
             }
-            // 未配置目标时保持旧行为：未知源音频不写入输出
+            // 未配置目标或目标为 AAC：无解码器 → 生成内容全静音的 AAC-LC 轨并如实声明
             return [
                 'source' => $sourceCodec,
-                'target' => null,
-                'output' => $sourceCodec,
-                'mode' => self::MODE_PASSTHROUGH,
+                'target' => $target,
+                'output' => self::CODEC_AAC,
+                'mode' => self::MODE_SILENT,
             ];
         }
 
@@ -127,10 +129,10 @@ final class AudioPolicy
             return;
         }
         if ($source === self::CODEC_MP3 && $target === self::CODEC_AAC) {
-            // 本项目 AAC-LC 编码器固定 48 kHz，无重采样器
-            if ($rate !== 48000) {
+            // AAC-LC 编码器支持 32/44.1/48 kHz（与 MP3 的 MPEG-1 档位一致），无重采样器
+            if (!in_array($rate, [48000, 44100, 32000], true)) {
                 throw new InvalidArgumentException(
-                    "MP3({$rate}Hz)→AAC 不支持：AAC 编码器固定 48kHz，本项目无重采样器（仅支持 48kHz 源）"
+                    "MP3({$rate}Hz)→AAC 不支持：AAC 编码器仅支持 32000/44100/48000 Hz，本项目无重采样器"
                 );
             }
             return;

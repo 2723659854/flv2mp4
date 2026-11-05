@@ -4,6 +4,7 @@ namespace Xiaosongshu\Flv2mp4\Recode;
 
 use Xiaosongshu\Flv2mp4\Audio\AudioPolicy;
 use Xiaosongshu\Flv2mp4\Audio\AudioTranscoder;
+use Xiaosongshu\Flv2mp4\Audio\SilentAacSource;
 use Xiaosongshu\Flv2mp4\Codec\H264Decoder;
 use Xiaosongshu\Flv2mp4\Codec\H264Encoder;
 use Xiaosongshu\Flv2mp4\Codec\NalUtil;
@@ -68,6 +69,8 @@ class Mp4Recoder
     private int $audioAnchorMs = 0;
     private bool $audioAnchorSet = false;
     private ?int $audioLastPtsRaw = null;
+    /** 源音频无解码器时的静音 AAC 轨（如实写入一条真实音轨，时长随视频） */
+    private ?SilentAacSource $silentAudioSource = null;
     /** 在途音频队列字节数（硬上限 8MB） */
     private int $queuedAudioBytes = 0;
 
@@ -291,6 +294,7 @@ class Mp4Recoder
         $this->audioAnchorMs = 0;
         $this->audioAnchorSet = false;
         $this->audioLastPtsRaw = null;
+        $this->silentAudioSource = null;
         $this->queuedAudioBytes = 0;
         $this->duration = 0;
         $this->encSpsAnnexB = '';
@@ -480,8 +484,10 @@ class Mp4Recoder
                 $this->videoTrack = ['id' => $trackId, 'type' => 'video', 'codec' => 'avc1', 'timescale' => $timescale, 'trak' => $trak];
                 $this->parseAvcCFromBox(substr($stsdData, $pos, $entrySize));
                 break;
-            } elseif ($handlerType === 'soun' && $entryType === 'mp4a') {
-                $this->audioTrack = ['id' => $trackId, 'type' => 'audio', 'codec' => 'mp4a', 'timescale' => $timescale, 'trak' => $trak];
+            } elseif ($handlerType === 'soun') {
+                // 任何 soun 轨都识别：mp4a 走原有 AAC/MP3 路径；PCM/Opus 等无解码器时
+                // 后续按策略输出静音 AAC 轨（不能因为样本条目不识别就把整条音轨丢掉）
+                $this->audioTrack = ['id' => $trackId, 'type' => 'audio', 'codec' => $entryType, 'timescale' => $timescale, 'trak' => $trak];
                 // AudioSampleEntry 数据区（盒子头之后）：声道数偏移16(u16)，采样率偏移24(u32 16.16)
                 $entryData = substr($stsdData, $pos + 8, $entrySize - 8);
                 if (strlen($entryData) >= 28) {
@@ -493,7 +499,9 @@ class Mp4Recoder
                         $this->audioTimescale = $rate;
                     }
                 }
-                $this->parseEsdsFromBox(substr($stsdData, $pos, $entrySize));
+                if ($entryType === 'mp4a') {
+                    $this->parseEsdsFromBox(substr($stsdData, $pos, $entrySize));
+                }
                 break;
             }
             $pos += $entrySize;
@@ -646,7 +654,7 @@ class Mp4Recoder
             unset($sample);
             $samples = array_merge($samples, $video);
         }
-        if ($this->audioTrack) {
+        if ($this->audioTrack && !str_starts_with((string)$this->audioSourceCodec, AudioPolicy::CODEC_UNKNOWN)) {
             $audio = $this->extractAudioSamples();
             foreach ($audio as &$sample) $sample['type'] = 'audio';
             unset($sample);
@@ -719,6 +727,17 @@ class Mp4Recoder
         $decision = AudioPolicy::decide($this->audioSourceCodec, $this->audioTarget);
         $this->audioOutputCodec = $decision['output'];
         $this->audioMode = $decision['mode'];
+        if ($this->audioMode === AudioPolicy::MODE_SILENT) {
+            // 源无解码器：准备静音 AAC 源（采样率/声道优先沿用源声明），实际样本在收尾时按视频时长补齐
+            $source = new SilentAacSource($this->audioSampleRate, $this->audioChannels);
+            $this->silentAudioSource = $source;
+            $this->audioSampleRate = $source->rate();
+            $this->audioChannels = $source->channels();
+            $this->audioTimescale = $source->rate();
+            $this->audioSpecificConfig = $source->audioSpecificConfig();
+            $this->audioObjectType = 2;
+            return;
+        }
         if ($this->audioMode !== AudioPolicy::MODE_TRANSCODE) return;
         $this->audioTranscoder = new AudioTranscoder(
             $this->audioSourceCodec,
@@ -806,6 +825,7 @@ class Mp4Recoder
         $this->flushDecoderFrames();
         $this->flushPendingVideo();
         $this->flushAudioTranscoder();
+        $this->synthesizeSilentAudio();
         if (!$this->videoTrack && !$this->audioTrack) throw new \RuntimeException('未找到有效的视频或音频轨道');
         $this->buildPipelineMp4($outputFile);
     }
@@ -841,7 +861,7 @@ class Mp4Recoder
             $allSamples = array_merge($allSamples, $videoSamples);
         }
 
-        if ($this->audioTrack) {
+        if ($this->audioTrack && !str_starts_with((string)$this->audioSourceCodec, AudioPolicy::CODEC_UNKNOWN)) {
             $audioSamples = $this->extractAudioSamples();
             foreach ($audioSamples as &$s) {
                 $s['type'] = 'audio';
@@ -875,6 +895,8 @@ class Mp4Recoder
         $this->flushDecoderFrames();
         $this->flushPendingVideo();
         $this->flushAudioTranscoder();
+        // 源音频无解码器：按视频时长合成一条静音 AAC 轨（真实 trak + 真实样本）
+        $this->synthesizeSilentAudio();
     }
 
     private function extractVideoSamples(): array
@@ -1051,6 +1073,10 @@ class Mp4Recoder
 
     private function intakeAudioPayload(string $data, int $dtsMs): void
     {
+        if ($this->audioMode === AudioPolicy::MODE_SILENT) {
+            // 源无解码器：不写入源负载（否则会把 PCM/Opus 裸数据当成 AAC 样本），静音轨在收尾时合成
+            return;
+        }
         if ($this->audioMode === AudioPolicy::MODE_TRANSCODE && $this->audioTranscoder !== null) {
             if (!$this->audioAnchorSet) {
                 $this->audioAnchorMs = $dtsMs;
@@ -1102,6 +1128,41 @@ class Mp4Recoder
         foreach ($this->audioTranscoder->flush() as $frame) {
             $this->enqueueOrStoreAudio($frame['data'], $this->nextTranscodedAudioTimestamp());
         }
+    }
+
+    /**
+     * 源音频无解码器：合成一条内容全静音的 AAC-LC 轨。
+     * 帧数按视频总时长（含最后一帧显示时长）向上取整，保证音轨不短于视频；
+     * 采样率/声道已在 initAudioPolicy 按源声明确定（不可用时回落 44.1 kHz / 2 声道）。
+     */
+    private function synthesizeSilentAudio(): void
+    {
+        if ($this->audioMode !== AudioPolicy::MODE_SILENT || $this->silentAudioSource === null) return;
+        if (!empty($this->audioSamples)) return;
+        $endMs = $this->videoEndMs();
+        if ($endMs <= 0) return;
+        $source = $this->silentAudioSource;
+        $frames = $source->framesFor((int)ceil($endMs));
+        for ($i = 0; $i < $frames; $i++) {
+            $timestamp = (int)round($i * $source->frameDurationMs());
+            $this->enqueueOrStoreAudio($source->frame(), $timestamp);
+        }
+    }
+
+    /** 视频总时长（毫秒，含最后一帧的显示时长），与 sample 时间戳基准无关 */
+    private function videoEndMs(): float
+    {
+        $count = count($this->videoSamples);
+        if ($count === 0) return 0.0;
+        $first = (float)$this->videoSamples[0]['timestamp'];
+        $last = (float)$this->videoSamples[$count - 1]['timestamp'];
+        if ($count >= 2) {
+            $frameMs = ($last - $first) / ($count - 1);
+        } else {
+            $fps = $this->effectiveTargetFps ?? $this->sourceFps;
+            $frameMs = ($fps !== null && $fps > 0) ? 1000.0 / $fps : 40.0;
+        }
+        return max(0.0, $last - $first) + max(1.0, $frameMs);
     }
 
     private function flushQueuedAudio(): void

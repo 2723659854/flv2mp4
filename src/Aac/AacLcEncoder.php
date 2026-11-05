@@ -5,26 +5,31 @@ namespace Xiaosongshu\Flv2mp4\Aac;
 use InvalidArgumentException;
 
 /**
- * @purpose 纯 PHP 实现的 AAC-LC 编码器，适用于 48 kHz 单声道或交错立体声 PCM
+ * @purpose 纯 PHP 实现的 AAC-LC 编码器，适用于 48 / 44.1 / 32 kHz 单声道或交错立体声 PCM
  * @author yanglong
  * @time 2026年8月12日17:08:03
  */
 final class AacLcEncoder
 {
     public const FRAME_SAMPLES = 1024;
-    private const SAMPLE_RATE = 48000;
+    /** ADTS / ASC 采样率索引（与 ISO 14496-3 一致） */
+    private const RATES = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350];
     private const MAX_SFB = 40;
     private const MAX_GLOBAL_SEARCHES = 6;
     private const MAX_LOCAL_ADJUSTMENTS = 96;
 
     private int $bitrate;
     private int $channels;
+    private int $sampleRate;
+    /** 当前采样率的长窗 swb 偏移表（FFmpeg ff_swb_offset_1024） */
+    private array $swb;
     private ?int $previousGlobalOffset = null;
     private array $pending = [];
     private int $pendingOffset = 0;
     private array $overlap = [[], []];
     private int $frameCount = 0;
-    private static ?array $bandIndex = null;
+    /** 按采样率缓存的 band 索引表 */
+    private static array $bandIndexCache = [];
     private static ?array $pow43Table = null;
 
     /**
@@ -44,29 +49,35 @@ final class AacLcEncoder
     }
 
     /**
-     * 预计算每个频谱样本所属的 scalefactor band（-1 表示超出 SWB_48K[MAX_SFB]，不参与能量统计），
+     * 预计算每个频谱样本所属的 scalefactor band（-1 表示超出 SWB[MAX_SFB]，不参与能量统计），
      * 与逐样本 while 推进逻辑位等价，仅省去每样本的边界判断。
      */
-    private static function bandIndexTable(): array
+    private function bandIndexTable(): array
     {
-        if (self::$bandIndex !== null) {
-            return self::$bandIndex;
+        if (isset(self::$bandIndexCache[$this->sampleRate])) {
+            return self::$bandIndexCache[$this->sampleRate];
         }
         $table = [];
         $band = 0;
         for ($i = 0; $i < self::FRAME_SAMPLES; ++$i) {
-            while ($band + 1 < self::MAX_SFB && $i >= AacTables::SWB_48K[$band + 1]) {
+            while ($band + 1 < self::MAX_SFB && $i >= $this->swb[$band + 1]) {
                 ++$band;
             }
-            $table[$i] = $i < AacTables::SWB_48K[self::MAX_SFB] ? $band : -1;
+            $table[$i] = $i < $this->swb[self::MAX_SFB] ? $band : -1;
         }
-        return self::$bandIndex = $table;
+        return self::$bandIndexCache[$this->sampleRate] = $table;
     }
 
-    public function __construct(int $bitrate = 128000, int $channels = 2)
+    public function __construct(int $bitrate = 128000, int $channels = 2, int $sampleRate = 48000)
     {
         if ($channels !== 1 && $channels !== 2) {
             throw new InvalidArgumentException('AAC channel count must be 1 or 2');
+        }
+        if (!in_array($sampleRate, [48000, 44100, 32000], true)) {
+            throw new InvalidArgumentException("AAC encoder supports 48000/44100/32000 Hz, got {$sampleRate}");
+        }
+        if (!in_array($sampleRate, self::RATES, true)) {
+            throw new InvalidArgumentException("AAC sample rate index missing for {$sampleRate}");
         }
         $minimumBitrate = $channels === 1 ? 48000 : 96000;
         if ($bitrate < $minimumBitrate || $bitrate > 192000) {
@@ -74,6 +85,8 @@ final class AacLcEncoder
         }
         $this->bitrate = $bitrate;
         $this->channels = $channels;
+        $this->sampleRate = $sampleRate;
+        $this->swb = AacTables::swbOffsetLong($sampleRate);
         $silence = array_fill(0, self::FRAME_SAMPLES, 0.0);
         $this->overlap = array_fill(0, $channels, $silence);
     }
@@ -119,7 +132,8 @@ final class AacLcEncoder
 
     public function getAudioSpecificConfig(): string
     {
-        $config = (2 << 11) | (3 << 7) | ($this->channels << 3);
+        $frequencyIndex = array_search($this->sampleRate, self::RATES, true);
+        $config = (2 << 11) | ($frequencyIndex << 7) | ($this->channels << 3);
         return pack('n', $config);
     }
 
@@ -191,7 +205,7 @@ final class AacLcEncoder
             ];
         }
 
-        $targetBytes = max(1, intdiv((int) floor($this->bitrate * 1024 / self::SAMPLE_RATE) - 56, 8));
+        $targetBytes = max(1, intdiv((int) floor($this->bitrate * 1024 / $this->sampleRate) - 56, 8));
         $attempts = 0;
         $plans = null;
         if ($this->previousGlobalOffset !== null) {
@@ -258,7 +272,7 @@ final class AacLcEncoder
                 $scaleFactors[$band] = 255;
                 continue;
             }
-            $width = AacTables::SWB_48K[$band + 1] - AacTables::SWB_48K[$band];
+            $width = $this->swb[$band + 1] - $this->swb[$band];
             $target = $width <= 8 ? 7.0 : 4.0;
             $scaleFactors[$band] = max(0, min(255, (int) ceil(104.0 + (16.0 / 3.0) * log($maximum / ($target - 0.4054), 2) + $offset)));
         }
@@ -297,8 +311,8 @@ final class AacLcEncoder
      */
     private function quantizeBand(array $spectrum, int $band, int $scaleFactor, bool $withDistortion = true): array
     {
-        $start = AacTables::SWB_48K[$band];
-        $end = AacTables::SWB_48K[$band + 1];
+        $start = $this->swb[$band];
+        $end = $this->swb[$band + 1];
         $pow34 = $spectrum['pow34'];
         $mdct = $spectrum['mdct'];
         $pow43 = self::$pow43Table ?? self::pow43Table();
@@ -629,7 +643,7 @@ final class AacLcEncoder
     private function adtsHeader(int $frameLength): string
     {
         $profile = 1;
-        $frequencyIndex = 3;
+        $frequencyIndex = array_search($this->sampleRate, self::RATES, true);
         $channelConfig = $this->channels;
         return pack('C7',
             0xff,

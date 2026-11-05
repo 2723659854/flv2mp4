@@ -59,6 +59,9 @@ class PurePhpHlsGenerator
     private ?AudioTranscoder $audioTranscoder = null;
     private int $mp3Bitrate = 128000;
     private int $audioOutputSamples = 0;
+    /** 源音频无解码器时的静音 AAC 轨（PMT 如实声明 0x0F，且每段都有真实音频包） */
+    private ?\Xiaosongshu\Flv2mp4\Audio\SilentAacSource $silentAudioSource = null;
+    private int $silentAudioFramesWritten = 0;
     private int $audioAnchorMs = 0;
     private bool $audioAnchorSet = false;
     private ?int $audioLastPts = null;
@@ -365,6 +368,7 @@ class PurePhpHlsGenerator
         // 冲刷双缓冲中最后一帧及排队音频，保证分片完整后再关闭
         $this->flushPendingVideo();
         $this->flushAudioTranscoder();
+        $this->finalizeSilentAudio();
         $this->closeAllSegments();
     }
 
@@ -439,6 +443,8 @@ class PurePhpHlsGenerator
     {
         // 冲刷双缓冲中最后一帧及排队音频，保证分片完整后再关闭
         $this->flushPendingVideo();
+        $this->flushAudioTranscoder();
+        $this->finalizeSilentAudio();
         $this->closeAllSegments();
     }
 
@@ -558,6 +564,8 @@ class PurePhpHlsGenerator
             }
             $this->lastVideoDtsTick = $dts;
         }
+        // pipeline 编码序 DTS 路径也要记录最大 DTS：静音音频轨收尾按视频末尾补齐
+        if ($this->lastVideoDtsTick === null || $dts > $this->lastVideoDtsTick) $this->lastVideoDtsTick = $dts;
         // B 帧合法 PTS<DTS（TS 容器原生支持），不能钳制
         // 非 B 模式 cts 来自源流（非负 tick），所以 pts >= dts 自动成立
         $pts = $dts + $ctsTicks;
@@ -772,7 +780,11 @@ class PurePhpHlsGenerator
                 $this->writeAudioPayload($payload, false, $pts);
                 return;
             }
-            if ($soundFormat !== 10) return;
+            if ($soundFormat !== 10) {
+                // 源音频无解码器（Nellymoser/PCM 等）：输出静音 AAC 轨并如实声明
+                $this->handleUndecodableAudio($tag, $raw, $soundFormat);
+                return;
+            }
             $aacPacketType = ord($raw[1]);
             if ($aacPacketType === 0) {
                 $asc = substr($raw, 2);
@@ -793,7 +805,11 @@ class PurePhpHlsGenerator
         // 配置了 audio：统一走 AudioPolicy（源格式 + 目标格式 → 直通/转码）
         $source = AudioPolicy::sourceFromFlvSoundFormat($soundFormat);
         if ($source === AudioPolicy::CODEC_UNKNOWN) {
-            throw new \RuntimeException("无法识别源音频格式: SoundFormat={$soundFormat}");
+            if ($this->audioTarget === AudioPolicy::CODEC_MP3) {
+                throw new \RuntimeException("源音频（SoundFormat={$soundFormat}）无解码器，无法转为 MP3");
+            }
+            $this->handleUndecodableAudio($tag, $raw, $soundFormat);
+            return;
         }
         if ($this->audioSourceCodec !== null && $this->audioSourceCodec !== $source) {
             // 同文件源格式变化：以首个音频帧锁定的格式为准，后续不一致的 tag 丢弃
@@ -849,6 +865,56 @@ class PurePhpHlsGenerator
             return;
         }
         $this->emitAacPassthrough($tag, $payload);
+    }
+
+    /**
+     * 源音频无解码器：生成静音 AAC-LC 帧（ADTS 包装后写入 TS），PMT 已按 hasAudioTrack 声明 0x0F。
+     * 采样率/声道优先沿用 FLV 音频头声明，不支持时回落 44.1 kHz。
+     */
+    private function handleUndecodableAudio($tag, string $raw, int $soundFormat): void
+    {
+        if ($this->silentAudioSource === null) {
+            $declaredRate = [5512, 11025, 22050, 44100][(ord($raw[0]) >> 2) & 3];
+            $declaredChannels = (ord($raw[0]) & 1) === 1 ? 2 : 1;
+            $this->silentAudioSource = new \Xiaosongshu\Flv2mp4\Audio\SilentAacSource($declaredRate, $declaredChannels);
+            $this->audioSpecificConfig = $this->silentAudioSource->audioSpecificConfig();
+            $this->parseAudioSpecificConfig($this->audioSpecificConfig);
+            $this->audioOutputCodec = AudioPolicy::CODEC_AAC;
+            $this->audioSourceCodec = AudioPolicy::CODEC_UNKNOWN . ':' . $soundFormat;
+            $this->audioMode = AudioPolicy::MODE_SILENT;
+        }
+        if ($this->baseTimestamp === null) return;
+        $timestamp = method_exists($tag, 'getTime') ? $tag->getTime() : 0;
+        $target = max(0, ($timestamp - $this->baseTimestamp) * 90);
+        $rate = $this->silentAudioSource->rate();
+        while ($this->silentAudioFramesWritten * 1024 * 90000 / $rate < $target) {
+            $this->writeSilentAudioFrame();
+        }
+    }
+
+    private function writeSilentAudioFrame(): void
+    {
+        $source = $this->silentAudioSource;
+        if ($source === null || $source->frame() === '') return;
+        $pts = (int)round($this->silentAudioFramesWritten * 1024 * 90000 / $source->rate());
+        ++$this->silentAudioFramesWritten;
+        if ($this->audioLastPts !== null && $pts < $this->audioLastPts) $pts = $this->audioLastPts;
+        $this->audioLastPts = $pts;
+        $this->writeAudioPayload($source->frame(), true, $pts);
+    }
+
+    /** 收尾：静音轨补齐到视频末尾（含最后一帧显示时长），保证音轨与视频等长 */
+    private function finalizeSilentAudio(): void
+    {
+        $source = $this->silentAudioSource;
+        if ($source === null || $this->silentAudioFramesWritten === 0 || $this->lastVideoDtsTick === null) return;
+        $rate = $source->rate();
+        $fps = $this->profile['fps'] ?? null;
+        $frameTicks = ($fps !== null && (int)$fps > 0) ? (int)round(1000.0 / (int)$fps * 90) : 3600;
+        $end = $this->lastVideoDtsTick + $frameTicks;
+        while ($this->silentAudioFramesWritten * 1024 * 90000 / $rate < $end) {
+            $this->writeSilentAudioFrame();
+        }
     }
 
     /** 源格式 + 目标格式的策略判定（只做一次；转码器随之建立） */
@@ -1153,9 +1219,12 @@ class PurePhpHlsGenerator
     {
         $body = "\x00\x01\xC1\x00\x00"
             . pack('n', 0xE000 | $this->videoPid) . "\xF0\x00"
-            . "\x1B" . pack('n', 0xE000 | $this->videoPid) . "\xF0\x00"
-            . $this->audioStreamTypeByte()
-            . pack('n', 0xE000 | $this->audioPid) . "\xF0\x00";
+            . "\x1B" . pack('n', 0xE000 | $this->videoPid) . "\xF0\x00";
+        // 没有音频轨时不声明音频：否则 PMT 会声明一路实际零包的“幽灵音频流”
+        $audioStreamType = $this->audioStreamTypeByte();
+        if ($audioStreamType !== null) {
+            $body .= $audioStreamType . pack('n', 0xE000 | $this->audioPid) . "\xF0\x00";
+        }
         $sectLen = strlen($body) + 4;
         $section = "\x02" . chr(0xB0 | (($sectLen >> 8) & 0x0F)) . chr($sectLen & 0xFF) . $body;
         $section .= pack('N', $this->crc32mpeg($section));
@@ -1164,16 +1233,27 @@ class PurePhpHlsGenerator
     }
 
     /**
-     * PMT 音频 stream_type：0x03 = MPEG-1 audio（MP3 裸帧），0x0F = AAC（ADTS）。
+     * PMT 音频 stream_type：0x03 = MPEG-1 audio（MP3 裸帧），0x0F = AAC（ADTS）；
+     * 无音频轨返回 null（PMT 不写音频行）。
      * 配置了 audio 时以目标格式为准；未配置时按源格式直通，
      * 优先用已见到的源 tag，分布式路径回落到主进程预扫描提示。
      */
-    private function audioStreamTypeByte(): string
+    private function audioStreamTypeByte(): ?string
     {
+        if (!$this->hasAudioTrack()) return null;
         if ($this->audioTarget === AudioPolicy::CODEC_MP3) return "\x03";
         if ($this->audioTarget === AudioPolicy::CODEC_AAC) return "\x0F";
         $soundFormat = $this->detectedAudioSoundFormat ?? $this->presetAudioSoundFormat;
         return $soundFormat === 2 ? "\x03" : "\x0F";
+    }
+
+    /**
+     * 是否存在音频轨：源里有音频 tag 即成立（AAC/MP3 直通或转码；Nellymoser/PCM 等
+     * 无解码器时输出静音 AAC 轨）。没有任何音频 tag（纯视频）才不声明。
+     */
+    private function hasAudioTrack(): bool
+    {
+        return ($this->detectedAudioSoundFormat ?? $this->presetAudioSoundFormat) !== null;
     }
 
     /**

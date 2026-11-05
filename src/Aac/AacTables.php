@@ -3,9 +3,15 @@
 namespace Xiaosongshu\Flv2mp4\Aac;
 
 /**
- * @purpose ISO/IEC 14496-3 AAC-LC 规范中规定的霍夫曼编码表以及适用于 48 kHz 采样率的比例因子带表。
+ * @purpose ISO/IEC 14496-3 AAC-LC 规范中规定的霍夫曼编码表以及比例因子带表。
  * @author yanglong
  * @time 2026年8月12日17:08:52
+ *
+ * 长窗 swb 表逐项抄自 FFmpeg libavcodec/aactab.c 的 ff_swb_offset_1024 索引表：
+ *  - 48 kHz 与 44.1 kHz 共用 swb_offset_1024_48（49 带，50 个偏移）；
+ *  - 32 kHz 用 swb_offset_1024_32（51 带，52 个偏移）。
+ * 短窗（128 样本）三者共用 swb_offset_128_48（14 带）；
+ * 本编码器只输出 ONLY_LONG_SEQUENCE，故只内置长窗表。
  */
 final class AacTables
 {
@@ -15,6 +21,20 @@ final class AacTables
         352, 384, 416, 448, 480, 512, 544, 576, 608, 640, 672, 704, 736, 768,
         800, 832, 864, 896, 928, 1024,
     ];
+
+    /** FFmpeg swb_offset_1024_32（前 41 个偏移与 48k 表相同，末尾为 960/992/1024） */
+    public const SWB_32K = [
+        0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 48, 56, 64, 72, 80,
+        88, 96, 108, 120, 132, 144, 160, 176, 196, 216, 240, 264, 292, 320,
+        352, 384, 416, 448, 480, 512, 544, 576, 608, 640, 672, 704, 736, 768,
+        800, 832, 864, 896, 928, 960, 992, 1024,
+    ];
+
+    /** 长窗 swb 偏移表（44.1/48 kHz → 48k 表，32 kHz → 32k 表） */
+    public static function swbOffsetLong(int $sampleRate): array
+    {
+        return $sampleRate === 32000 ? self::SWB_32K : self::SWB_48K;
+    }
 
     public const SCALEFACTOR_CODES = [
         0x3ffe8,0x3ffe6,0x3ffe7,0x3ffe5,0x7fff5,0x7fff1,0x7ffed,0x7fff6,0x7ffee,0x7ffef,0x7fff0,0x7fffc,0x7fffd,0x7ffff,0x7fffe,0x7fff7,

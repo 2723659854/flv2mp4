@@ -143,7 +143,7 @@ final class AacLcDecoder
         $ics = $this->readIcsInfo($r);
         $this->readingChannel = $channelIndex;
         $spectrum = $this->readChannel($r, $gain, $ics, $rateIndex);
-        $offsets = $ics[2] === 2 ? [0, 4, 8, 12, 16, 20, 28, 36, 44, 56, 68, 80, 96, 112, 128] : AacTables::SWB_48K;
+        $offsets = $ics[2] === 2 ? [0, 4, 8, 12, 16, 20, 28, 36, 44, 56, 68, 80, 96, 112, 128] : AacTables::swbOffsetLong(self::RATES[$rateIndex]);
         $this->applyTns($spectrum, $this->channelTns[$channelIndex] ?? [], $ics[2], $ics[3], $offsets, $ics[0], $rateIndex);
         return $this->imdct($spectrum, $channelIndex, $ics[1], $ics[2]);
     }
@@ -178,7 +178,7 @@ final class AacLcDecoder
             $this->applyMsStereo($a, $b, $ics, $msMask, $msFlags);
         }
         $this->applyIntensityStereo($a, $b, $ics, $msMask);
-        $offsets = $ics[2] === 2 ? [0, 4, 8, 12, 16, 20, 28, 36, 44, 56, 68, 80, 96, 112, 128] : AacTables::SWB_48K;
+        $offsets = $ics[2] === 2 ? [0, 4, 8, 12, 16, 20, 28, 36, 44, 56, 68, 80, 96, 112, 128] : AacTables::swbOffsetLong(self::RATES[$rateIndex]);
         $this->applyTns($a, $this->channelTns[0], $ics[2], $ics[3], $offsets, $ics[0], $rateIndex);
         $this->applyTns($b, $this->channelTns[1], $ics[2], $ics[3], $offsets, $ics[0], $rateIndex);
         return [$this->imdct($a, 0, $ics[1], $ics[2]), $this->imdct($b, 1, $ics[1], $ics[2])];
@@ -360,7 +360,7 @@ final class AacLcDecoder
         [$max, , $sequence, $groups] = $ics;
         $offsets = $sequence === 2
             ? [0, 4, 8, 12, 16, 20, 28, 36, 44, 56, 68, 80, 96, 112, 128]
-            : AacTables::SWB_48K;
+            : AacTables::swbOffsetLong($this->sampleRate);
         $window = 0;
         foreach ($groups as $group => $windowCount) {
             for ($band = 0; $band < $max; ++$band) {
@@ -443,7 +443,7 @@ final class AacLcDecoder
         if ($gainControlPresent) {
             throw new RuntimeException('AAC gain control is not supported');
         }
-        $spectrum = array_fill(0, 1024, 0.0); $offsets = AacTables::SWB_48K;
+        $spectrum = array_fill(0, 1024, 0.0); $offsets = AacTables::swbOffsetLong(self::RATES[$rateIndex]);
         for ($i = 0; $i < $max; ++$i) {
             $start = $offsets[$i]; $end = $offsets[$i + 1];
             $codebook = $cb[$i] ?? 0;
@@ -477,7 +477,7 @@ final class AacLcDecoder
     private function applyIntensityStereo(array &$left, array &$right, array $ics, int $msMask): void
     {
         [$max, , $sequence, $groups] = $ics;
-        $offsets = $sequence === 2 ? [0, 4, 8, 12, 16, 20, 28, 36, 44, 56, 68, 80, 96, 112, 128] : AacTables::SWB_48K;
+        $offsets = $sequence === 2 ? [0, 4, 8, 12, 16, 20, 28, 36, 44, 56, 68, 80, 96, 112, 128] : AacTables::swbOffsetLong($this->sampleRate);
         $window = 0;
         foreach ($groups as $group => $count) {
             for ($band = 0; $band < $max; ++$band) {

@@ -61,7 +61,7 @@ final class AudioTranscoder
         } else {
             $min = $channels === 1 ? 48000 : 96000;
             $bitrate = max($min, min(192000, $mp3Bitrate));
-            $this->encoder = new AacLcEncoder($bitrate, $channels);
+            $this->encoder = new AacLcEncoder($bitrate, $channels, $rate);
         }
         // 延迟补偿 = 丢 1 帧（samplesPerFrame）后，预填 samplesPerFrame - 往返总延迟 个静音样本；
         // MP3：1152 - (576+529) = 47；AAC：1024 - (1024+1024) < 0 → 0。
