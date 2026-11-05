@@ -2,6 +2,8 @@
 
 namespace Xiaosongshu\Flv2mp4\Recode;
 
+use Xiaosongshu\Flv2mp4\Audio\AudioPolicy;
+use Xiaosongshu\Flv2mp4\Audio\AudioTranscoder;
 use Xiaosongshu\Flv2mp4\Codec\H264Decoder;
 use Xiaosongshu\Flv2mp4\Codec\H264Encoder;
 use Xiaosongshu\Flv2mp4\Codec\NalUtil;
@@ -57,6 +59,23 @@ class FlvRecoder
     private int $audioChannels = 2;
     private int $audioObjectType = 2;
 
+    /** 音频目标（null=未配置→原样直通；aac/mp3=目标格式） */
+    private ?string $audioTarget = null;
+    /** 源格式（首次音频 tag 锁定，中途变化按首个格式处理） */
+    private ?string $audioSourceCodec = null;
+    private string $audioOutputCodec = AudioPolicy::CODEC_UNKNOWN;
+    private string $audioMode = AudioPolicy::MODE_PASSTHROUGH;
+    private ?AudioTranscoder $audioTranscoder = null;
+    private int $mp3Bitrate = 128000;
+    /** 编码器已输出的样本游标（用于按样本时钟生成时间戳） */
+    private int $audioOutputSamples = 0;
+    /** 首个音频帧相对时间（转码时间戳锚点） */
+    private int $audioAnchorMs = 0;
+    private bool $audioAnchorSet = false;
+    /** 最近写入的未偏移音频时间戳（保证单调） */
+    private ?int $audioLastPtsRaw = null;
+    private bool $audioSequenceHeaderWritten = false;
+
     private ?int $baseTimestamp = null;
     private int $videoFrameCount = 0;
 
@@ -94,6 +113,11 @@ class FlvRecoder
     private ?array $pendingVideoJob = null;
     /** @var FlvTag[] 在途视频帧之后到达的音频 tag，待该帧写出后按原顺序回放 */
     private array $queuedAudioTags = [];
+    /** 在途音频队列字节数（硬上限 8MB，防止内存被音频吃掉） */
+    private int $queuedAudioBytes = 0;
+    /** @var FlvTag[] 首个视频帧写出 FLV 头之前到达的音频 tag（仅配置了 audio 时保留，避免丢段） */
+    private array $preHeaderAudioTags = [];
+    private int $preHeaderAudioBytes = 0;
 
     // B 帧（IBBP）编码调度状态：显示序待编码帧队列 + 编码序计数
     /** 是否启用 B 帧编码（config.bframes 且 profile 非 baseline） */
@@ -120,6 +144,9 @@ class FlvRecoder
         $this->targetBitrate = $config['bitrate'] ?? 0;
         $this->targetFps = $config['fps'] ?? 0;
         $this->targetQp = $config['qp'] ?? 26;
+        // 音频策略在校验期就完成取值检查：非法 audio 直接报错，不静默回退
+        $this->audioTarget = AudioPolicy::targetFromConfig($config);
+        $this->mp3Bitrate = (int)($config['audioBitrate'] ?? 128000);
         $this->validateConfig();
 
         if (!empty($config['watermark']) && !empty($config['watermarkFile'])) {
@@ -285,6 +312,9 @@ class FlvRecoder
         $this->positiveVideoDtsDeltaCount = 0;
         $this->pendingVideoJob = null;
         $this->queuedAudioTags = [];
+        $this->queuedAudioBytes = 0;
+        $this->preHeaderAudioTags = [];
+        $this->preHeaderAudioBytes = 0;
         $this->bQueue = [];
         $this->bLastAnchorIdx = -1;
         $this->bPocBase = 0;
@@ -461,6 +491,8 @@ class FlvRecoder
             $this->flushDecoderFrames();
         }
         $this->flushPendingVideo();
+        // 音频转码器的尾部样本（编码器缓冲）必须在 metadata 计算前写完
+        $this->flushAudioTranscoder();
 
         $actualHasVideo = $this->outputVideoFrameCount > 0;
         $actualHasAudio = $this->outputAudioFrameCount > 0;
@@ -472,7 +504,9 @@ class FlvRecoder
             : 1000 / $fallbackFps;
         $videoEndMs = $actualHasVideo && $this->lastVideoOutputTimestamp !== null
             ? $this->lastVideoOutputTimestamp + $videoFrameDurationMs : 0.0;
-        $audioSamplesPerFrame = in_array($this->audioObjectType, [5, 29], true) ? 2048 : 1024;
+        $audioSamplesPerFrame = $this->audioOutputCodec === AudioPolicy::CODEC_MP3
+            ? 1152
+            : (in_array($this->audioObjectType, [5, 29], true) ? 2048 : 1024);
         $audioFrameDurationMs = $this->audioSampleRate > 0 ? $audioSamplesPerFrame / $this->audioSampleRate * 1000 : 0.0;
         $audioEndMs = $actualHasAudio && $this->lastAudioOutputTimestamp !== null
             ? $this->lastAudioOutputTimestamp + $audioFrameDurationMs : 0.0;
@@ -488,7 +522,7 @@ class FlvRecoder
                 'hasAudio' => $actualHasAudio,
             ];
             if ($actualHasAudio) {
-                $metadata['audiocodecid'] = 'mp4a';
+                $metadata['audiocodecid'] = $this->audioOutputCodec === AudioPolicy::CODEC_MP3 ? 2.0 : 'mp4a';
                 $metadata['audiosamplerate'] = (float)$this->audioSampleRate;
                 $metadata['audiochannels'] = (float)$this->audioChannels;
             }
@@ -968,10 +1002,30 @@ class FlvRecoder
 
     private function replayQueuedAudio(): void
     {
+        // FLV 头已写出后，补放此前缓存的音频 tag（仅配置 audio 时才会缓存）
+        if ($this->flvHeaderWritten && $this->preHeaderAudioTags !== []) {
+            $pending = $this->preHeaderAudioTags;
+            $this->preHeaderAudioTags = [];
+            $this->preHeaderAudioBytes = 0;
+            foreach ($pending as $tag) {
+                $this->handleAudioFrame($tag);
+            }
+        }
         foreach ($this->queuedAudioTags as $queuedTag) {
             $this->handleAudioFrame($queuedTag);
         }
         $this->queuedAudioTags = [];
+        $this->queuedAudioBytes = 0;
+    }
+
+    /** 缓存 FLV 头写出前的音频 tag（有界） */
+    private function queuePreHeaderAudio(FlvTag $tag): void
+    {
+        $this->preHeaderAudioBytes += strlen($tag->body ?? '');
+        if ($this->preHeaderAudioBytes > 8 * 1024 * 1024) {
+            throw new \RuntimeException('音频排队超过 8MB 硬上限');
+        }
+        $this->preHeaderAudioTags[] = $tag;
     }
 
     /**
@@ -1099,6 +1153,10 @@ class FlvRecoder
     {
         // 有在途视频帧时音频排队，随该帧 finish 后按原 tag 顺序回放，维持 FLV 交错时序
         if ($this->pendingVideoJob !== null) {
+            $this->queuedAudioBytes += strlen($tag->body ?? '');
+            if ($this->queuedAudioBytes > 8 * 1024 * 1024) {
+                throw new \RuntimeException('音频排队超过 8MB 硬上限');
+            }
             $this->queuedAudioTags[] = $tag;
             return;
         }
@@ -1107,29 +1165,187 @@ class FlvRecoder
         if ($raw === null || strlen($raw) < 2) return;
 
         $soundFormat = (ord($raw[0]) >> 4) & 0x0F;
-        if ($soundFormat !== 10) return;
-
-        $aacPacketType = ord($raw[1]);
-        if ($aacPacketType === 0) {
-            $this->audioSpecificConfig = substr($raw, 2);
-            $this->audioConfigParsed = true;
-            $this->parseAudioSpecificConfig($this->audioSpecificConfig);
+        if (!$this->lockAudioPolicy($soundFormat, $raw)) return;
+        if (str_starts_with($this->audioSourceCodec, AudioPolicy::CODEC_UNKNOWN)) {
+            // 未知源音频且未配置目标：保持旧行为，不写入输出
             return;
         }
-        // FLV 头由首个输出视频帧写出（emitPendingVideoFrame）。B 帧重排期间首帧尚未产出
-        // 但 baseTimestamp 已被关键帧事件设置，此时直写音频帧会落在 FLV 头之前破坏文件结构。
-        // 注意必须放在 AAC config 解析之后：config tag 位于首帧视频之前，只解析不写出
-        if ($aacPacketType !== 1) return;
+
+        if ($this->audioSourceCodec === AudioPolicy::CODEC_AAC) {
+            $aacPacketType = ord($raw[1]);
+            if ($aacPacketType === 0) {
+                $this->audioSpecificConfig = substr($raw, 2);
+                $this->audioConfigParsed = true;
+                $this->parseAudioSpecificConfig($this->audioSpecificConfig);
+                $this->ensureAudioTranscoder();
+                return;
+            }
+            // FLV 头由首个输出视频帧写出（emitPendingVideoFrame）。B 帧重排期间首帧尚未产出
+            // 但 baseTimestamp 已被关键帧事件设置，此时直写音频帧会落在 FLV 头之前破坏文件结构。
+            // 注意必须放在 AAC config 解析之后：config tag 位于首帧视频之前，只解析不写出
+            if ($aacPacketType !== 1) return;
+            if (!$this->flvHeaderWritten) {
+                // 未配置 audio 或目标与源同格式（直通）：保持旧行为（丢弃 FLV 头之前的音频，
+                // 产物与基线逐字节一致）。仅转码路径需要缓存，否则样本计数会因丢帧产生偏移。
+                if ($this->audioMode !== AudioPolicy::MODE_TRANSCODE) return;
+                $this->queuePreHeaderAudio($tag);
+                return;
+            }
+            if ($this->baseTimestamp === null || !$this->audioConfigParsed) return;
+
+            $payload = substr($raw, 2);
+            if ($payload === '') return;
+            $this->emitAudioPayload($payload, $tag->getTime() - $this->baseTimestamp);
+            return;
+        }
+
+        // 源为 MP3：tag 体 = 1 字节音频头 + MP3 帧字节
+        if (!$this->flvHeaderWritten || $this->baseTimestamp === null) {
+            // 仅转码路径缓存 FLV 头前的音频，直通/未配置保持旧行为
+            if ($this->audioMode === AudioPolicy::MODE_TRANSCODE) {
+                $this->queuePreHeaderAudio($tag);
+            }
+            return;
+        }
+        $payload = substr($raw, 1);
+        if ($payload === '') return;
+        $this->emitAudioPayload($payload, $tag->getTime() - $this->baseTimestamp);
+    }
+
+    /**
+     * 首次音频 tag 锁定源格式并完成策略决策；之后出现不同源格式的 tag 一律丢弃，
+     * 保证同一文件内源格式变化时行为确定。
+     */
+    private function lockAudioPolicy(int $soundFormat, string $raw): bool
+    {
+        $source = AudioPolicy::sourceFromFlvSoundFormat($soundFormat);
+        if ($this->audioSourceCodec === null) {
+            $this->audioSourceCodec = $source;
+            $decision = AudioPolicy::decide($source, $this->audioTarget);
+            $this->audioOutputCodec = $decision['output'];
+            $this->audioMode = $decision['mode'];
+            if ($source === AudioPolicy::CODEC_MP3) {
+                // 直通与转码都需要真实采样率/声道：FLV 音频头（SoundRate/SoundType）
+                // 按此填写，转码器也按此建立
+                $header = $this->parseMp3FrameHeader(substr($raw, 1));
+                if ($header !== null) {
+                    [$this->audioSampleRate, $this->audioChannels] = $header;
+                }
+                if ($this->audioMode === AudioPolicy::MODE_TRANSCODE) $this->ensureAudioTranscoder();
+            }
+            return true;
+        }
+        return $source === $this->audioSourceCodec;
+    }
+
+    /** MP3 帧头 → [采样率, 声道数]；解析失败返回 null */
+    private function parseMp3FrameHeader(string $data): ?array
+    {
+        if (strlen($data) < 4) return null;
+        $h = unpack('N', substr($data, 0, 4))[1];
+        if (($h >> 21 & 0x7FF) !== 0x7FF) return null;
+        $version = ($h >> 19) & 0x3;   // 3=MPEG1, 2=MPEG2, 0=MPEG2.5
+        $layer = ($h >> 17) & 0x3;     // 1=Layer III
+        if ($layer !== 1) return null;
+        $rateIndex = ($h >> 10) & 0x3;
+        $rates = [44100, 48000, 32000];
+        $rate = $rates[$rateIndex] ?? 0;
+        if ($version === 2) $rate = intdiv($rate, 2);
+        elseif ($version === 0) $rate = intdiv($rate, 4);
+        $mode = ($h >> 6) & 0x3;       // 3=单声道，其余为双声道/联合立体声
+        $channels = $mode === 3 ? 1 : 2;
+        return [$rate, $channels];
+    }
+
+    /** 转码器按需创建（采样率/声道已知后）；输出 AAC 时同时准备序列头 */
+    private function ensureAudioTranscoder(): void
+    {
+        if ($this->audioMode !== AudioPolicy::MODE_TRANSCODE || $this->audioTranscoder !== null) return;
+        if ($this->audioSourceCodec === null || $this->audioSampleRate <= 0) return;
+        if ($this->audioSourceCodec === AudioPolicy::CODEC_AAC && !$this->audioConfigParsed) return;
+
+        $this->audioTranscoder = new AudioTranscoder(
+            $this->audioSourceCodec,
+            $this->audioOutputCodec,
+            $this->audioSampleRate,
+            $this->audioChannels,
+            $this->mp3Bitrate
+        );
+        if ($this->audioOutputCodec === AudioPolicy::CODEC_AAC) {
+            $asc = $this->audioTranscoder->outputAudioSpecificConfig();
+            if ($asc !== '') {
+                $this->audioSpecificConfig = $asc;
+                $this->audioConfigParsed = true;
+                $this->writeAudioSequenceHeaderIfNeeded();
+            }
+        }
+    }
+
+    private function emitAudioPayload(string $payload, int $relativeTime): void
+    {
+        if ($this->audioOutputCodec === AudioPolicy::CODEC_UNKNOWN) return;
+
+        if ($this->audioMode === AudioPolicy::MODE_PASSTHROUGH) {
+            if ($this->audioSourceCodec === AudioPolicy::CODEC_AAC) {
+                $this->writeAudioTag($payload, $relativeTime);
+            } else {
+                // MP3 直通：源首个音频 tag 可能早于首个视频 tag（相对时间为负），必须钳制且单调
+                $pts = max(0, $relativeTime);
+                if ($this->audioLastPtsRaw !== null && $pts < $this->audioLastPtsRaw) {
+                    $pts = $this->audioLastPtsRaw;
+                }
+                $this->audioLastPtsRaw = $pts;
+                $this->writeMp3Tag($payload, $pts);
+            }
+            return;
+        }
+
+        $this->ensureAudioTranscoder();
+        if ($this->audioTranscoder === null) return;
+        if (!$this->audioAnchorSet) {
+            $this->audioAnchorMs = $relativeTime;
+            $this->audioAnchorSet = true;
+        }
+        foreach ($this->audioTranscoder->push($payload) as $frame) {
+            $this->writeTranscodedAudioFrame($frame);
+        }
+    }
+
+    private function writeTranscodedAudioFrame(array $frame): void
+    {
+        $rate = $this->audioSampleRate;
+        // 编码器延迟已由 AudioTranscoder 的"预填静音+丢首帧"在样本域补偿，
+        // 这里首个写出帧即对应源样本 0，时间戳只按输出样本数线性推进
+        $pts = $this->audioAnchorMs + (int)round($this->audioOutputSamples * 1000 / $rate);
+        if ($pts < 0) $pts = 0;
+        if ($this->audioLastPtsRaw !== null && $pts < $this->audioLastPtsRaw) $pts = $this->audioLastPtsRaw;
+        $this->audioLastPtsRaw = $pts;
+        $this->audioOutputSamples += (int)$frame['samples'];
+
+        if ($this->audioOutputCodec === AudioPolicy::CODEC_MP3) {
+            $this->writeMp3Tag($frame['data'], $pts);
+        } else {
+            $this->writeAudioSequenceHeaderIfNeeded();
+            $this->writeAudioTag($frame['data'], $pts);
+        }
+    }
+
+    private function flushAudioTranscoder(): void
+    {
+        if ($this->audioTranscoder === null) return;
+        foreach ($this->audioTranscoder->flush() as $frame) {
+            $this->writeTranscodedAudioFrame($frame);
+        }
+    }
+
+    private function writeAudioSequenceHeaderIfNeeded(): void
+    {
+        if ($this->audioSequenceHeaderWritten) return;
+        if ($this->audioOutputCodec !== AudioPolicy::CODEC_AAC) return;
+        if ($this->audioSpecificConfig === '') return;
         if (!$this->flvHeaderWritten) return;
-        if ($this->baseTimestamp === null || !$this->audioConfigParsed) return;
-
-        $aacRaw = substr($raw, 2);
-        if ($aacRaw === '') return;
-
-        $timestamp = $tag->getTime();
-        $relativeTime = $timestamp - $this->baseTimestamp;
-
-        $this->writeAudioTag($aacRaw, $relativeTime);
+        $this->writeAudioSequenceHeader();
+        $this->audioSequenceHeaderWritten = true;
     }
 
     private function parseAudioSpecificConfig(string $config): void
@@ -1247,8 +1463,11 @@ class FlvRecoder
     private function writeSequenceHeaderTag(): void
     {
         $this->writeVideoSequenceHeader();
-        if ($this->audioConfigParsed && $this->audioSpecificConfig !== '') {
+        // 仅 AAC 输出需要序列头；MP3 目标不写（MP3 帧自带采样率/声道）
+        if ($this->audioOutputCodec === AudioPolicy::CODEC_AAC
+            && $this->audioConfigParsed && $this->audioSpecificConfig !== '') {
             $this->writeAudioSequenceHeader();
+            $this->audioSequenceHeaderWritten = true;
         }
     }
 
@@ -1377,13 +1596,28 @@ class FlvRecoder
         }
     }
 
-    private function getAudioHeaderByte(): int
+    private function getAudioHeaderByte(int $soundFormat = 10): int
     {
-        $soundFormat = 10;
         $soundRate = $this->getSoundRateValue();
         $soundSize = 1;
         $soundType = ($this->audioChannels == 2) ? 1 : 0;
         return ($soundFormat << 4) | ($soundRate << 2) | ($soundSize << 1) | $soundType;
+    }
+
+    /**
+     * 写 MP3 音频 tag：SoundFormat=2，无 AAC packet type 字节。
+     * 采样率/位宽/声道按实际参数填（FLV 的 SoundRate 无 32/48k 档，统一落 3，
+     * 真实采样率由 MP3 帧头决定，解码器以帧头为准）。
+     */
+    private function writeMp3Tag(string $mp3Data, int $timestamp): void
+    {
+        if ($this->bframes) {
+            $timestamp += $this->bCtsShiftMs();
+        }
+        $body = chr($this->getAudioHeaderByte(2)) . $mp3Data;
+        $this->outputAudioFrameCount++;
+        $this->lastAudioOutputTimestamp = $timestamp;
+        $this->writeTag(8, $body, $timestamp);
     }
 
     /**

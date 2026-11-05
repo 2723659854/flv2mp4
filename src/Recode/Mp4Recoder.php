@@ -2,6 +2,8 @@
 
 namespace Xiaosongshu\Flv2mp4\Recode;
 
+use Xiaosongshu\Flv2mp4\Audio\AudioPolicy;
+use Xiaosongshu\Flv2mp4\Audio\AudioTranscoder;
 use Xiaosongshu\Flv2mp4\Codec\H264Decoder;
 use Xiaosongshu\Flv2mp4\Codec\H264Encoder;
 use Xiaosongshu\Flv2mp4\Codec\NalUtil;
@@ -51,6 +53,23 @@ class Mp4Recoder
     private int $audioSampleRate = 44100;
     private int $audioChannels = 2;
     private int $audioObjectType = 2;
+
+    /** 音频目标（null=未配置→原样直通；aac/mp3=目标格式） */
+    private ?string $audioTarget = null;
+    /** 源音频格式（aac/mp3/unknown:N），由 esds tag0x04 的 ObjectTypeIndication 读出 */
+    private ?string $audioSourceCodec = null;
+    private int $audioSourceOti = -1;
+    private string $audioOutputCodec = AudioPolicy::CODEC_UNKNOWN;
+    private string $audioMode = AudioPolicy::MODE_PASSTHROUGH;
+    private ?AudioTranscoder $audioTranscoder = null;
+    private int $mp3Bitrate = 128000;
+    /** 转码输出样本游标（用于生成音频样本时间戳） */
+    private int $audioOutputSamples = 0;
+    private int $audioAnchorMs = 0;
+    private bool $audioAnchorSet = false;
+    private ?int $audioLastPtsRaw = null;
+    /** 在途音频队列字节数（硬上限 8MB） */
+    private int $queuedAudioBytes = 0;
 
     private array $videoSamples = [];
     private array $audioSamples = [];
@@ -111,6 +130,9 @@ class Mp4Recoder
         $this->targetBitrate = $config['bitrate'] ?? 0;
         $this->targetFps = $config['fps'] ?? 0;
         $this->targetQp = $config['qp'] ?? 26;
+        // 音频策略在校验期完成取值检查：非法 audio 直接报错
+        $this->audioTarget = AudioPolicy::targetFromConfig($config);
+        $this->mp3Bitrate = (int)($config['audioBitrate'] ?? 128000);
         $this->validateConfig();
 
         if (!empty($config['watermark']) && !empty($config['watermarkFile'])) {
@@ -260,6 +282,16 @@ class Mp4Recoder
         $this->audioSamples = [];
         $this->videoTimescale = 90000;
         $this->audioTimescale = 44100;
+        $this->audioSourceCodec = null;
+        $this->audioSourceOti = -1;
+        $this->audioOutputCodec = AudioPolicy::CODEC_UNKNOWN;
+        $this->audioMode = AudioPolicy::MODE_PASSTHROUGH;
+        $this->audioTranscoder = null;
+        $this->audioOutputSamples = 0;
+        $this->audioAnchorMs = 0;
+        $this->audioAnchorSet = false;
+        $this->audioLastPtsRaw = null;
+        $this->queuedAudioBytes = 0;
         $this->duration = 0;
         $this->encSpsAnnexB = '';
         $this->encPpsAnnexB = '';
@@ -405,6 +437,10 @@ class Mp4Recoder
         foreach ($traks as $trak) {
             $this->parseTrack($trak);
         }
+        // 有音频轨但未从 esds 读到 OTI：源格式未知（未配置 audio 时仍走旧直通行为）
+        if ($this->audioTrack !== null && $this->audioSourceCodec === null) {
+            $this->audioSourceCodec = AudioPolicy::CODEC_UNKNOWN;
+        }
     }
 
     private function parseTrack(array $trak): void
@@ -446,6 +482,17 @@ class Mp4Recoder
                 break;
             } elseif ($handlerType === 'soun' && $entryType === 'mp4a') {
                 $this->audioTrack = ['id' => $trackId, 'type' => 'audio', 'codec' => 'mp4a', 'timescale' => $timescale, 'trak' => $trak];
+                // AudioSampleEntry 数据区（盒子头之后）：声道数偏移16(u16)，采样率偏移24(u32 16.16)
+                $entryData = substr($stsdData, $pos + 8, $entrySize - 8);
+                if (strlen($entryData) >= 28) {
+                    $channels = unpack('n', substr($entryData, 16, 2))[1];
+                    $rate = unpack('N', substr($entryData, 24, 4))[1] >> 16;
+                    if ($channels > 0) $this->audioChannels = $channels;
+                    if ($rate > 0) {
+                        $this->audioSampleRate = $rate;
+                        $this->audioTimescale = $rate;
+                    }
+                }
                 $this->parseEsdsFromBox(substr($stsdData, $pos, $entrySize));
                 break;
             }
@@ -540,6 +587,11 @@ class Mp4Recoder
                     $this->parseEsds(substr($data, $pos + $skipBytes, $length - $skipBytes), false);
                 }
             } elseif ($tag == 0x04) {
+                // 记录 ObjectTypeIndication：0x6B/0x69=MP3，0x40/0x66/0x67/0x68=AAC
+                if ($this->audioSourceOti < 0 && $length >= 1) {
+                    $this->audioSourceOti = ord($data[$pos]);
+                    $this->audioSourceCodec = AudioPolicy::sourceFromMp4ObjectTypeIndication($this->audioSourceOti);
+                }
                 $skipBytes = 13;
                 if ($length > $skipBytes) {
                     $this->parseEsds(substr($data, $pos + $skipBytes, $length - $skipBytes), false);
@@ -610,6 +662,8 @@ class Mp4Recoder
             'audioConfig' => base64_encode($this->audioSpecificConfig),
             'audioSampleRate' => $this->audioSampleRate, 'audioChannels' => $this->audioChannels,
             'audioObjectType' => $this->audioObjectType, 'audioTimescale' => $this->audioTimescale,
+            'audioCodec' => $this->audioSourceCodec ?? AudioPolicy::CODEC_UNKNOWN,
+            'audioTarget' => $this->audioTarget, 'mp3Bitrate' => $this->mp3Bitrate,
             'hasVideo' => $this->videoTrack !== null, 'hasAudio' => $this->audioTrack !== null,
         ], $samples];
     }
@@ -643,8 +697,44 @@ class Mp4Recoder
         $this->audioChannels = (int)$metadata['audioChannels'];
         $this->audioObjectType = (int)$metadata['audioObjectType'];
         $this->audioTimescale = (int)$metadata['audioTimescale'];
+        $this->audioSourceCodec = $metadata['audioCodec'] ?? null;
+        if ($this->audioSourceCodec === null && !empty($metadata['hasAudio'])) {
+            $this->audioSourceCodec = AudioPolicy::CODEC_UNKNOWN;
+        }
+        if (array_key_exists('audioTarget', $metadata)) {
+            $this->audioTarget = $metadata['audioTarget'];
+        }
+        if (isset($metadata['mp3Bitrate'])) {
+            $this->mp3Bitrate = (int)$metadata['mp3Bitrate'];
+        }
         $this->videoTrack = !empty($metadata['hasVideo']) ? ['pipeline' => true] : null;
         $this->audioTrack = !empty($metadata['hasAudio']) ? ['pipeline' => true] : null;
+        $this->initAudioPolicy();
+    }
+
+    /** 由源格式 + 目标格式做一次策略判定（三驱动共用 AudioPolicy，不各写一份） */
+    private function initAudioPolicy(): void
+    {
+        if ($this->audioTrack === null || $this->audioSourceCodec === null) return;
+        $decision = AudioPolicy::decide($this->audioSourceCodec, $this->audioTarget);
+        $this->audioOutputCodec = $decision['output'];
+        $this->audioMode = $decision['mode'];
+        if ($this->audioMode !== AudioPolicy::MODE_TRANSCODE) return;
+        $this->audioTranscoder = new AudioTranscoder(
+            $this->audioSourceCodec,
+            $this->audioOutputCodec,
+            $this->audioSampleRate,
+            $this->audioChannels,
+            $this->mp3Bitrate
+        );
+        if ($this->audioOutputCodec === AudioPolicy::CODEC_AAC) {
+            $asc = $this->audioTranscoder->outputAudioSpecificConfig();
+            if ($asc !== '') {
+                $this->audioSpecificConfig = $asc;
+                $this->parseAudioSpecificConfig($asc);
+            }
+        }
+        $this->audioTimescale = $this->audioSampleRate;
     }
 
     public function processPipelineSample(array $metadata, string $payload): void
@@ -715,6 +805,7 @@ class Mp4Recoder
         // 先冲洗解码器重排队列中残留的 B 帧，再冲刷最后一帧的延迟编码及排队音频
         $this->flushDecoderFrames();
         $this->flushPendingVideo();
+        $this->flushAudioTranscoder();
         if (!$this->videoTrack && !$this->audioTrack) throw new \RuntimeException('未找到有效的视频或音频轨道');
         $this->buildPipelineMp4($outputFile);
     }
@@ -735,6 +826,8 @@ class Mp4Recoder
         if (!$mdat) throw new \RuntimeException("未找到mdat盒子");
         $moov = $this->findBox($this->boxTree, 'moov');
         if (!$moov) return;
+        // 单进程路径同样走统一音频策略
+        $this->initAudioPolicy();
 
         $allSamples = [];
 
@@ -781,6 +874,7 @@ class Mp4Recoder
         // 先冲洗解码器重排队列中残留的 B 帧，再冲刷双缓冲末帧
         $this->flushDecoderFrames();
         $this->flushPendingVideo();
+        $this->flushAudioTranscoder();
     }
 
     private function extractVideoSamples(): array
@@ -957,15 +1051,56 @@ class Mp4Recoder
 
     private function intakeAudioPayload(string $data, int $dtsMs): void
     {
-        // 有在途视频帧时音频排队，待该帧 finish 后按原时间戳顺序落盘
+        if ($this->audioMode === AudioPolicy::MODE_TRANSCODE && $this->audioTranscoder !== null) {
+            if (!$this->audioAnchorSet) {
+                $this->audioAnchorMs = $dtsMs;
+                $this->audioAnchorSet = true;
+            }
+            foreach ($this->audioTranscoder->push($data) as $frame) {
+                $this->enqueueOrStoreAudio($frame['data'], $this->nextTranscodedAudioTimestamp());
+            }
+            return;
+        }
+        $this->enqueueOrStoreAudio($data, $dtsMs);
+    }
+
+    /** 音频落盘：有在途视频帧时排队（8MB 硬上限），否则直接写临时媒体文件/样本数组 */
+    private function enqueueOrStoreAudio(string $data, int $timestamp): void
+    {
         if ($this->pendingVideoJob !== null) {
-            $this->queuedAudioSamples[] = ['data' => $data, 'timestamp' => $dtsMs];
+            $this->queuedAudioBytes += strlen($data);
+            if ($this->queuedAudioBytes > 8 * 1024 * 1024) {
+                throw new \RuntimeException('音频排队超过 8MB 硬上限');
+            }
+            $this->queuedAudioSamples[] = ['data' => $data, 'timestamp' => $timestamp];
             return;
         }
         if (is_resource($this->pipelineMediaHandle)) {
-            $this->storePipelineSample($this->audioSamples, $data, ['timestamp' => $dtsMs]);
+            $this->storePipelineSample($this->audioSamples, $data, ['timestamp' => $timestamp]);
         } else {
-            $this->audioSamples[] = ['data' => $data, 'timestamp' => $dtsMs];
+            $this->audioSamples[] = ['data' => $data, 'timestamp' => $timestamp];
+        }
+    }
+
+    /** 转码帧时间戳：锚点 + 已输出样本数；毫秒舍入并强制单调 */
+    private function nextTranscodedAudioTimestamp(): int
+    {
+        $rate = max(1, $this->audioSampleRate);
+        $timestamp = $this->audioAnchorMs + (int)round($this->audioOutputSamples * 1000 / $rate);
+        $this->audioOutputSamples += AudioPolicy::samplesPerFrame($this->audioOutputCodec);
+        if ($this->audioLastPtsRaw !== null && $timestamp <= $this->audioLastPtsRaw) {
+            $timestamp = $this->audioLastPtsRaw + 1;
+        }
+        $this->audioLastPtsRaw = $timestamp;
+        return $timestamp;
+    }
+
+    /** EOF 冲洗转码器尾部帧 */
+    private function flushAudioTranscoder(): void
+    {
+        if ($this->audioMode !== AudioPolicy::MODE_TRANSCODE || $this->audioTranscoder === null) return;
+        foreach ($this->audioTranscoder->flush() as $frame) {
+            $this->enqueueOrStoreAudio($frame['data'], $this->nextTranscodedAudioTimestamp());
         }
     }
 
@@ -979,6 +1114,7 @@ class Mp4Recoder
             }
         }
         $this->queuedAudioSamples = [];
+        $this->queuedAudioBytes = 0;
     }
 
     private function flushPendingVideo(): void
@@ -1687,6 +1823,9 @@ class Mp4Recoder
 
     private function calculateAudioSampleDuration(): int
     {
+        if ($this->audioOutputCodec === AudioPolicy::CODEC_MP3) {
+            return AudioPolicy::samplesPerFrame(AudioPolicy::CODEC_MP3);
+        }
         return in_array($this->audioObjectType, [5, 29], true) ? 2048 : 1024;
     }
 
@@ -1928,6 +2067,19 @@ class Mp4Recoder
 
     private function buildEsds(): string
     {
+        // MP3onMP4（ISO/IEC 14496-14 注册的 MP3 对象类型）：mp4a + esds(OTI 0x6B,
+        // 无 tag5 DecoderSpecificInfo) + SLConfig。max/avgBitrate 按实际帧尺寸计算，
+        // 直通与转码两条路径都不会把配置里的目标码率误当成流码率声明
+        if ($this->audioOutputCodec === AudioPolicy::CODEC_MP3) {
+            [$avgBitrate, $maxBitrate] = $this->measureMp3Bitrates();
+            $tag4Content = "\x6B\x15\x00\x00\x00" . pack('N', $maxBitrate) . pack('N', $avgBitrate);
+            $tag4 = "\x04" . $this->writeDescriptorLength(strlen($tag4Content)) . $tag4Content;
+            $tag6 = "\x06\x01\x02";
+            $tag3Content = "\x00\x01\x00" . $tag4 . $tag6;
+            $tag3 = "\x03" . $this->writeDescriptorLength(strlen($tag3Content)) . $tag3Content;
+            return pack('N', 0) . $tag3;
+        }
+
         $config = $this->audioSpecificConfig;
         $configSize = strlen($config);
 
@@ -1941,6 +2093,28 @@ class Mp4Recoder
         $tag3 = "\x03" . $this->writeDescriptorLength(strlen($tag3Content)) . $tag3Content;
 
         return pack('N', 0) . $tag3;
+    }
+
+    /**
+     * 按已收集的 MP3 帧实测码率：1152 样本/帧，max 取最大帧、avg 取总字节/总时长
+     * @return array{0:int,1:int} [avgBitrate, maxBitrate]
+     */
+    private function measureMp3Bitrates(): array
+    {
+        $count = count($this->audioSamples);
+        if ($count === 0) return [$this->mp3Bitrate, $this->mp3Bitrate];
+        $frameSeconds = 1152.0 / max(1, $this->audioSampleRate);
+        $total = 0;
+        $maxFrame = 0;
+        foreach ($this->audioSamples as $sample) {
+            // 分布式路径只保留 size（数据已落盘），本地路径才有 data
+            $size = $sample['size'] ?? strlen($sample['data']);
+            $total += $size;
+            if ($size > $maxFrame) $maxFrame = $size;
+        }
+        $avg = (int)round($total * 8 / ($count * $frameSeconds));
+        $max = (int)round($maxFrame * 8 / $frameSeconds);
+        return [$avg > 0 ? $avg : $this->mp3Bitrate, $max > 0 ? $max : $this->mp3Bitrate];
     }
 
     private function writeDescriptorLength(int $length): string

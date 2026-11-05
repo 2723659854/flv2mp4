@@ -27,6 +27,11 @@ final class HlsPipelineClient
         // 静态文件自动规划：解码进程数 = min(GOP数, CPU逻辑核心数, 配置上限)
         // 基准实测（test.flv GOP=2 / test1.flv GOP=7）：解码进程数 = GOP 数时耗时最短，超过无收益
         $sourceInfo = $this->scanSource($flvFile);
+        // 源音频格式随 config 下发：输出 worker 在首个分片头写 PMT 时按实际源格式
+        // 选择 stream_type（MP3=0x03 / AAC=0x0F），避免默认直通路径写错流类型
+        if (($sourceInfo['audioSoundFormat'] ?? null) !== null) {
+            $this->config['sourceAudioSoundFormat'] = $sourceInfo['audioSoundFormat'];
+        }
         $gopCount = $sourceInfo['gopCount'] ?? 0;
         $cpuCores = $this->detectCpuCores();
         $configMax = max(1, $this->decodeWorkers);
@@ -351,12 +356,15 @@ final class HlsPipelineClient
     /**
      * 预扫描（单次遍历）：统计源帧率与 IDR/GOP 数量。
      * IDR 数即可并行 GOP 数（用于收敛 worker 数量避免空转）；帧率用于抽帧判定。
-     * @return array{fps: ?float, gopCount: int}
+     * @return array{fps: ?float, gopCount: int, audioSoundFormat: ?int}
      */
     private function scanSource(string $flvFile): array
     {
-        $first = null; $last = null; $count = 0; $gopCount = 0;
+        $first = null; $last = null; $count = 0; $gopCount = 0; $audioSoundFormat = null;
         foreach ($this->readFlvTags($flvFile) as $tag) {
+            if ($tag['tagType'] === 8 && $audioSoundFormat === null && strlen($tag['body']) >= 1) {
+                $audioSoundFormat = (ord($tag['body'][0]) >> 4) & 0x0F;
+            }
             if ($tag['tagType'] !== 9) continue;
             $body = $tag['body'];
             if (strlen($body) < 2 || ord($body[1]) !== 1) continue;
@@ -364,7 +372,7 @@ final class HlsPipelineClient
             if ($this->containsIdrNal($body)) $gopCount++;
         }
         $fps = $count >= 2 && $last > $first ? ($count - 1) * 1000 / ($last - $first) : null;
-        return ['fps' => $fps, 'gopCount' => $gopCount];
+        return ['fps' => $fps, 'gopCount' => $gopCount, 'audioSoundFormat' => $audioSoundFormat];
     }
 
     private function bufferedBytes(array $buffers): int

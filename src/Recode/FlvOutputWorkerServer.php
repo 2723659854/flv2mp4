@@ -15,6 +15,16 @@ final class FlvOutputWorkerServer
     {
     }
 
+    /** 当前进程累计 CPU 秒数（用户态+内核态） */
+    private static function cpuSeconds(): float
+    {
+        $usage = getrusage();
+        if (!is_array($usage)) return 0.0;
+        $user = ($usage['ru_utime.tv_sec'] ?? 0) + ($usage['ru_utime.tv_usec'] ?? 0) / 1e6;
+        $sys = ($usage['ru_stime.tv_sec'] ?? 0) + ($usage['ru_stime.tv_usec'] ?? 0) / 1e6;
+        return $user + $sys;
+    }
+
     public function run(string $listenAddress, int $workers = 1): void
     {
         $workers = max(1, $workers);
@@ -42,6 +52,12 @@ final class FlvOutputWorkerServer
         // 永不推进、pending 只进不出。停滞若干轮（progress 无任何变化）后强制放水读全部连接。
         $lastProgress = '';
         $stallRounds = 0;
+        $probeLog = getenv('OUT_BUSY_LOG') ?: '';
+        $busyNs = 0;
+        // CPU 时间探针：进程被其它 worker 抢占时 hrtime 会把等待计入 busy，
+        // 因此同时记录 getrusage 的 CPU 秒数，区分"真实计算占用"与"墙钟占用"。
+        $cpuStart = $probeLog !== '' ? self::cpuSeconds() : 0.0;
+        $tStart = hrtime(true);
         try {
             $recoder->beginPipelineOutput($this->outputFile);
             while (true) {
@@ -64,7 +80,20 @@ final class FlvOutputWorkerServer
                 $write = [];
                 foreach ($outputs as $id => $buffer) if ($buffer !== '') $write[] = $sockets[$id];
                 if ($read === [] && $write === []) {
-                    if ($finished) return;
+                    if ($finished) {
+                        if ($probeLog !== '') {
+                            $wall = (hrtime(true) - $tStart) / 1e9;
+                            $cpu = max(0.0, self::cpuSeconds() - $cpuStart);
+                            file_put_contents($probeLog, json_encode([
+                                'wall_s' => $wall,
+                                'busy_s' => $busyNs / 1e9,
+                                'busy_pct' => ($busyNs / 1e9) / max(1e-9, $wall) * 100,
+                                'cpu_s' => $cpu,
+                                'cpu_pct' => $cpu / max(1e-9, $wall) * 100,
+                            ]));
+                        }
+                        return;
+                    }
                     usleep(1);
                     continue;
                 }
@@ -105,7 +134,10 @@ final class FlvOutputWorkerServer
                     unset($pending[$expected]);
                     $pendingBytes -= $eventBytes;
                     if ($event['type'] === HlsPipelineProtocol::EVENT) {
+                        // 忙闲探针仅在显式设置 OUT_BUSY_LOG 时采样，默认路径零额外开销
+                        $tb = $probeLog !== '' ? hrtime(true) : 0;
                         $recoder->processPipelineEvent($event['metadata'], $event['payload']);
+                        if ($probeLog !== '') $busyNs += hrtime(true) - $tb;
                     } elseif ($event['type'] !== HlsPipelineProtocol::END) {
                         throw new RuntimeException('输出进程收到未知事件');
                     }

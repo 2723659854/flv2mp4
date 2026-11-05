@@ -280,13 +280,17 @@ final class Mp3L3Decoder
      * 流式解码：逐帧回调本帧的 planar float 采样，不累积全量数组，
      * 供子进程管线按帧向管道写出，内存占用 O(单帧)。
      * 回调签名 fn(array $framePlanes, int $channels, int $sampleRate): void
+     * @param bool $reset true=按整段独立解码（重置 bit reservoir/合成器状态）；
+     *                    false=跨调用保持状态（供按 tag/包粒度喂入的流式转码使用）
      */
-    public function decodeStreaming(string $data, \Closure $onFrames): void
+    public function decodeStreaming(string $data, \Closure $onFrames, bool $reset = true): void
     {
-        $this->reservoir = '';
-        $this->sampleRate = 0;
-        $this->channels = 0;
-        $this->synthOff = [0, 0];
+        if ($reset) {
+            $this->reservoir = '';
+            $this->sampleRate = 0;
+            $this->channels = 0;
+            $this->synthOff = [0, 0];
+        }
 
         $total = strlen($data);
         $off = $this->skipId3v2($data);
