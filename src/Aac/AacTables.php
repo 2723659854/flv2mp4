@@ -30,10 +30,58 @@ final class AacTables
         800, 832, 864, 896, 928, 960, 992, 1024,
     ];
 
-    /** 长窗 swb 偏移表（44.1/48 kHz → 48k 表，32 kHz → 32k 表） */
+    /** FFmpeg swb_offset_1024_24（24 kHz / 22.05 kHz，47 带） */
+    public const SWB_24K = [
+        0, 4, 8, 12, 16, 20, 24, 28,
+        32, 36, 40, 44, 52, 60, 68, 76,
+        84, 92, 100, 108, 116, 124, 136, 148,
+        160, 172, 188, 204, 220, 240, 260, 284,
+        308, 336, 364, 396, 432, 468, 508, 552,
+        600, 652, 704, 768, 832, 896, 960, 1024,
+    ];
+
+    /** FFmpeg swb_offset_1024_16（16 / 12 / 11.025 kHz，43 带） */
+    public const SWB_16K = [
+        0, 8, 16, 24, 32, 40, 48, 56,
+        64, 72, 80, 88, 100, 112, 124, 136,
+        148, 160, 172, 184, 196, 212, 228, 244,
+        260, 280, 300, 320, 344, 368, 396, 424,
+        456, 492, 532, 572, 616, 664, 716, 772,
+        832, 896, 960, 1024,
+    ];
+
+    /** FFmpeg swb_offset_1024_8（8 kHz / 7.35 kHz，40 带） */
+    public const SWB_8K = [
+        0, 12, 24, 36, 48, 60, 72, 84,
+        96, 108, 120, 132, 144, 156, 172, 188,
+        204, 220, 236, 252, 268, 288, 308, 328,
+        348, 372, 396, 420, 448, 476, 508, 544,
+        580, 620, 664, 712, 764, 820, 880, 944,
+        1024,
+    ];
+
+    /**
+     * 长窗 swb 偏移表（按 ISO 14496-3 采样率索引）：
+     * 44.1/48k → 48k 表；32k → 32k 表；22.05/24k → 24k 表；
+     * 11.025/12/16k → 16k 表；7.35/8k → 8k 表。
+     */
     public static function swbOffsetLong(int $sampleRate): array
     {
-        return $sampleRate === 32000 ? self::SWB_32K : self::SWB_48K;
+        if ($sampleRate >= 44100) return self::SWB_48K;
+        if ($sampleRate === 32000) return self::SWB_32K;
+        if ($sampleRate >= 22050) return self::SWB_24K;
+        if ($sampleRate >= 11025) return self::SWB_16K;
+        return self::SWB_8K;
+    }
+
+    /** 长窗比例因子带数（与 FFmpeg ff_aac_num_swb_1024 对齐） */
+    public static function longBandCount(int $sampleRate): int
+    {
+        if ($sampleRate >= 44100) return 49;
+        if ($sampleRate === 32000) return 51;
+        if ($sampleRate >= 22050) return 47;
+        if ($sampleRate >= 11025) return 43;
+        return 40;
     }
 
     public const SCALEFACTOR_CODES = [

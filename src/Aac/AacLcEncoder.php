@@ -14,13 +14,19 @@ final class AacLcEncoder
     public const FRAME_SAMPLES = 1024;
     /** ADTS / ASC 采样率索引（与 ISO 14496-3 一致） */
     private const RATES = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350];
-    private const MAX_SFB = 40;
+    /**
+     * 高采样率（32/44.1/48k）沿用既有的 40 带上限，保证既有 AAC 输出逐字节不变；
+     * 低采样率（8/11.025/12/16/22.05/24k）使用完整 swb 带数，避免高频被无谓截断。
+     */
+    private const LEGACY_MAX_SFB = 40;
     private const MAX_GLOBAL_SEARCHES = 6;
     private const MAX_LOCAL_ADJUSTMENTS = 96;
 
     private int $bitrate;
     private int $channels;
     private int $sampleRate;
+    /** 实际编码的比例因子带数（写入 ics_info 的 max_sfb） */
+    private int $maxSfb;
     /** 当前采样率的长窗 swb 偏移表（FFmpeg ff_swb_offset_1024） */
     private array $swb;
     private ?int $previousGlobalOffset = null;
@@ -49,7 +55,7 @@ final class AacLcEncoder
     }
 
     /**
-     * 预计算每个频谱样本所属的 scalefactor band（-1 表示超出 SWB[MAX_SFB]，不参与能量统计），
+     * 预计算每个频谱样本所属的 scalefactor band（-1 表示超出 SWB[maxSfb]，不参与能量统计），
      * 与逐样本 while 推进逻辑位等价，仅省去每样本的边界判断。
      */
     private function bandIndexTable(): array
@@ -60,10 +66,10 @@ final class AacLcEncoder
         $table = [];
         $band = 0;
         for ($i = 0; $i < self::FRAME_SAMPLES; ++$i) {
-            while ($band + 1 < self::MAX_SFB && $i >= $this->swb[$band + 1]) {
+            while ($band + 1 < $this->maxSfb && $i >= $this->swb[$band + 1]) {
                 ++$band;
             }
-            $table[$i] = $i < $this->swb[self::MAX_SFB] ? $band : -1;
+            $table[$i] = $i < $this->swb[$this->maxSfb] ? $band : -1;
         }
         return self::$bandIndexCache[$this->sampleRate] = $table;
     }
@@ -73,8 +79,8 @@ final class AacLcEncoder
         if ($channels !== 1 && $channels !== 2) {
             throw new InvalidArgumentException('AAC channel count must be 1 or 2');
         }
-        if (!in_array($sampleRate, [48000, 44100, 32000], true)) {
-            throw new InvalidArgumentException("AAC encoder supports 48000/44100/32000 Hz, got {$sampleRate}");
+        if (!in_array($sampleRate, [8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000], true)) {
+            throw new InvalidArgumentException("AAC encoder supports 8000/11025/12000/16000/22050/24000/32000/44100/48000 Hz, got {$sampleRate}");
         }
         if (!in_array($sampleRate, self::RATES, true)) {
             throw new InvalidArgumentException("AAC sample rate index missing for {$sampleRate}");
@@ -87,6 +93,9 @@ final class AacLcEncoder
         $this->channels = $channels;
         $this->sampleRate = $sampleRate;
         $this->swb = AacTables::swbOffsetLong($sampleRate);
+        $this->maxSfb = $sampleRate >= 32000
+            ? self::LEGACY_MAX_SFB
+            : AacTables::longBandCount($sampleRate);
         $silence = array_fill(0, self::FRAME_SAMPLES, 0.0);
         $this->overlap = array_fill(0, $channels, $silence);
     }
@@ -180,8 +189,8 @@ final class AacLcEncoder
             $this->overlap[$ch] = $channels[$ch];
             $mdct = $this->mdct($input);
             $pow34 = [];
-            $energy = array_fill(0, self::MAX_SFB, 0.0);
-            $maxPow34 = array_fill(0, self::MAX_SFB, 0.0);
+            $energy = array_fill(0, $this->maxSfb, 0.0);
+            $maxPow34 = array_fill(0, $this->maxSfb, 0.0);
             $bandTable = self::bandIndexTable();
             for ($i = 0; $i < 1024; ++$i) {
                 $value = $mdct[$i];
@@ -266,7 +275,7 @@ final class AacLcEncoder
     private function analyzeChannel(array $spectrum, int $offset, bool $withDistortion = true): array
     {
         $scaleFactors = [];
-        for ($band = 0; $band < self::MAX_SFB; ++$band) {
+        for ($band = 0; $band < $this->maxSfb; ++$band) {
             $maximum = $spectrum['maxPow34'][$band];
             if ($maximum === 0.0) {
                 $scaleFactors[$band] = 255;
@@ -278,7 +287,7 @@ final class AacLcEncoder
         }
         $scaleFactors = $this->constrainScaleFactors($scaleFactors, $spectrum);
         $bands = [];
-        for ($band = 0; $band < self::MAX_SFB; ++$band) {
+        for ($band = 0; $band < $this->maxSfb; ++$band) {
             $bands[$band] = $this->quantizeBand($spectrum, $band, $scaleFactors[$band], $withDistortion);
         }
         return $this->finishPlan($bands);
@@ -287,7 +296,7 @@ final class AacLcEncoder
     private function constrainScaleFactors(array $scaleFactors, array $spectrum): array
     {
         $active = [];
-        for ($band = 0; $band < self::MAX_SFB; ++$band) {
+        for ($band = 0; $band < $this->maxSfb; ++$band) {
             if ($spectrum['maxPow34'][$band] > 0.0) {
                 $active[] = $band;
             }
@@ -436,7 +445,7 @@ final class AacLcEncoder
             $overBudget = $currentBytes > $targetBytes;
             $best = null;
             foreach ($plans as $channel => $plan) {
-                for ($band = 0; $band < self::MAX_SFB; ++$band) {
+                for ($band = 0; $band < $this->maxSfb; ++$band) {
                     $old = $plan['bands'][$band];
                     if ($old['codebook'] === 0 || ($overBudget && $old['sf'] >= 255) || (!$overBudget && $old['sf'] <= 0)) {
                         continue;
@@ -494,7 +503,7 @@ final class AacLcEncoder
                 break;
             }
         }
-        for ($band = $changedBand + 1; $band < self::MAX_SFB; ++$band) {
+        for ($band = $changedBand + 1; $band < $this->maxSfb; ++$band) {
             if ($bands[$band]['codebook'] !== 0) {
                 $next = $bands[$band]['sf'];
                 break;
@@ -522,10 +531,10 @@ final class AacLcEncoder
     {
         $bits = 3;
         $band = 0;
-        while ($band < self::MAX_SFB) {
+        while ($band < $this->maxSfb) {
             $codebook = $plan['bands'][$band]['codebook'];
             $run = 1;
-            while ($band + $run < self::MAX_SFB && $plan['bands'][$band + $run]['codebook'] === $codebook) {
+            while ($band + $run < $this->maxSfb && $plan['bands'][$band + $run]['codebook'] === $codebook) {
                 ++$run;
             }
             $bits += 4 + 5 * (intdiv($run, 31) + 1);
@@ -573,17 +582,17 @@ final class AacLcEncoder
         $writer->write(0, 1);
         $writer->write(0, 2);
         $writer->write(0, 1);
-        $writer->write(self::MAX_SFB, 6);
+        $writer->write($this->maxSfb, 6);
         $writer->write(0, 1);
     }
 
     private function writeChannelPayload(BitWriter $writer, array $plan): void
     {
         $band = 0;
-        while ($band < self::MAX_SFB) {
+        while ($band < $this->maxSfb) {
             $codebook = $plan['bands'][$band]['codebook'];
             $run = 1;
-            while ($band + $run < self::MAX_SFB && $plan['bands'][$band + $run]['codebook'] === $codebook) {
+            while ($band + $run < $this->maxSfb && $plan['bands'][$band + $run]['codebook'] === $codebook) {
                 ++$run;
             }
             $writer->write($codebook, 4);

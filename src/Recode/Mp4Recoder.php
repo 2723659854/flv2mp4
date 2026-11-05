@@ -71,6 +71,13 @@ class Mp4Recoder
     private ?int $audioLastPtsRaw = null;
     /** 源音频无解码器时的静音 AAC 轨（如实写入一条真实音轨，时长随视频） */
     private ?SilentAacSource $silentAudioSource = null;
+    /** Opus dOps pre-skip（48 kHz 样本）/ output gain（Q7.7） */
+    private int $audioPreSkip = 0;
+    private int $audioGain = 0;
+    /** PCM 位深/字节序（PCM 无需解码器，直接解释字节） */
+    private array $audioSourceOptions = [];
+    /** Opus 首包模式判定是否已完成（非 CELT 时确定性落静音） */
+    private bool $opusProbed = false;
     /** 在途音频队列字节数（硬上限 8MB） */
     private int $queuedAudioBytes = 0;
 
@@ -295,6 +302,10 @@ class Mp4Recoder
         $this->audioAnchorSet = false;
         $this->audioLastPtsRaw = null;
         $this->silentAudioSource = null;
+        $this->audioPreSkip = 0;
+        $this->audioGain = 0;
+        $this->audioSourceOptions = [];
+        $this->opusProbed = false;
         $this->queuedAudioBytes = 0;
         $this->duration = 0;
         $this->encSpsAnnexB = '';
@@ -403,6 +414,26 @@ class Mp4Recoder
         return null;
     }
 
+    /**
+     * 在 sample entry 数据区中查找子盒子的原始数据（如 Opus 的 dOps、lpcm 的 enda）。
+     * 直接按 FourCC 定位，兼容 sample entry 的 version 0/1 偏移差异。
+     */
+    private function findEntryChildBox(string $entryData, string $type): ?string
+    {
+        $pos = 0;
+        $needle = $type;
+        while (($idx = strpos($entryData, $needle, $pos)) !== false) {
+            if ($idx >= 4) {
+                $size = unpack('N', substr($entryData, $idx - 4, 4))[1];
+                if ($size >= 8 && $idx - 4 + $size <= strlen($entryData)) {
+                    return substr($entryData, $idx + 4, $size - 8);
+                }
+            }
+            $pos = $idx + 4;
+        }
+        return null;
+    }
+
     private function findAllBoxes(array $boxes, string $type): array
     {
         $result = [];
@@ -501,6 +532,38 @@ class Mp4Recoder
                 }
                 if ($entryType === 'mp4a') {
                     $this->parseEsdsFromBox(substr($stsdData, $pos, $entrySize));
+                } elseif ($entryType === 'Opus') {
+                    // Opus：dOps 给出真实声道 / pre-skip / output gain；解码固定 48 kHz
+                    $this->audioSourceCodec = AudioPolicy::CODEC_OPUS;
+                    $this->audioSampleRate = 48000;
+                    $dops = $this->findEntryChildBox($entryData, 'dOps');
+                    if ($dops !== null) {
+                        $parsed = AudioPolicy::parseOpusIdentificationHeader($dops);
+                        if ($parsed !== null) {
+                            if ($parsed['channels'] > 0) $this->audioChannels = max(1, min(2, $parsed['channels']));
+                            $this->audioPreSkip = (int)$parsed['preSkip'];
+                            $this->audioGain = (int)$parsed['gain'];
+                            $this->audioSourceOptions = ['preSkip' => $this->audioPreSkip, 'gain' => $this->audioGain];
+                        }
+                    }
+                } elseif (in_array($entryType, ['ipcm', 'sowt', 'twos', 'lpcm', 'raw ', 'in24', 'in32'], true)) {
+                    // PCM：无需解码器，按 sample entry 的位深/字节序直接解释
+                    $this->audioSourceCodec = AudioPolicy::CODEC_PCM;
+                    $bits = 16;
+                    if (strlen($entryData) >= 20) {
+                        $declared = unpack('n', substr($entryData, 18, 2))[1];
+                        if (in_array($declared, [8, 16, 24, 32], true)) $bits = $declared;
+                    }
+                    $littleEndian = $entryType === 'sowt';
+                    if ($entryType === 'lpcm' && ($enda = $this->findEntryChildBox($entryData, 'enda')) !== null) {
+                        // enda: version/flags(4) + little_endian(1)
+                        $littleEndian = strlen($enda) >= 5 && ord($enda[4]) === 1;
+                    }
+                    $this->audioSourceOptions = [
+                        'bits' => $bits,
+                        'littleEndian' => $littleEndian,
+                        'unsigned' => false,
+                    ];
                 }
                 break;
             }
@@ -656,6 +719,18 @@ class Mp4Recoder
         }
         if ($this->audioTrack && !str_starts_with((string)$this->audioSourceCodec, AudioPolicy::CODEC_UNKNOWN)) {
             $audio = $this->extractAudioSamples();
+            // Opus：用首个包判定 CELT；SILK/Hybrid 未实现 → 确定性落静音（目标 MP3 时直接报错）
+            if ($this->audioSourceCodec === AudioPolicy::CODEC_OPUS && $audio !== []) {
+                $this->opusProbed = true;
+                $mode = AudioPolicy::opusPacketMode((string)$audio[0]['data']);
+                if ($mode !== 'CELT') {
+                    if ($this->audioTarget === AudioPolicy::CODEC_MP3) {
+                        throw new \RuntimeException('源音频（Opus/' . ($mode ?? 'invalid') . '）无解码器，无法转为 MP3');
+                    }
+                    $this->audioSourceCodec = AudioPolicy::CODEC_UNKNOWN . ':opus-' . strtolower((string)$mode);
+                    $audio = [];
+                }
+            }
             foreach ($audio as &$sample) $sample['type'] = 'audio';
             unset($sample);
             $samples = array_merge($samples, $audio);
@@ -672,6 +747,9 @@ class Mp4Recoder
             'audioObjectType' => $this->audioObjectType, 'audioTimescale' => $this->audioTimescale,
             'audioCodec' => $this->audioSourceCodec ?? AudioPolicy::CODEC_UNKNOWN,
             'audioTarget' => $this->audioTarget, 'mp3Bitrate' => $this->mp3Bitrate,
+            'audioOptions' => $this->audioSourceOptions,
+            'audioPreSkip' => $this->audioPreSkip,
+            'audioGain' => $this->audioGain,
             'hasVideo' => $this->videoTrack !== null, 'hasAudio' => $this->audioTrack !== null,
         ], $samples];
     }
@@ -715,6 +793,11 @@ class Mp4Recoder
         if (isset($metadata['mp3Bitrate'])) {
             $this->mp3Bitrate = (int)$metadata['mp3Bitrate'];
         }
+        if (isset($metadata['audioOptions']) && is_array($metadata['audioOptions'])) {
+            $this->audioSourceOptions = $metadata['audioOptions'];
+        }
+        $this->audioPreSkip = (int)($metadata['audioPreSkip'] ?? 0);
+        $this->audioGain = (int)($metadata['audioGain'] ?? 0);
         $this->videoTrack = !empty($metadata['hasVideo']) ? ['pipeline' => true] : null;
         $this->audioTrack = !empty($metadata['hasAudio']) ? ['pipeline' => true] : null;
         $this->initAudioPolicy();
@@ -744,7 +827,8 @@ class Mp4Recoder
             $this->audioOutputCodec,
             $this->audioSampleRate,
             $this->audioChannels,
-            $this->mp3Bitrate
+            $this->mp3Bitrate,
+            $this->audioSourceOptions
         );
         if ($this->audioOutputCodec === AudioPolicy::CODEC_AAC) {
             $asc = $this->audioTranscoder->outputAudioSpecificConfig();
@@ -1078,8 +1162,20 @@ class Mp4Recoder
             return;
         }
         if ($this->audioMode === AudioPolicy::MODE_TRANSCODE && $this->audioTranscoder !== null) {
+            // Opus 首包模式兜底判定（pipeline 已在 prepare 阶段预判，这里覆盖非 pipeline 路径）
+            if ($this->audioSourceCodec === AudioPolicy::CODEC_OPUS && !$this->opusProbed) {
+                $this->opusProbed = true;
+                $mode = AudioPolicy::opusPacketMode($data);
+                if ($mode !== 'CELT') {
+                    $this->switchToSilentAudioMp4('Opus/' . ($mode ?? 'invalid'));
+                    return;
+                }
+            }
             if (!$this->audioAnchorSet) {
-                $this->audioAnchorMs = $dtsMs;
+                // Opus pre-skip 在解码器内丢弃；整轨时间戳后移同一偏移，保持首个可听样本对齐
+                $this->audioAnchorMs = $dtsMs + ($this->audioSourceCodec === AudioPolicy::CODEC_OPUS
+                    ? (int)round($this->audioPreSkip * 1000 / 48000)
+                    : 0);
                 $this->audioAnchorSet = true;
             }
             foreach ($this->audioTranscoder->push($data) as $frame) {
@@ -1088,6 +1184,24 @@ class Mp4Recoder
             return;
         }
         $this->enqueueOrStoreAudio($data, $dtsMs);
+    }
+
+    /** Opus 首包非 CELT（SILK/Hybrid）：丢弃转码器，改确定性静音 AAC 轨 */
+    private function switchToSilentAudioMp4(string $reason): void
+    {
+        if ($this->audioTarget === AudioPolicy::CODEC_MP3) {
+            throw new \RuntimeException('源音频（' . $reason . '）无解码器，无法转为 MP3');
+        }
+        $this->audioTranscoder = null;
+        $this->audioOutputCodec = AudioPolicy::CODEC_AAC;
+        $this->audioMode = AudioPolicy::MODE_SILENT;
+        $source = new SilentAacSource(48000, max(1, min(2, $this->audioChannels)));
+        $this->silentAudioSource = $source;
+        $this->audioSampleRate = $source->rate();
+        $this->audioChannels = $source->channels();
+        $this->audioTimescale = $source->rate();
+        $this->audioSpecificConfig = $source->audioSpecificConfig();
+        $this->audioObjectType = 2;
     }
 
     /** 音频落盘：有在途视频帧时排队（8MB 硬上限），否则直接写临时媒体文件/样本数组 */

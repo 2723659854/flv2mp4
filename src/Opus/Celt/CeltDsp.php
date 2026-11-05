@@ -118,6 +118,7 @@ final class CeltDsp
                 }
             }
             $output[] = $filtered;
+            $input[$position] = $filtered;
         }
         $this->postfilterHistory = array_slice($input, -1024);
         return $output;
@@ -185,7 +186,10 @@ final class CeltDsp
                 $old = 0.0;
                 $new = $this->postfilterContribution($input, $position, $newPeriod, $newGain, $tapset);
             }
-            $output[] = (float) $sample + (1.0 - $mix) * $old + $mix * $new;
+            $out = (float) $sample + (1.0 - $mix) * $old + $mix * $new;
+            // 与 FFmpeg dsp.c postfilter_c 一致：滤波结果回写，后续样本的梳状参考取滤波后值
+            $input[$position] = $out;
+            $output[] = $out;
         }
         $this->postfilterHistory = array_slice($input, -1024);
         $this->postfilterOldPeriod = $this->postfilterPeriod;

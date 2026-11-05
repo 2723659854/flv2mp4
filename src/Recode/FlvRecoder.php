@@ -23,6 +23,8 @@ class FlvRecoder
     const VIDEO_FRAME_TYPE_KEY_FRAME = 1;
     const AVC_PACKET_TYPE_SEQUENCE_HEADER = 0;
     const AVC_PACKET_TYPE_NALU = 1;
+    /** Opus 模式探测包数：Opus 允许逐包切换模式，单个首包不足以判定整轨 */
+    const OPUS_PROBE_PACKETS = 8;
 
     private int $targetWidth = 0;
     private int $targetHeight = 0;
@@ -79,6 +81,15 @@ class FlvRecoder
     /** 源音频无法解码时的静音 AAC 轨（内容全静音，时长随视频） */
     private ?SilentAacSource $silentAudioSource = null;
     private int $silentAudioFramesWritten = 0;
+    /** Opus dOps pre-skip（48 kHz 样本数）与 output gain（Q7.7） */
+    private int $audioPreSkip = 0;
+    private int $audioGain = 0;
+    /** 已用首个 Opus 包判定模式（CELT 才转码，SILK/Hybrid 确定性落静音） */
+    private bool $opusProbed = false;
+    /** Opus 模式探测已检查的包数（Opus 允许逐包切换 SILK/CELT，需连续探测若干包） */
+    private int $opusProbeCount = 0;
+    /** PCM 位深/字节序参数（传给 AudioTranscoder） */
+    private array $audioSourceOptions = [];
 
     private ?int $baseTimestamp = null;
     private int $videoFrameCount = 0;
@@ -648,6 +659,7 @@ class FlvRecoder
                 $relativeTime = 0;
                 $this->writeFlvHeader(true, true);
                 $this->writeSequenceHeaderTag();
+                $this->replayPreHeaderAudio();
             } else {
                 $relativeTime = $timestamp - $this->baseTimestamp;
             }
@@ -925,6 +937,7 @@ class FlvRecoder
             $this->extractSpsPpsFromNals($nals);
             $this->writeFlvHeader(true, true);
             $this->writeSequenceHeaderTag();
+            $this->replayPreHeaderAudio();
         }
         $this->writeEncodedVideoFrame($nals, $isKey || $this->outputVideoFrameCount === 0, $dts, $cts);
         $this->bDtsCounter++;
@@ -960,6 +973,7 @@ class FlvRecoder
             $this->extractSpsPpsFromNals($encodedNals);
             $this->writeFlvHeader(true, true);
             $this->writeSequenceHeaderTag();
+            $this->replayPreHeaderAudio();
         }
 
         // B 模式（GOP worker 已按编码序产出并附 cts）：DTS 由输出侧按写出序号×帧时长推导，
@@ -1004,6 +1018,18 @@ class FlvRecoder
         }
         $this->replayQueuedAudio();
         $this->pendingVideoJob = $job;
+    }
+
+    /** FLV 头写出瞬间立即补放缓存音频，避免后续音频 tag 先于缓存 tag 被处理导致顺序/时间轴错乱 */
+    private function replayPreHeaderAudio(): void
+    {
+        if ($this->preHeaderAudioTags === []) return;
+        $pending = $this->preHeaderAudioTags;
+        $this->preHeaderAudioTags = [];
+        $this->preHeaderAudioBytes = 0;
+        foreach ($pending as $queued) {
+            $this->handleAudioFrame($queued);
+        }
     }
 
     private function replayQueuedAudio(): void
@@ -1170,27 +1196,34 @@ class FlvRecoder
         $raw = $tag->body ?? null;
         if ($raw === null || strlen($raw) < 2) return;
 
-        $soundFormat = (ord($raw[0]) >> 4) & 0x0F;
-        if (!$this->lockAudioPolicy($soundFormat, $raw)) return;
+        $info = AudioPolicy::parseFlvAudioTag($raw);
+        if (!$this->lockAudioPolicy($info)) return;
         if (str_starts_with($this->audioSourceCodec, AudioPolicy::CODEC_UNKNOWN)) {
-            // 源音频无解码器（Nellymoser/PCM 等）：按最终策略生成静音 AAC 轨并如实写入
-            $this->handleUndecodableAudio($tag, $raw, $soundFormat);
+            // 源音频无解码器（Nellymoser 等）：按最终策略生成静音 AAC 轨并如实写入
+            $this->handleUndecodableAudio($tag, $raw, $info['soundFormat'], $info);
+            return;
+        }
+
+        // Opus 首包为非 CELT（SILK/Hybrid）时已确定性切换为静音轨，后续 tag 只推进时间轴
+        if ($this->audioMode === AudioPolicy::MODE_SILENT) {
+            $this->advanceSilentAudio($tag);
             return;
         }
 
         if ($this->audioSourceCodec === AudioPolicy::CODEC_AAC) {
-            $aacPacketType = ord($raw[1]);
-            if ($aacPacketType === 0) {
-                $this->audioSpecificConfig = substr($raw, 2);
+            if ($info['packetType'] === 0) {
+                $asc = $info['aacAsc'] ?? '';
+                if ($asc === '') return;
+                $this->audioSpecificConfig = $asc;
                 $this->audioConfigParsed = true;
-                $this->parseAudioSpecificConfig($this->audioSpecificConfig);
+                $this->parseAudioSpecificConfig($asc);
                 $this->ensureAudioTranscoder();
                 return;
             }
             // FLV 头由首个输出视频帧写出（emitPendingVideoFrame）。B 帧重排期间首帧尚未产出
             // 但 baseTimestamp 已被关键帧事件设置，此时直写音频帧会落在 FLV 头之前破坏文件结构。
             // 注意必须放在 AAC config 解析之后：config tag 位于首帧视频之前，只解析不写出
-            if ($aacPacketType !== 1) return;
+            if ($info['packetType'] !== 1) return;
             if (!$this->flvHeaderWritten) {
                 // 未配置 audio 或目标与源同格式（直通）：保持旧行为（丢弃 FLV 头之前的音频，
                 // 产物与基线逐字节一致）。仅转码路径需要缓存，否则样本计数会因丢帧产生偏移。
@@ -1200,13 +1233,77 @@ class FlvRecoder
             }
             if ($this->baseTimestamp === null || !$this->audioConfigParsed) return;
 
-            $payload = substr($raw, 2);
+            $payload = $info['payload'];
             if ($payload === '') return;
             $this->emitAudioPayload($payload, $tag->getTime() - $this->baseTimestamp);
             return;
         }
 
+        if ($this->audioSourceCodec === AudioPolicy::CODEC_OPUS) {
+            if ($info['packetType'] === 0) {
+                // Opus SequenceStart：dOps 决定声道 / pre-skip / output gain
+                $dops = $info['dOps'];
+                if ($dops === null) return;
+                $this->audioSampleRate = 48000;
+                $this->audioChannels = max(1, min(2, (int)$dops['channels']));
+                $this->audioPreSkip = (int)$dops['preSkip'];
+                $this->audioGain = (int)$dops['gain'];
+                $this->audioSourceOptions = ['preSkip' => $this->audioPreSkip, 'gain' => $this->audioGain];
+                $this->audioTranscoder = null;
+                $this->ensureAudioTranscoder();
+                return;
+            }
+            if ($info['packetType'] !== 1) return;
+            $payload = $info['payload'];
+            if ($payload === '') return;
+
+            if (!$this->opusProbed) {
+                // Opus 允许逐包切换 SILK/Hybrid/CELT：连续探测前若干包，任一非 CELT 即确定性落静音
+                $mode = AudioPolicy::opusPacketMode($payload);
+                if ($mode !== 'CELT') {
+                    // SILK/Hybrid 未实现：确定性落静音（目标 MP3 时直接报错）
+                    $this->switchToSilentAudio('Opus/' . ($mode ?? 'invalid'));
+                    if ($this->flvHeaderWritten && $this->baseTimestamp !== null) {
+                        $this->advanceSilentAudio($tag);
+                    }
+                    return;
+                }
+                if (++$this->opusProbeCount >= self::OPUS_PROBE_PACKETS) $this->opusProbed = true;
+            }
+            if (!$this->flvHeaderWritten) {
+                if ($this->audioMode !== AudioPolicy::MODE_TRANSCODE) return;
+                $this->queuePreHeaderAudio($tag);
+                return;
+            }
+            if ($this->baseTimestamp === null) return;
+            // pre-skip 在解码器内丢弃；整轨时间戳后移 pre-skip，保证首个可听样本仍对齐原容器
+            $relative = $tag->getTime() - $this->baseTimestamp + $this->audioPreSkipMs();
+            try {
+                $this->emitAudioPayload($payload, $relative);
+            } catch (\Throwable $e) {
+                // 解码失败（模式中途切换/异常码流）：不再抛给调用方，确定性转为静音轨并续接时间轴
+                $this->switchToSilentAudio('Opus decode failed: ' . $e->getMessage());
+                $this->advanceSilentAudio($tag);
+            }
+            return;
+        }
+
+        if ($this->audioSourceCodec === AudioPolicy::CODEC_PCM) {
+            $payload = $info['payload'];
+            if ($payload === '') return;
+            if (!$this->flvHeaderWritten) {
+                if ($this->audioMode !== AudioPolicy::MODE_TRANSCODE) return;
+                $this->queuePreHeaderAudio($tag);
+                return;
+            }
+            if ($this->baseTimestamp === null) return;
+            $this->emitAudioPayload($payload, $tag->getTime() - $this->baseTimestamp);
+            return;
+        }
+
         // 源为 MP3：tag 体 = 1 字节音频头 + MP3 帧字节
+        $payload = $info['payload'];
+        if ($payload === '') return;
         if (!$this->flvHeaderWritten || $this->baseTimestamp === null) {
             // 仅转码路径缓存 FLV 头前的音频，直通/未配置保持旧行为
             if ($this->audioMode === AudioPolicy::MODE_TRANSCODE) {
@@ -1214,8 +1311,6 @@ class FlvRecoder
             }
             return;
         }
-        $payload = substr($raw, 1);
-        if ($payload === '') return;
         $this->emitAudioPayload($payload, $tag->getTime() - $this->baseTimestamp);
     }
 
@@ -1224,14 +1319,14 @@ class FlvRecoder
      * 采样率/声道优先沿用 FLV 音频头声明，不可用时回落 44.1 kHz / 原声道数。
      * 显式要求 MP3 时不生成静音 MP3（确定性报错，避免产出坏文件）。
      */
-    private function handleUndecodableAudio(FlvTag $tag, string $raw, int $soundFormat): void
+    private function handleUndecodableAudio(FlvTag $tag, string $raw, int $soundFormat, ?array $info = null): void
     {
         if ($this->audioTarget === AudioPolicy::CODEC_MP3) {
             throw new \RuntimeException('源音频（SoundFormat=' . $soundFormat . '）无解码器，无法转为 MP3');
         }
         if ($this->silentAudioSource === null) {
-            $declaredRate = [5512, 11025, 22050, 44100][(ord($raw[0]) >> 2) & 3];
-            $declaredChannels = (ord($raw[0]) & 1) === 1 ? 2 : 1;
+            $declaredRate = $info['rate'] ?? [5512, 11025, 22050, 44100][(ord($raw[0]) >> 2) & 3];
+            $declaredChannels = ($info['channels'] ?? 0) ?: ((ord($raw[0]) & 1) === 1 ? 2 : 1);
             $this->silentAudioSource = new SilentAacSource($declaredRate, $declaredChannels);
             $this->audioSampleRate = $this->silentAudioSource->rate();
             $this->audioChannels = $this->silentAudioSource->channels();
@@ -1240,11 +1335,49 @@ class FlvRecoder
             $this->audioOutputCodec = AudioPolicy::CODEC_AAC;
             $this->audioMode = AudioPolicy::MODE_SILENT;
         }
+        $this->advanceSilentAudio($tag);
+    }
+
+    /** Opus 首包不是 CELT（SILK/Hybrid）：丢弃转码器，改为确定性静音 AAC 轨 */
+    private function switchToSilentAudio(string $reason): void
+    {
+        if ($this->audioTarget === AudioPolicy::CODEC_MP3) {
+            throw new \RuntimeException('源音频（' . $reason . '）无解码器，无法转为 MP3');
+        }
+        $this->audioTranscoder = null;
+        $this->audioOutputCodec = AudioPolicy::CODEC_AAC;
+        $this->audioMode = AudioPolicy::MODE_SILENT;
+        $this->audioSpecificConfig = '';
+        $this->silentAudioSource = new SilentAacSource(
+            $this->audioSampleRate > 0 ? $this->audioSampleRate : 48000,
+            $this->audioChannels > 0 ? $this->audioChannels : 2
+        );
+        $this->audioSampleRate = $this->silentAudioSource->rate();
+        $this->audioChannels = $this->silentAudioSource->channels();
+        $this->audioSpecificConfig = $this->silentAudioSource->audioSpecificConfig();
+        $this->audioConfigParsed = true;
+        // 中途切换（已写出部分转码帧）时静音轨从当前时间点续接，避免时间戳回退
+        $frameMs = $this->silentAudioSource->frameDurationMs();
+        if ($frameMs > 0 && $this->audioLastPtsRaw !== null) {
+            $this->silentAudioFramesWritten = max(0, (int)ceil(($this->audioLastPtsRaw + 1) / $frameMs));
+        }
+    }
+
+    /** 按音频 tag 时间轴补齐静音帧（内容全零，时长随源时间戳） */
+    private function advanceSilentAudio(FlvTag $tag): void
+    {
         if (!$this->flvHeaderWritten || $this->baseTimestamp === null) return;
+        if ($this->silentAudioSource === null) return;
         $rel = max(0, $tag->getTime() - $this->baseTimestamp);
         while ($this->silentAudioFramesWritten * $this->silentAudioSource->frameDurationMs() < $rel) {
             $this->writeSilentAudioFrame();
         }
+    }
+
+    /** Opus pre-skip 对应毫秒数（48 kHz 样本） */
+    private function audioPreSkipMs(): int
+    {
+        return (int)round($this->audioPreSkip * 1000 / 48000);
     }
 
     /** 写一帧静音 AAC（时间戳 = 帧序号 * 1024/采样率），并保证序列头先写出 */
@@ -1280,22 +1413,42 @@ class FlvRecoder
      * 首次音频 tag 锁定源格式并完成策略决策；之后出现不同源格式的 tag 一律丢弃，
      * 保证同一文件内源格式变化时行为确定。
      */
-    private function lockAudioPolicy(int $soundFormat, string $raw): bool
+    private function lockAudioPolicy(array $info): bool
     {
-        $source = AudioPolicy::sourceFromFlvSoundFormat($soundFormat);
+        $source = $info['codec'];
         if ($this->audioSourceCodec === null) {
             $this->audioSourceCodec = $source;
             $decision = AudioPolicy::decide($source, $this->audioTarget);
             $this->audioOutputCodec = $decision['output'];
             $this->audioMode = $decision['mode'];
             if ($source === AudioPolicy::CODEC_MP3) {
-                // 直通与转码都需要真实采样率/声道：FLV 音频头（SoundRate/SoundType）
-                // 按此填写，转码器也按此建立
-                $header = $this->parseMp3FrameHeader(substr($raw, 1));
+                // 直通与转码都需要真实采样率/声道：从首帧 MP3 帧头读取，转码器也按此建立
+                $header = $this->parseMp3FrameHeader($info['payload']);
                 if ($header !== null) {
                     [$this->audioSampleRate, $this->audioChannels] = $header;
                 }
                 if ($this->audioMode === AudioPolicy::MODE_TRANSCODE) $this->ensureAudioTranscoder();
+            } elseif ($source === AudioPolicy::CODEC_PCM) {
+                // PCM 无需解码：采样率/声道/位深/字节序全部来自 FLV 音频头
+                $this->audioSampleRate = (int)$info['rate'];
+                $this->audioChannels = (int)$info['channels'];
+                $this->audioSourceOptions = [
+                    'bits' => (int)$info['bits'],
+                    'littleEndian' => (bool)$info['littleEndian'],
+                    'unsigned' => (bool)$info['unsigned'],
+                ];
+                if ($this->audioMode === AudioPolicy::MODE_TRANSCODE) $this->ensureAudioTranscoder();
+            } elseif ($source === AudioPolicy::CODEC_OPUS) {
+                // Opus 解码固定 48 kHz；声道/pre-skip 先取默认值，dOps 到达后覆盖
+                $this->audioSampleRate = 48000;
+                $this->audioChannels = max(1, min(2, (int)($info['channels'] ?: 2)));
+                $dops = $info['dOps'] ?? null;
+                if ($dops !== null) {
+                    $this->audioPreSkip = (int)$dops['preSkip'];
+                    $this->audioGain = (int)$dops['gain'];
+                    $this->audioSourceOptions = ['preSkip' => $this->audioPreSkip, 'gain' => $this->audioGain];
+                }
+                // 转码器延迟到首包 CELT 判定之后再建，避免 SILK/Hybrid 白建一次
             }
             return true;
         }
@@ -1333,7 +1486,8 @@ class FlvRecoder
             $this->audioOutputCodec,
             $this->audioSampleRate,
             $this->audioChannels,
-            $this->mp3Bitrate
+            $this->mp3Bitrate,
+            $this->audioSourceOptions
         );
         if ($this->audioOutputCodec === AudioPolicy::CODEC_AAC) {
             $asc = $this->audioTranscoder->outputAudioSpecificConfig();

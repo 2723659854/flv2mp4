@@ -9,15 +9,17 @@ use Xiaosongshu\Flv2mp4\Aac\AacLcEncoder;
 use Xiaosongshu\Flv2mp4\Mp3\Config as Mp3Config;
 use Xiaosongshu\Flv2mp4\Mp3\Encoder as Mp3Encoder;
 use Xiaosongshu\Flv2mp4\Mp3\Mp3L3Decoder;
+use Xiaosongshu\Flv2mp4\Opus\OpusDecoder;
 
 /**
- * @purpose 音频流式转码桥：输入源帧（AAC 访问单元 / MP3 帧字节），输出目标格式的完整帧。
+ * @purpose 音频流式转码桥：输入源帧（AAC 访问单元 / MP3 帧字节 / Opus 包 / 裸 PCM），输出目标格式的完整帧。
  * 三条重编码路径共用，不做每帧重新构造，状态跨帧保留。
  * @author yanglong
  * @time 2026年11月5日
  *
  * 帧长说明：AAC 解码输出 1024 样本/帧，MP3 编码需要 1152 样本/帧，
  * 由目标编码器内部的 PcmBuffer 做样本级拼装（非重采样，采样率保持不变）。
+ * Opus 解码器固定输出 48 kHz；PCM 按位深/字节序直接转 s16le，不做重采样。
  */
 final class AudioTranscoder
 {
@@ -27,6 +29,14 @@ final class AudioTranscoder
 
     private AacLcDecoder|Mp3L3Decoder|null $decoder = null;
     private Mp3Encoder|AacLcEncoder|null $encoder = null;
+    private ?OpusDecoder $opusDecoder = null;
+
+    /** PCM 源参数（PCM 无需解码器，按位深/字节序直接解释） */
+    private int $pcmBits = 16;
+    private bool $pcmLittleEndian = true;
+    private bool $pcmUnsigned = false;
+    /** Opus dOps/OpusHead pre-skip（48 kHz 样本数，仅用于报告与时间戳补偿） */
+    private int $sourcePreSkip = 0;
 
     /** 已送入解码器的源样本数 */
     private int $inputSamples = 0;
@@ -40,18 +50,36 @@ final class AudioTranscoder
     private int $dropFrames = 1;
     private bool $prerollApplied = false;
 
+    /**
+     * @param array{bits?:int,littleEndian?:bool,unsigned?:bool,preSkip?:int,gain?:int} $options
+     */
     public function __construct(
         private readonly string $source,
         private readonly string $target,
         private readonly int $rate,
         private readonly int $channels,
-        int $mp3Bitrate = 128000
+        int $mp3Bitrate = 128000,
+        array $options = []
     ) {
         AudioPolicy::assertTranscodable($source, $target, $rate, $channels);
         if ($source === AudioPolicy::CODEC_AAC) {
             $this->decoder = new AacLcDecoder();
-        } else {
+        } elseif ($source === AudioPolicy::CODEC_MP3) {
             $this->decoder = new Mp3L3Decoder();
+        } elseif ($source === AudioPolicy::CODEC_OPUS) {
+            $this->opusDecoder = new OpusDecoder($channels, 48000);
+            $this->sourcePreSkip = max(0, (int)($options['preSkip'] ?? 0));
+            $this->opusDecoder->setPreSkip($this->sourcePreSkip);
+            if (!empty($options['gain'])) {
+                $this->opusDecoder->setOutputGain((int)$options['gain']);
+            }
+        } elseif ($source === AudioPolicy::CODEC_PCM) {
+            $this->pcmBits = (int)($options['bits'] ?? 16);
+            if (!in_array($this->pcmBits, [8, 16, 24, 32], true)) {
+                throw new InvalidArgumentException('PCM 仅支持 8/16/24/32 bit，收到 ' . $this->pcmBits);
+            }
+            $this->pcmLittleEndian = (bool)($options['littleEndian'] ?? true);
+            $this->pcmUnsigned = (bool)($options['unsigned'] ?? ($this->pcmBits === 8));
         }
         if ($target === AudioPolicy::CODEC_MP3) {
             if (!in_array($mp3Bitrate, array_map(fn ($v) => $v * 1000, self::MP3_BITRATES), true)) {
@@ -71,7 +99,8 @@ final class AudioTranscoder
 
     /**
      * 喂入一帧源音频。
-     * @param string $payload AAC：原始访问单元（不带 ADTS）；MP3：一个或多个完整 MP3 帧
+     * @param string $payload AAC：原始访问单元（不带 ADTS）；MP3：一个或多个完整 MP3 帧；
+     *                        Opus：一个 Opus 包（可含多帧）；PCM：裸 PCM 字节块
      * @return array<int,array{data:string,samples:int}> 输出帧（目标容器可直接写入）
      */
     public function push(string $payload): array
@@ -87,6 +116,21 @@ final class AudioTranscoder
             return $frames;
         }
 
+        if ($this->source === AudioPolicy::CODEC_OPUS) {
+            // CELT 多帧包由 OpusDecoder 输出 48 kHz s16le（pre-skip 已在解码器内丢弃）
+            $pcm = $this->opusDecoder->decodeS16le($payload);
+            $this->inputSamples += intdiv(strlen($pcm), 2 * $this->channels);
+            $this->encodeInto($pcm, $frames);
+            return $frames;
+        }
+
+        if ($this->source === AudioPolicy::CODEC_PCM) {
+            $pcm = $this->pcmToS16le($payload);
+            $this->inputSamples += intdiv(strlen($pcm), 2 * $this->channels);
+            $this->encodeInto($pcm, $frames);
+            return $frames;
+        }
+
         // MP3：一个 tag 可能含多个帧，逐帧解码后立即编码，保持内存 O(单帧)
         $this->decoder->decodeStreaming($payload, function (array $planes, int $channels) use (&$frames): void {
             $pcm = $this->interleaveS16($planes, $channels);
@@ -96,6 +140,9 @@ final class AudioTranscoder
 
         return $frames;
     }
+
+    /** Opus 源 pre-skip（48 kHz 样本数），用于输出时间戳补偿 */
+    public function sourcePreSkipSamples(): int { return $this->sourcePreSkip; }
 
     /** 冲刷解码器/编码器缓冲区，返回尾部完整帧 */
     public function flush(): array
@@ -127,6 +174,55 @@ final class AudioTranscoder
             return $this->encoder->getAudioSpecificConfig();
         }
         return '';
+    }
+
+    /**
+     * 裸 PCM → s16le（交错）。
+     * 8bit：无符号时减 128 偏置（有符号时按 >=128 取负）；16/24/32bit：有符号，按字节序读取。
+     * 位深大于 16 时右移截断到 16bit（不做 dither）。不足一帧的尾部字节丢弃。
+     */
+    private function pcmToS16le(string $payload): string
+    {
+        $bytesPerSample = intdiv($this->pcmBits, 8);
+        $frameBytes = $bytesPerSample * $this->channels;
+        if ($frameBytes <= 0) return '';
+        $usable = intdiv(strlen($payload), $frameBytes) * $frameBytes;
+        if ($usable <= 0) return '';
+        $payload = $usable === strlen($payload) ? $payload : substr($payload, 0, $usable);
+
+        if ($this->pcmBits === 16) {
+            if ($this->pcmLittleEndian) return $payload;
+            $out = '';
+            $len = strlen($payload);
+            for ($i = 0; $i < $len; $i += 2) {
+                $out .= $payload[$i + 1] . $payload[$i];
+            }
+            return $out;
+        }
+
+        if ($this->pcmBits === 8) {
+            $src = unpack('C*', $payload);
+            $mapped = [];
+            foreach ($src as $v) {
+                $signed = $this->pcmUnsigned ? ($v - 128) : ($v >= 128 ? $v - 256 : $v);
+                $mapped[] = ($signed * 256) & 0xFFFF;
+            }
+            return pack('v*', ...$mapped);
+        }
+
+        $out = '';
+        $len = strlen($payload);
+        for ($i = 0; $i + $bytesPerSample <= $len; $i += $bytesPerSample) {
+            // 取高 16 位：24bit = 去掉最低字节，32bit = 去掉最低两字节
+            if ($this->pcmLittleEndian) {
+                $out .= $bytesPerSample === 4
+                    ? substr($payload, $i + 2, 2)
+                    : substr($payload, $i + 1, 2);
+            } else {
+                $out .= substr($payload, $i, 2);
+            }
+        }
+        return $out;
     }
 
     private function encodeInto(string $pcm, array &$frames): void

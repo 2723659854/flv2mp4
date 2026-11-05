@@ -24,7 +24,8 @@ final class CeltBands
         bool $transient,
         int $totalBits,
         int $channels,
-        int $seed
+        int $seed,
+        int $endBand = 21
     ): array {
         $m = 1 << $lm;
         $size = 120 << $lm;
@@ -50,7 +51,7 @@ final class CeltBands
         $coded = $allocation['coded'];
         $totalFrac = ($totalBits << 3) - $allocation['anti'];
 
-        for ($band = 0; $band < 21; $band++) {
+        for ($band = 0; $band < $endBand; $band++) {
             $tell = $decoder->tellFrac();
             if ($band !== 0) $balance -= $tell;
             $remaining = $totalFrac - $tell - 1;
@@ -97,7 +98,7 @@ final class CeltBands
                 $xb = ['vector' => $st['x']]; $yb = ['vector' => $st['y']];
                 $cmX = $cmY = $st['mask'];
             }
-            if ($band < 20) {
+            if ($band < $endBand - 1) {
                 $scale = sqrt($n);
                 for ($j = 0; $j < $n; $j++) {
                     $v = $xb['vector'][$j];
