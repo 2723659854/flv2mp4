@@ -25,6 +25,7 @@ class RangeDecoder
     private int $endOffset = 0;
     private int $endWindow = 0;
     private int $endBits = 0;
+    private int $rawLimit;
     private int $totalBits = 33 - 24;
     private int $range = 128;
     private int $value;
@@ -36,6 +37,7 @@ class RangeDecoder
     {
         $this->data = $data;
         $this->storage = strlen($data);
+        $this->rawLimit = $this->storage;
         $this->remainder = $this->readByte();
         $this->value = $this->range - 1 - ($this->remainder >> 1);
         $this->normalize();
@@ -110,6 +112,29 @@ class RangeDecoder
             }
         }
         throw new RuntimeException('Inverse CDF did not terminate');
+    }
+
+    /**
+     * FFmpeg 风格 CDF 解码（libavcodec/opus/rc.c ff_opus_rc_dec_cdf）。
+     * CDF 数组格式为 [total, cdf1, cdf2, ..., total]，与 libopus 的反向 CDF 不同。
+     * $offset 允许直接指向大表内某个子 CDF 的起始下标（SILK 的 pulse_location 表）。
+     */
+    public function decodeCdfFfmpeg(array $cdf, int $offset = 0): int
+    {
+        $total = $cdf[$offset];
+        $scale = intdiv($this->range, $total);
+        $symbol = intdiv($this->value, $scale) + 1;
+        $symbol = $total - min($symbol, $total);
+        $count = count($cdf);
+        $k = 0;
+        while ($offset + 1 + $k < $count && $cdf[$offset + 1 + $k] <= $symbol) {
+            $k++;
+        }
+        $high = $cdf[$offset + 1 + $k];
+        $low = $k > 0 ? $cdf[$offset + $k] : 0;
+        $this->extension = $scale;
+        $this->update($low, $high, $total);
+        return $k;
     }
 
     public function decodeUint(int $total): int
@@ -265,7 +290,21 @@ class RangeDecoder
 
     private function readByteFromEnd(): int
     {
-        return $this->endOffset < $this->storage ? ord($this->data[$this->storage - ++$this->endOffset]) : 0;
+        return $this->endOffset < $this->rawLimit ? ord($this->data[$this->rawLimit - ++$this->endOffset]) : 0;
+    }
+
+    /**
+     * FFmpeg ff_opus_rc_dec_raw_init：把原始位读取器重新指向帧尾（可选地缩短可用字节数），
+     * 区间解码状态与 totalBits 保持不变。Hybrid 中 SILK 与 CELT 各自从帧尾独立读取原始位。
+     */
+    public function resetRaw(int $bytes = -1): void
+    {
+        if ($bytes >= 0) {
+            $this->rawLimit = min($bytes, $this->storage);
+        }
+        $this->endOffset = 0;
+        $this->endWindow = 0;
+        $this->endBits = 0;
     }
 
     private static function ilog(int $value): int

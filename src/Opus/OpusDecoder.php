@@ -5,6 +5,8 @@ namespace Xiaosongshu\Flv2mp4\Opus;
 use InvalidArgumentException;
 use LogicException;
 use Xiaosongshu\Flv2mp4\Opus\Celt\CeltFrameDecoder;
+use Xiaosongshu\Flv2mp4\Opus\Silk\SilkDecoder;
+use Xiaosongshu\Flv2mp4\Opus\Silk\SilkResampler;
 
 /**
  * @purpose Opus 解码器
@@ -20,12 +22,18 @@ final class OpusDecoder
     private CeltFrameDecoder $celtDecoder;
     private int $skipRemaining = 0;
     private float $outputGain = 1.0;
+    private ?SilkDecoder $silkDecoder = null;
+    /** @var array<int, SilkResampler> */
+    private array $silkResamplers = [];
+    private int $silkRate = 0;
+    /** @var float[] hybrid 下 CELT 层相对 SILK 输出的尾部延迟（输出声道交错） */
+    private array $celtDelay = [];
 
     /**
      * CELT 带宽 → 编码带上限（end band）。取值逐项对应 FFmpeg libavcodec/opus/tab.c
      * 的 ff_celt_band_end[] = {13, 17, 17, 19, 21}（NB/MB/WB/SWB/FB）。
      */
-    private const BAND_END = ['NB' => 13, 'WB' => 17, 'SWB' => 19, 'FB' => 21];
+    private const BAND_END = ['NB' => 13, 'MB' => 17, 'WB' => 17, 'SWB' => 19, 'FB' => 21];
 
     public function __construct(int $channels = 2, int $sampleRate = 48000)
     {
@@ -68,6 +76,12 @@ final class OpusDecoder
         $this->lastSampleCount = 0;
         $this->skipRemaining = 0;
         $this->celtDecoder->reset();
+        $this->silkDecoder?->reset();
+        foreach ($this->silkResamplers as $resampler) {
+            $resampler->reset();
+        }
+        $this->silkRate = 0;
+        $this->celtDelay = [];
     }
 
     /** 设置 dOps/OpusHead 的 pre-skip（48 kHz 样本数），从解码输出开头丢弃 */
@@ -86,15 +100,21 @@ final class OpusDecoder
     {
         $this->lastPacket = OpusPacketParser::parse($packet);
         $this->lastSampleCount = 0;
-        if ($this->lastPacket['mode'] !== 'CELT') {
-            throw new LogicException($this->lastPacket['mode'] . ' audio decoding is not implemented; refusing to fabricate PCM');
+        $mode = $this->lastPacket['mode'];
+        if ($mode !== 'CELT' && $mode !== 'SILK' && $mode !== 'HYBRID') {
+            throw new LogicException($mode . ' audio decoding is not implemented; refusing to fabricate PCM');
         }
         if ($this->sampleRate !== 48000) {
             throw new LogicException(sprintf('Unsupported Opus output rate: %d (only 48000)', $this->sampleRate));
         }
         $frameSamples = $this->lastPacket['frameDurationSamples'];
-        if (!in_array($frameSamples, [120, 240, 480, 960], true)) {
-            throw new LogicException('Unsupported CELT frame size: ' . $frameSamples);
+        $allowedSizes = match ($mode) {
+            'SILK' => [480, 960, 1920, 2880],
+            'HYBRID' => [480, 960],
+            default => [120, 240, 480, 960],
+        };
+        if (!in_array($frameSamples, $allowedSizes, true)) {
+            throw new LogicException('Unsupported ' . $mode . ' frame size: ' . $frameSamples);
         }
         $endBand = self::BAND_END[$this->lastPacket['bandwidth']] ?? 21;
         $codedChannels = $this->lastPacket['stereo'] ? 2 : 1;
@@ -105,21 +125,37 @@ final class OpusDecoder
 
         $pcm = [];
         foreach ($frames as $frame) {
-            $decoded = $this->celtDecoder->decode($frame, $frameSamples, $codedChannels, $endBand);
-            if ($codedChannels === 1 && $this->channels === 2) {
-                for ($i = 0; $i < $frameSamples; $i++) {
-                    $pcm[] = $decoded[$i];
-                    $pcm[] = $decoded[$i];
-                }
-            } elseif ($codedChannels === 2 && $this->channels === 1) {
-                for ($i = 0; $i < $frameSamples; $i++) {
-                    $pcm[] = ($decoded[$i * 2] + $decoded[$i * 2 + 1]) * 0.5;
-                }
-            } else {
-                foreach ($decoded as $sample) {
-                    $pcm[] = $sample;
-                }
+            if ($mode === 'SILK') {
+                $pcm = array_merge($pcm, $this->decodeSilkFrame($frame, $frameSamples, $codedChannels));
+                continue;
             }
+            if ($mode === 'HYBRID') {
+                // FFmpeg dec.c：SILK 低频层（≤WB）+ CELT 高频层（start_band=17）逐样本相加，
+                // 且两层共用同一个区间解码器状态：先 SILK 读，CELT 从当前位置继续读。
+                $rc = new RangeDecoder($frame);
+                $silk = $this->decodeSilkFrame($frame, $frameSamples, $codedChannels, $rc);
+                // FFmpeg dec.c 278–304：hybrid 在 CELT 前还要读 1 位冗余标志（logp=12），
+                // 冗余帧从帧尾剥离，随后 CELT 从剩余的字节重新初始化原始位读取器。
+                $size = strlen($frame);
+                $redundancy = ($rc->tell() + 37 <= $size * 8) ? $rc->decodeBitLogp(12) : 0;
+                if ($redundancy) {
+                    $rc->decodeBitLogp(1);
+                    $size -= $rc->decodeUint(256) + 2;
+                }
+                $rc->resetRaw($size);
+                $celt = $this->normalizeChannels(
+                    $this->celtDecoder->decode($frame, $frameSamples, $codedChannels, $endBand, 17, $rc),
+                    $frameSamples,
+                    $codedChannels
+                );
+                $pcm = array_merge($pcm, $this->combineHybrid($silk, $celt));
+                continue;
+            }
+            $pcm = array_merge($pcm, $this->normalizeChannels(
+                $this->celtDecoder->decode($frame, $frameSamples, $codedChannels, $endBand),
+                $frameSamples,
+                $codedChannels
+            ));
         }
 
         if ($this->outputGain !== 1.0) {
@@ -138,8 +174,148 @@ final class OpusDecoder
         return $pcm;
     }
 
+    private function decodeSilkFrame(
+        string $frame,
+        int $frameSamples,
+        int $codedChannels,
+        ?RangeDecoder $rc = null
+    ): array {
+        // hybrid（config 12–15）的 SILK 层最高为宽带，FFmpeg 用 min(bandwidth, WB)
+        $bandwidth = min(2, intdiv($this->lastPacket['config'], 4));
+        $rate = [8000, 12000, 16000][$bandwidth];
+        $durationMs = intdiv($frameSamples, 48);
+        if ($this->silkDecoder === null) {
+            $this->silkDecoder = new SilkDecoder($this->channels);
+        }
+        if ($this->silkRate !== $rate) {
+            $this->silkResamplers = [];
+            $this->silkRate = $rate;
+        }
+
+        $channels = $this->silkDecoder->decodeSuperframe(
+            $rc ?? new RangeDecoder($frame),
+            $bandwidth,
+            $codedChannels,
+            $durationMs
+        );
+
+        $resampled = [];
+        foreach ($channels as $index => $samples) {
+            if (!isset($this->silkResamplers[$index])) {
+                $this->silkResamplers[$index] = new SilkResampler($rate);
+            }
+            $resampled[$index] = $this->silkResamplers[$index]->process($samples);
+        }
+
+        $pcm = [];
+        if ($this->channels === 1) {
+            foreach ($resampled[0] as $sample) {
+                $pcm[] = $sample;
+            }
+            return $pcm;
+        }
+
+        $right = $resampled[1] ?? $resampled[0];
+        $count = min(count($resampled[0]), count($right));
+        for ($i = 0; $i < $count; $i++) {
+            $pcm[] = $resampled[0][$i];
+            $pcm[] = $right[$i];
+        }
+        return $pcm;
+    }
+
+    /** 把 CELT 解码结果（按编码声道数）转成输出声道布局的交错 PCM */
+    private function normalizeChannels(array $decoded, int $frameSamples, int $codedChannels): array
+    {
+        if ($codedChannels === 1 && $this->channels === 2) {
+            $pcm = [];
+            for ($i = 0; $i < $frameSamples; $i++) {
+                $pcm[] = $decoded[$i];
+                $pcm[] = $decoded[$i];
+            }
+            return $pcm;
+        }
+        if ($codedChannels === 2 && $this->channels === 1) {
+            $pcm = [];
+            for ($i = 0; $i < $frameSamples; $i++) {
+                $pcm[] = ($decoded[$i * 2] + $decoded[$i * 2 + 1]) * 0.5;
+            }
+            return $pcm;
+        }
+        return $decoded;
+    }
+
+    /**
+     * hybrid 合成：CELT 层输出比 SILK 重采样输出多出一个固定延迟（48k 下 72 样本），
+     * 按 FFmpeg dec.c 的 celt_delay FIFO 方式把多出来的尾部顺延到下一帧。
+     */
+    private function combineHybrid(array $silk, array $celt): array
+    {
+        $ch = $this->channels;
+        $silkN = intdiv(count($silk), $ch);
+        $out = $silk;
+        $pos = 0;
+        if ($this->celtDelay !== []) {
+            $delayN = intdiv(count($this->celtDelay), $ch);
+            $take = min($delayN, $silkN);
+            for ($i = 0; $i < $take; $i++) {
+                for ($c = 0; $c < $ch; $c++) {
+                    $out[$i * $ch + $c] += $this->celtDelay[$i * $ch + $c];
+                }
+            }
+            $pos = $take;
+        }
+        $celtN = intdiv(count($celt), $ch);
+        $add = min($silkN - $pos, $celtN);
+        for ($i = 0; $i < $add; $i++) {
+            for ($c = 0; $c < $ch; $c++) {
+                $out[($pos + $i) * $ch + $c] += $celt[$i * $ch + $c];
+            }
+        }
+        $this->celtDelay = array_slice($celt, $add * $ch);
+        return $out;
+    }
+
     public function decodeS16le(string $packet): string
     {
         return Pcm16::floatsToS16le($this->decodeFloat($packet), $this->channels);
+    }
+
+    /**
+     * 冲洗 SILK 重采样器的尾部延迟（线性相位滤波器需要前瞻，结束时补零）。
+     * 返回交错格式的剩余 PCM 样本。
+     */
+    public function flushFloat(): array
+    {
+        $pcm = [];
+        if ($this->silkResamplers !== []) {
+            $extra = [];
+            foreach ($this->silkResamplers as $index => $resampler) {
+                $extra[$index] = $resampler->flush();
+            }
+            if ($this->channels === 1) {
+                $pcm = $extra[0] ?? [];
+            } else {
+                $left = $extra[0] ?? [];
+                $right = $extra[1] ?? $left;
+                $count = min(count($left), count($right));
+                for ($i = 0; $i < $count; $i++) {
+                    $pcm[] = $left[$i];
+                    $pcm[] = $right[$i];
+                }
+            }
+        }
+        // hybrid：把 CELT 层 FIFO 中剩余的尾样本叠加到冲洗输出的开头
+        if ($this->celtDelay !== []) {
+            $ch = $this->channels;
+            $n = min(intdiv(count($this->celtDelay), $ch), intdiv(count($pcm), $ch));
+            for ($i = 0; $i < $n; $i++) {
+                for ($c = 0; $c < $ch; $c++) {
+                    $pcm[$i * $ch + $c] += $this->celtDelay[$i * $ch + $c];
+                }
+            }
+            $this->celtDelay = [];
+        }
+        return $pcm;
     }
 }

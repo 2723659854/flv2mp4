@@ -25,7 +25,8 @@ final class CeltBands
         int $totalBits,
         int $channels,
         int $seed,
-        int $endBand = 21
+        int $endBand = 21,
+        int $startBand = 0
     ): array {
         $m = 1 << $lm;
         $size = 120 << $lm;
@@ -40,8 +41,9 @@ final class CeltBands
 
         $x = array_fill(0, $size, 0.0);
         $y = $channels === 1 ? [] : array_fill(0, $size, 0.0);
-        $norm = [];
-        $norm2 = $channels === 1 ? null : [];
+        // hybrid（start_band=17）时 start_band 以下的样本不会写入，必须预置为连续零
+        $norm = array_fill(0, $size, 0.0);
+        $norm2 = $channels === 1 ? null : array_fill(0, $size, 0.0);
         $collapse = array_fill(0, 42, 0);
         $balance = $allocation['extra'];
         $lowbandOffset = 0;
@@ -51,9 +53,9 @@ final class CeltBands
         $coded = $allocation['coded'];
         $totalFrac = ($totalBits << 3) - $allocation['anti'];
 
-        for ($band = 0; $band < $endBand; $band++) {
+        for ($band = $startBand; $band < $endBand; $band++) {
             $tell = $decoder->tellFrac();
-            if ($band !== 0) $balance -= $tell;
+            if ($band !== $startBand) $balance -= $tell;
             $remaining = $totalFrac - $tell - 1;
             $ctx->remaining = $remaining;
             $ctx->band = $band;
@@ -64,14 +66,26 @@ final class CeltBands
                 : 0;
             $offset = CeltBitAllocation::BAND_EDGES[$band] << $lm;
 
-            if (($offset - $n >= 0 || $band === 1) && ($updateLowband || $lowbandOffset === 0)) $lowbandOffset = $band;
+            $bandStartPos = CeltBitAllocation::BAND_EDGES[$startBand] << $lm;
+            if (($offset - $n >= $bandStartPos || $band === $startBand + 1) && ($updateLowband || $lowbandOffset === 0)) $lowbandOffset = $band;
+
+            // RFC 8251 §9 特殊 hybrid 折叠：把 start_band 的尾部复制到 start_band+1 的头部
+            if ($band === $startBand + 1) {
+                $copyCount = (CeltBitAllocation::BAND_WIDTHS[$band] - CeltBitAllocation::BAND_WIDTHS[$band - 1]) << $lm;
+                $from = $offset - $copyCount;
+                for ($j = 0; $j < $copyCount; $j++) {
+                    $norm[$offset + $j] = $norm[$from + $j] ?? 0.0;
+                    if ($channels !== 1) $norm2[$offset + $j] = $norm2[$from + $j] ?? 0.0;
+                }
+            }
+
             $effective = -1;
             $fillX = (1 << $blocks) - 1;
             $fillY = $channels === 1 ? 0 : $fillX;
             if ($lowbandOffset !== 0) {
-                $effective = max(0, (CeltBitAllocation::BAND_EDGES[$lowbandOffset] << $lm) - $n);
+                $effective = max($bandStartPos, (CeltBitAllocation::BAND_EDGES[$lowbandOffset] << $lm) - $n);
                 $fillX = $fillY = 0;
-                for ($j = max(0, $lowbandOffset - 1); $j < $band; $j++) {
+                for ($j = max($startBand, $lowbandOffset - 1); $j < $band; $j++) {
                     $fillX |= $collapse[2 * $j];
                     if ($channels !== 1) {
                         $fillY |= $collapse[2 * $j + 1];
@@ -84,7 +98,7 @@ final class CeltBands
             if ($channels !== 1 && $dual && $band === $allocation['intensity']) {
                 $dual = false;
                 $count = $offset;
-                for ($j = 0; $j < $count; $j++) $norm[$j] = (($norm[$j] ?? 0.0) + ($norm2[$j] ?? 0.0)) * 0.5;
+                for ($j = $bandStartPos; $j < $count; $j++) $norm[$j] = (($norm[$j] ?? 0.0) + ($norm2[$j] ?? 0.0)) * 0.5;
             }
             if ($channels === 1) {
                 $xb = self::quantBand($ctx, $n, $b, $blocks, $lowX, $lm, 1.0, $fillX);

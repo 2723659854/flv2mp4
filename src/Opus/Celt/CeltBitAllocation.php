@@ -42,13 +42,14 @@ final class CeltBitAllocation
         bool $transient,
         int $channels,
         int $frameBits,
-        int $endBand = 21
+        int $endBand = 21,
+        int $startBand = 0
     ): array {
         $consumed = $decoder->tell();
         $logp = $transient ? 2 : 4;
         $selectBit = $lm !== 0 && $consumed + $logp + 1 <= $frameBits;
         $diff = 0; $changed = 0; $tf = array_fill(0, $endBand, 0);
-        for ($i = 0; $i < $endBand; $i++) {
+        for ($i = $startBand; $i < $endBand; $i++) {
             if ($consumed + $logp + ($selectBit ? 1 : 0) <= $frameBits) {
                 $diff ^= $decoder->decodeBitLogp($logp);
                 $consumed = $decoder->tell();
@@ -59,12 +60,12 @@ final class CeltBitAllocation
         }
         $base = $transient ? 4 : 0; $select = 0; $table = self::TF_SELECT[$lm];
         if ($selectBit && $table[$base + $changed] !== $table[$base + 2 + $changed]) $select = $decoder->decodeBitLogp(1);
-        for ($i = 0; $i < $endBand; $i++) $tf[$i] = $table[$base + 2 * $select + $tf[$i]];
+        for ($i = $startBand; $i < $endBand; $i++) $tf[$i] = $table[$base + 2 * $select + $tf[$i]];
 
         $spread = $decoder->tell() + 4 <= $frameBits ? $decoder->decodeCdf(self::SPREAD_ICDF, 5) : 2;
         $caps = $boost = array_fill(0, $endBand, 0);
         $tbits = $frameBits << 3; $dynalloc = 6;
-        for ($i = 0; $i < $endBand; $i++) {
+        for ($i = $startBand; $i < $endBand; $i++) {
             $width = self::BAND_WIDTHS[$i] << $lm;
             $caps[$i] = CeltTables::cap($i, $lm, $channels, $width);
             $quanta = min(($width << ($channels - 1)) << 3, max(48, $width << ($channels - 1)));
@@ -81,12 +82,12 @@ final class CeltBitAllocation
         $tbits = ($frameBits << 3) - $decoder->tellFrac() - 1;
         $anti = $transient && $lm >= 2 && $tbits >= (($lm + 2) << 3) ? 8 : 0; $tbits -= $anti;
         $skipBit = $tbits >= 8 ? 8 : 0; $tbits -= $skipBit;
-        $intensityBits = $channels === 2 ? self::LOG2_FRAC[$endBand] : 0; $dualBits = 0;
+        $intensityBits = $channels === 2 ? self::LOG2_FRAC[$endBand - $startBand] : 0; $dualBits = 0;
         if ($intensityBits > 0 && $intensityBits <= $tbits) { $tbits -= $intensityBits; if ($tbits >= 8) { $dualBits = 8; $tbits -= 8; } }
         elseif ($intensityBits > $tbits) $intensityBits = 0;
 
-        $threshold = $trimOffset = array_fill(0, $endBand, 0); $skipStart = 0;
-        for ($i = 0; $i < $endBand; $i++) {
+        $threshold = $trimOffset = array_fill(0, $endBand, 0); $skipStart = $startBand;
+        for ($i = $startBand; $i < $endBand; $i++) {
             $trimValue = $trim - 5 - $lm;
             $threshold[$i] = max((3 * self::BAND_WIDTHS[$i] << ($lm + 3)) >> 4, $channels << 3);
             $trimOffset[$i] = ($trimValue * (self::BAND_WIDTHS[$i] * ($endBand - 1 - $i) << ($lm + 3 + $channels - 1))) >> 6;
@@ -96,7 +97,7 @@ final class CeltBitAllocation
         $low = 1; $high = 10;
         while ($low <= $high) {
             $center = ($low + $high) >> 1; $total = 0; $done = false;
-            for ($i = $endBand - 1; $i >= 0; $i--) {
+            for ($i = $endBand - 1; $i >= $startBand; $i--) {
                 $b = $norm(self::BAND_WIDTHS[$i] * self::STATIC_ALLOC[$center][$i]);
                 if ($b) $b = max($b + $trimOffset[$i], 0); $b += $boost[$i];
                 if ($b >= $threshold[$i] || $done) { $done = true; $total += min($b, $caps[$i]); }
@@ -117,7 +118,7 @@ final class CeltBitAllocation
         $lowStep = 0; $highStep = 64;
         for ($step = 0; $step < 6; $step++) {
             $center = ($lowStep + $highStep) >> 1; $total = 0; $done = false;
-            for ($j = $endBand - 1; $j >= 0; $j--) {
+            for ($j = $endBand - 1; $j >= $startBand; $j--) {
                 $b = $bits1[$j] + (($center * $bits2[$j]) >> 6);
                 if ($b >= $threshold[$j] || $done) { $done = true; $total += min($b, $caps[$j]); }
                 elseif ($b >= ($channels << 3)) $total += $channels << 3;
@@ -125,7 +126,7 @@ final class CeltBitAllocation
             if ($total > $tbits) $highStep = $center; else $lowStep = $center;
         }
         $pulses = array_fill(0, $endBand, 0); $total = 0; $done = false;
-        for ($i = $endBand - 1; $i >= 0; $i--) {
+        for ($i = $endBand - 1; $i >= $startBand; $i--) {
             $b = $bits1[$i] + (($lowStep * $bits2[$i]) >> 6);
             if ($b >= $threshold[$i] || $done) $done = true; else $b = $b >= ($channels << 3) ? $channels << 3 : 0;
             $pulses[$i] = min($b, $caps[$i]); $total += $pulses[$i];
@@ -133,25 +134,26 @@ final class CeltBitAllocation
         for ($coded = $endBand; ; $coded--) {
             $j = $coded - 1;
             if ($j === $skipStart) { $tbits += $skipBit; break; }
-            $span = self::BAND_EDGES[$j + 1]; $remaining = $tbits - $total;
+            $span = self::BAND_EDGES[$j + 1] - self::BAND_EDGES[$startBand]; $remaining = $tbits - $total;
             $bandbits = intdiv($remaining, $span); $remaining -= $bandbits * $span;
-            $allocation = $pulses[$j] + $bandbits * self::BAND_WIDTHS[$j] + max($remaining - self::BAND_EDGES[$j], 0);
+            $allocation = $pulses[$j] + $bandbits * self::BAND_WIDTHS[$j]
+                + max($remaining - (self::BAND_EDGES[$j] - self::BAND_EDGES[$startBand]), 0);
             if ($allocation >= max($threshold[$j], ($channels + 1) << 3)) {
                 if ($decoder->decodeBitLogp(1)) break;
                 $total += 8; $allocation -= 8;
             }
             $total -= $pulses[$j];
-            if ($intensityBits) { $total -= $intensityBits; $intensityBits = self::LOG2_FRAC[$j]; $total += $intensityBits; }
+            if ($intensityBits) { $total -= $intensityBits; $intensityBits = self::LOG2_FRAC[$j - $startBand]; $total += $intensityBits; }
             $pulses[$j] = $allocation >= ($channels << 3) ? $channels << 3 : 0; $total += $pulses[$j];
         }
-        $intensity = $intensityBits ? $decoder->decodeUint($coded + 1) : 0;
+        $intensity = $intensityBits ? $startBand + $decoder->decodeUint($coded + 1 - $startBand) : 0;
         $dual = 0;
-        if ($intensity <= 0) $tbits += $dualBits; elseif ($dualBits) $dual = $decoder->decodeBitLogp(1);
-        $remaining = $tbits - $total; $span = self::BAND_EDGES[$coded];
+        if ($intensity <= $startBand) $tbits += $dualBits; elseif ($dualBits) $dual = $decoder->decodeBitLogp(1);
+        $remaining = $tbits - $total; $span = self::BAND_EDGES[$coded] - self::BAND_EDGES[$startBand];
         $bandbits = intdiv($remaining, $span); $remaining -= $bandbits * $span;
-        for ($i = 0; $i < $coded; $i++) { $bits = min($remaining, self::BAND_WIDTHS[$i]); $pulses[$i] += $bits + $bandbits * self::BAND_WIDTHS[$i]; $remaining -= $bits; }
+        for ($i = $startBand; $i < $coded; $i++) { $bits = min($remaining, self::BAND_WIDTHS[$i]); $pulses[$i] += $bits + $bandbits * self::BAND_WIDTHS[$i]; $remaining -= $bits; }
         $fine = $priority = array_fill(0, $endBand, 0); $extra = 0;
-        for ($i = 0; $i < $coded; $i++) {
+        for ($i = $startBand; $i < $coded; $i++) {
             $n = self::BAND_WIDTHS[$i] << $lm; $prevExtra = $extra; $pulses[$i] += $extra;
             if ($n > 1) {
                 $extra = max($pulses[$i] - $caps[$i], 0); $pulses[$i] -= $extra;

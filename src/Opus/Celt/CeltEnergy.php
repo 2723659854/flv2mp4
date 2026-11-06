@@ -54,14 +54,14 @@ final class CeltEnergy
         $this->previous2 = [$silence, $silence];
     }
 
-    public function decodeCoarse(RangeDecoder $decoder, int $lm, int $channels, bool $intra, int $totalBits, int $endBand = 21): array
+    public function decodeCoarse(RangeDecoder $decoder, int $lm, int $channels, bool $intra, int $totalBits, int $endBand = 21, int $startBand = 0): array
     {
         $alpha = $intra ? 0.0 : self::ALPHA[$lm];
         $beta = $intra ? self::INTRA_BETA : self::BETA[$lm];
         $prediction = [0.0, 0.0];
         $energy = $this->previous;
         for ($band = 0; $band < 21; $band++) {
-            if ($band >= $endBand) {
+            if ($band < $startBand || $band >= $endBand) {
                 for ($channel = 0; $channel < $channels; $channel++) $energy[$channel][$band] = 0.0;
                 continue;
             }
@@ -94,7 +94,7 @@ final class CeltEnergy
         return [$this->previous, $this->previous2];
     }
 
-    public function finishFrame(array $energy, bool $transient, int $channels): void
+    public function finishFrame(array $energy, bool $transient, int $channels, int $startBand = 0, int $endBand = 21): void
     {
         if ($channels === 1) $energy[1] = $energy[0];
         for ($channel = 0; $channel < 2; $channel++) {
@@ -107,11 +107,20 @@ final class CeltEnergy
                 $this->previous[$channel] = $energy[$channel];
             }
         }
+        // FFmpeg dec_celt.c: band 外的能量与历史一律归零/静音（hybrid 时 start_band=17）
+        for ($channel = 0; $channel < 2; $channel++) {
+            for ($band = 0; $band < $startBand; $band++) {
+                $this->previous[$channel][$band] = -28.0;
+            }
+            for ($band = $endBand; $band < 21; $band++) {
+                $this->previous[$channel][$band] = -28.0;
+            }
+        }
     }
 
-    public static function decodeFine(RangeDecoder $decoder, array $energy, array $fineBits, int $channels, int $endBand = 21): array
+    public static function decodeFine(RangeDecoder $decoder, array $energy, array $fineBits, int $channels, int $endBand = 21, int $startBand = 0): array
     {
-        for ($band = 0; $band < $endBand; $band++) {
+        for ($band = $startBand; $band < $endBand; $band++) {
             $bits = $fineBits[$band];
             if ($bits === 0) {
                 continue;
@@ -131,11 +140,12 @@ final class CeltEnergy
         array $priority,
         int $channels,
         int $totalBits,
-        int $endBand = 21
+        int $endBand = 21,
+        int $startBand = 0
     ): array {
         $bitsLeft = $totalBits - $decoder->tell();
         for ($pass = 0; $pass < 2; $pass++) {
-            for ($band = 0; $band < $endBand && $bitsLeft >= $channels; $band++) {
+            for ($band = $startBand; $band < $endBand && $bitsLeft >= $channels; $band++) {
                 if ($priority[$band] !== $pass || $fineBits[$band] >= 8) {
                     continue;
                 }
