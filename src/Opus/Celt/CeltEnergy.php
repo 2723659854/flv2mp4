@@ -39,6 +39,9 @@ final class CeltEnergy
         ],
     ];
 
+    /** 上一帧解码出的能量（对应 FFmpeg CeltBlock.energy，供 alpha 时域预测使用） */
+    private array $lastEnergy = [[], []];
+    /** 反向能量历史（对应 FFmpeg CeltBlock.prev_energy[2]，供 anti-collapse 使用） */
     private array $previous = [[], []];
     private array $previous2 = [[], []];
 
@@ -47,11 +50,29 @@ final class CeltEnergy
         $this->reset();
     }
 
-    public function reset(): void
+    /**
+     * 对应 FFmpeg ff_celt_flush()：energy 清 0，prev_energy[0]/[1] 全置 CELT_ENERGY_SILENCE。
+     * 仅 CELT 冗余帧路径（hybrid redundancy）在解码冗余帧前后调用。
+     */
+    public function flush(): void
     {
+        $zero = array_fill(0, 21, 0.0);
         $silence = array_fill(0, 21, -28.0);
+        $this->lastEnergy = [$zero, $zero];
         $this->previous = [$silence, $silence];
         $this->previous2 = [$silence, $silence];
+    }
+
+    public function reset(): void
+    {
+        // FFmpeg/libopus 的 CeltBlock.energy 与 prev_energy 初始为 0.0（av_mallocz / OPUS_CLEAR），
+        // 不是 -28（CELT_ENERGY_SILENCE 只用于“带外”与静音帧）。
+        // 若初始化为 -28，首帧 alpha*FFMAX(-9, prev) 会引入约 -5.8（log2）的增益误差，
+        // 之后每帧按 alpha 衰减，表现为开播约 200ms 的幅度爬升。
+        $zero = array_fill(0, 21, 0.0);
+        $this->lastEnergy = [$zero, $zero];
+        $this->previous = [$zero, $zero];
+        $this->previous2 = [$zero, $zero];
     }
 
     public function decodeCoarse(RangeDecoder $decoder, int $lm, int $channels, bool $intra, int $totalBits, int $endBand = 21, int $startBand = 0): array
@@ -59,7 +80,7 @@ final class CeltEnergy
         $alpha = $intra ? 0.0 : self::ALPHA[$lm];
         $beta = $intra ? self::INTRA_BETA : self::BETA[$lm];
         $prediction = [0.0, 0.0];
-        $energy = $this->previous;
+        $energy = $this->lastEnergy;
         for ($band = 0; $band < 21; $band++) {
             if ($band < $startBand || $band >= $endBand) {
                 for ($channel = 0; $channel < $channels; $channel++) $energy[$channel][$band] = 0.0;
@@ -78,7 +99,7 @@ final class CeltEnergy
                 } else {
                     $delta = -1;
                 }
-                $value = $alpha * max(-9.0, $this->previous[$channel][$band]) + $prediction[$channel] + $delta;
+                $value = $alpha * max(-9.0, $this->lastEnergy[$channel][$band]) + $prediction[$channel] + $delta;
                 $energy[$channel][$band] = $value;
                 $prediction[$channel] += $beta * $delta;
             }
@@ -106,14 +127,19 @@ final class CeltEnergy
                 $this->previous2[$channel] = $this->previous[$channel];
                 $this->previous[$channel] = $energy[$channel];
             }
+            // FFmpeg dec_celt.c: block->energy 总是更新为当前帧解码值（transient 也一样），
+            // 它才是下一帧 alpha 时域预测的输入。
+            $this->lastEnergy[$channel] = $energy[$channel];
         }
-        // FFmpeg dec_celt.c: band 外的能量与历史一律归零/静音（hybrid 时 start_band=17）
+        // FFmpeg dec_celt.c: band 外 prev_energy 归静音、energy 归零（hybrid 时 start_band=17）
         for ($channel = 0; $channel < 2; $channel++) {
             for ($band = 0; $band < $startBand; $band++) {
                 $this->previous[$channel][$band] = -28.0;
+                $this->lastEnergy[$channel][$band] = 0.0;
             }
             for ($band = $endBand; $band < 21; $band++) {
                 $this->previous[$channel][$band] = -28.0;
+                $this->lastEnergy[$channel][$band] = 0.0;
             }
         }
     }

@@ -23,11 +23,12 @@ final class CeltDsp
     private int $postfilterPeriod = 15;
     private float $postfilterGain = 0.0;
     private int $postfilterTapset = 0;
-    private int $postfilterOldPeriod = 15;
-    private float $postfilterOldGain = 0.0;
-    private int $postfilterOldTapset = 0;
     private float $deemphasisMemory = 0.0;
-    private bool $postfilterEverActive = false;
+
+    public function __construct()
+    {
+        $this->reset();
+    }
 
     /**
      * Synthesizes one CELT frame. For transient packets, pass 2, 4, or 8
@@ -127,52 +128,44 @@ final class CeltDsp
     public function reset(): void
     {
         $this->outMemory = [];
-        $this->postfilterHistory = [];
+        // FFmpeg CeltBlock.buf 为 av_mallocz，初始 1024 个历史样本全 0
+        $this->postfilterHistory = array_fill(0, 1024, 0.0);
         $this->postfilterPeriod = 15;
         $this->postfilterGain = 0.0;
         $this->postfilterTapset = 0;
-        $this->postfilterOldPeriod = 15;
-        $this->postfilterOldGain = 0.0;
-        $this->postfilterOldTapset = 0;
         $this->deemphasisMemory = 0.0;
-        $this->postfilterEverActive = false;
     }
 
     private function postfilterTransition(array $samples, ?int $period, float $gain, int $tapset): array
     {
-        $newPeriod = $period ?? 15;
-        $newGain = $period === null ? 0.0 : $gain;
-        if ($this->postfilterOldGain === 0.0 && $this->postfilterGain === 0.0 && $newGain === 0.0) {
-            // 滤波器从未启用过时不维护历史；启用过则仅做最小长度的滑动（避免整表 merge）
-            if ($this->postfilterEverActive) {
-                $keep = 1024 - count($samples);
-                $history = $keep > 0 ? array_slice($this->postfilterHistory, -$keep) : [];
-                $this->postfilterHistory = array_merge($history, $samples);
-            } else {
-                $this->postfilterHistory = [];
+        $curPeriod = $period ?? 15;
+        $curGain = $period === null ? 0.0 : $gain;
+        // FFmpeg dec_celt.c celt_postfilter()：无论滤波是否启用，块尾都会 memmove 保留最近
+        // 1024 个样本；下一帧启用滤波时 data[-T] 读到的是真实历史样本，而不是零/缺省。
+        if ($this->postfilterGain === 0.0 && $curGain === 0.0) {
+            $history = $this->postfilterHistory;
+            foreach ($samples as $sample) {
+                $history[] = (float) $sample;
             }
-            $this->postfilterOldPeriod = $this->postfilterPeriod;
-            $this->postfilterOldGain = 0.0;
-            $this->postfilterOldTapset = $this->postfilterTapset;
-            $this->postfilterPeriod = $newPeriod;
+            $this->postfilterHistory = array_slice($history, -1024);
+            $this->postfilterPeriod = $curPeriod;
             $this->postfilterGain = 0.0;
             $this->postfilterTapset = $tapset;
             return $samples;
         }
-        $this->postfilterEverActive = true;
         $history = $this->postfilterHistory;
         $input = array_merge($history, $samples);
         $historyLength = count($history);
         $output = [];
         $window = CeltWindow::coefficients();
+        // 分段与 FFmpeg 一致：
+        //   [0, OVERLAP)      : 上一帧参数（celt_postfilter_apply_transition 第一次调用）
+        //   [OVERLAP, 2*OVERLAP): 上一帧 → 本帧参数的交叉淡入
+        //   [2*OVERLAP, end)  : 本帧参数
         foreach ($samples as $i => $sample) {
             $position = $historyLength + $i;
             if ($i < CeltWindow::OVERLAP) {
-                $mix = $window[$i] ** 2;
-                $old = $this->postfilterContribution(
-                    $input, $position, $this->postfilterOldPeriod, $this->postfilterOldGain, $this->postfilterOldTapset
-                );
-                $new = $this->postfilterContribution(
+                $out = (float) $sample + $this->postfilterContribution(
                     $input, $position, $this->postfilterPeriod, $this->postfilterGain, $this->postfilterTapset
                 );
             } elseif ($i < 2 * CeltWindow::OVERLAP) {
@@ -180,23 +173,18 @@ final class CeltDsp
                 $old = $this->postfilterContribution(
                     $input, $position, $this->postfilterPeriod, $this->postfilterGain, $this->postfilterTapset
                 );
-                $new = $this->postfilterContribution($input, $position, $newPeriod, $newGain, $tapset);
+                $new = $this->postfilterContribution($input, $position, $curPeriod, $curGain, $tapset);
+                $out = (float) $sample + (1.0 - $mix) * $old + $mix * $new;
             } else {
-                $mix = 1.0;
-                $old = 0.0;
-                $new = $this->postfilterContribution($input, $position, $newPeriod, $newGain, $tapset);
+                $out = (float) $sample + $this->postfilterContribution($input, $position, $curPeriod, $curGain, $tapset);
             }
-            $out = (float) $sample + (1.0 - $mix) * $old + $mix * $new;
             // 与 FFmpeg dsp.c postfilter_c 一致：滤波结果回写，后续样本的梳状参考取滤波后值
             $input[$position] = $out;
             $output[] = $out;
         }
         $this->postfilterHistory = array_slice($input, -1024);
-        $this->postfilterOldPeriod = $this->postfilterPeriod;
-        $this->postfilterOldGain = $this->postfilterGain;
-        $this->postfilterOldTapset = $this->postfilterTapset;
-        $this->postfilterPeriod = $newPeriod;
-        $this->postfilterGain = $newGain;
+        $this->postfilterPeriod = $curPeriod;
+        $this->postfilterGain = $curGain;
         $this->postfilterTapset = $tapset;
         return $output;
     }

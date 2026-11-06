@@ -1369,6 +1369,13 @@ class FlvRecoder
         if (!$this->flvHeaderWritten || $this->baseTimestamp === null) return;
         if ($this->silentAudioSource === null) return;
         $rel = max(0, $tag->getTime() - $this->baseTimestamp);
+        // 静音轨只是视频时间轴的填充：源音轨比视频长时（容器允许），不得把静音轨拖到视频之后，
+        // 否则容器级 A/V 时长差会等于源音轨尾部长度。对齐 MP4 静音轨行为（到视频末帧为止）。
+        if ($this->lastVideoOutputTimestamp !== null) {
+            $fps = $this->effectiveTargetFps ?? $this->sourceFps;
+            $frameMs = ($fps !== null && $fps > 0) ? 1000.0 / $fps : 40.0;
+            $rel = min($rel, (int)floor($this->lastVideoOutputTimestamp + $frameMs));
+        }
         while ($this->silentAudioFramesWritten * $this->silentAudioSource->frameDurationMs() < $rel) {
             $this->writeSilentAudioFrame();
         }

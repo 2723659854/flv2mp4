@@ -82,10 +82,22 @@ final class CeltBands
             $effective = -1;
             $fillX = (1 << $blocks) - 1;
             $fillY = $channels === 1 ? 0 : $fillX;
-            if ($lowbandOffset !== 0) {
-                $effective = max($bandStartPos, (CeltBitAllocation::BAND_EDGES[$lowbandOffset] << $lm) - $n);
+            // FFmpeg celt.c ff_celt_quant_bands：spread==AGGRESSIVE(3) 且非 transient 且 tf_change>=0 时
+            // 不使用低频折叠（effective_lowband 保持 -1，quant_band 收到 lowband=NULL → LCG 噪声填充）。
+            if ($lowbandOffset !== 0 && ($ctx->spread !== 3 || $blocks > 1 || $ctx->tf < 0)) {
+                // FFmpeg celt.c：effective_lowband 以 200Hz 频带边为单位，折叠区间按边值前缀/后缀确定
+                $effEdge = max(CeltBitAllocation::BAND_EDGES[$startBand],
+                    CeltBitAllocation::BAND_EDGES[$lowbandOffset] - CeltBitAllocation::BAND_WIDTHS[$band]);
+                $effective = $effEdge << $lm;
                 $fillX = $fillY = 0;
-                for ($j = max($startBand, $lowbandOffset - 1); $j < $band; $j++) {
+                $foldStart = $lowbandOffset;
+                while (CeltBitAllocation::BAND_EDGES[--$foldStart] > $effEdge) {
+                }
+                $foldEnd = $lowbandOffset - 1;
+                while (++$foldEnd < $band
+                    && CeltBitAllocation::BAND_EDGES[$foldEnd] < $effEdge + CeltBitAllocation::BAND_WIDTHS[$band]) {
+                }
+                for ($j = $foldStart; $j < $foldEnd; $j++) {
                     $fillX |= $collapse[2 * $j];
                     if ($channels !== 1) {
                         $fillY |= $collapse[2 * $j + 1];
@@ -200,12 +212,21 @@ final class CeltBands
         for ($k = 0; $k < $recombine; $k++) $fill = self::BIT_INTERLEAVE[$fill & 15] | (self::BIT_INTERLEAVE[$fill >> 4] << 2);
         $blocks >>= $recombine; $nb <<= $recombine;
         $divide = 0; $tf = $ctx->tf;
-        while (($nb & 1) === 0 && $tf < 0) { $fill |= $fill << $blocks; $blocks <<= 1; $nb >>= 1; $divide++; $tf++; }
+        // FFmpeg pvq.c quant_band_template：折叠源 lowband 需先做与 X 相同的 haar 前变换
+        if ($lowband !== null) {
+            for ($k = 0; $k < $recombine; $k++) $lowband = self::haar($lowband, $n >> $k, 1 << $k);
+        }
+        while (($nb & 1) === 0 && $tf < 0) {
+            if ($lowband !== null) $lowband = self::haar($lowband, $nb, $blocks);
+            $fill |= $fill << $blocks; $blocks <<= 1; $nb >>= 1; $divide++; $tf++;
+        }
         $b0 = $blocks; $nb0 = $nb;
-        if ($b0 > 1 && $lowband !== null) $lowband = CeltPvq::deinterleaveHadamard($lowband, $b0, $originalBlocks === 1);
+        // FFmpeg pvq.c：stride = B0 << recombine（B0 已含 time_divide 的左移）
+        $stride = $b0 << $recombine;
+        if ($b0 > 1 && $lowband !== null) $lowband = CeltPvq::deinterleaveHadamard($lowband, $stride, $originalBlocks === 1);
         $result = self::partition($ctx, $n, $b, $blocks, $lowband, $lm, $gain, $fill);
         $vector = $result['vector']; $mask = $result['mask'];
-        if ($b0 > 1) $vector = CeltPvq::interleaveHadamard($vector, $b0, $originalBlocks === 1);
+        if ($b0 > 1) $vector = CeltPvq::interleaveHadamard($vector, $stride, $originalBlocks === 1);
         $nb = $nb0; $blocks = $b0;
         for ($k = 0; $k < $divide; $k++) { $blocks >>= 1; $nb <<= 1; $mask |= $mask >> $blocks; $vector = self::haar($vector, $nb, $blocks); }
         for ($k = 0; $k < $recombine; $k++) { $mask = self::BIT_DEINTERLEAVE[$mask & 255]; $vector = self::haar($vector, $n0 >> $k, 1 << $k); }
@@ -245,7 +266,16 @@ final class CeltBands
         $mask = (1 << $blocks) - 1; $fill &= $mask;
         if ($fill === 0) return ['vector' => array_fill(0, $n, 0.0), 'mask' => 0];
         $vector = [];
-        for ($j = 0; $j < $n; $j++) { $ctx->seed = self::lcg($ctx->seed); $vector[] = $lowband === null ? (($ctx->seed & 0x80000000) ? 1.0 : -1.0) : (($lowband[$j] ?? 0.0) + (($ctx->seed & 0x8000) ? 1 / 256 : -1 / 256)); }
+        for ($j = 0; $j < $n; $j++) {
+            $ctx->seed = self::lcg($ctx->seed);
+            if ($lowband === null) {
+                // FFmpeg pvq.c：X[i] = ((int32_t)celt_rng(f)) >> 20（随后统一 renormalize）
+                $signed = $ctx->seed >= 0x80000000 ? $ctx->seed - 0x100000000 : $ctx->seed;
+                $vector[] = (float) ($signed >> 20);
+            } else {
+                $vector[] = ($lowband[$j] ?? 0.0) + (($ctx->seed & 0x8000) ? 1 / 256 : -1 / 256);
+            }
+        }
         return ['vector' => self::normalize($vector, $gain), 'mask' => $lowband === null ? $mask : $fill];
     }
 

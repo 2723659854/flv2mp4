@@ -38,6 +38,20 @@ final class CeltFrameDecoder
         }
     }
 
+    /**
+     * 对应 FFmpeg ff_celt_flush()：清空能量/重叠/后置滤波/去加重状态。
+     * hybrid 冗余帧（opus_decode_redundancy）在解码前后会调用它。
+     */
+    public function flush(): void
+    {
+        $this->energy->flush();
+        $this->rng = 0;
+        $this->debugFrame = null;
+        foreach ($this->dsp as $dsp) {
+            $dsp->reset();
+        }
+    }
+
     public function decode(
         string $frame,
         int $frameSamples,
@@ -120,6 +134,16 @@ final class CeltFrameDecoder
             'transient' => $transient,
             'antiCollapse' => $antiCollapse,
             'seed' => $bands['seed'],
+            'coarseSpec' => $coarse[0],
+            'codedBands' => $allocation['coded'] ?? null,
+            'pulses' => $allocation['pulses'] ?? null,
+            'startBand' => $startBand,
+            'endBand' => $endBand,
+            'specRms' => (function () use ($spectra, $coarse, $lm, $endBand, $startBand) {
+                $s = $this->denormalize($spectra[0], $coarse[0], $lm, $endBand, $startBand);
+                $r = 0.0; foreach ($s as $v) { $r += $v * $v; }
+                return sqrt($r / max(1, count($s)));
+            })(),
         ];
         $this->energy->finishFrame($coarse, $transient, $channels, $startBand, $endBand);
         $this->rng = $decoder->range();
@@ -162,7 +186,8 @@ final class CeltFrameDecoder
             $width = CeltBitAllocation::BAND_WIDTHS[$band];
             $length = $width << $lm;
             $offset = CeltBitAllocation::BAND_EDGES[$band] << $lm;
-            $depth = ((1 + $allocation['pulses'][$band]) / $width) / (1 << $lm);
+            // FFmpeg dec_celt.c process_anticollapse：depth 为整数除法 (1+pulses)/(width<<size)
+            $depth = intdiv(1 + $allocation['pulses'][$band], $length);
             $difference = max(0.0, $energy[$band] - min($previous[$band], $previous2[$band]));
             $level = min(
                 0.5 * 2 ** (-0.125 * $depth),

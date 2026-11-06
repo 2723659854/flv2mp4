@@ -5,6 +5,7 @@ namespace Xiaosongshu\Flv2mp4\Opus;
 use InvalidArgumentException;
 use LogicException;
 use Xiaosongshu\Flv2mp4\Opus\Celt\CeltFrameDecoder;
+use Xiaosongshu\Flv2mp4\Opus\Celt\CeltWindow;
 use Xiaosongshu\Flv2mp4\Opus\Silk\SilkDecoder;
 use Xiaosongshu\Flv2mp4\Opus\Silk\SilkResampler;
 
@@ -28,6 +29,8 @@ final class OpusDecoder
     private int $silkRate = 0;
     /** @var float[] hybrid 下 CELT 层相对 SILK 输出的尾部延迟（输出声道交错） */
     private array $celtDelay = [];
+    /** hybrid 累计的 SILK 重采样欠输出样本数（FFmpeg dec.c s->delayed_samples） */
+    private int $hybridDelayedSamples = 0;
 
     /**
      * CELT 带宽 → 编码带上限（end band）。取值逐项对应 FFmpeg libavcodec/opus/tab.c
@@ -82,6 +85,7 @@ final class OpusDecoder
         }
         $this->silkRate = 0;
         $this->celtDelay = [];
+        $this->hybridDelayedSamples = 0;
     }
 
     /** 设置 dOps/OpusHead 的 pre-skip（48 kHz 样本数），从解码输出开头丢弃 */
@@ -125,6 +129,16 @@ final class OpusDecoder
 
         $pcm = [];
         foreach ($frames as $frame) {
+            if ($mode === 'CELT' && $this->silkResamplers !== []) {
+                // FFmpeg dec.c 408-447：packet 模式切到纯 CELT 时先 flush SILK 重采样器，
+                // 把 delayed_samples 个重采样尾部与 celt_delay FIFO 剩余样本叠加，
+                // 输出在首个 CELT 帧之前（即 hybrid→CELT 交界处多出 15 个样本）。
+                $pcm = array_merge($pcm, $this->flushFloat());
+                $this->silkResamplers = [];
+                $this->silkRate = 0;
+                // FFmpeg dec.c 435-443：CELT 包触发重采样器冲洗后 delayed_samples 归零
+                $this->hybridDelayedSamples = 0;
+            }
             if ($mode === 'SILK') {
                 $pcm = array_merge($pcm, $this->decodeSilkFrame($frame, $frameSamples, $codedChannels));
                 continue;
@@ -134,13 +148,29 @@ final class OpusDecoder
                 // 且两层共用同一个区间解码器状态：先 SILK 读，CELT 从当前位置继续读。
                 $rc = new RangeDecoder($frame);
                 $silk = $this->decodeSilkFrame($frame, $frameSamples, $codedChannels, $rc);
+                // FFmpeg dec.c 274：SILK 重采样输出不足 frame_duration 的部分按帧累计，
+                // 冗余帧淡入位置依赖它（本流累计 15 个样本）。
+                $this->hybridDelayedSamples += $frameSamples - intdiv(count($silk), $this->channels);
                 // FFmpeg dec.c 278–304：hybrid 在 CELT 前还要读 1 位冗余标志（logp=12），
                 // 冗余帧从帧尾剥离，随后 CELT 从剩余的字节重新初始化原始位读取器。
                 $size = strlen($frame);
                 $redundancy = ($rc->tell() + 37 <= $size * 8) ? $rc->decodeBitLogp(12) : 0;
+                $redundancyPos = 0;
+                $redundancySize = 0;
                 if ($redundancy) {
-                    $rc->decodeBitLogp(1);
-                    $size -= $rc->decodeUint(256) + 2;
+                    $redundancyPos = $rc->decodeBitLogp(1);
+                    $redundancySize = $rc->decodeUint(256) + 2;
+                    $size -= $redundancySize;
+                }
+                $redundancyPcm = null;
+                // FFmpeg dec.c 298-303：冗余帧在主体之前时，先解冗余再 ff_celt_flush
+                if ($redundancy && $redundancyPos) {
+                    $redundancyPcm = $this->decodeRedundancyFrame(
+                        substr($frame, $size, $redundancySize),
+                        $codedChannels,
+                        $endBand
+                    );
+                    $this->celtDecoder->flush();
                 }
                 $rc->resetRaw($size);
                 $celt = $this->normalizeChannels(
@@ -148,7 +178,22 @@ final class OpusDecoder
                     $frameSamples,
                     $codedChannels
                 );
-                $pcm = array_merge($pcm, $this->combineHybrid($silk, $celt));
+                $hybrid = $this->combineHybrid($silk, $celt);
+                // FFmpeg dec.c 368-391：冗余帧在主体之后时，先 ff_celt_flush，再解冗余帧；
+                // 冗余帧（240 样本、start_band=0）会留下全带能量状态给下一帧，
+                // 这正是 hybrid→纯 CELT 交界处 f17 所依赖的历史。
+                if ($redundancy && $redundancyPos) {
+                    $hybrid = $this->fadeInRedundancyHead($hybrid, $redundancyPcm, $frameSamples);
+                } elseif ($redundancy) {
+                    $this->celtDecoder->flush();
+                    $redundancyPcm = $this->decodeRedundancyFrame(
+                        substr($frame, $size, $redundancySize),
+                        $codedChannels,
+                        $endBand
+                    );
+                    $hybrid = $this->fadeInRedundancyTail($hybrid, $redundancyPcm, $frameSamples);
+                }
+                $pcm = array_merge($pcm, $hybrid);
                 continue;
             }
             $pcm = array_merge($pcm, $this->normalizeChannels(
@@ -274,6 +319,89 @@ final class OpusDecoder
         }
         $this->celtDelay = array_slice($celt, $add * $ch);
         return $out;
+    }
+
+    /**
+     * 解码 hybrid 冗余帧：240 样本、start_band=0 的纯 CELT 帧（FFmpeg dec.c 218-232）。
+     * 该调用会写入完整 21 带能量，因此它解码后 CELT 的历史可直接供下一帧使用。
+     */
+    private function decodeRedundancyFrame(string $payload, int $codedChannels, int $endBand): array
+    {
+        if ($payload === '') {
+            return [];
+        }
+        return $this->normalizeChannels(
+            $this->celtDecoder->decode($payload, 240, $codedChannels, $endBand, 0),
+            240,
+            $codedChannels
+        );
+    }
+
+    /**
+     * FFmpeg dec.c 375-382（redundancy_pos=0）：本帧尾部 120-delayed 个样本用 window2
+     * 把冗余帧 [120..] 淡入。
+     */
+    private function fadeInRedundancyTail(array $hybrid, array $redundancy, int $frameSamples): array
+    {
+        if ($redundancy === []) {
+            return $hybrid;
+        }
+        $ch = $this->channels;
+        $delay = max(0, min(120, $this->hybridDelayedSamples));
+        $len = 120 - $delay;
+        $start = $frameSamples - 120 + $delay;
+        $window = CeltWindow::window2();
+        $total = intdiv(count($hybrid), $ch);
+        for ($i = 0; $i < $len; $i++) {
+            $sample = $start + $i;
+            if ($sample < 0 || $sample >= $total) {
+                continue;
+            }
+            $w = $window[$i];
+            for ($c = 0; $c < $ch; $c++) {
+                $idx = $sample * $ch + $c;
+                $red = $redundancy[(120 + $i) * $ch + $c] ?? 0.0;
+                $hybrid[$idx] = $red * $w + $hybrid[$idx] * (1.0 - $w);
+            }
+        }
+        return $hybrid;
+    }
+
+    /**
+     * FFmpeg dec.c 384-390（redundancy_pos=1）：本帧开头 120 个样本替换为冗余帧，
+     * 随后 120 个样本用 window2 从冗余帧淡出。
+     */
+    private function fadeInRedundancyHead(array $hybrid, array $redundancy, int $frameSamples): array
+    {
+        if ($redundancy === []) {
+            return $hybrid;
+        }
+        $ch = $this->channels;
+        $delay = max(0, min(120, $this->hybridDelayedSamples));
+        $window = CeltWindow::window2();
+        $total = intdiv(count($hybrid), $ch);
+        for ($i = 0; $i < 120; $i++) {
+            $sample = $delay + $i;
+            if ($sample < 0 || $sample >= $total) {
+                continue;
+            }
+            for ($c = 0; $c < $ch; $c++) {
+                $hybrid[$sample * $ch + $c] = $redundancy[$i * $ch + $c] ?? 0.0;
+            }
+        }
+        for ($i = 0; $i < 120; $i++) {
+            $sample = $delay + 120 + $i;
+            if ($sample < 0 || $sample >= $total) {
+                continue;
+            }
+            $w = $window[$i];
+            for ($c = 0; $c < $ch; $c++) {
+                $idx = $sample * $ch + $c;
+                $red = $redundancy[(120 + $i) * $ch + $c] ?? 0.0;
+                $hybrid[$idx] = $hybrid[$idx] * $w + $red * (1.0 - $w);
+            }
+        }
+        return $hybrid;
     }
 
     public function decodeS16le(string $packet): string
