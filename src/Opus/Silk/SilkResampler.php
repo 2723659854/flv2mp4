@@ -59,8 +59,8 @@ final class SilkResampler
 
     public function process(array $input): array
     {
-        foreach ($input as $value) {
-            $this->buffer[] = $value;
+        if ($input !== []) {
+            array_push($this->buffer, ...$input);
         }
         $this->inputCount += count($input);
 
@@ -72,28 +72,38 @@ final class SilkResampler
     private function drain(array &$out): void
     {
         $half = self::HALF_TAPS;
-        $end = $this->base + count($this->buffer) - 1;
+        // 每次输出 33 个抽头，逐抽头访问 $this->buffer / count($this->buffer) 会多出
+        // 数万次属性与函数调用；buffer 在本次 drain 内不变，直接提到局部并预算边界。
+        $buffer = $this->buffer;
+        $count = count($buffer);
+        $base = $this->base;
+        $ratio = $this->ratio;
+        $delay = $this->delay;
+        $end = $base + $count - 1;
+        $limit = $half * 2 + 1;
         while (true) {
             $n = $this->nextOutput;
-            if ($n >= $this->ratio * $this->inputCount) {
+            if ($n >= $ratio * $this->inputCount) {
                 break;
             }
-            $q = intdiv($n, $this->ratio);
-            $c = $q - $this->delay;
+            $q = intdiv($n, $ratio);
+            $c = $q - $delay;
             if ($c + $half > $end) {
                 break;
             }
 
-            $phase = $n % $this->ratio;
+            $phase = $n % $ratio;
             $kernel = $this->kernel[$phase];
-            $start = $c - $half - $this->base;
+            $start = $c - $half - $base;
             $acc = 0.0;
-            $limit = $half * 2 + 1;
-            for ($t = 0; $t < $limit; $t++) {
-                $idx = $start + $t;
-                if ($idx >= 0 && $idx < count($this->buffer)) {
-                    $acc += $this->buffer[$idx] * $kernel[$t];
-                }
+            // 只累加落在 buffer 内的抽头（越界项乘以 0 不改变浮点累加结果）
+            $from = $start < 0 ? -$start : 0;
+            $to = $limit;
+            if ($start + $limit > $count) {
+                $to = $count - $start;
+            }
+            for ($t = $from; $t < $to; $t++) {
+                $acc += $buffer[$start + $t] * $kernel[$t];
             }
             $out[] = $acc;
             $this->nextOutput++;

@@ -316,65 +316,72 @@ final class SilkDecoder
             $residual[self::MAX_LAG + $i] = $excitation[$i];
         }
 
-        for ($i = 0; $i < $this->subframes; $i++) {
+        // 把逐样本循环里频繁访问的对象属性/数组提到局部变量：PHP 对 $frame->prop[idx]
+        // 的每次读写都要走属性+哈希查找，合成内层循环每帧调用 order*2 次，是 SILK 最大热点。
+        $output = $frame->output;
+        $history = $frame->lpcHistory;
+        $sflength = $this->sflength;
+        $subframes = $this->subframes;
+        for ($i = 0; $i < $subframes; $i++) {
             $lpcCoeff = ($i < 2 && $hasLeadin) ? $lpcLeadin : $lpcBody;
-            $dstBase = self::HISTORY + $i * $this->sflength;
-            $resBase = self::MAX_LAG + $i * $this->sflength;
+            $dstBase = self::HISTORY + $i * $sflength;
+            $resBase = self::MAX_LAG + $i * $sflength;
+            $gain = $sf[$i]['gain'];
 
             if ($voiced) {
                 if ($i < 2 || $this->nlsfInterpFactor === 4) {
-                    $outEnd = -$i * $this->sflength;
+                    $outEnd = -$i * $sflength;
                     $scale = $ltpscale;
                 } else {
-                    $outEnd = -($i - 2) * $this->sflength;
+                    $outEnd = -($i - 2) * $sflength;
                     $scale = 1.0;
                 }
 
                 for ($j = -$sf[$i]['pitchlag'] - 2; $j < $outEnd; $j++) {
-                    $sum = $frame->output[$dstBase + $j];
+                    $sum = $output[$dstBase + $j];
                     for ($k = 0; $k < $order; $k++) {
-                        $sum -= $lpcCoeff[$k] * $frame->output[$dstBase + $j - $k - 1];
+                        $sum -= $lpcCoeff[$k] * $output[$dstBase + $j - $k - 1];
                     }
-                    $residual[$resBase + $j] = self::clipf($sum, -1.0, 1.0) * $scale / $sf[$i]['gain'];
+                    $residual[$resBase + $j] = self::clipf($sum, -1.0, 1.0) * $scale / $gain;
                 }
 
                 if ($outEnd) {
-                    $rescale = $sf[$i - 1]['gain'] / $sf[$i]['gain'];
+                    $rescale = $sf[$i - 1]['gain'] / $gain;
                     for ($j = $outEnd; $j < 0; $j++) {
                         $residual[$resBase + $j] *= $rescale;
                     }
                 }
 
-                for ($j = 0; $j < $this->sflength; $j++) {
+                $pitchlag = $sf[$i]['pitchlag'];
+                $ltptaps = $sf[$i]['ltptaps'];
+                for ($j = 0; $j < $sflength; $j++) {
                     $sum = $residual[$resBase + $j];
                     for ($k = 0; $k < self::LTP_ORDER; $k++) {
-                        $sum += $sf[$i]['ltptaps'][$k]
-                            * $residual[$resBase + $j - $sf[$i]['pitchlag'] + 2 - $k];
+                        $sum += $ltptaps[$k]
+                            * $residual[$resBase + $j - $pitchlag + 2 - $k];
                     }
                     $residual[$resBase + $j] = $sum;
                 }
             }
 
-            for ($j = 0; $j < $this->sflength; $j++) {
-                $sum = self::f32($residual[$resBase + $j] * $sf[$i]['gain']);
+            for ($j = 0; $j < $sflength; $j++) {
+                $sum = self::f32($residual[$resBase + $j] * $gain);
+                $base = $dstBase + $j;
                 for ($k = 1; $k <= $order; $k++) {
-                    $sum = self::f32($sum + self::f32($lpcCoeff[$k - 1] * $frame->lpcHistory[$dstBase + $j - $k]));
+                    $sum = self::f32($sum + self::f32($lpcCoeff[$k - 1] * $history[$base - $k]));
                 }
-                $frame->lpcHistory[$dstBase + $j] = self::f32($sum);
-                $frame->output[$dstBase + $j] = self::f32(self::clipf($sum, -1.0, 1.0));
+                // $sum 已是 float32 值，再套 f32 是恒等；clip 边界 ±1.0 也可精确表示。
+                $history[$base] = $sum;
+                $output[$base] = $sum > 1.0 ? 1.0 : ($sum < -1.0 ? -1.0 : $sum);
             }
         }
+        $frame->output = $output;
+        $frame->lpcHistory = $history;
 
         $frame->prevVoiced = $voiced !== 0;
 
-        $newOutput = array_fill(0, 644, 0.0);
-        $newHistory = array_fill(0, 644, 0.0);
-        for ($i = 0; $i < self::HISTORY; $i++) {
-            $newOutput[$i] = $frame->output[$i + $this->flength];
-            $newHistory[$i] = $frame->lpcHistory[$i + $this->flength];
-        }
-        $frame->output = $newOutput;
-        $frame->lpcHistory = $newHistory;
+        $frame->output = array_pad(array_slice($output, $this->flength, self::HISTORY), 644, 0.0);
+        $frame->lpcHistory = array_pad(array_slice($history, $this->flength, self::HISTORY), 644, 0.0);
         $frame->coded = true;
     }
 

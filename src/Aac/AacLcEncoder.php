@@ -32,6 +32,8 @@ final class AacLcEncoder
     private array $pending = [];
     private int $pendingOffset = 0;
     private array $overlap = [[], []];
+    /** 贪心调账期间 (声道, 带, sf) → quantizeBand 结果缓存：同一帧内同参数重复求值结果恒定 */
+    private array $adjustQuantCache = [];
     private int $frameCount = 0;
     /** 按采样率缓存的 band 索引表 */
     private static array $bandIndexCache = [];
@@ -304,6 +306,21 @@ final class AacLcEncoder
             }
         }
         $count = count($active);
+        // 全局统一步长下所有活动带的 sf 相同（且未截断到 255），约束恒成立：
+        // sf[i] >= sf[j] - 60*|i-j| 化为 x >= x，直接返回可省掉 O(n^2) 比较。
+        if ($count > 0) {
+            $first = $scaleFactors[$active[0]];
+            $uniform = true;
+            for ($i = 1; $i < $count; ++$i) {
+                if ($scaleFactors[$active[$i]] !== $first) {
+                    $uniform = false;
+                    break;
+                }
+            }
+            if ($uniform) {
+                return $scaleFactors;
+            }
+        }
         for ($i = 0; $i < $count; ++$i) {
             for ($j = 0; $j < $count; ++$j) {
                 $scaleFactors[$active[$i]] = max(
@@ -327,6 +344,28 @@ final class AacLcEncoder
         $pow34 = $spectrum['pow34'];
         $mdct = $spectrum['mdct'];
         $pow43 = self::$pow43Table ?? self::pow43Table();
+        $bandMax = $spectrum['maxPow34'][$band];
+        // 全零带直接返回码本 0：后续写码流时码本 0 的带会被整体跳过，q 内容不参与比特输出。
+        if ($bandMax <= 0.0) {
+            return [
+                'sf' => $scaleFactor,
+                'codebook' => 0,
+                'q' => [],
+                'qMax' => 0,
+                'spectralBits' => 0,
+                'distortion' => 0.0,
+            ];
+        }
+        // qMax(sf) = floor(max|pow34| * 2^(3*(104-sf)/16) + 0.4054) 对 sf 单调不增。
+        // 先解析求出首个满足 qMax <= 15 的 sf，避免从全局 base 起逐级 +1 重复整带量化
+        // （音质修复后低频响带需要 ~17 次整带重量化，是 2.6x 变慢的主因之一）。
+        $bandMax = $spectrum['maxPow34'][$band];
+        if ($bandMax > 0.0 && $scaleFactor < 255) {
+            $limit = (int) floor(104.0 - (16.0 / 3.0) * log(15.5946 / $bandMax, 2)) + 1;
+            if ($limit > $scaleFactor) {
+                $scaleFactor = min(255, $limit);
+            }
+        }
         do {
             $quantizer = pow(2.0, (104 - $scaleFactor) * 3.0 / 16.0);
             $quantizer34 = pow(2.0, (104 - $scaleFactor) / 4.0);
@@ -424,28 +463,81 @@ final class AacLcEncoder
 
     private function adjustToBudget(array $spectra, array $plans, int $targetBytes, int &$attempts): array
     {
+        $this->adjustQuantCache = [];
         for ($iteration = 0; $iteration < self::MAX_LOCAL_ADJUSTMENTS; ++$iteration) {
-            $currentBytes = $this->estimateRawBytes($plans);
+            $currentChannelBits = [];
+            $neighbours = [];
+            foreach ($plans as $channel => $plan) {
+                $currentChannelBits[$channel] = $this->channelPayloadBits($plan);
+                // 预先算好每个带“前/后一个非零带的 sf”，候选合法性与比特差分共用
+                $bands = $plan['bands'];
+                $previous = [];
+                $next = [];
+                $last = null;
+                for ($band = 0; $band < $this->maxSfb; ++$band) {
+                    $previous[$band] = $last;
+                    if ($bands[$band]['codebook'] !== 0) {
+                        $last = $bands[$band]['sf'];
+                    }
+                }
+                $last = null;
+                for ($band = $this->maxSfb - 1; $band >= 0; --$band) {
+                    $next[$band] = $last;
+                    if ($bands[$band]['codebook'] !== 0) {
+                        $last = $bands[$band]['sf'];
+                    }
+                }
+                $neighbours[$channel] = [$previous, $next];
+            }
+            $currentBytes = $this->totalBytes($currentChannelBits);
             $overBudget = $currentBytes > $targetBytes;
             $best = null;
             foreach ($plans as $channel => $plan) {
+                $bands = $plan['bands'];
+                [$previous, $next] = $neighbours[$channel];
                 for ($band = 0; $band < $this->maxSfb; ++$band) {
-                    $old = $plan['bands'][$band];
+                    $old = $bands[$band];
                     if ($old['codebook'] === 0 || ($overBudget && $old['sf'] >= 255) || (!$overBudget && $old['sf'] <= 0)) {
                         continue;
                     }
                     $newSf = $old['sf'] + ($overBudget ? 1 : -1);
-                    if (!$this->isScaleFactorLegal($plan['bands'], $band, $newSf)) {
+                    $previousSf = $previous[$band];
+                    $nextSf = $next[$band];
+                    if (($previousSf !== null && abs($newSf - $previousSf) > 60)
+                        || ($nextSf !== null && abs($nextSf - $newSf) > 60)) {
                         continue;
                     }
-                    $newBand = $this->quantizeBand($spectra[$channel], $band, $newSf);
+                    // 每轮都会对全部带重新评估候选 sf，但绝大多数带的 (sf) 未变，
+                    // 命中缓存可把整带重量化从 O(迭代×带) 降到 O(带 + 实际变更数)。
+                    // 缓存用整型三维数组，避免字符串键拼接在热循环里产生哈希开销。
+                    if (!isset($this->adjustQuantCache[$channel][$band][$newSf])) {
+                        $this->adjustQuantCache[$channel][$band][$newSf] =
+                            $this->quantizeBand($spectra[$channel], $band, $newSf);
+                    }
+                    $newBand = $this->adjustQuantCache[$channel][$band][$newSf];
                     if ($newBand['qMax'] > 15 || (!$overBudget && $newBand['sf'] !== $newSf)) {
                         continue;
                     }
-                    $candidatePlans = $plans;
-                    $candidatePlans[$channel]['bands'][$band] = $newBand;
-                    $candidatePlans[$channel] = $this->finishPlan($candidatePlans[$channel]['bands']);
-                    $candidateBytes = $this->estimateRawBytes($candidatePlans);
+                    if ($newBand['codebook'] !== 0 && $newBand['codebook'] === $old['codebook']) {
+                        // 码本未变：游程段不变，只差分本带频谱位与前后 sf 差分位。
+                        // 注意实际 sf 可能因 qMax 收敛高于 newSf，差分必须用 newBand['sf']。
+                        $actualSf = $newBand['sf'];
+                        $delta = $newBand['spectralBits'] - $old['spectralBits'];
+                        if ($previousSf !== null) {
+                            $delta += AacTables::SCALEFACTOR_BITS[$actualSf - $previousSf + 60]
+                                - AacTables::SCALEFACTOR_BITS[$old['sf'] - $previousSf + 60];
+                        }
+                        if ($nextSf !== null) {
+                            $delta += AacTables::SCALEFACTOR_BITS[$nextSf - $actualSf + 60]
+                                - AacTables::SCALEFACTOR_BITS[$nextSf - $old['sf'] + 60];
+                        }
+                        $candidateChannelBits = $currentChannelBits;
+                        $candidateChannelBits[$channel] += $delta;
+                        $candidateBytes = $this->totalBytes($candidateChannelBits);
+                    } else {
+                        // 码本 0 与非 0 之间切换会改变游程段与 globalGain，少见，整通道重算
+                        $candidateBytes = $this->estimateRawBytesWith($plans, $channel, $band, $newBand);
+                    }
                     if ($overBudget) {
                         $saved = $currentBytes - $candidateBytes;
                         if ($saved <= 0) {
@@ -453,7 +545,7 @@ final class AacLcEncoder
                         }
                         $score = max(0.0, $newBand['distortion'] - $old['distortion']) / $saved;
                         if ($best === null || $score < $best['score']) {
-                            $best = ['score' => $score, 'plans' => $candidatePlans];
+                            $best = ['score' => $score, 'channel' => $channel, 'band' => $band, 'data' => $newBand];
                         }
                     } else {
                         $added = $candidateBytes - $currentBytes;
@@ -463,7 +555,7 @@ final class AacLcEncoder
                         $improvement = max(0.0, $old['distortion'] - $newBand['distortion']);
                         $score = $improvement / $added;
                         if ($score > 0.0 && ($best === null || $score > $best['score'])) {
-                            $best = ['score' => $score, 'plans' => $candidatePlans];
+                            $best = ['score' => $score, 'channel' => $channel, 'band' => $band, 'data' => $newBand];
                         }
                     }
                 }
@@ -471,10 +563,61 @@ final class AacLcEncoder
             if ($best === null) {
                 break;
             }
-            $plans = $best['plans'];
+            $plans[$best['channel']]['bands'][$best['band']] = $best['data'];
+            $plans[$best['channel']] = $this->finishPlan($plans[$best['channel']]['bands']);
             ++$attempts;
         }
         return $plans;
+    }
+
+    /** 把已改一个带的 plan 估成字节（不做数组拷贝，逐带套用覆盖值） */
+    private function estimateRawBytesWith(array $plans, int $channel, int $band, array $newBand): int
+    {
+        $channelBits = [];
+        foreach ($plans as $ch => $plan) {
+            $channelBits[$ch] = $ch === $channel
+                ? $this->channelPayloadBitsOverride($plan, $band, $newBand)
+                : $this->channelPayloadBits($plan);
+        }
+        return $this->totalBytes($channelBits);
+    }
+
+    private function channelPayloadBitsOverride(array $plan, int $band, array $newBand): int
+    {
+        $bits = 3;
+        $index = 0;
+        while ($index < $this->maxSfb) {
+            $codebook = $index === $band ? $newBand['codebook'] : $plan['bands'][$index]['codebook'];
+            $run = 1;
+            while ($index + $run < $this->maxSfb) {
+                $nextCodebook = $index + $run === $band ? $newBand['codebook'] : $plan['bands'][$index + $run]['codebook'];
+                if ($nextCodebook !== $codebook) {
+                    break;
+                }
+                ++$run;
+            }
+            $bits += 4 + 5 * (intdiv($run, 31) + 1);
+            $index += $run;
+        }
+        $globalGain = 0;
+        for ($index = 0; $index < $this->maxSfb; ++$index) {
+            $bandData = $index === $band ? $newBand : $plan['bands'][$index];
+            if ($bandData['codebook'] !== 0) {
+                $globalGain = $bandData['sf'];
+                break;
+            }
+        }
+        $previous = $globalGain;
+        for ($index = 0; $index < $this->maxSfb; ++$index) {
+            $bandData = $index === $band ? $newBand : $plan['bands'][$index];
+            if ($bandData['codebook'] === 0) {
+                continue;
+            }
+            $bits += AacTables::SCALEFACTOR_BITS[$bandData['sf'] - $previous + 60];
+            $previous = $bandData['sf'];
+            $bits += $bandData['spectralBits'];
+        }
+        return $bits;
     }
 
     private function isScaleFactorLegal(array $bands, int $changedBand, int $newSf): bool
@@ -499,15 +642,25 @@ final class AacLcEncoder
 
     private function estimateRawBytes(array $plans): int
     {
+        $channelBits = [];
+        foreach ($plans as $channel => $plan) {
+            $channelBits[$channel] = $this->channelPayloadBits($plan);
+        }
+        return $this->totalBytes($channelBits);
+    }
+
+    /** 由各通道载荷位数换算整帧字节数（与原始位流封装开销一致） */
+    private function totalBytes(array $channelBits): int
+    {
         if ($this->channels === 1) {
-            $bits = 3 + 4 + 8 + 11 + $this->channelPayloadBits($plans[0]);
+            $bits = 3 + 4 + 8 + 11 + $channelBits[0] + 3;
         } else {
             $bits = 3 + 4 + 1 + 11 + 2;
-            foreach ($plans as $plan) {
-                $bits += 8 + $this->channelPayloadBits($plan);
+            foreach ($channelBits as $value) {
+                $bits += 8 + $value;
             }
+            $bits += 3;
         }
-        $bits += 3;
         return intdiv($bits + 7, 8);
     }
 
