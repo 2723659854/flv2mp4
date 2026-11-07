@@ -219,7 +219,8 @@ final class AudioTranscoder
                     ? substr($payload, $i + 2, 2)
                     : substr($payload, $i + 1, 2);
             } else {
-                $out .= substr($payload, $i, 2);
+                // 大端高 16 位是 [MSB, LSB]，写入 s16le 需要交换字节序
+                $out .= $payload[$i + 1] . $payload[$i];
             }
         }
         return $out;

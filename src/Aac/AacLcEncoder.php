@@ -15,11 +15,10 @@ final class AacLcEncoder
     /** ADTS / ASC 采样率索引（与 ISO 14496-3 一致） */
     private const RATES = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350];
     /**
-     * 高采样率（32/44.1/48k）沿用既有的 40 带上限，保证既有 AAC 输出逐字节不变；
-     * 低采样率（8/11.025/12/16/22.05/24k）使用完整 swb 带数，避免高频被无谓截断。
+     * 码率控制：全局 offset 二分次数，以及每帧的逐带局部调整上限。
      */
-    private const LEGACY_MAX_SFB = 40;
     private const MAX_GLOBAL_SEARCHES = 6;
+    private const START_PEAK = 128.0;
     private const MAX_LOCAL_ADJUSTMENTS = 96;
 
     private int $bitrate;
@@ -93,9 +92,7 @@ final class AacLcEncoder
         $this->channels = $channels;
         $this->sampleRate = $sampleRate;
         $this->swb = AacTables::swbOffsetLong($sampleRate);
-        $this->maxSfb = $sampleRate >= 32000
-            ? self::LEGACY_MAX_SFB
-            : AacTables::longBandCount($sampleRate);
+        $this->maxSfb = AacTables::longBandCount($sampleRate);
         $silence = array_fill(0, self::FRAME_SAMPLES, 0.0);
         $this->overlap = array_fill(0, $channels, $silence);
     }
@@ -274,16 +271,21 @@ final class AacLcEncoder
 
     private function analyzeChannel(array $spectrum, int $offset, bool $withDistortion = true): array
     {
+        $maxAll = 0.0;
+        for ($band = 0; $band < $this->maxSfb; ++$band) {
+            if ($spectrum['maxPow34'][$band] > $maxAll) {
+                $maxAll = $spectrum['maxPow34'][$band];
+            }
+        }
+        $base = 0;
+        if ($maxAll > 0.0) {
+            $base = max(0, min(255, (int) ceil(104.0 + (16.0 / 3.0) * log($maxAll / (self::START_PEAK - 0.4054), 2))));
+        }
         $scaleFactors = [];
         for ($band = 0; $band < $this->maxSfb; ++$band) {
-            $maximum = $spectrum['maxPow34'][$band];
-            if ($maximum === 0.0) {
-                $scaleFactors[$band] = 255;
-                continue;
-            }
-            $width = $this->swb[$band + 1] - $this->swb[$band];
-            $target = $width <= 8 ? 7.0 : 4.0;
-            $scaleFactors[$band] = max(0, min(255, (int) ceil(104.0 + (16.0 / 3.0) * log($maximum / ($target - 0.4054), 2) + $offset)));
+            $scaleFactors[$band] = $spectrum['maxPow34'][$band] > 0.0
+                ? max(0, min(255, $base + $offset))
+                : 255;
         }
         $scaleFactors = $this->constrainScaleFactors($scaleFactors, $spectrum);
         $bands = [];
@@ -347,57 +349,35 @@ final class AacLcEncoder
                     $distortion += $error * $error;
                 }
             }
-            if ($qMax <= 7 || $scaleFactor === 255) {
+            if ($qMax <= 15 || $scaleFactor === 255) {
                 break;
             }
             ++$scaleFactor;
         } while (true);
 
-        $significant = $spectrum['totalEnergy'] > 0.0
-            && $spectrum['energy'][$band] >= $spectrum['totalEnergy'] * 1.0e-8
-            && $spectrum['maxPow34'][$band] >= $spectrum['peakPow34'] * 1.0e-6;
-        while ($qMax === 0 && $significant && $scaleFactor > 0) {
-            --$scaleFactor;
-            $quantizer = pow(2.0, (104 - $scaleFactor) * 3.0 / 16.0);
-            $quantizer34 = pow(2.0, (104 - $scaleFactor) / 4.0);
-            $q = [];
-            $qMax = 0;
-            $distortion = 0.0;
-            for ($i = $start; $i < $end; ++$i) {
-                $magnitude = abs($pow34[$i]);
-                $value = (int) floor($magnitude * $quantizer + 0.4054);
-                if ($value > $qMax) {
-                    $qMax = $value;
-                }
-                $q[] = $pow34[$i] < 0.0 ? -$value : $value;
-                if ($withDistortion) {
-                    $reconstructed = $value <= 64 ? $pow43[$value] / $quantizer34 : pow($value / $quantizer, 4.0 / 3.0);
-                    if ($mdct[$i] < 0.0) {
-                        $reconstructed = -$reconstructed;
-                    }
-                    $error = $mdct[$i] - $reconstructed;
-                    $distortion += $error * $error;
-                }
-            }
-        }
-
         $codebook = 0;
         $spectralBits = 0;
         if ($qMax > 0) {
-            if ($qMax <= 4) {
-                $bits5 = $this->spectralBits($q, 5);
-                $bits7 = $this->spectralBits($q, 7);
-                if ($bits5 <= $bits7) {
-                    $codebook = 5;
-                    $spectralBits = $bits5;
-                } else {
-                    $codebook = 7;
-                    $spectralBits = $bits7;
-                }
+            if ($qMax <= 1) {
+                $candidates = [5, 6, 7, 8];
+            } elseif ($qMax <= 4) {
+                $candidates = [5, 6];
+            } elseif ($qMax <= 7) {
+                $candidates = [7, 8];
+            } elseif ($qMax <= 12) {
+                $candidates = [9, 10];
             } else {
-                $codebook = 7;
-                $spectralBits = $this->spectralBits($q, 7);
+                $candidates = [11];
             }
+            $bestBits = PHP_INT_MAX;
+            foreach ($candidates as $candidate) {
+                $bits = $this->spectralBits($q, $candidate);
+                if ($bits < $bestBits) {
+                    $bestBits = $bits;
+                    $codebook = $candidate;
+                }
+            }
+            $spectralBits = $bestBits;
         }
         return [
             'sf' => $scaleFactor,
@@ -413,15 +393,19 @@ final class AacLcEncoder
     {
         $bits = 0;
         $count = count($q);
+        $table = AacTables::$tables[$codebook][1];
+        if ($codebook <= 6) {
+            for ($i = 0; $i < $count; $i += 2) {
+                $bits += $table[($q[$i] + 4) * 9 + ($q[$i + 1] + 4)];
+            }
+            return $bits;
+        }
+        $base = $codebook <= 8 ? 8 : ($codebook <= 10 ? 13 : 17);
         for ($i = 0; $i < $count; $i += 2) {
             $a = $q[$i];
             $b = $q[$i + 1];
-            if ($codebook === 5) {
-                $bits += AacTables::BITS5[($a + 4) * 9 + ($b + 4)];
-            } else {
-                $bits += AacTables::BITS7[abs($a) * 8 + abs($b)];
-                $bits += ($a !== 0 ? 1 : 0) + ($b !== 0 ? 1 : 0);
-            }
+            $bits += $table[abs($a) * $base + abs($b)];
+            $bits += ($a !== 0 ? 1 : 0) + ($b !== 0 ? 1 : 0);
         }
         return $bits;
     }
@@ -455,7 +439,7 @@ final class AacLcEncoder
                         continue;
                     }
                     $newBand = $this->quantizeBand($spectra[$channel], $band, $newSf);
-                    if ($newBand['qMax'] > 7 || (!$overBudget && $newBand['sf'] !== $newSf)) {
+                    if ($newBand['qMax'] > 15 || (!$overBudget && $newBand['sf'] !== $newSf)) {
                         continue;
                     }
                     $candidatePlans = $plans;
@@ -624,15 +608,19 @@ final class AacLcEncoder
             }
             $q = $band['q'];
             $count = count($q);
+            $codebook = $band['codebook'];
+            $codes = AacTables::$tables[$codebook][0];
+            $bitLengths = AacTables::$tables[$codebook][1];
+            $base = $codebook <= 8 ? 8 : ($codebook <= 10 ? 13 : 17);
             for ($i = 0; $i < $count; $i += 2) {
                 $a = $q[$i];
                 $b = $q[$i + 1];
-                if ($band['codebook'] === 5) {
+                if ($codebook <= 6) {
                     $index = ($a + 4) * 9 + ($b + 4);
-                    $writer->write(AacTables::CODES5[$index], AacTables::BITS5[$index]);
+                    $writer->write($codes[$index], $bitLengths[$index]);
                 } else {
-                    $index = abs($a) * 8 + abs($b);
-                    $writer->write(AacTables::CODES7[$index], AacTables::BITS7[$index]);
+                    $index = abs($a) * $base + abs($b);
+                    $writer->write($codes[$index], $bitLengths[$index]);
                     if ($a !== 0) {
                         $writer->write($a < 0 ? 1 : 0, 1);
                     }

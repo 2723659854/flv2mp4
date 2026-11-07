@@ -434,6 +434,22 @@ class Mp4Recoder
         return null;
     }
 
+    /**
+     * 解析 QuickTime enda 子盒：payload 为 16bit 大端标志（1=小端，0=大端），
+     * 兼容部分封装在标志前带 4 字节 version/flags 的变体。
+     */
+    private function parseEndaFlag(?string $enda): ?bool
+    {
+        if ($enda === null) return null;
+        $flag = null;
+        if (strlen($enda) >= 6 && substr($enda, 0, 4) === "\0\0\0\0") {
+            $flag = unpack('n', substr($enda, 4, 2))[1];
+        } elseif (strlen($enda) >= 2) {
+            $flag = unpack('n', substr($enda, 0, 2))[1];
+        }
+        return ($flag === 0 || $flag === 1) ? $flag === 1 : null;
+    }
+
     private function findAllBoxes(array $boxes, string $type): array
     {
         $result = [];
@@ -549,21 +565,71 @@ class Mp4Recoder
                 } elseif (in_array($entryType, ['ipcm', 'sowt', 'twos', 'lpcm', 'raw ', 'in24', 'in32'], true)) {
                     // PCM：无需解码器，按 sample entry 的位深/字节序直接解释
                     $this->audioSourceCodec = AudioPolicy::CODEC_PCM;
-                    $bits = 16;
-                    if (strlen($entryData) >= 20) {
+                    // QuickTime in24/in32 的 samplesize 字段恒为 16，真实位深只能由 FourCC 决定
+                    $bits = $entryType === 'in24' ? 24 : ($entryType === 'in32' ? 32 : 0);
+                    if ($bits === 0 && strlen($entryData) >= 20) {
                         $declared = unpack('n', substr($entryData, 18, 2))[1];
                         if (in_array($declared, [8, 16, 24, 32], true)) $bits = $declared;
                     }
+                    if ($bits === 0) $bits = 16;
                     $littleEndian = $entryType === 'sowt';
-                    if ($entryType === 'lpcm' && ($enda = $this->findEntryChildBox($entryData, 'enda')) !== null) {
-                        // enda: version/flags(4) + little_endian(1)
-                        $littleEndian = strlen($enda) >= 5 && ord($enda[4]) === 1;
+                    $unsigned = $entryType === 'raw ';
+                    $unsupported = null;
+                    if ($entryType === 'ipcm') {
+                        // ISO/IEC 23003-5 pcmC：version/flags(4) + format_flags(1) + PCM_sample_size(1)
+                        // format_flags bit0 = 小端；PCM_sample_size 才是权威位深（8bit 为无符号）
+                        $pcmC = $this->findEntryChildBox($entryData, 'pcmC');
+                        if ($pcmC !== null && strlen($pcmC) >= 6) {
+                            $littleEndian = (ord($pcmC[4]) & 0x01) === 1;
+                            $sampleSize = ord($pcmC[5]);
+                            if (in_array($sampleSize, [8, 16, 24, 32], true)) $bits = $sampleSize;
+                            if ($bits === 8) $unsigned = true;
+                        }
+                    } elseif ($entryType === 'lpcm') {
+                        // QuickTime lpcm：v0 用 samplesize + enda；v2 ASBD 才是权威
+                        //（offset 32 采样率 f64 / 40 声道 / 48 位深 / 52 格式标志：0x1 浮点、0x2 大端、0x4 有符号）
+                        $flag = $this->parseEndaFlag($this->findEntryChildBox($entryData, 'enda'));
+                        if ($flag !== null) $littleEndian = $flag;
+                        $version = strlen($entryData) >= 10 ? unpack('n', substr($entryData, 8, 2))[1] : 0;
+                        if ($version === 2 && strlen($entryData) >= 60) {
+                            $flags = unpack('N', substr($entryData, 52, 4))[1];
+                            if (($flags & 0x1) !== 0) {
+                                // 浮点 lpcm 无解码器：显式不支持，绝不按整数解释
+                                $unsupported = 'lpcm-float';
+                            } else {
+                                $asbdBits = unpack('N', substr($entryData, 48, 4))[1];
+                                if (in_array($asbdBits, [8, 16, 24, 32], true)) $bits = $asbdBits;
+                                $littleEndian = ($flags & 0x2) === 0;
+                                $unsigned = ($flags & 0x4) === 0;
+                                if ($bits === 8) $unsigned = true;
+                                $asbdChannels = unpack('N', substr($entryData, 40, 4))[1];
+                                if ($asbdChannels > 0 && $asbdChannels <= 8) $this->audioChannels = $asbdChannels;
+                                $asbdRate = unpack('E', substr($entryData, 32, 8))[1];
+                                if ($asbdRate >= 8000 && $asbdRate <= 192000) {
+                                    $this->audioSampleRate = (int)round($asbdRate);
+                                    $this->audioTimescale = $this->audioSampleRate;
+                                }
+                            }
+                        }
+                    } else {
+                        // QuickTime in24/in32：字节序在 enda 子盒（16bit 大端标志，1=小端）
+                        $flag = $this->parseEndaFlag($this->findEntryChildBox($entryData, 'enda'));
+                        if ($flag !== null) $littleEndian = $flag;
                     }
-                    $this->audioSourceOptions = [
-                        'bits' => $bits,
-                        'littleEndian' => $littleEndian,
-                        'unsigned' => false,
-                    ];
+                    if ($unsupported !== null) {
+                        $this->audioSourceCodec = AudioPolicy::CODEC_UNKNOWN . ':' . $unsupported;
+                        $this->audioSourceOptions = [];
+                    } else {
+                        $this->audioSourceOptions = [
+                            'bits' => $bits,
+                            'littleEndian' => $littleEndian,
+                            'unsigned' => $unsigned,
+                        ];
+                    }
+                } elseif (in_array($entryType, ['fpcm', 'fl32', 'fl64'], true)) {
+                    // 浮点 PCM 无解码器：显式标记为不支持（后续确定性输出静音 AAC；目标 MP3 时报错），
+                    // 绝不按整数 PCM 解释，避免把浮点字节当 s16 输出噪声
+                    $this->audioSourceCodec = AudioPolicy::CODEC_UNKNOWN . ':' . trim($entryType);
                 }
                 break;
             }
