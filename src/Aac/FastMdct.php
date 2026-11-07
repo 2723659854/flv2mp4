@@ -25,12 +25,17 @@ final class FastMdct
         self::initialize();
         $inputReal = self::$inputReal;
         $inputImaginary = self::$inputImaginary;
+        $bitReverse = self::$bitReverse;
         $real = [];
         $imaginary = [];
+        // bit-reversal 直接并入加窗：$real[$i] 取原始序号 bitReverse[$i] 的加窗值，
+        // 与"顺序加窗后再做一趟就地置换"结果完全相同（bitReverse 是自逆的），
+        // 但省掉整趟 2048 次索引遍历与 ~1024 次 4 元素交换。
         for ($i = 0; $i < self::SIZE; ++$i) {
-            $sample = $input[$i];
-            $real[$i] = $sample * $inputReal[$i];
-            $imaginary[$i] = $sample * $inputImaginary[$i];
+            $j = $bitReverse[$i];
+            $sample = $input[$j];
+            $real[$i] = $sample * $inputReal[$j];
+            $imaginary[$i] = $sample * $inputImaginary[$j];
         }
 
         self::fft($real, $imaginary);
@@ -85,22 +90,8 @@ final class FastMdct
 
     private static function fft(array &$real, array &$imaginary): void
     {
-        $bitReverse = self::$bitReverse;
         $twiddleReal = self::$twiddleReal;
         $twiddleImaginary = self::$twiddleImaginary;
-        for ($i = 0; $i < self::SIZE; ++$i) {
-            $j = $bitReverse[$i];
-            if ($j <= $i) {
-                continue;
-            }
-            $temporary = $real[$i];
-            $real[$i] = $real[$j];
-            $real[$j] = $temporary;
-            $temporary = $imaginary[$i];
-            $imaginary[$i] = $imaginary[$j];
-            $imaginary[$j] = $temporary;
-        }
-
         for ($length = 2; $length <= self::SIZE; $length <<= 1) {
             $half = $length >> 1;
             $stride = intdiv(self::SIZE, $length);
