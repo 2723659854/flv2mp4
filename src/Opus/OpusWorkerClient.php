@@ -296,10 +296,11 @@ final class OpusWorkerClient
         }
         $composerClassLoader = (new \ReflectionClass(\Composer\Autoload\ClassLoader::class))->getFileName();
         $autoload = dirname($composerClassLoader, 2) . DIRECTORY_SEPARATOR . 'autoload.php';
-        // 直播转码为 CPU 密集型纯 PHP 计算，启用 OPcache+JIT（实测每包 5.2ms→1.4ms，
-        // P95 12.3ms→3.4ms，消除超 20ms 预算的尾延迟；JIT 不改变输出码流，md5 已验证一致）
+        // 直播转码为 CPU 密集型纯 PHP 计算。OPcache 与 JIT 统一由全局 php.ini 提供
+        // （opcache.enable_cli=1 / opcache.jit=tracing），此处不再逐进程传 -d 参数，
+        // 避免各拉起点散落配置、漏配后静默退化为无 JIT。JIT 不改变输出码流，md5 已验证一致。
         $process = @proc_open(
-            [PHP_BINARY, '-d', 'opcache.enable_cli=1', '-d', 'opcache.jit_buffer_size=64M', $entry, '--owned', "--port={$port}", "--autoload={$autoload}"],
+            [PHP_BINARY, $entry, '--owned', "--port={$port}", "--autoload={$autoload}"],
             $descriptor,
             $pipes,
             dirname($entry),

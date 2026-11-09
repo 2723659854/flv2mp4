@@ -10,7 +10,7 @@ use RuntimeException;
  * @author yanglong
  * @time 2026年8月12日17:27:57
  */
-class RangeDecoder
+final class RangeDecoder
 {
     private const CODE_BOT = 0x00800000;
     private const CODE_TOP = 0x80000000;
@@ -132,8 +132,12 @@ class RangeDecoder
         }
         $high = $cdf[$offset + 1 + $k];
         $low = $k > 0 ? $cdf[$offset + $k] : 0;
+        // 内联 update()：省掉一次方法调用与 4 项参数校验（内部调用保证 interval 合法）
         $this->extension = $scale;
-        $this->update($low, $high, $total);
+        $scaled = $scale * ($total - $high);
+        $this->value = ($this->value - $scaled) & self::U32;
+        $this->range = $low > 0 ? $scale * ($high - $low) : ($this->range - $scaled) & self::U32;
+        $this->normalize();
         return $k;
     }
 
