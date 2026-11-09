@@ -438,7 +438,13 @@ final class WebRtcFlvRelay
                 return;
             }
             $this->videoStarted = true;
-            $this->sendAvcSequenceHeaderIfNeeded();
+            // 首次写 0；中途因分辨率变化重发时用当前帧的 DTS，避免视频时间戳回跳到 0 导致播放器错乱
+            $headTs = 0;
+            if ($this->videoBaseRtpTimestamp !== null) {
+                $headTs = ($this->videoArrivalOffsetMs ?? 0)
+                    + (int) round((($timestamp - $this->videoBaseRtpTimestamp) & 0xffffffff) / 90);
+            }
+            $this->sendAvcSequenceHeaderIfNeeded($headTs);
         }
         if ($this->sentAvcConfigHash === null || $this->videoBaseRtpTimestamp === null) {
             return;
@@ -459,7 +465,7 @@ final class WebRtcFlvRelay
         $this->lastVideoTimestamp = $timestamp;
     }
 
-    private function sendAvcSequenceHeaderIfNeeded(): void
+    private function sendAvcSequenceHeaderIfNeeded(int $timestampMs = 0): void
     {
         if ($this->sps === null || $this->pps === null || strlen($this->sps) < 4) {
             return;
@@ -471,7 +477,7 @@ final class WebRtcFlvRelay
         $config = "\x01" . substr($this->sps, 1, 3) . "\xFF\xE1"
             . pack('n', strlen($this->sps)) . $this->sps
             . "\x01" . pack('n', strlen($this->pps)) . $this->pps;
-        $this->write(self::buildFlvTag(9, 0, "\x17\x00\x00\x00\x00" . $config));
+        $this->write(self::buildFlvTag(9, max(0, $timestampMs), "\x17\x00\x00\x00\x00" . $config));
         $this->sentAvcConfigHash = $hash;
         $this->avcSequenceHeaderPending = true;
     }
