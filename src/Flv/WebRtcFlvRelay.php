@@ -11,6 +11,11 @@ use Xiaosongshu\Flv2mp4\Opus\OpusToAacTranscoder;
 use Xiaosongshu\Flv2mp4\Opus\OpusWorkerClient;
 use Xiaosongshu\Flv2mp4\Opus\OpusWorkerProtocol;
 
+/**
+ * @purpose webrtc转rtmp桥接客户端
+ * @author yanglong
+ * @time 2026年08月12日11:10:03
+ */
 final class WebRtcFlvRelay
 {
     private const MAX_PENDING_OPUS_GAP_SAMPLES = 14400000;
