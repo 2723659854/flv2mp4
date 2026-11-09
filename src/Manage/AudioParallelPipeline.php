@@ -46,8 +46,8 @@ final class AudioParallelPipeline
             throw new RuntimeException("找不到 audio-worker 脚本: {$script}");
         }
         $nullDevice = DIRECTORY_SEPARATOR === '\\' ? 'NUL' : '/dev/null';
-        // 子进程的 OPcache/JIT 由全局 php.ini 统一提供（opcache.enable_cli / opcache.jit），
-        // 不再逐进程传 -d 参数。唯一例外是 opus 编码子进程，见下方 $encJitArgs。
+        // 解码/编码子进程的 OPcache 与 JIT 全部由全局 php.ini 统一提供
+        // （opcache.enable_cli=1 / opcache.jit=tracing），此处不传任何 -d 参数。
 
         $dec = null;
         $enc = null;
@@ -77,13 +77,7 @@ final class AudioParallelPipeline
             }
 
             $options = $encodeOptions instanceof Closure ? $encodeOptions($decMeta) : $encodeOptions;
-            // opus 编码器（RangeEncoder）在 JIT 下存在数值偏差（不同输入可能改写码流或触发
-            // "Invalid range interval"），实测 mp3/aac 编码与 aac/mp3/opus 解码均逐字节一致，仅此处排除。
-            // 全局 php.ini 已开 JIT，因此这里是唯一的显式反向覆盖，属必要参数而非散落的开启配置。
-            // 注意必须用 off 而不是 disable：本机 PHP 8.4.3 ZTS 下 -d opcache.jit=disable 会让
-            // 编码子进程启动即 0xC0000005 崩溃（off 则等价关闭且正常）。
-            $encJitArgs = $encodeFormat === 'opus' ? ['-d', 'opcache.jit=off'] : [];
-            $encCmd = [PHP_BINARY, ...$encJitArgs, $script, 'encode', $encodeFormat, $outputFile,
+            $encCmd = [PHP_BINARY, $script, 'encode', $encodeFormat, $outputFile,
                 '--rate=' . (int)$decMeta['sampleRate'], '--channels=' . (int)$decMeta['channels']];
             if (isset($options['bitrate'])) {
                 $encCmd[] = '--bitrate=' . (int)$options['bitrate'];
