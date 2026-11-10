@@ -6,7 +6,7 @@ ini_set('memory_limit', '2048M');
 gc_disable();
 if (function_exists('pcntl_signal')) pcntl_signal(SIGINT, SIG_IGN);
 try {
-    $options = getopt('', ['mode:', 'autoload:', 'port:', 'rendezvous:', 'control-port:', 'output-port:', 'config:', 'output:', 'workers:', 'preencoded']);
+    $options = getopt('', ['mode:', 'autoload:', 'rendezvous:', 'control-port:', 'output-port:', 'config:', 'output:', 'workers:', 'preencoded']);
     $mode = $options['mode'] ?? '';
     if (empty($options['autoload']) || empty($options['rendezvous']) || empty($options['config'])) {
         throw new RuntimeException('HLS worker 参数不完整');

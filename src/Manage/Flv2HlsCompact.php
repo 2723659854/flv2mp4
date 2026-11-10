@@ -589,41 +589,49 @@ class Flv2HlsCompact
         $entry = dirname(__DIR__, 2) . '/bin/hls-worker.php';
         $configOpt = base64_encode(json_encode($this->workerConfig, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR));
 
-        [, $outputPort] = $this->reserveAddress();
+        // 媒体端口由各 worker 自行 bind tcp://127.0.0.1:0 后经 rendezvous 上报，
+        // 主进程不再预留（预留需 bind+close 监听 socket，Windows 上 close 有约 510ms 固定延迟）。
+        // 控制端口仍由主进程预留后经 --control-port 传入，worker 负责监听。
+        $rendezvous = @stream_socket_server('tcp://127.0.0.1:0', $errno, $error);
+        if ($rendezvous === false) throw new RuntimeException("无法建立 rendezvous 监听: {$error}");
+        $rvPort = (int)substr(strrchr(stream_socket_get_name($rendezvous, false), ':'), 1);
+        $rendezvousAddress = "tcp://127.0.0.1:{$rvPort}";
         [, $outputCtrlPort] = $this->reserveAddress();
-        $decoderPorts = [];
         $controlPorts = [];
-        for ($i = 0; $i < $n; $i++) {
-            [, $decoderPorts[]] = $this->reserveAddress();
-            [, $controlPorts[]] = $this->reserveAddress();
-        }
+        for ($i = 0; $i < $n; $i++) [, $controlPorts[]] = $this->reserveAddress();
 
-        // 输出worker先启动（单profile下视频帧已在解码worker预编码完成，输出worker只做TS封装；
-        // --preencoded 跳过编码器运动子进程预热，避免白冷启动 motionWorkers 个永不使用的PHP进程）
-        $this->startWorker($entry, [
-            '--mode', 'output',
-            '--autoload', $autoload,
-            '--port', (string)$outputPort,
-            '--control-port', (string)$outputCtrlPort,
-            '--workers', (string)$n,
-            '--config', $configOpt,
-            '--output', rtrim($this->streamDir, '/\\') . '/',
-            '--preencoded',
-        ]);
-        for ($i = 0; $i < $n; $i++) {
+        try {
+            // 输出worker先启动（单profile下视频帧已在解码worker预编码完成，输出worker只做TS封装；
+            // --preencoded 跳过编码器运动子进程预热，避免白冷启动 motionWorkers 个永不使用的PHP进程）
             $this->startWorker($entry, [
-                '--mode', 'decoder',
+                '--mode', 'output',
                 '--autoload', $autoload,
-                '--port', (string)$decoderPorts[$i],
-                '--control-port', (string)$controlPorts[$i],
-                '--output-port', (string)$outputPort,
+                '--rendezvous', $rendezvousAddress,
+                '--control-port', (string)$outputCtrlPort,
+                '--workers', (string)$n,
                 '--config', $configOpt,
+                '--output', rtrim($this->streamDir, '/\\') . '/',
+                '--preencoded',
             ]);
-            $this->plOut[$i] = '';
-            $this->plIn[$i] = '';
-            $this->plLoad[$i] = 0;
-            $this->plReady[$i] = false;
-            $this->plEmaMsPerWeight[$i] = 0.0;
+            [$outputPort] = $this->collectWorkerPorts($rendezvous, 0);
+            for ($i = 0; $i < $n; $i++) {
+                $this->startWorker($entry, [
+                    '--mode', 'decoder',
+                    '--autoload', $autoload,
+                    '--rendezvous', $rendezvousAddress,
+                    '--control-port', (string)$controlPorts[$i],
+                    '--output-port', (string)$outputPort,
+                    '--config', $configOpt,
+                ]);
+                $this->plOut[$i] = '';
+                $this->plIn[$i] = '';
+                $this->plLoad[$i] = 0;
+                $this->plReady[$i] = false;
+                $this->plEmaMsPerWeight[$i] = 0.0;
+            }
+            [, $decoderPorts] = $this->collectWorkerPorts($rendezvous, $n, false);
+        } finally {
+            @fclose($rendezvous);
         }
         $this->plHold = '';
 
@@ -665,6 +673,37 @@ class Flv2HlsCompact
         $name = stream_socket_get_name($server, false);
         fclose($server);
         return ['tcp://' . $name, (int)substr(strrchr($name, ':'), 1)];
+    }
+
+    /**
+     * 从 rendezvous 收集 worker 自报的媒体监听端口（每个连接一行 "mode port"）。
+     * 输出worker的端口是解码worker --output-port 的下游参数，必须先收集完成。
+     * $needOutput=false 时只等待解码worker上报。
+     */
+    private function collectWorkerPorts($rendezvous, int $decoders, bool $needOutput = true): array
+    {
+        $outputPort = 0;
+        $decoderPorts = [];
+        $deadline = microtime(true) + 30;
+        while (microtime(true) < $deadline
+            && (($needOutput && $outputPort === 0) || count($decoderPorts) < $decoders)) {
+            $conn = @stream_socket_accept($rendezvous, 2);
+            if ($conn === false) continue;
+            $line = fgets($conn);
+            @fclose($conn);
+            if ($line === false) continue;
+            $parts = explode(' ', trim($line));
+            if (count($parts) !== 2) continue;
+            [$mode, $port] = $parts;
+            $port = (int)$port;
+            if ($port <= 0) continue;
+            if ($mode === 'output') $outputPort = $port;
+            elseif ($mode === 'decoder') $decoderPorts[] = $port;
+        }
+        if (($needOutput && $outputPort === 0) || count($decoderPorts) < $decoders) {
+            throw new RuntimeException('worker 端口上报不完整（rendezvous 超时）');
+        }
+        return [$outputPort, $decoderPorts];
     }
 
     private function startWorker(string $entry, array $args): void
