@@ -11,6 +11,17 @@ use Xiaosongshu\Flv2mp4\Codec\H264Decoder;
  */
 trait MacroblockDecodingTrait
 {
+    /**
+     * 宏块级 QP 递推（H.264 7.4.5）：
+     * QPY = (QPY_PREV + mb_qp_delta + 52) % 52（8bit，QpBdOffsetY=0）
+     * 注意是模 52 回绕，不是截断到 [0,51]；用 clamp 会让负向 delta 卡在 0，
+     * 之后整条 QP 链偏低，反量化系数被系统性缩小（横带区域重建失败即由此而来）。
+     */
+    private function wrapQp(int $q): int
+    {
+        return (($q % 52) + 52) % 52;
+    }
+
     private function readRefIdxL0(): int
     {
         $numRef = $this->numRefIdxL0Active;
@@ -173,7 +184,7 @@ trait MacroblockDecodingTrait
         if ($cbp > 0) {
             $mbQpDelta = $this->reader->readSe();
         }
-        $qp = max(0, min(51, $sliceQp + $mbQpDelta));
+        $qp = $this->wrapQp($sliceQp + $mbQpDelta);
         $yCoeffs = array_fill(0, 16, array_fill(0, 16, 0));
         $cbCoeffs = array_fill(0, 4, array_fill(0, 16, 0));
         $crCoeffs = array_fill(0, 4, array_fill(0, 16, 0));
@@ -450,7 +461,7 @@ trait MacroblockDecodingTrait
 
         // mb_qp_delta - I_16x16无论cbp如何都要读取（编码标准 7.4.5.2）
         $mbQpDelta = $this->reader->readSe();
-        $qp = max(0, min(51, $qp + $mbQpDelta));
+        $qp = $this->wrapQp($qp + $mbQpDelta);
 
         // 亮度DC系数
         // 编码顺序：亮度 DC → 亮度 AC → 色度 DC → 色度 AC
@@ -2373,8 +2384,7 @@ trait MacroblockDecodingTrait
         $mbQpDelta = 0;
         if ($codedBlockPattern !== 0) {
             $mbQpDelta = $this->reader->readSe();
-            $qp = $sliceQp + $mbQpDelta;
-            $qp = max(0, min(51, $qp));
+            $qp = $this->wrapQp($sliceQp + $mbQpDelta);
             $this->decodeResidualAndAdd($mbX, $mbY, $codedBlockPattern, $qp, 0);
         } else {
             $this->updateNzCountZero($mbX, $mbY);
@@ -2411,8 +2421,7 @@ trait MacroblockDecodingTrait
         $mbQpDelta = 0;
         if ($codedBlockPattern !== 0) {
             $mbQpDelta = $this->reader->readSe();
-            $qp = $sliceQp + $mbQpDelta;
-            $qp = max(0, min(51, $qp));
+            $qp = $this->wrapQp($sliceQp + $mbQpDelta);
             $this->decodeResidualAndAdd($mbX, $mbY, $codedBlockPattern, $qp, 0);
         }
         if ($codedBlockPattern === 0) {
@@ -2459,8 +2468,7 @@ trait MacroblockDecodingTrait
         $mbQpDelta = 0;
         if ($codedBlockPattern !== 0) {
             $mbQpDelta = $this->reader->readSe();
-            $qp = $sliceQp + $mbQpDelta;
-            $qp = max(0, min(51, $qp));
+            $qp = $this->wrapQp($sliceQp + $mbQpDelta);
             $this->decodeResidualAndAdd($mbX, $mbY, $codedBlockPattern, $qp, 0);
         }
 
@@ -2518,8 +2526,7 @@ trait MacroblockDecodingTrait
         $mbQpDelta = 0;
         if ($codedBlockPattern !== 0) {
             $mbQpDelta = $this->reader->readSe();
-            $qp = $sliceQp + $mbQpDelta;
-            $qp = max(0, min(51, $qp));
+            $qp = $this->wrapQp($sliceQp + $mbQpDelta);
             $this->decodeResidualAndAdd($mbX, $mbY, $codedBlockPattern, $qp, 0);
         }
 
@@ -2692,8 +2699,7 @@ trait MacroblockDecodingTrait
         $codedBlockPattern = self::GOLOMB_TO_INTER_CBP[$cbpCode] ?? 0;
         if ($codedBlockPattern !== 0) {
             $mbQpDelta = $this->reader->readSe();
-            $qp = $sliceQp + $mbQpDelta;
-            $qp = max(0, min(51, $qp));
+            $qp = $this->wrapQp($sliceQp + $mbQpDelta);
             $this->decodeResidualAndAdd($mbX, $mbY, $codedBlockPattern, $qp, 0);
         }
 
@@ -2847,8 +2853,7 @@ trait MacroblockDecodingTrait
         $mbQpDelta = 0;
         if ($codedBlockPattern !== 0) {
             $mbQpDelta = $this->reader->readSe();
-            $qp = $sliceQp + $mbQpDelta;
-            $qp = max(0, min(51, $qp));
+            $qp = $this->wrapQp($sliceQp + $mbQpDelta);
             $this->decodeResidualAndAdd($mbX, $mbY, $codedBlockPattern, $qp, 0);
         }
 

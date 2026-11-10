@@ -484,7 +484,7 @@ trait SliceDecodingTrait
                 continue;
             }
             $mbQpDelta = $this->decodeMacroblock($mbX, $mbY, $qp, $sliceType);
-            $qp = max(0, min(51, $qp + $mbQpDelta));
+            $qp = $this->wrapQp($qp + $mbQpDelta);
             if ($this->deblockInfoEnabled) $this->mbQpForDeblock[$mbIdx] = $qp;
             $this->mvTopLeft = [$nextMvTopLeft, $nextMvTopLeft, $nextMvTopLeft, $nextMvTopLeft];
             if ($isBslice) {
