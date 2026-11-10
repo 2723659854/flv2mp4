@@ -188,6 +188,20 @@ $opusWorkerPort = 8330;
 $wsFlvPushUrl = 'ws://127.0.0.1:8501/live/{streamId}';
 ```
 
+**Periodic keyframe request (`periodicKeyFrameIntervalSec`)**
+
+Browsers may keep the same IDR for up to ~120s in steady state. Downstream FLV/RTMP servers cache the whole GOP and replay it to every new viewer, which shows up as stuttering on 720p. `webrtc.php` sets the interval directly at startup, and the server requests a keyframe from the browser every N seconds via RTCP PLI:
+
+```php
+$server->periodicKeyFrameIntervalSec = 2; // seconds; 0 disables the periodic PLI (legacy behavior)
+```
+
+| Property | Default | Description |
+|---|---|---|
+| `periodicKeyFrameIntervalSec` | `2` | Positive value: IDR interval in seconds. `0`: no periodic PLI |
+
+2 seconds matches the common RTMP/HLS keyint of 2s; the first frame waits at most ~2s longer. Larger values save CPU/bandwidth but delay the first decodable frame.
+
 Run the example:
 
 ```bash

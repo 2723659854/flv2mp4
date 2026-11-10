@@ -183,6 +183,20 @@ $opusWorkerPort = 8330;
 $wsFlvPushUrl = 'ws://127.0.0.1:8501/live/{streamId}';
 ```
 
+**周期关键帧请求（`periodicKeyFrameIntervalSec`）**
+
+浏览器稳态下同一个 IDR 可能持续 ~120 秒；下游 FLV/RTMP 服务按 GOP 缓存，并在每个新观众连接时整段回放，720p 下就表现为卡顿。`webrtc.php` 在启动时直接设置该属性，服务会每隔 N 秒通过 RTCP PLI 向浏览器请求一次关键帧：
+
+```php
+$server->periodicKeyFrameIntervalSec = 2; // 秒；0 关闭周期性 PLI（保持旧行为）
+```
+
+| 属性 | 默认值 | 说明 |
+|---|---|---|
+| `periodicKeyFrameIntervalSec` | `2` | 大于 0 时作为 IDR 间隔（秒）；`0` 关闭周期性 PLI |
+
+2 秒与 RTMP/HLS 直播常规 keyint=2s 对齐，首帧最多多等约 2 秒；调大更省 CPU/带宽但首次出图更慢。
+
 运行示例：
 
 ```bash

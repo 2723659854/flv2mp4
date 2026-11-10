@@ -31,6 +31,14 @@ class FlvSinglePusher
 
     protected $lastFlushTime = 0;
 
+    /**
+     * 单次 flush() 最多阻塞的墙钟时间（毫秒）。
+     * 下游（ws-flv/http-flv 接收端）变慢时，flush 不会无限阻塞媒体循环：
+     * 到点即返回，剩余数据留在 sendBuffer，由后续 write()/flush() 续写。
+     * 0 = 只做一次非阻塞尝试（完全不等待）。
+     */
+    protected $flushTimeoutMs = 1;
+
     public function __construct(string $playPath, string $pushUrl)
     {
         $this->playPath = $playPath;
@@ -65,9 +73,10 @@ class FlvSinglePusher
             $result = $this->httpConnect($host);
         }
 
-        // 保持阻塞模式，确保数据能完整发送
+        // 握手完成后切换为非阻塞：下游卡住时不反压 RTP 接收循环，
+        // 未写完的数据保留在 sendBuffer 中由后续 flush 续写。
         if ($result) {
-            stream_set_blocking($this->socket, true);
+            stream_set_blocking($this->socket, false);
             $this->closed = false;
         } else {
             $this->close();
@@ -244,21 +253,40 @@ class FlvSinglePusher
         try {
             $totalWritten = 0;
             $bufferLen = $this->sendBufferSize;
-            
+            $deadline = microtime(true) + (max(0, (int)$this->flushTimeoutMs) / 1000);
+
             while ($totalWritten < $bufferLen) {
-                $written = fwrite($this->socket, substr($this->sendBuffer, $totalWritten));
-                if ($written === false || $written === 0) {
+                /** 非阻塞 socket：先确认可写，避免 fwrite 空转；到 deadline 就保留剩余数据返回 */
+                $remaining = $deadline - microtime(true);
+                $read = null;
+                $write = [$this->socket];
+                $except = null;
+                $usec = (int)round(max(0, $remaining) * 1000000);
+                $ready = @stream_select($read, $write, $except, 0, $usec);
+                if ($ready === false) {
                     $this->close();
                     return;
                 }
+                if ($ready === 0) {
+                    break; // 下游暂时不可写，保留剩余数据
+                }
+
+                $written = @fwrite($this->socket, substr($this->sendBuffer, $totalWritten));
+                if ($written === false) {
+                    $this->close();
+                    return;
+                }
+                if ($written === 0) {
+                    break; // 与不可写等价，等待下次
+                }
                 $totalWritten += $written;
             }
-            
+
             if ($totalWritten > 0) {
                 $this->sendBuffer = substr($this->sendBuffer, $totalWritten);
                 $this->sendBufferSize -= $totalWritten;
+                $this->lastFlushTime = microtime(true);
             }
-            $this->lastFlushTime = microtime(true);
         } catch (\Exception $e) {
             $this->close();
         }
