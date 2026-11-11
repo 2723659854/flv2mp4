@@ -2175,7 +2175,7 @@ trait MacroblockDecodingTrait
                 }
                 $mvdX = $this->reader->readSe();
                 $mvdY = $this->reader->readSe();
-                $mvs[$list][$p] = [$px + $mvdX, $py + $mvdY];
+                $mvs[$list][$p] = [$px + $mvdX, $py + $mvdY, $refs[$list][$p]];
             }
         }
         // MC + 网格
@@ -2301,7 +2301,7 @@ trait MacroblockDecodingTrait
                     list($px, $py) = $this->predictMvP8x8(
                         $mbX, $mbY, $bx, $by, $cols,
                         $list === 0 ? $mbMvsL0 : $mbMvsL1,
-                        $this->bMvTopRow[$list], $this->bMvLeftCol[$list], $refIdx
+                        $this->bMvTopRow[$list], $this->bMvLeftCol[$list], $refIdx, $i
                     );
                     $mvdX = $this->reader->readSe();
                     $mvdY = $this->reader->readSe();

@@ -2483,7 +2483,7 @@ trait CabacDecodingTrait
                     [$bx, $by, $cols, $rows] = $this->cabSubPartGeometry($st, $i, $j, true);
                     [$px, $py] = $this->predictMvP8x8(
                         $mbX, $mbY, $bx, $by, $cols,
-                        $mbMvs, $this->bMvTopRow[$list], $this->bMvLeftCol[$list], $refIdx
+                        $mbMvs, $this->bMvTopRow[$list], $this->bMvLeftCol[$list], $refIdx, $i
                     );
                     $n = $by * 4 + $bx;
                     $mvdX = $this->cabReadMvd($list, 0, $n);

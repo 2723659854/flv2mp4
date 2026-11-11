@@ -139,33 +139,53 @@ trait MotionVectorPredictionTrait
     public function predictMvP8x8(
         int $mbX, int $mbY, int $blkX, int $blkY, int $partWidth,
         array $mbMvs, array $topRowMvs, array $leftColMvs,
-        int $currRefIdx
+        int $currRefIdx, int $curSubIdx = -1
     ): array {
         $mbW = $this->picWidthInMbs;
+        // $curSubIdx >= 0 时启用严格可用性语义：
+        // 同 MB 内“已解码但该 list 未使用”的邻居按 ref=-1、MV=(0,0) 参与中值，且不触发 C→D 回退；
+        // 只有“尚未解码”的邻居才是 PART_NOT_AVAILABLE。$curSubIdx < 0 保留旧行为（供 P 片调用方）。
+        $strict = ($curSubIdx >= 0);
 
         $mvA = null;
         $mvB = null;
         $mvC = null;
+        $aAvail = false;
+        $bAvail = false;
+        $cAvail = false;
 
         // Neighbor A (left)
         if ($blkX > 0) {
-            if (isset($mbMvs[$blkY][$blkX - 1])) {
-                $mvA = $mbMvs[$blkY][$blkX - 1];
+            $cell = $mbMvs[$blkY][$blkX - 1] ?? null;
+            if ($cell !== null) {
+                $aAvail = true;
+                $mvA = $cell;
+            } elseif ($strict) {
+                // 同 MB 左侧 4x4 一定排在当前块之前解码，缺少运动信息即该 list 未使用
+                $aAvail = true;
+                $mvA = [0, 0, -1];
             }
         } elseif ($mbX > 0) {
             if (isset($leftColMvs[$blkY])) {
+                $aAvail = true;
                 $mvA = $leftColMvs[$blkY];
             }
         }
 
         // Neighbor B (top)
         if ($blkY > 0) {
-            if (isset($mbMvs[$blkY - 1][$blkX])) {
-                $mvB = $mbMvs[$blkY - 1][$blkX];
+            $cell = $mbMvs[$blkY - 1][$blkX] ?? null;
+            if ($cell !== null) {
+                $bAvail = true;
+                $mvB = $cell;
+            } elseif ($strict) {
+                $bAvail = true;
+                $mvB = [0, 0, -1];
             }
         } elseif ($mbY > 0) {
             $colIdx = $mbX * 4 + $blkX;
             if (isset($topRowMvs[$colIdx])) {
+                $bAvail = true;
                 $mvB = $topRowMvs[$colIdx];
             }
         }
@@ -184,7 +204,6 @@ trait MotionVectorPredictionTrait
             $cIsPast = ($cMbY < $mbY) || ($cMbY == $mbY && $cMbX <= $mbX);
         }
 
-        $mvC = null;
         if ($cIsPast && $absCrX >= 0 && $absCrY >= 0 && $absCrX < $mbW * 4) {
             $cMbX = (int)($absCrX / 4);
             $cBlkX = $absCrX % 4;
@@ -193,65 +212,85 @@ trait MotionVectorPredictionTrait
 
             $isSameMb = ($cMbX == $mbX && $cMbY == $mbY);
             if ($isSameMb) {
-                if (isset($mbMvs[$cBlkY][$cBlkX])) {
-                    $mvC = $mbMvs[$cBlkY][$cBlkX];
+                $cell = $mbMvs[$cBlkY][$cBlkX] ?? null;
+                if ($strict) {
+                    // 同 MB：仅排在当前子块之前的 4x4 视为已解码；
+                    // 已解码但该 list 未使用 -> ref=-1、MV=(0,0)，仍参与中值，不触发 D 回退
+                    $siC = (($cBlkY >> 1) << 1) + ($cBlkX >> 1);
+                    $decoded = ($siC <= $curSubIdx);
+                    if ($decoded) {
+                        $cAvail = true;
+                        $mvC = $cell ?? [0, 0, -1];
+                    }
+                } elseif ($cell !== null) {
+                    $cAvail = true;
+                    $mvC = $cell;
                 }
             } else {
                 if ($cMbY < $mbY) {
                     $colIdx = $cMbX * 4 + $cBlkX;
                     if (isset($topRowMvs[$colIdx])) {
+                        $cAvail = true;
                         $mvC = $topRowMvs[$colIdx];
                     }
                 }
             }
         }
 
-        // Fall back to D (top-left) if C not available
-        if ($mvC === null && $blkX > 0 && $blkY > 0) {
-            if (isset($mbMvs[$blkY - 1][$blkX - 1])) {
-                $mvC = $mbMvs[$blkY - 1][$blkX - 1];
+        // Fall back to D (top-left) only when C is genuinely unavailable (out of picture / not decoded)
+        if (!$cAvail && $blkX > 0 && $blkY > 0) {
+            $cell = $mbMvs[$blkY - 1][$blkX - 1] ?? null;
+            if ($cell !== null) {
+                $cAvail = true;
+                $mvC = $cell;
+            } elseif ($strict) {
+                $cAvail = true;
+                $mvC = [0, 0, -1];
             }
         }
-        if ($mvC === null && $blkX == 0 && $blkY > 0 && $mbX > 0) {
+        if (!$cAvail && $blkX == 0 && $blkY > 0 && $mbX > 0) {
             if (isset($leftColMvs[$blkY - 1])) {
+                $cAvail = true;
                 $mvC = $leftColMvs[$blkY - 1];
             }
         }
-        if ($mvC === null && $blkY == 0 && $blkX > 0 && $mbY > 0) {
+        if (!$cAvail && $blkY == 0 && $blkX > 0 && $mbY > 0) {
             $colIdx = $mbX * 4 + $blkX - 1;
             if (isset($topRowMvs[$colIdx])) {
+                $cAvail = true;
                 $mvC = $topRowMvs[$colIdx];
             }
         }
-        if ($mvC === null && $blkX == 0 && $blkY == 0 && $mbX > 0 && $mbY > 0) {
+        if (!$cAvail && $blkX == 0 && $blkY == 0 && $mbX > 0 && $mbY > 0) {
             $colIdx = ($mbX - 1) * 4 + 3;
             if (isset($topRowMvs[$colIdx])) {
+                $cAvail = true;
                 $mvC = $topRowMvs[$colIdx];
             }
         }
 
-        if ($mvA === null) {
-            $refA = self::PART_NOT_AVAILABLE;
-            $mvAv = [0, 0];
-        } else {
+        if ($aAvail) {
             $refA = $mvA[2] ?? -1;
             $mvAv = [$mvA[0] ?? 0, $mvA[1] ?? 0];
+        } else {
+            $refA = self::PART_NOT_AVAILABLE;
+            $mvAv = [0, 0];
         }
 
-        if ($mvB === null) {
-            $refB = self::PART_NOT_AVAILABLE;
-            $mvBv = [0, 0];
-        } else {
+        if ($bAvail) {
             $refB = $mvB[2] ?? -1;
             $mvBv = [$mvB[0] ?? 0, $mvB[1] ?? 0];
+        } else {
+            $refB = self::PART_NOT_AVAILABLE;
+            $mvBv = [0, 0];
         }
 
-        if ($mvC === null) {
-            $refC = self::PART_NOT_AVAILABLE;
-            $mvCv = [0, 0];
-        } else {
+        if ($cAvail) {
             $refC = $mvC[2] ?? -1;
             $mvCv = [$mvC[0] ?? 0, $mvC[1] ?? 0];
+        } else {
+            $refC = self::PART_NOT_AVAILABLE;
+            $mvCv = [0, 0];
         }
 
         $matchCount = ($refA === $currRefIdx) + ($refB === $currRefIdx) + ($refC === $currRefIdx);
