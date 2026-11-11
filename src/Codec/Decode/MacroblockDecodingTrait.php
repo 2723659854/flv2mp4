@@ -2709,6 +2709,8 @@ trait MacroblockDecodingTrait
 
         $this->saveMvForPrediction8x8($mbX, $mbY, $mbMvs);
 
+        $this->storeDeblockInfo8x8($mbX, $mbY, $mbMvs);
+
         $this->updateInterMbIntraModes($mbX);
 
         return $mbQpDelta;
@@ -2863,25 +2865,9 @@ trait MacroblockDecodingTrait
 
         $this->saveMvForPrediction8x8($mbX, $mbY, $mbMvs);
 
-        $this->updateInterMbIntraModes($mbX);
+        $this->storeDeblockInfo8x8($mbX, $mbY, $mbMvs);
 
-        $mbWidth = $this->picWidthInMbs;
-        $mbIdx = $mbY * $mbWidth + $mbX;
-        if ($this->deblockInfoEnabled) {
-            // 下方按子块原地改写，先换成本 MB 私有数组，避免污染帧级共享零数组
-            $this->mbMvForDeblock[$mbIdx] = array_fill(0, 16, [0, 0]);
-            $this->mbRefForDeblock[$mbIdx] = array_fill(0, 16, 0);
-            for ($y = 0; $y < 4; $y++) {
-                for ($x = 0; $x < 4; $x++) {
-                    $idx = $y * 4 + $x;
-                    $mv = $mbMvs[$y][$x];
-                    if ($mv !== null) {
-                        $this->mbMvForDeblock[$mbIdx][$idx] = [$mv[0], $mv[1]];
-                        $this->mbRefForDeblock[$mbIdx][$idx] = $mv[2];
-                    }
-                }
-            }
-        }
+        $this->updateInterMbIntraModes($mbX);
 
         return $mbQpDelta;
     }
@@ -3360,6 +3346,31 @@ trait MacroblockDecodingTrait
                 $m = $mbMvs[$y][$x] ?? [0, 0, -1];
                 $this->picMv0[$base + $y * 4 + $x] = [$m[0], $m[1]];
                 $this->picRef0[$base + $y * 4 + $x] = $m[2];
+            }
+        }
+    }
+
+    /**
+     * 保存去块滤波所需的 4x4 运动信息（P_8x8 / P_8x8ref0 共用）。
+     * 边界强度按 4x4 子块比较 MV，逐子块写入；未赋值的子块用 (0,0)/ref 0 占位。
+     */
+    private function storeDeblockInfo8x8(int $mbX, int $mbY, array $mbMvs): void
+    {
+        if (!$this->deblockInfoEnabled) {
+            return;
+        }
+        $mbIdx = $mbY * $this->picWidthInMbs + $mbX;
+        // 先换成本 MB 私有数组，避免污染帧级共享零数组
+        $this->mbMvForDeblock[$mbIdx] = array_fill(0, 16, [0, 0]);
+        $this->mbRefForDeblock[$mbIdx] = array_fill(0, 16, 0);
+        for ($y = 0; $y < 4; $y++) {
+            for ($x = 0; $x < 4; $x++) {
+                $mv = $mbMvs[$y][$x];
+                if ($mv !== null) {
+                    $idx = $y * 4 + $x;
+                    $this->mbMvForDeblock[$mbIdx][$idx] = [$mv[0], $mv[1]];
+                    $this->mbRefForDeblock[$mbIdx][$idx] = $mv[2];
+                }
             }
         }
     }

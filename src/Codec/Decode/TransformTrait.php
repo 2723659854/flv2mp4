@@ -103,26 +103,15 @@ trait TransformTrait
 
     /**
      * 4x4 IDCT整数逆变换（输入输出均为raster顺序的16个系数）
+     * 顺序与 ffmpeg ff_h264_idct_add 一致：先行变换（含>>1），再列变换（含>>1与>>6）。
+     * 两遍蝶形在实数域可交换，但 >>1 是 floor，顺序互换会在 .5 边界产生 ±1 漂移。
      */
     public function idct4x4Flat(array $in): array
     {
         $block = $in;
         $block[0] += 32;
 
-        // 第一遍：列变换 (i是列索引)
-        for ($i = 0; $i < 4; $i++) {
-            $z0 = $block[$i + 0] + $block[$i + 8];
-            $z1 = $block[$i + 0] - $block[$i + 8];
-            $z2 = ($block[$i + 4] >> 1) - $block[$i + 12];
-            $z3 = $block[$i + 4] + ($block[$i + 12] >> 1);
-
-            $block[$i + 0] = $z0 + $z3;
-            $block[$i + 4] = $z1 + $z2;
-            $block[$i + 8] = $z1 - $z2;
-            $block[$i + 12] = $z0 - $z3;
-        }
-
-        // 第二遍：行变换并>>6，原地写回（每行的4次读取先于该行4次写入，各行互不重叠）
+        // 第一遍：行变换
         for ($i = 0; $i < 4; $i++) {
             $row = 4 * $i;
             $z0 = $block[$row + 0] + $block[$row + 2];
@@ -130,10 +119,23 @@ trait TransformTrait
             $z2 = ($block[$row + 1] >> 1) - $block[$row + 3];
             $z3 = $block[$row + 1] + ($block[$row + 3] >> 1);
 
-            $block[$row + 0] = ($z0 + $z3) >> 6;
-            $block[$row + 1] = ($z1 + $z2) >> 6;
-            $block[$row + 2] = ($z1 - $z2) >> 6;
-            $block[$row + 3] = ($z0 - $z3) >> 6;
+            $block[$row + 0] = $z0 + $z3;
+            $block[$row + 1] = $z1 + $z2;
+            $block[$row + 2] = $z1 - $z2;
+            $block[$row + 3] = $z0 - $z3;
+        }
+
+        // 第二遍：列变换并>>6（每列的4次读取先于该列4次写入，各列互不重叠）
+        for ($i = 0; $i < 4; $i++) {
+            $z0 = $block[$i + 0] + $block[$i + 8];
+            $z1 = $block[$i + 0] - $block[$i + 8];
+            $z2 = ($block[$i + 4] >> 1) - $block[$i + 12];
+            $z3 = $block[$i + 4] + ($block[$i + 12] >> 1);
+
+            $block[$i + 0] = ($z0 + $z3) >> 6;
+            $block[$i + 4] = ($z1 + $z2) >> 6;
+            $block[$i + 8] = ($z1 - $z2) >> 6;
+            $block[$i + 12] = ($z0 - $z3) >> 6;
         }
 
         return $block;

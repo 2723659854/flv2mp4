@@ -923,6 +923,11 @@ trait CabacDecodingTrait
         $this->picMbType[$mbY * $this->picWidthInMbs + $mbX] |= 1;
 
         $t = $preType ?? $this->cabReadIntraMbType(3, true);
+        // 内嵌 intra 的语法 mb_type 按 I 片编号（I4=0 / I16=1..24 / PCM=25）解码，
+        // 去块簿记需要片类型编号：P 片整体 +5（I4=5..PCM=30），B 片整体 +23（I4=23..PCM=48）
+        $this->cabDeblockTypeOffset = $this->currentSliceType === 1
+            ? 23
+            : (($this->currentSliceType === 0 || $this->currentSliceType === 5) ? 5 : 0);
         // intra 恒定：不可用邻居 nz 哨兵转 64（IS_INTRA -> 0x40）
         $this->cabFixUnavailNz(true);
 
@@ -1134,7 +1139,7 @@ trait CabacDecodingTrait
 
         $this->cabBuildNz24();
         $this->cabWriteBackNz($mbX);
-        $this->cabWriteDeblock(0);
+        $this->cabWriteDeblock($this->cabDeblockTypeOffset);
     }
 
     /** I16x16 宏块 */
@@ -1246,7 +1251,7 @@ trait CabacDecodingTrait
         $this->cabBuildNz24();
         $this->cabWriteBackNz($mbX);
         $chrType = $chromaCbp === 2 ? 8 : ($chromaCbp === 1 ? 4 : 0);
-        $this->cabWriteDeblock(1 + ($luma15 ? 12 : 0) + $chrType + $predMode);
+        $this->cabWriteDeblock($this->cabDeblockTypeOffset + 1 + ($luma15 ? 12 : 0) + $chrType + $predMode);
     }
 
     /**
@@ -1388,7 +1393,7 @@ trait CabacDecodingTrait
         $this->nzTopRowChroma[$w2 + $mbX * 2 + 1] = $nz[23];
     }
 
-    /** 去块滤波簿记（语法 mb_type：I4=0；I16=1..24；PCM=25） */
+    /** 去块滤波簿记（语法 mb_type：I4=0；I16=1..24；PCM=25；P/B 片内嵌 intra 由调用侧加片类型偏移） */
     private function cabWriteDeblock(int $syntaxType): void
     {
         if (!$this->deblockInfoEnabled) {
@@ -1474,7 +1479,7 @@ trait CabacDecodingTrait
         $this->intra4x4TopModes[$base + 3] = 2;
         $this->cabLastQpDiff = 0;
         $this->cabWriteBackNz($mbX);
-        $this->cabWriteDeblock(25);
+        $this->cabWriteDeblock($this->cabDeblockTypeOffset + 25);
     }
 
     // ================================================================

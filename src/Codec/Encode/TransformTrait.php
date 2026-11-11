@@ -128,28 +128,15 @@ trait TransformTrait
 
     /**
      * 4x4 IDCT 整数逆变换（一维行优先输入输出）——原地
-     * 蝶形顺序与解码器 idct4x4Flat 一致：
-     * 先列变换（stride 4）后行变换并 >>6。本地重建必须与解码端 bit-exact，
-     * 行列顺序互换会因 >>1 舍入产生 ±1 漂移。
+     * 顺序与解码器 idct4x4Flat / ffmpeg ff_h264_idct_add 一致：
+     * 先行变换（含 >>1）再列变换（含 >>1 与 >>6）。本地重建必须与解码端 bit-exact，
+     * 顺序互换会因 >>1 的 floor 舍入产生 ±1 漂移。
      */
     public function idctFlat(array &$coeffs): void
     {
         $coeffs[0] += 32;
 
-        // 第一遍：列变换
-        for ($i = 0; $i < 4; $i++) {
-            $z0 = $coeffs[$i + 0] + $coeffs[$i + 8];
-            $z1 = $coeffs[$i + 0] - $coeffs[$i + 8];
-            $z2 = ($coeffs[$i + 4] >> 1) - $coeffs[$i + 12];
-            $z3 = $coeffs[$i + 4] + ($coeffs[$i + 12] >> 1);
-
-            $coeffs[$i + 0] = $z0 + $z3;
-            $coeffs[$i + 4] = $z1 + $z2;
-            $coeffs[$i + 8] = $z1 - $z2;
-            $coeffs[$i + 12] = $z0 - $z3;
-        }
-
-        // 第二遍：行变换并 >>6
+        // 第一遍：行变换
         for ($i = 0; $i < 4; $i++) {
             $row = $i << 2;
             $z0 = $coeffs[$row + 0] + $coeffs[$row + 2];
@@ -157,10 +144,23 @@ trait TransformTrait
             $z2 = ($coeffs[$row + 1] >> 1) - $coeffs[$row + 3];
             $z3 = $coeffs[$row + 1] + ($coeffs[$row + 3] >> 1);
 
-            $coeffs[$row + 0] = ($z0 + $z3) >> 6;
-            $coeffs[$row + 1] = ($z1 + $z2) >> 6;
-            $coeffs[$row + 2] = ($z1 - $z2) >> 6;
-            $coeffs[$row + 3] = ($z0 - $z3) >> 6;
+            $coeffs[$row + 0] = $z0 + $z3;
+            $coeffs[$row + 1] = $z1 + $z2;
+            $coeffs[$row + 2] = $z1 - $z2;
+            $coeffs[$row + 3] = $z0 - $z3;
+        }
+
+        // 第二遍：列变换并 >>6
+        for ($i = 0; $i < 4; $i++) {
+            $z0 = $coeffs[$i + 0] + $coeffs[$i + 8];
+            $z1 = $coeffs[$i + 0] - $coeffs[$i + 8];
+            $z2 = ($coeffs[$i + 4] >> 1) - $coeffs[$i + 12];
+            $z3 = $coeffs[$i + 4] + ($coeffs[$i + 12] >> 1);
+
+            $coeffs[$i + 0] = ($z0 + $z3) >> 6;
+            $coeffs[$i + 4] = ($z1 + $z2) >> 6;
+            $coeffs[$i + 8] = ($z1 - $z2) >> 6;
+            $coeffs[$i + 12] = ($z0 - $z3) >> 6;
         }
     }
 
