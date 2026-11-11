@@ -39,7 +39,7 @@ final class CeltFrameDecoder
     }
 
     /**
-     * 对应 FFmpeg ff_celt_flush()：清空能量/重叠/后置滤波/去加重状态。
+     * 对应参考实现 ff_celt_flush()：清空能量/重叠/后置滤波/去加重状态。
      * hybrid 冗余帧（opus_decode_redundancy）在解码前后会调用它。
      */
     public function flush(): void
@@ -62,7 +62,7 @@ final class CeltFrameDecoder
     ): array {
         $lm = match ($frameSamples) { 120 => 0, 240 => 1, 480 => 2, 960 => 3 };
         $totalBits = strlen($frame) * 8;
-        // Hybrid：SILK 层与 CELT 层共享同一个区间解码器（FFmpeg dec.c 只初始化一次）
+        // Hybrid：SILK 层与 CELT 层共享同一个区间解码器（参考实现 dec.c 只初始化一次）
         $decoder = $decoder ?? new RangeDecoder($frame);
         $silence = $decoder->tell() === 1 && $decoder->decodeBitLogp(15) === 1;
         if ($silence) {
@@ -70,7 +70,7 @@ final class CeltFrameDecoder
             $this->energy->finishFrame($silentEnergy, false, $channels, $startBand, $endBand);
             return array_fill(0, $frameSamples * $channels, 0.0);
         }
-        // FFmpeg dec_celt.c: hybrid（start_band != 0）不解析后置滤波，不消耗该位
+        // 参考实现 dec_celt.c: hybrid（start_band != 0）不解析后置滤波，不消耗该位
         $postfilter = $startBand === 0 ? $this->decodePostfilter($decoder, $totalBits) : null;
         $transient = $lm > 0 && $decoder->tell() + 3 <= $totalBits && $decoder->decodeBitLogp(3) === 1;
         $intra = $decoder->tell() + 3 <= $totalBits && $decoder->decodeBitLogp(3) === 1;
@@ -186,7 +186,7 @@ final class CeltFrameDecoder
             $width = CeltBitAllocation::BAND_WIDTHS[$band];
             $length = $width << $lm;
             $offset = CeltBitAllocation::BAND_EDGES[$band] << $lm;
-            // FFmpeg dec_celt.c process_anticollapse：depth 为整数除法 (1+pulses)/(width<<size)
+            // 参考实现 dec_celt.c process_anticollapse：depth 为整数除法 (1+pulses)/(width<<size)
             $depth = intdiv(1 + $allocation['pulses'][$band], $length);
             $difference = max(0.0, $energy[$band] - min($previous[$band], $previous2[$band]));
             $level = min(

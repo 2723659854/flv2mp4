@@ -103,7 +103,7 @@ trait TransformTrait
 
     /**
      * 4x4 IDCT整数逆变换（输入输出均为raster顺序的16个系数）
-     * 顺序与 ffmpeg ff_h264_idct_add 一致：先行变换（含>>1），再列变换（含>>1与>>6）。
+     * 顺序与参考实现 ff_h264_idct_add 一致：先行变换（含>>1），再列变换（含>>1与>>6）。
      * 两遍蝶形在实数域可交换，但 >>1 是 floor，顺序互换会在 .5 边界产生 ±1 漂移。
      */
     public function idct4x4Flat(array $in): array

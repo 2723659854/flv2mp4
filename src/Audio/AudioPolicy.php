@@ -38,7 +38,7 @@ final class AudioPolicy
     public const MP3_ENCODER_DELAY = 576;
     /** 本项目 AAC-LC 编码器延迟（MDCT overlap，样本数） */
     public const AAC_ENCODER_DELAY = 1024;
-    /** MP3 解码器合成滤波器组固有延迟（ffmpeg/标准实现一致） */
+    /** MP3 解码器合成滤波器组固有延迟（参考实现/标准实现一致） */
     public const MP3_DECODER_DELAY = 529;
 
     /**
@@ -179,7 +179,7 @@ final class AudioPolicy
      */
     public static function parseOpusIdentificationHeader(string $data): ?array
     {
-        // FFmpeg/libopus 的 FLV SequenceStart 里写的是带 magic 的 OpusHead（多字节字段为小端），
+        // 参考实现/libopus 的 FLV SequenceStart 里写的是带 magic 的 OpusHead（多字节字段为小端），
         // 而 MP4 dOps 字段布局相同但为 ISO BMFF 大端，这里按 magic 区分。
         $littleEndian = false;
         if (substr($data, 0, 8) === 'OpusHead') {

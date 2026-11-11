@@ -116,8 +116,8 @@ class PurePhpHlsGenerator
     /** B 模式（IBBP）全局编码序帧计数器，跨 GOP 不重置——保证 DTS 全局单调递增 */
     private int $videoEncodeCounter = 0;
     /** TS 音视频 PTS 统一偏移（90kHz tick）：IBBP 下 B 帧解码序天然晚于显示序（pts<dts），
-     *  TS 要求每帧 pts>=dts（ISO 13818-1：解码不得晚于呈现；ffmpeg 对 pts<dts 的包报
-     *  Invalid timestamps）。标准做法与 x264/ffmpeg mpegts muxer 一致：PTS 整体后移
+     *  TS 要求每帧 pts>=dts（ISO 13818-1：解码不得晚于呈现；参考实现对 pts<dts 的包报
+     *  Invalid timestamps）。标准做法与 x264/参考实现 mpegts muxer 一致：PTS 整体后移
      *  重排延迟（2 帧时长），音视频同移保持 A/V 同步；非 B 模式为 0 */
     private int $tsPtsOffsetTicks = 0;
     /** pipeline 元数据缓存：worker 传来的 encoded/ctsMs/dtsMs 在 processPipelineEvent 里暂存，handleVideoFrame 里消费 */
@@ -681,7 +681,7 @@ class PurePhpHlsGenerator
         }
 
         $annexb = $isTranscoded ? $outputData : $this->avccToAnnexB($outputData);
-        // 只在每个分片的第一帧前置SPS/PPS，避免重复导致FFmpeg解码错误
+        // 只在每个分片的第一帧前置SPS/PPS，避免重复导致参考实现解码错误
         // 注意：转码路径（encoded/transcode）的 IDR 帧已自带新编码参数的 SPS/PPS，
         // 不能再前置源流的 SPS/PPS——旧 SPS 声明了错误尺寸且无 B 帧重排声明，
         // 播放端会按"无 B 帧"判定 pts<dts 为非法时间戳

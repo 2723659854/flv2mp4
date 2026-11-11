@@ -1153,7 +1153,7 @@ class FlvRecoder
 
     private function writeEncodedVideoFrame(array $nals, bool $isKeyFrame, int $timestamp, int $cts): void
     {
-        // B 帧模式：对齐 FFmpeg flv muxer 行为——tag 时间戳保持编码序 DTS，
+        // B 帧模式：对齐参考实现 flv muxer 行为——tag 时间戳保持编码序 DTS，
         // CTS 统一加上 2 个帧时长的常量偏移，使所有 CTS ≥ 0（避免解复用端
         // "Invalid timestamps/Negative cts" 及播放器重排节拍错乱），音视频同移保持同步
         if ($this->bframes) {

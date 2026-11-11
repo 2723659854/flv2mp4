@@ -390,7 +390,7 @@ trait SliceDecodingTrait
             $this->mbRefForDeblock = array_fill(0, $totalMbs, $emptyRef);
             $this->mbMvL1ForDeblock = array_fill(0, $totalMbs, $emptyMv);
             $this->mbRefL1ForDeblock = array_fill(0, $totalMbs, $emptyRef);
-            // 参考索引 → 参考帧唯一 id（ffmpeg ref2frm 语义）：去块跨列表比较用
+            // 参考索引 → 参考帧唯一 id（参考实现 ref2frm 语义）：去块跨列表比较用
             $this->deblockRefIdL0 = [];
             foreach ($this->refPicList0 as $ri => $entry) {
                 $this->deblockRefIdL0[$ri] = $entry['id'] ?? -1;

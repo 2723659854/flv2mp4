@@ -14,7 +14,7 @@ final class CeltWindow
     public const OVERLAP = 120;
 
     /**
-     * FFmpeg libavcodec/opus/tab.c 的 ff_celt_window2[120]，用于后置滤波器过渡与
+     * 参考实现 libavcodec/opus/tab.c 的 ff_celt_window2[120]，用于后置滤波器过渡与
      * 冗余帧淡入淡出（dec.c opus_fade）。与 IMDCT 用的窗表不同，必须逐值对齐。
      */
     private const WINDOW2 = [

@@ -82,10 +82,10 @@ final class CeltBands
             $effective = -1;
             $fillX = (1 << $blocks) - 1;
             $fillY = $channels === 1 ? 0 : $fillX;
-            // FFmpeg celt.c ff_celt_quant_bands：spread==AGGRESSIVE(3) 且非 transient 且 tf_change>=0 时
+            // 参考实现 celt.c ff_celt_quant_bands：spread==AGGRESSIVE(3) 且非 transient 且 tf_change>=0 时
             // 不使用低频折叠（effective_lowband 保持 -1，quant_band 收到 lowband=NULL → LCG 噪声填充）。
             if ($lowbandOffset !== 0 && ($ctx->spread !== 3 || $blocks > 1 || $ctx->tf < 0)) {
-                // FFmpeg celt.c：effective_lowband 以 200Hz 频带边为单位，折叠区间按边值前缀/后缀确定
+                // 参考实现 celt.c：effective_lowband 以 200Hz 频带边为单位，折叠区间按边值前缀/后缀确定
                 $effEdge = max(CeltBitAllocation::BAND_EDGES[$startBand],
                     CeltBitAllocation::BAND_EDGES[$lowbandOffset] - CeltBitAllocation::BAND_WIDTHS[$band]);
                 $effective = $effEdge << $lm;
@@ -212,7 +212,7 @@ final class CeltBands
         for ($k = 0; $k < $recombine; $k++) $fill = self::BIT_INTERLEAVE[$fill & 15] | (self::BIT_INTERLEAVE[$fill >> 4] << 2);
         $blocks >>= $recombine; $nb <<= $recombine;
         $divide = 0; $tf = $ctx->tf;
-        // FFmpeg pvq.c quant_band_template：折叠源 lowband 需先做与 X 相同的 haar 前变换
+        // 参考实现 pvq.c quant_band_template：折叠源 lowband 需先做与 X 相同的 haar 前变换
         if ($lowband !== null) {
             for ($k = 0; $k < $recombine; $k++) $lowband = self::haar($lowband, $n >> $k, 1 << $k);
         }
@@ -221,7 +221,7 @@ final class CeltBands
             $fill |= $fill << $blocks; $blocks <<= 1; $nb >>= 1; $divide++; $tf++;
         }
         $b0 = $blocks; $nb0 = $nb;
-        // FFmpeg pvq.c：stride = B0 << recombine（B0 已含 time_divide 的左移）
+        // 参考实现 pvq.c：stride = B0 << recombine（B0 已含 time_divide 的左移）
         $stride = $b0 << $recombine;
         if ($b0 > 1 && $lowband !== null) $lowband = CeltPvq::deinterleaveHadamard($lowband, $stride, $originalBlocks === 1);
         $result = self::partition($ctx, $n, $b, $blocks, $lowband, $lm, $gain, $fill);
@@ -269,7 +269,7 @@ final class CeltBands
         for ($j = 0; $j < $n; $j++) {
             $ctx->seed = self::lcg($ctx->seed);
             if ($lowband === null) {
-                // FFmpeg pvq.c：X[i] = ((int32_t)celt_rng(f)) >> 20（随后统一 renormalize）
+                // 参考实现 pvq.c：X[i] = ((int32_t)celt_rng(f)) >> 20（随后统一 renormalize）
                 $signed = $ctx->seed >= 0x80000000 ? $ctx->seed - 0x100000000 : $ctx->seed;
                 $vector[] = (float) ($signed >> 20);
             } else {

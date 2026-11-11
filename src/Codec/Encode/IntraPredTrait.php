@@ -1892,7 +1892,7 @@ trait IntraPredTrait
 
             // 模式决策：SSE 最小（9 模式全评——8x8 块作为 I 帧参考，剪到 4 模式
             // 会使重建明显劣化并放大后续 P/B 帧残差，实测得不偿失）
-            // 合法性对照 ffmpeg ff_h264_check_intra4x4_pred_mode 的 top[]/left[] 表
+            // 合法性对照参考实现 ff_h264_check_intra4x4_pred_mode 的 top[]/left[] 表
             // （需要 top：{0,3,4,5,6,7}；需要 left：{1,4,5,6,8}），非法组合解码器直接报错
             $bestMode = 2;
             $bestCost = PHP_INT_MAX;

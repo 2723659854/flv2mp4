@@ -17,7 +17,7 @@ trait DeblockingFilterTrait
     public array $mbQpForDeblock = [];
     /**
      * 去块簿记的参考索引 → 参考帧唯一 id（L0/L1），片头参考列表构建后填充。
-     * ffmpeg check_mv 比较的是 ref2frm 映射后的帧号（同一参考帧跨列表同号），
+     * 参考实现 check_mv 比较的是 ref2frm 映射后的帧号（同一参考帧跨列表同号），
      * 直接比较原始索引会把 B 片 L0[0] / L1[0]（通常是不同帧）误判为相同。
      */
     public array $deblockRefIdL0 = [];
@@ -494,7 +494,7 @@ trait DeblockingFilterTrait
     }
 
     /**
-     * B 片边界强度的运动判定，语义与 ffmpeg check_mv 一致：
+     * B 片边界强度的运动判定，语义与参考实现 check_mv 一致：
      * 先比 list0 参考索引；仅当索引相同且不为 -1（表示该 list 未使用）时才比 list0 MV；
      * list0 未判出差异时再比 list1；一旦判出差异转入跨列表判定——跨列表参考索引
      * 不一致即判差异，否则只按跨列表 MV 极差判定。
@@ -822,7 +822,7 @@ trait DeblockingFilterTrait
 
     /**
      * 把去块簿记里的原始参考索引统一映射为参考帧唯一 id。
-     * ffmpeg 的 check_mv 比较的是 ref2frm 映射后的帧号：B 片的 L0 索引 0 与 L1 索引 0
+     * 参考实现的 check_mv 比较的是 ref2frm 映射后的帧号：B 片的 L0 索引 0 与 L1 索引 0
      * 通常指向不同参考帧，直接比索引数值会把“跨列表指向不同帧”误判为相同。
      */
     private function mapDeblockRefIds(): void

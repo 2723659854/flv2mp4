@@ -115,7 +115,7 @@ final class RangeDecoder
     }
 
     /**
-     * FFmpeg 风格 CDF 解码（libavcodec/opus/rc.c ff_opus_rc_dec_cdf）。
+     * 参考实现风格 CDF 解码（libavcodec/opus/rc.c ff_opus_rc_dec_cdf）。
      * CDF 数组格式为 [total, cdf1, cdf2, ..., total]，与 libopus 的反向 CDF 不同。
      * $offset 允许直接指向大表内某个子 CDF 的起始下标（SILK 的 pulse_location 表）。
      */
@@ -298,7 +298,7 @@ final class RangeDecoder
     }
 
     /**
-     * FFmpeg ff_opus_rc_dec_raw_init：把原始位读取器重新指向帧尾（可选地缩短可用字节数），
+     * 参考实现 ff_opus_rc_dec_raw_init：把原始位读取器重新指向帧尾（可选地缩短可用字节数），
      * 区间解码状态与 totalBits 保持不变。Hybrid 中 SILK 与 CELT 各自从帧尾独立读取原始位。
      */
     public function resetRaw(int $bytes = -1): void

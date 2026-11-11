@@ -3,7 +3,7 @@
 namespace Xiaosongshu\Flv2mp4\Opus\Silk;
 
 /**
- * @purpose SILK 解码码表（由 FFmpeg libavcodec/opus/tab.c 自动抽取）
+ * @purpose SILK 解码码表（由参考实现 libavcodec/opus/tab.c 自动抽取）
  * @author yanglong
  */
 final class SilkTables

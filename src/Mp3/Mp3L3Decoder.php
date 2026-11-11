@@ -826,13 +826,13 @@ final class Mp3L3Decoder
     /**
      * compute_imdct()：长块 IMDCT36 + overlap；短块三窗 IMDCT12 旋转；
      * 零带冲刷历史；最后 18 个时间槽过 32 子带合成滤波器组。
-     * 历史缓冲简化为 [32 子带][18 槽]（等价 ffmpeg 的 mdct_buf 分组打包布局）。
+     * 历史缓冲简化为 [32 子带][18 槽]（等价参考实现的 mdct_buf 分组打包布局）。
      */
     private function computeImdct(array &$g, int $ch, array &$outPlane): void
     {
         $h = &$g['hybrid'];
 
-        // 找最后一个非零 6 样本组 → sblimit（ffmpeg: ptr 从 576 回退，最低探到 36）
+        // 找最后一个非零 6 样本组 → sblimit（参考实现: ptr 从 576 回退，最低探到 36）
         $ptr = 576;
         while ($ptr >= 36) {
             $ptr -= 6;

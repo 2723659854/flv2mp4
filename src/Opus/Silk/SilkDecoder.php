@@ -802,7 +802,7 @@ final class SilkDecoder
     }
 
     /**
-     * 模拟 C 的 float（32 位）舍入：FFmpeg 的 SILK 合成全程使用 float，
+     * 模拟 C 的 float（32 位）舍入：参考实现的 SILK 合成全程使用 float，
      * LPC 反馈在响度大/削波处对精度敏感，必须与 float32 保持一致才能逐样本对齐。
      */
     private static function f32(float $value): float

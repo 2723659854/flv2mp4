@@ -7,8 +7,8 @@ namespace Xiaosongshu\Flv2mp4\Opus\Silk;
  * @author yanglong
  *
  * 采用固定群延迟的对称加窗 sinc 插值：输出第 n 个样本对应输入时间 n/ratio - delay。
- * delay 与 FFmpeg libavcodec/opus/silk.h 的 silk_resample_delay[3] = {4, 8, 11} 一致，
- * 从而与 FFmpeg（swresample）解码结果逐样本对齐。
+ * delay 与参考实现 libavcodec/opus/silk.h 的 silk_resample_delay[3] = {4, 8, 11} 一致，
+ * 从而与参考实现（swresample）解码结果逐样本对齐。
  * 由于线性相位滤波器需要前瞻 half-delay 个输入样本，最后一次调用需 flush() 补零收尾。
  */
 final class SilkResampler

@@ -128,7 +128,7 @@ trait TransformTrait
 
     /**
      * 4x4 IDCT 整数逆变换（一维行优先输入输出）——原地
-     * 顺序与解码器 idct4x4Flat / ffmpeg ff_h264_idct_add 一致：
+     * 顺序与解码器 idct4x4Flat / 参考实现 ff_h264_idct_add 一致：
      * 先行变换（含 >>1）再列变换（含 >>1 与 >>6）。本地重建必须与解码端 bit-exact，
      * 顺序互换会因 >>1 的 floor 舍入产生 ±1 漂移。
      */

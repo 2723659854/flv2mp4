@@ -7,7 +7,7 @@ namespace Xiaosongshu\Flv2mp4\Aac;
  * @author yanglong
  * @time 2026年8月12日17:08:52
  *
- * 长窗 swb 表逐项抄自 FFmpeg libavcodec/aactab.c 的 ff_swb_offset_1024 索引表：
+ * 长窗 swb 表逐项抄自参考实现 libavcodec/aactab.c 的 ff_swb_offset_1024 索引表：
  *  - 48 kHz 与 44.1 kHz 共用 swb_offset_1024_48（49 带，50 个偏移）；
  *  - 32 kHz 用 swb_offset_1024_32（51 带，52 个偏移）。
  * 短窗（128 样本）三者共用 swb_offset_128_48（14 带）；
@@ -22,7 +22,7 @@ final class AacTables
         800, 832, 864, 896, 928, 1024,
     ];
 
-    /** FFmpeg swb_offset_1024_32（前 41 个偏移与 48k 表相同，末尾为 960/992/1024） */
+    /** 参考实现 swb_offset_1024_32（前 41 个偏移与 48k 表相同，末尾为 960/992/1024） */
     public const SWB_32K = [
         0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 48, 56, 64, 72, 80,
         88, 96, 108, 120, 132, 144, 160, 176, 196, 216, 240, 264, 292, 320,
@@ -30,7 +30,7 @@ final class AacTables
         800, 832, 864, 896, 928, 960, 992, 1024,
     ];
 
-    /** FFmpeg swb_offset_1024_24（24 kHz / 22.05 kHz，47 带） */
+    /** 参考实现 swb_offset_1024_24（24 kHz / 22.05 kHz，47 带） */
     public const SWB_24K = [
         0, 4, 8, 12, 16, 20, 24, 28,
         32, 36, 40, 44, 52, 60, 68, 76,
@@ -40,7 +40,7 @@ final class AacTables
         600, 652, 704, 768, 832, 896, 960, 1024,
     ];
 
-    /** FFmpeg swb_offset_1024_16（16 / 12 / 11.025 kHz，43 带） */
+    /** 参考实现 swb_offset_1024_16（16 / 12 / 11.025 kHz，43 带） */
     public const SWB_16K = [
         0, 8, 16, 24, 32, 40, 48, 56,
         64, 72, 80, 88, 100, 112, 124, 136,
@@ -50,7 +50,7 @@ final class AacTables
         832, 896, 960, 1024,
     ];
 
-    /** FFmpeg swb_offset_1024_8（8 kHz / 7.35 kHz，40 带） */
+    /** 参考实现 swb_offset_1024_8（8 kHz / 7.35 kHz，40 带） */
     public const SWB_8K = [
         0, 12, 24, 36, 48, 60, 72, 84,
         96, 108, 120, 132, 144, 156, 172, 188,
@@ -74,7 +74,7 @@ final class AacTables
         return self::SWB_8K;
     }
 
-    /** 长窗比例因子带数（与 FFmpeg ff_aac_num_swb_1024 对齐） */
+    /** 长窗比例因子带数（与参考实现 ff_aac_num_swb_1024 对齐） */
     public static function longBandCount(int $sampleRate): int
     {
         if ($sampleRate >= 44100) return 49;

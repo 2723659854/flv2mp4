@@ -26,7 +26,7 @@ final class AacLcEncoder
     private int $sampleRate;
     /** 实际编码的比例因子带数（写入 ics_info 的 max_sfb） */
     private int $maxSfb;
-    /** 当前采样率的长窗 swb 偏移表（FFmpeg ff_swb_offset_1024） */
+    /** 当前采样率的长窗 swb 偏移表（参考实现 ff_swb_offset_1024） */
     private array $swb;
     private ?int $previousGlobalOffset = null;
     private array $pending = [];

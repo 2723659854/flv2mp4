@@ -128,7 +128,7 @@ final class CeltDsp
     public function reset(): void
     {
         $this->outMemory = [];
-        // FFmpeg CeltBlock.buf 为 av_mallocz，初始 1024 个历史样本全 0
+        // 参考实现 CeltBlock.buf 为 av_mallocz，初始 1024 个历史样本全 0
         $this->postfilterHistory = array_fill(0, 1024, 0.0);
         $this->postfilterPeriod = 15;
         $this->postfilterGain = 0.0;
@@ -140,7 +140,7 @@ final class CeltDsp
     {
         $curPeriod = $period ?? 15;
         $curGain = $period === null ? 0.0 : $gain;
-        // FFmpeg dec_celt.c celt_postfilter()：无论滤波是否启用，块尾都会 memmove 保留最近
+        // 参考实现 dec_celt.c celt_postfilter()：无论滤波是否启用，块尾都会 memmove 保留最近
         // 1024 个样本；下一帧启用滤波时 data[-T] 读到的是真实历史样本，而不是零/缺省。
         if ($this->postfilterGain === 0.0 && $curGain === 0.0) {
             $history = $this->postfilterHistory;
@@ -158,7 +158,7 @@ final class CeltDsp
         $historyLength = count($history);
         $output = [];
         $window = CeltWindow::coefficients();
-        // 分段与 FFmpeg 一致：
+        // 分段与参考实现一致：
         //   [0, OVERLAP)      : 上一帧参数（celt_postfilter_apply_transition 第一次调用）
         //   [OVERLAP, 2*OVERLAP): 上一帧 → 本帧参数的交叉淡入
         //   [2*OVERLAP, end)  : 本帧参数
@@ -178,7 +178,7 @@ final class CeltDsp
             } else {
                 $out = (float) $sample + $this->postfilterContribution($input, $position, $curPeriod, $curGain, $tapset);
             }
-            // 与 FFmpeg dsp.c postfilter_c 一致：滤波结果回写，后续样本的梳状参考取滤波后值
+            // 与参考实现 dsp.c postfilter_c 一致：滤波结果回写，后续样本的梳状参考取滤波后值
             $input[$position] = $out;
             $output[] = $out;
         }

@@ -136,7 +136,7 @@ class H264Decoder
 
     // DPB (Decoded Picture Buffer) - 多参考帧管理
     public array $dpb = [];
-    /** DPB 条目自增 id：去块滤波跨列表参考比较需要“同一参考帧”的唯一标识（等价 ffmpeg ref2frm） */
+    /** DPB 条目自增 id：去块滤波跨列表参考比较需要“同一参考帧”的唯一标识（等价参考实现 ref2frm） */
     public int $dpbIdSeq = 0;
     public array $refPicList0 = [];
     // ref_pic_list_modification 命令暂存（[idc, value] 对，slice header 解析后于默认列表上执行）

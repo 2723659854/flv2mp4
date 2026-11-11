@@ -126,7 +126,7 @@ class OpusToAacTranscoder
         $decodedSamples = $this->decoder->lastSampleCount();
         if ($sampleCount !== null && $sampleCount !== $decodedSamples) {
             // hybrid→CELT 交界处解码器会多出 SILK 重采样器 flush 的尾部样本
-            // （FFmpeg dec.c: AVFrame.nb_samples = coded_samples + delayed_samples），
+            // （参考实现 dec.c: AVFrame.nb_samples = coded_samples + delayed_samples），
             // 这类超出是合法的，只在明显异常（缺样本/超出一个包）时报错。
             $surplus = $decodedSamples - $sampleCount;
             if ($surplus <= 0 || $surplus > 64 || ($trimStart + $trimEnd) > $decodedSamples - $sampleCount) {
