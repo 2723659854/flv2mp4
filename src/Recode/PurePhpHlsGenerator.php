@@ -20,6 +20,8 @@ class PurePhpHlsGenerator
 
     /** 切片分割时间 3秒 */
     private int $segmentDuration = 3;
+    /** 已写出分片的实际最大 EXTINF（秒），收尾时用于回写 TARGETDURATION */
+    private float $maxSegmentDuration = 0.0;
     private int $videoPid = 0x100;
     private int $audioPid = 0x101;
     private int $pmtPid = 0x1000;
@@ -39,6 +41,21 @@ class PurePhpHlsGenerator
     private ?int $baseTimestamp = null;
     private int $segmentStartTime = 0;
     private int $currentSegmentLastTime = 0;
+    /**
+     * 当前分片内已写入媒体的时间戳边界（90kHz tick，-1=本片尚未写入该轨媒体）。
+     * 收尾关闭末片时按这些值算 EXTINF：排空阶段末片帧的 relativeTime 可能不推进
+     * （或不经过 emitPendingVideoFrame 的更新路径），用它会把 3.8s 的末片算成 0.001。
+     *
+     * 起点一律用视频显示 PTS：分片边界按视频关键帧切分，若把先于视频到达的音频
+     * 计入起点，会与上一片的时长时间轴重叠（实测末片多算 94ms）。
+     * 尾端取视频结束与音频结束的较大者（音频可能比末帧视频更晚结束）。
+     */
+    private int $segVideoStartTick = -1;
+    private int $segVideoEndTick = -1;
+    private int $segAudioStartTick = -1;
+    private int $segAudioEndTick = -1;
+    /** 本片已写入视频帧的上一 DTS（90kHz），用于实测片内帧步长 */
+    private ?int $segPrevVideoDtsTick = null;
 
     private string $audioSpecificConfig = '';
     private int $audioObjectType = 2;
@@ -566,6 +583,8 @@ class PurePhpHlsGenerator
             $dts = (int)($dtsMs * 90);
             $this->videoEncodeCounter++;
         } else {
+            $fpsCfg = (int)($this->profile['fps'] ?? 0);
+            $frameDurMs = $fpsCfg > 0 ? 1000.0 / $fpsCfg : 0.0;
             $dts = (int)($relativeTime * 90);
             // 非 B 模式仍保留钳制（源流 timestamp 可能有碰撞）
             if ($this->lastVideoDtsTick !== null && $dts <= $this->lastVideoDtsTick) {
@@ -617,6 +636,7 @@ class PurePhpHlsGenerator
             'avcData' => $avcData,
             'dts' => $dts,
             'pts' => $pts,
+            'frameDurTicks' => (int)round($frameDurMs * 90),
             'segmentSwitch' => $segmentSwitch,
             'transcode' => $transcode,
             'skip' => $skip,
@@ -691,6 +711,34 @@ class PurePhpHlsGenerator
 
         $this->currentSegmentLastTime = $job['relativeTime'];
         $this->segmentWriter['endTime'] = $job['relativeTime'];
+        // 记录本片媒体边界（90kHz，显示时间轴），收尾时用它算末片 EXTINF。
+        // 帧时长优先用片内实测 DTS 步长：静态路径的 dts 来自源流时间戳，
+        // 与配置 fps 推得的 frameDurTicks 可能不一致（如源 30fps、配置 fps=10）。
+        $frameStep = (int)($job['frameDurTicks'] ?? 0);
+        if ($this->segPrevVideoDtsTick !== null) {
+            $delta = $job['dts'] - $this->segPrevVideoDtsTick;
+            if ($delta > 0 && $delta <= 90000) $frameStep = $delta;
+        }
+        $this->segPrevVideoDtsTick = $job['dts'];
+        $this->noteSegmentVideoTicks($job['pts'], $job['pts'] + $frameStep);
+    }
+
+    /** 记录本片视频显示时间边界（90kHz tick） */
+    private function noteSegmentVideoTicks(int $startTick, int $endTick): void
+    {
+        if ($this->segVideoStartTick < 0 || $startTick < $this->segVideoStartTick) {
+            $this->segVideoStartTick = $startTick;
+        }
+        if ($endTick > $this->segVideoEndTick) $this->segVideoEndTick = $endTick;
+    }
+
+    /** 记录本片音频时间边界（90kHz tick），只用于把尾端延长到音频结束 */
+    private function noteSegmentAudioTicks(int $startTick, int $endTick): void
+    {
+        if ($this->segAudioStartTick < 0 || $startTick < $this->segAudioStartTick) {
+            $this->segAudioStartTick = $startTick;
+        }
+        if ($endTick > $this->segAudioEndTick) $this->segAudioEndTick = $endTick;
     }
 
     private function replayQueuedAudio(): void
@@ -1053,20 +1101,29 @@ class PurePhpHlsGenerator
         $timestamp = method_exists($tag, 'getTime') ? $tag->getTime() : 0;
         $relativeTime = $timestamp - $this->baseTimestamp;
 
+        // 早于首个视频关键帧的"预滚音频"：HLS 时间轴从首个 IDR 起算，PTS 不能为负。
+        // 直接丢弃；若钳到 0 再靠 +1 tick 保严格递增，会把连续几个包（每个约 21ms）
+        // 压进 1 tick 间隔，既触发 "non monotonically increasing dts"，也让音频时间轴塌陷
+        if ($relativeTime < 0) return;
+
         $sampleRates = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350];
         $sampleRate = $sampleRates[$this->samplingFrequencyIndex] ?? 44100;
         $frameDuration = (int)((1024 * 90000) / $sampleRate);
 
         if (is_resource($this->segmentWriter['handle'])) {
-            if ($this->audioBasePts === null) {
-                $this->audioBasePts = (int)($relativeTime * 90);
+            // 直通 AAC 的 PTS 直接跟随源音频时间戳：源音频时间轴与"包数×1024/fps"存在
+            // 约 1% 的长期差异（设备时钟/时间戳抖动），按包数递推再在每片切点重锚会把
+            // 累计差异一次性甩成某个分片里的音频空洞；跟随源标签时间轴则逐包对齐视频。
+            $pts = max(0, (int)round($relativeTime * 90));
+            if ($this->audioLastPts !== null && $pts <= $this->audioLastPts) {
+                $pts = $this->audioLastPts + 1; // TS 要求 PTS 严格递增
             }
-            $pts = $this->audioBasePts + ($this->audioFrameCount * $frameDuration);
-            $this->audioFrameCount++;
+            $this->audioLastPts = $pts;
 
             // 音频与视频同步后移同一常量，保持 A/V 同步
             $pes = $this->createPES(0xC0, $payload, $pts + $this->tsPtsOffsetTicks, null);
             $this->writeTSPackets($this->audioPid, $pes, false, 0);
+            $this->noteSegmentAudioTicks($pts, $pts + $frameDuration);
         }
     }
 
@@ -1078,6 +1135,14 @@ class PurePhpHlsGenerator
         if ($pts90 === null) return;
         $pes = $this->createPES(0xC0, $payload, $pts90 + $this->tsPtsOffsetTicks, null);
         $this->writeTSPackets($this->audioPid, $pes, false, 0);
+        $this->noteSegmentAudioTicks($pts90, $pts90 + $this->audioFrameTicks());
+    }
+
+    /** 一帧音频的时长（90kHz tick），按输出编码的每帧采样数换算 */
+    private function audioFrameTicks(): int
+    {
+        $samples = AudioPolicy::samplesPerFrame($this->audioOutputCodec);
+        return (int)round($samples * 90000 / max(1, $this->audioOutputRate()));
     }
 
     /** 去掉可能存在的 ADTS 外层（7/9 字节），返回裸 AAC 帧 */
@@ -1462,10 +1527,19 @@ class PurePhpHlsGenerator
         $this->writePMT();
 
         $this->audioFrameCount = 0;
+        // 新分片：媒体边界重新起算
+        $this->segVideoStartTick = -1;
+        $this->segVideoEndTick = -1;
+        $this->segAudioStartTick = -1;
+        $this->segAudioEndTick = -1;
+        $this->segPrevVideoDtsTick = null;
     }
 
     /**
      * 关闭分片并向 index.m3u8 追加条目
+     *
+     * @param int $endTime 显式终点（毫秒，源相对时间轴）；0 = 收尾关闭，
+     *                     此时按本片已写入媒体的真实时间跨度收尾
      */
     private function closeSegment(int $endTime = 0): void
     {
@@ -1475,8 +1549,23 @@ class PurePhpHlsGenerator
         fclose($writer['handle']);
         $writer['handle'] = null;
 
-        $endTs = $endTime ?: $this->currentSegmentLastTime;
-        $durSec = max(0.001, round(($endTs - $this->segmentStartTime) / 1000.0, 3));
+        if ($endTime > 0) {
+            $durSec = ($endTime - $this->segmentStartTime) / 1000.0;
+        } elseif ($this->segVideoStartTick >= 0 && $this->segVideoEndTick > $this->segVideoStartTick) {
+            // 收尾末片：排空阶段末片帧的 relativeTime 可能不推进（不经过
+            // emitPendingVideoFrame 的 endTime 更新路径），用它会把 3.8s 的末片算成 0.001。
+            // 这里用片内实际写入的显示时间轴边界：起点=首个视频 PTS（与分片切分口径一致），
+            // 终点=视频末帧结束与音频结束的较大者，与容器里的内容严格一致。
+            $endTick = max($this->segVideoEndTick, $this->segAudioEndTick);
+            $durSec = ($endTick - $this->segVideoStartTick) / 90000.0;
+        } elseif ($this->segAudioStartTick >= 0 && $this->segAudioEndTick > $this->segAudioStartTick) {
+            // 本片无视频（纯音频片段）：退化为音频跨度
+            $durSec = ($this->segAudioEndTick - $this->segAudioStartTick) / 90000.0;
+        } else {
+            $durSec = ($this->currentSegmentLastTime - $this->segmentStartTime) / 1000.0;
+        }
+        $durSec = max(0.001, round($durSec, 3));
+        if ($durSec > $this->maxSegmentDuration) $this->maxSegmentDuration = $durSec;
         // 单次 fwrite 写入完整条目块（EXTINF + URI），避免读到半行
         if (is_resource($this->playlistHandle)) {
             fwrite($this->playlistHandle, "#EXTINF:" . number_format($durSec, 3, '.', '') . ",\nsegment_{$writer['sequence']}.ts\n");
@@ -1490,7 +1579,8 @@ class PurePhpHlsGenerator
     private function closeAllSegments(): void
     {
         if (is_resource($this->segmentWriter['handle'])) {
-            $this->closeSegment($this->segmentWriter['endTime']);
+            // 不传显式终点：由 closeSegment 按本片实际媒体跨度收尾，避免 endTime 不推进
+            $this->closeSegment();
         }
         $this->addEndList();
     }
@@ -1564,22 +1654,39 @@ class PurePhpHlsGenerator
 
     /**
      * 末尾追加ENDLIST标记并关闭句柄；重复调用幂等
+     * 收尾时按实际最大 EXTINF 回写 TARGETDURATION（追加写期间只能预估，分片实际时长
+     * 取决于源关键帧间隔，可能超出预估）
      */
     private function addEndList(): void
     {
+        $path = $this->outputDir . '/index.m3u8';
         if (is_resource($this->playlistHandle)) {
             fwrite($this->playlistHandle, "#EXT-X-ENDLIST\n");
             fflush($this->playlistHandle);
             fclose($this->playlistHandle);
             $this->playlistHandle = null;
-            return;
         }
-        // 无句柄（仅做收尾的实例）：直接对文件追加，已存在 ENDLIST 则跳过
-        $path = $this->outputDir . '/index.m3u8';
         if (!file_exists($path)) return;
         $buf = file_get_contents($path);
-        if ($buf === false || strpos($buf, '#EXT-X-ENDLIST') !== false) return;
-        file_put_contents($path, rtrim($buf, "\n") . "\n#EXT-X-ENDLIST\n");
+        if ($buf === false) return;
+        if (strpos($buf, '#EXT-X-ENDLIST') === false) {
+            $buf = rtrim($buf, "\n") . "\n#EXT-X-ENDLIST\n";
+        }
+        $target = $this->targetDurationFromPlaylist($buf);
+        $buf = preg_replace('/^#EXT-X-TARGETDURATION:\d+$/m', "#EXT-X-TARGETDURATION:{$target}", $buf, 1) ?? $buf;
+        file_put_contents($path, $buf);
+    }
+
+    /**
+     * TARGETDURATION 规范值：所有 EXTINF 的最大值向上取整（HLS RFC 8216 §4.3.3.1）
+     */
+    private function targetDurationFromPlaylist(string $playlist): int
+    {
+        $max = $this->maxSegmentDuration;
+        if (preg_match_all('/^#EXTINF:([0-9.]+),/m', $playlist, $m)) {
+            foreach ($m[1] as $v) $max = max($max, (float)$v);
+        }
+        return max(1, (int)ceil($max));
     }
 
     /**

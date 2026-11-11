@@ -61,6 +61,15 @@ class Flv2HlsCompact
     private int $idleTimeout = 30;
     private int $queueMaxBytes = 8388608; // 转发积压上限8MB，超过拉流端跳帧追直播
     private int $duration = 0;            // 0=不限时
+    /**
+     * 收尾排空：duration 到点后不再立刻杀掉拉流进程，先按内容窗口把在途积压吃完
+     * （拉流端 ipcBuffer + 内核缓冲 + 主进程 readBuffer/plHold + 各 worker 在途 GOP），
+     * 然后再走 ENDLIST 收尾，避免"最后一截已拉到的内容被丢弃"。
+     */
+    private const DRAIN_GRACE_SECONDS = 15;
+    private bool $draining = false;
+    private float $drainDeadline = 0.0;
+    private int $drainContentLimit = 0;
     private int $targetFps = 0;           // 0=不抽帧；大于0时按目标帧率跳过多余视频帧
     private bool $tlsVerify = true;
 
@@ -526,13 +535,18 @@ class Flv2HlsCompact
 
             $tagType = ord($payload[0]);
             $timestamp = unpack('N', substr($payload, 1, 4))[1];
-            if ($this->firstMediaTimestamp === null) $this->firstMediaTimestamp = $timestamp;
-            $this->lastMediaTimestamp = $timestamp;
-            if ($tagType === 9) {
-                if ($this->firstVideoTimestamp === null) $this->firstVideoTimestamp = $timestamp;
-                $this->lastVideoTimestamp = $timestamp;
-            }
             $body = substr($payload, 5);
+            // 内容时间窗只按媒体实体帧推进：sequence header（时间戳通常为 0）、
+            // end-of-sequence 与脚本元数据若算进来，firstMediaTimestamp 会被钉在 0，
+            // 排空终点 drainContentLimit 立刻被末个时间戳越过，收尾排空吃不到在途数据
+            if ($this->isMediaEntityTag($tagType, $body)) {
+                if ($this->firstMediaTimestamp === null) $this->firstMediaTimestamp = $timestamp;
+                $this->lastMediaTimestamp = $timestamp;
+                if ($tagType === 9) {
+                    if ($this->firstVideoTimestamp === null) $this->firstVideoTimestamp = $timestamp;
+                    $this->lastVideoTimestamp = $timestamp;
+                }
+            }
             if ($pipeline) {
                 $this->plEnqueueTag($tagType, $body, $timestamp);
                 // 新GOP无空闲worker时帧进入plHold：必须立即停止解析本批剩余字节。
@@ -551,6 +565,29 @@ class Flv2HlsCompact
             $this->consumedBytes += $newlyConsumed;
             $this->grantCredit();
         }
+    }
+
+    /**
+     * 是否为媒体实体帧（可推进内容时间窗），排除 sequence header 等非内容 tag：
+     *  - 视频：AVC 的 AVCPacketType=0（sequence header）/2（end of sequence）不是帧；
+     *          帧类型 5（video info/command）也不是图像
+     *  - 音频：AAC 的 AACPacketType=0（sequence header）不是音频帧
+     *  - 其余（脚本元数据 tagType=18 等）一律不算
+     */
+    private function isMediaEntityTag(int $tagType, string $body): bool
+    {
+        if (strlen($body) < 2) return false;
+        if ($tagType === 9) {
+            $frameType = (ord($body[0]) >> 4) & 0x0F;
+            if ($frameType !== 1 && $frameType !== 2) return false;
+            if ((ord($body[0]) & 0x0F) === 7 && ord($body[1]) !== 1) return false;
+            return true;
+        }
+        if ($tagType === 8) {
+            if ((ord($body[0]) >> 4) === 10 && ord($body[1]) !== 1) return false;
+            return true;
+        }
+        return false;
     }
 
     private function feedTranscoder(int $tagType, string $body, int $timestamp): void
@@ -720,10 +757,26 @@ class Flv2HlsCompact
     private function pipelineLoop(): void
     {
         while (true) {
-            if ($this->running && $this->duration > 0 && microtime(true) - $this->startMicrotime >= $this->duration) {
-                $this->log("已达到运行时长 {$this->duration} 秒，停止");
-                $this->stopSignaled = true;
-                $this->running = false;
+            if ($this->running && !$this->draining && $this->duration > 0
+                && microtime(true) - $this->startMicrotime >= $this->duration) {
+                // 到点后先进排空：保持读拉流IPC，把已拉到但未消化的内容吃完再收尾
+                $this->draining = true;
+                $this->drainDeadline = microtime(true) + self::DRAIN_GRACE_SECONDS;
+                $this->drainContentLimit = ($this->firstMediaTimestamp ?? 0) + $this->duration * 1000;
+                $this->log("已达到运行时长 {$this->duration} 秒，进入收尾排空（内容窗口至 {$this->drainContentLimit}ms）");
+            }
+            if ($this->draining) {
+                // 排空终点：内容窗口已到 / 拉流侧结束 / 宽限期到
+                $contentReached = $this->lastMediaTimestamp !== null
+                    && $this->lastMediaTimestamp > $this->drainContentLimit;
+                if ($this->endReceived || $this->pullerIpcEnded || $contentReached
+                    || microtime(true) >= $this->drainDeadline) {
+                    $this->draining = false;
+                    $this->stopSignaled = true;
+                    $this->running = false;
+                    $this->log('收尾排空完成（末个媒体时间戳 '
+                        . ($this->lastMediaTimestamp ?? 0) . 'ms），冲刷在途后写 ENDLIST');
+                }
             }
 
             $outBytes = 0;
@@ -880,10 +933,10 @@ class Flv2HlsCompact
                 if ($this->targetFps > 0) {
                     // 尾帧冲刷用：保留帧时间戳在目标帧率均匀网格上，尾帧步长对齐输出节奏
                     $metadata['sourceFps'] = $this->targetFps;
-                    // 与静态管线 HlsPipelineClient 同款网格选帧：保留帧重映射到
-                    // base + n×1000/targetFps 均匀网格（outTimestamp），被抽帧仍送解码
-                    // 维持参考链但标记 drop 不写输出。源 DTS 33ms 步进不规则，
-                    // 沿用会与 GOP 尾帧合成时间戳碰撞（DTS 重复/倒挂 → 播放器灰色画面）
+                    // 选帧网格按源 PTS 归一：保留帧直接沿用源 PTS（音频/视频两轴同刻度），
+                    // 输出时长只跟源时间轴走；不再用"保留帧数 × 1000/targetFps"反推输出时间
+                    // ——那样输出时长由帧数决定，上游时间戳一旦被拉长就成倍膨胀。
+                    // 保留帧数仍用于选帧：被抽掉的帧送解码维持参考链但标记 drop 不写输出。
                     if ($this->plBaseVideoTs < 0) {
                         if ($isKey) {
                             $this->plBaseVideoTs = $timestamp;
@@ -896,8 +949,7 @@ class Flv2HlsCompact
                         && ($timestamp - $this->plBaseVideoTs) * $this->targetFps < $this->plSelectedFrames * 1000) {
                         $drop = true;
                     } else {
-                        $metadata['outTimestamp'] = $this->plBaseVideoTs
-                            + (int)round($this->plSelectedFrames * 1000 / $this->targetFps);
+                        $metadata['outTimestamp'] = $timestamp;
                         $this->plSelectedFrames++;
                     }
                 }
