@@ -43,7 +43,7 @@ final class Opus2Mp3
                 }
             },
             null,
-            ['gainQ8' => 'auto']
+            ['gain-q8' => 'auto']
         );
         return [
             'output' => $this->outputFile,
