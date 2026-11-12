@@ -215,12 +215,11 @@ function decodeOpus(string $inputFile, string $gainQ8, string $pcm = 's16'): voi
     $reader = OggOpusReader::fromFile($inputFile);
     $channels = $reader->channels();
     $rate = $reader->sampleRate();
-    $packets = $reader->audioPackets();
     sendEvent([
         'ev' => 'meta',
         'sampleRate' => $rate,
         'channels' => $channels,
-        'packets' => count($packets),
+        // 流式读取：包数只有读完才知道，随 done 事件给出
         'mappingFamily' => $reader->head()['mappingFamily'] ?? null,
     ]);
     // 调用方通过 --gain-q8 决定是否应用 outputGainQ8（Opus2AAC 应用；Opus2Wav 不应用）
@@ -235,10 +234,12 @@ function decodeOpus(string $inputFile, string $gainQ8, string $pcm = 's16'): voi
     }
     $decoder = new OpusDecoder($channels, $rate);
     $samplesTotal = 0;
+    $packetCount = 0;
     $nextProgress = 0;
     // 逐包写 stdout（每包仅 ~2KB）在 Windows 管道上开销大，缓冲到 256KB 再写
     $buffer = '';
-    foreach ($packets as $packet) {
+    foreach ($reader->packets() as $packet) {
+        $packetCount++;
         $samples = $decoder->decodeFloat($packet['data']);
         $trimStart = $packet['trimStartSamples'];
         $trimEnd = $packet['trimEndSamples'];
@@ -264,7 +265,7 @@ function decodeOpus(string $inputFile, string $gainQ8, string $pcm = 's16'): voi
     if ($buffer !== '') {
         writeAll(STDOUT, $buffer);
     }
-    sendEvent(['ev' => 'done', 'seconds' => $samplesTotal / $rate, 'samples' => $samplesTotal, 'packets' => count($packets)]);
+    sendEvent(['ev' => 'done', 'seconds' => $samplesTotal / $rate, 'samples' => $samplesTotal, 'packets' => $packetCount]);
 }
 
 /** MP3 → PCM：decodeStreaming 逐帧解码输出（meta 首帧发出），内存 O(单帧) */
