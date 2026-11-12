@@ -75,10 +75,20 @@ class FlvStreamPuller
     private string $videoSeqHeader = '';  // 最新AVC序列头body
     private string $audioSeqHeader = '';  // 最新AAC序列头body
 
-    // ===== 时间轴重映射（跨重连 + 跨跳帧缺口压缩） =====
-    private int $timelineOffset = 0; // 重连归零平移
-    private int $skippedMs = 0;      // 跳帧累计压缩掉的时长
-    private int $lastFedTimestamp = -1;
+    // ===== 时间轴重映射（按媒体类型各自单调，跨重连 + 跨跳帧缺口压缩） =====
+    /**
+     * 音频与视频是两条独立时间戳域，源流里音频常态落后视频十几毫秒、偶发失步
+     * 可达数百毫秒。旧实现两路共用 lastFed/offset，视频帧只要比"最新一个音频 tag"
+     * 的时间戳落后，就会把全局 offset 永久抬高一次（棘轮），整条时间轴被顶成
+     * 1.3 倍甚至数倍膨胀。现在只在同路内钳制，跨路交错不影响其它路；
+     * 真正需要整体下沉的场景（重连、GOP 跳帧）由 realignTarget 一次性给出两路共用的新起点。
+     */
+    private const DRIFT_LIMIT_MS = 500; // 同路时间戳回退超过此值视为上游重置，重新定标而非钳制
+    private array $timelineOffset = [self::AUDIO_TAG => 0, self::VIDEO_TAG => 0];
+    private array $lastFedTimestamp = [self::AUDIO_TAG => -1, self::VIDEO_TAG => -1];
+    /** 两路共用的重锚目标（ms），null=无待对齐 */
+    private ?int $realignTarget = null;
+    private array $realignDone = [self::AUDIO_TAG => false, self::VIDEO_TAG => false];
 
     // ===== 统计 =====
     private int $retryCount = 0;
@@ -289,6 +299,10 @@ class FlvStreamPuller
                 if (!$this->reconnect()) return;
                 continue;
             }
+
+            // 新连接建立：两路时间轴统一下沉到上一连接的最大时间戳之后，
+            // 源时间戳从 0 重新开始时也不会出现 A/V 错位或本路卡死
+            $this->realignAfterReconnect();
 
             try {
                 $this->streamLoop();
@@ -746,53 +760,92 @@ class FlvStreamPuller
     }
 
     /**
-     * 在IDR处重新对齐：补发序列头 + IDR，并把跳帧造成的时间缺口压缩掉
+     * 在IDR处重新对齐：补发序列头 + IDR，并按"上一有效点+1"重锚两路时间轴。
+     * 跳帧丢掉的源时长不再补回：两路统一落到同一个 target，
+     * 既压缩掉跳帧缺口，又保证 A/V 相对关系不被破坏。
      */
     private function resyncAtIdr(string $idrBody, int $srcTimestamp): void
     {
-        $fed = $this->remapTimestamp($srcTimestamp);
-        if ($this->lastFedTimestamp >= 0) {
-            $gap = $fed - $this->lastFedTimestamp;
-            if ($gap > 1) $this->skippedMs += $gap - 1;
-        }
-        $fed = $this->remapTimestamp($srcTimestamp);
-        if ($fed < $this->lastFedTimestamp) $fed = max(0, $this->lastFedTimestamp);
+        $base = max($this->lastFedTimestamp[self::AUDIO_TAG], $this->lastFedTimestamp[self::VIDEO_TAG]);
+        $target = max(0, $base) + 1;
 
-        $anchorTs = max(0, $this->lastFedTimestamp >= 0 ? $this->lastFedTimestamp : $fed);
+        // 视频自身直接落在 target，并据此定标本路偏移，后续视频帧按源跨度推进
+        $this->timelineOffset[self::VIDEO_TAG] = $target - $srcTimestamp;
+        $this->lastFedTimestamp[self::VIDEO_TAG] = $target;
+        $this->realignDone[self::VIDEO_TAG] = true;
+        // 音频等各自下一帧按同一起点落位
+        $this->realignTarget = $target;
+        $this->realignDone[self::AUDIO_TAG] = false;
+
         if ($this->videoSeqHeader !== '') {
-            $this->frameToBuffer(self::VIDEO_TAG, $this->videoSeqHeader, $anchorTs);
+            $this->frameToBuffer(self::VIDEO_TAG, $this->videoSeqHeader, $target);
         }
         if ($this->audioSeqHeader !== '') {
-            $this->frameToBuffer(self::AUDIO_TAG, $this->audioSeqHeader, $anchorTs);
+            $this->frameToBuffer(self::AUDIO_TAG, $this->audioSeqHeader, $target);
         }
-        $this->frameToBuffer(self::VIDEO_TAG, $idrBody, $fed);
-        $this->lastFedTimestamp = $fed;
+        $this->frameToBuffer(self::VIDEO_TAG, $idrBody, $target);
         $this->skipMode = false;
-        $this->log("已在IDR对齐直播点，丢弃 {$this->tagsDropped} 个tag", 'success');
+        $this->log("已在IDR对齐直播点（{$target}ms），丢弃 {$this->tagsDropped} 个tag", 'success');
         $this->tagsDropped = 0;
     }
 
     private function emitTag(int $tagType, string $body, int $srcTimestamp, bool $isSeq): void
     {
-        $fed = $this->remapTimestamp($srcTimestamp);
+        $fed = $this->remapTimestamp($srcTimestamp, $tagType);
         // 序列头时间戳不参与推进（生成器忽略其时间戳），避免压缩正常媒体时间轴
-        if (!$isSeq && $fed < $this->lastFedTimestamp) $fed = max(0, $this->lastFedTimestamp);
+        if (!$isSeq) {
+            $last = $this->lastFedTimestamp[$tagType] ?? -1;
+            if ($last >= 0 && $fed < $last) $fed = max(0, $last);
+            $this->lastFedTimestamp[$tagType] = $fed;
+        }
         $this->frameToBuffer($tagType, $body, $fed);
-        if (!$isSeq) $this->lastFedTimestamp = $fed;
     }
 
     /**
-     * 时间戳重映射：先处理重连归零平移，再减去跳帧压缩量，保证单调不减
+     * 重连后统一时间轴起点：取上一连接两路 lastFed 的最大值 +1，
+     * 一次性给出两路共用的新起点，保证重连不会让 A/V 相对关系错位。
      */
-    private function remapTimestamp(int $srcTimestamp): int
+    private function realignAfterReconnect(): void
     {
-        if ($this->lastFedTimestamp >= 0) {
-            $candidate = $srcTimestamp + $this->timelineOffset;
-            if ($candidate < $this->lastFedTimestamp + $this->skippedMs) {
-                $this->timelineOffset = $this->lastFedTimestamp + $this->skippedMs + 1 - $srcTimestamp;
+        $base = max($this->lastFedTimestamp[self::AUDIO_TAG], $this->lastFedTimestamp[self::VIDEO_TAG]);
+        if ($base < 0) return; // 首次连接：源时间戳可直接使用
+        $this->realignTarget = $base + 1;
+        $this->realignDone = [self::AUDIO_TAG => false, self::VIDEO_TAG => false];
+        $this->log("重连完成，两路时间轴统一下沉到 {$this->realignTarget}ms");
+    }
+
+    /**
+     * 时间戳重映射：先在"本路"内保证单调（跨路交错不参与），
+     * 再按需处理重连/跳帧的统一重锚。返回按类型独立推进的时间戳。
+     */
+    private function remapTimestamp(int $srcTimestamp, int $tagType): int
+    {
+        // 重连/跳帧后：本路首帧按统一目标起点落位（同一起点保证 A/V 同步）
+        if ($this->realignTarget !== null && empty($this->realignDone[$tagType])) {
+            $this->timelineOffset[$tagType] = $this->realignTarget - $srcTimestamp;
+            $this->realignDone[$tagType] = true;
+            if ($this->realignDone[self::AUDIO_TAG] && $this->realignDone[self::VIDEO_TAG]) {
+                $this->realignTarget = null;
             }
         }
-        return max(0, $srcTimestamp + $this->timelineOffset - $this->skippedMs);
+
+        $fed = $srcTimestamp + ($this->timelineOffset[$tagType] ?? 0);
+        $last = $this->lastFedTimestamp[$tagType] ?? -1;
+
+        if ($last >= 0 && $fed < $last) {
+            $gap = $last - $fed;
+            if ($gap > self::DRIFT_LIMIT_MS) {
+                // 漂移看门狗：本路时间戳整段回退（上游重置/长时间失步），
+                // 直接钳制会让本路永久卡死，按上一有效点重新定标偏移
+                $this->timelineOffset[$tagType] = $last + 1 - $srcTimestamp;
+                $fed = $last + 1;
+                $typeName = $tagType === self::VIDEO_TAG ? '视频' : '音频';
+                $this->log("{$typeName}时间轴回退 {$gap}ms 超限，已重锚到 {$fed}ms", 'warning');
+            } else {
+                $fed = $last;
+            }
+        }
+        return max(0, $fed);
     }
 
     private function frameToBuffer(int $tagType, string $body, int $timestamp): void

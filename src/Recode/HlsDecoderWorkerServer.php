@@ -34,7 +34,12 @@ final class HlsDecoderWorkerServer
      */
     private string $deferredOutput = '';
     /** 最近一个已编码保留帧的时间戳（tail 帧时间戳延续基准） */
+    /** 最近一个已编码保留帧的时间戳（tail 帧时间戳延续基准） */
     private int $lastVideoTs = 0;
+    /** 分片周期强制 IDR 的间隔（ms，取 segmentDuration；0=关闭） */
+    private int $idrPeriodMs = 0;
+    /** 最近一个 IDR 的输出流时间戳（ms，-1=尚未出现），用于周期强制 IDR */
+    private int $lastIdrTs = -1;
     /** 源帧率（主进程随视频 meta 下发），用于推导 tail 帧时间戳步长 */
     private float $sourceFps = 0.0;
     /** B 帧粘滞：源流出现过 B 帧后，后续每个 GOP 起始即按 POC 重排 */
@@ -69,6 +74,9 @@ final class HlsDecoderWorkerServer
         if (isset($config['intra8x8QpOffset'])) $encoder->intra8x8QpOffset = max(-51, min(51, (int)$config['intra8x8QpOffset']));
         $this->encoder = $encoder;
         $this->scaler = new VideoScaler();
+        // 分片周期强制 IDR：源 GOP 再长也保证 IDR 间隔不超过 segmentDuration，
+        // 分片因此不再依赖源关键帧间隔（0=保持旧行为，只跟源 IDR/场景切换走）
+        $this->idrPeriodMs = max(0, (int)($config['segmentDuration'] ?? 0)) * 1000;
     }
 
     public function run(string $rendezvousAddress, string $outputAddress, string $controlAddress = ''): void
@@ -321,6 +329,16 @@ final class HlsDecoderWorkerServer
         // 必须用解码帧的 isIdr 决定编码关键帧，否则切片 IDR 缺失导致首段无画面
         $isKeyFrame = !empty($frame['isIdr']);
         $this->lastVideoTs = (int)($meta['outTimestamp'] ?? $meta['timestamp'] ?? 0);
+        // 分片周期强制 IDR：源 GOP 再长、画面再静止，也按 segmentDuration 周期出 IDR，
+        // 使切片不再受源关键帧间隔限制。源自然 IDR 到达时重置周期起点，
+        // 避免刚进 GOP 又被强制一次（不介入 H264Encoder 的场景切换强制 IDR 及其冷却）。
+        if ($isKeyFrame) {
+            $this->lastIdrTs = $this->lastVideoTs;
+        } elseif ($this->idrPeriodMs > 0 && $this->lastIdrTs >= 0
+            && $this->lastVideoTs - $this->lastIdrTs >= $this->idrPeriodMs) {
+            $isKeyFrame = true;
+            $this->lastIdrTs = $this->lastVideoTs;
+        }
         $profile = $this->config;
         $targetWidth = ($profile['width'] ?? 0) > 0 ? (int)$profile['width'] : $this->width;
         $targetHeight = ($profile['height'] ?? 0) > 0 ? (int)$profile['height'] : $this->height;

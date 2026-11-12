@@ -38,6 +38,17 @@ class Flv2HlsCompact
      */
     private const PIPELINE_OUTPUT_MAX_BYTES = 3145728;
 
+    /**
+     * 收尾等待基准（秒）的默认值，可由配置项 finishTimeout 覆盖。
+     * 它是唯一的主控值：断流/输入结束后的"无进展判定""finish确认""中断排空"
+     * "最终冲刷"全部由它按固定倍率派生，避免出现"配置调小但内部仍等45秒"的矛盾。
+     */
+    private const FINISH_WAIT_DEFAULT = 30;
+    /** 配置钳制下限（秒）：再小会截断正常尾部GOP编码 */
+    private const FINISH_WAIT_MIN = 5;
+    /** 配置钳制上限（秒）：再大则兜底失去意义 */
+    private const FINISH_WAIT_MAX = 600;
+
     /** 拉流地址 */
     private string $pullUrl;
     private bool $isWebSocket;
@@ -61,6 +72,22 @@ class Flv2HlsCompact
     private int $idleTimeout = 30;
     private int $queueMaxBytes = 8388608; // 转发积压上限8MB，超过拉流端跳帧追直播
     private int $duration = 0;            // 0=不限时
+
+    // ===== 收尾等待（全部由 finishTimeout 基准派生，见构造函数） =====
+    /** 基准值（秒），配置项 finishTimeout，默认30，钳制到 [5,600] */
+    private int $finishWait = self::FINISH_WAIT_DEFAULT;
+    /** 输入结束后"无任何进展"判定：ceil(1.5×基准)，默认45s */
+    private int $drainStallTimeout = 45;
+    /** finish 屏障后等待 worker 确认：ceil(2/3×基准)，默认20s */
+    private int $finishStallTimeout = 20;
+    /** 收到 Ctrl+C/SIGINT 后的排空硬预算：1×基准，默认30s */
+    private int $signalDrainBudget = 30;
+    /** 强制收尾后最后一次冲刷等待：ceil(1/3×基准)，默认10s */
+    private int $forceFlushWait = 10;
+    /** 非强制收尾（异常路径）的兜底等待：20×基准，默认600s */
+    private int $shutdownMaxWait = 600;
+    /** 基准值的来源说明（用于启动日志，体现钳制结果） */
+    private string $finishWaitNote = '未配置，使用默认值';
     /**
      * 收尾排空：duration 到点后不再立刻杀掉拉流进程，先按内容窗口把在途积压吃完
      * （拉流端 ipcBuffer + 内核缓冲 + 主进程 readBuffer/plHold + 各 worker 在途 GOP），
@@ -103,6 +130,10 @@ class Flv2HlsCompact
     private ?int $lastMediaTimestamp = null;
     private ?int $firstVideoTimestamp = null;
     private ?int $lastVideoTimestamp = null;
+    /** @var array<int,int> 各媒体类型上一时间戳（同类型跳变告警用） */
+    private array $lastTsByType = [8 => -1, 9 => -1];
+    /** 同类型时间戳前跳 >500ms 的告警次数 */
+    private int $tsJumpWarnings = 0;
     private float $processStartMicrotime;
     private float $startMicrotime;
     private float $pullStartMicrotime;
@@ -167,6 +198,21 @@ class Flv2HlsCompact
     private bool $plFinishing = false;
     private int $plFinished = 0;
     private bool $plEndSent = false;
+    /** 卡死兜底已触发（强制收尾），shutdownPipeline 据此使用短超时 */
+    private bool $plForceStopped = false;
+    /** 管线进度水位：签名及其最后一次变化时刻，用于卡死看门狗 */
+    private float $plProgressAt = 0.0;
+    private float $plProgressCheckAt = 0.0;
+    private string $plProgressSig = '';
+    /** 拉流子进程存活探测（每0.5s一次） */
+    private float $pullerStatusAt = 0.0;
+    private bool $pullerProcGone = false;
+    /** 收到第二次 Ctrl+C/SIGINT：立即退出，不再等待收尾 */
+    private bool $forceExitRequested = false;
+    /** 用户中断信号计数（与上游EOF置位的stopSignaled区分开） */
+    private int $signalCount = 0;
+    /** 收到中断后的排空硬上限时刻（0=未启动） */
+    private float $stopDeadline = 0.0;
     /** 抽帧网格基准：首个保留 IDR 的源时间戳（-1=未初始化，与静态管线一致） */
     private int $plBaseVideoTs = -1;
     /** 已保留帧计数：第 n 个保留帧重映射到 base + n×1000/targetFps 均匀网格 */
@@ -177,7 +223,8 @@ class Flv2HlsCompact
      * @param array $config 转码配置：width/height(0=保持)/bitrate/fps(仅编码器)/qp/audioBitrate/
      *                      motionWorkers/watermark/watermark_file/segmentDuration；
      *                      部署配置：outputDir/streamName/maxRetries/retryDelay/connectTimeout/
-     *                      idleTimeout/queueMaxBytes(转码落后容忍字节,默认8MB)/duration/fps/tlsVerify
+     *                      idleTimeout/queueMaxBytes(转码落后容忍字节,默认8MB)/duration/fps/tlsVerify/
+     *                      finishTimeout(尾部落空与worker确认的基准等待秒数,默认30,范围5~600)
      */
     public function __construct(string $pullUrl, array $config = [])
     {
@@ -196,6 +243,14 @@ class Flv2HlsCompact
         if (isset($config['fps'])) $this->targetFps = max(0, (int)$config['fps']);
         if (isset($config['tlsVerify'])) $this->tlsVerify = (bool)$config['tlsVerify'];
         $this->decodeWorkers = max(0, (int)($config['decodeWorkers'] ?? 2));
+
+        // 收尾等待基准及其派生阈值（单调：基准越小，整条收尾链路越快）
+        $this->finishWait = $this->normalizeFinishWait($config['finishTimeout'] ?? null);
+        $this->drainStallTimeout = max(3, (int)ceil($this->finishWait * 1.5));
+        $this->finishStallTimeout = max(2, (int)ceil($this->finishWait * 2 / 3));
+        $this->signalDrainBudget = $this->finishWait;
+        $this->forceFlushWait = max(1, (int)ceil($this->finishWait / 3));
+        $this->shutdownMaxWait = max(30, $this->finishWait * 20);
 
         $streamName = $config['streamName'] ?? $this->deriveStreamName($parts);
         $this->streamDir = $config['outputDir'] ?? dirname(__DIR__, 2) . "/hls/{$streamName}/";
@@ -216,7 +271,7 @@ class Flv2HlsCompact
             $profile['outputDir'], $profile['streamName'], $profile['segmentDuration'],
             $profile['maxRetries'], $profile['retryDelay'], $profile['connectTimeout'],
             $profile['idleTimeout'], $profile['queueMaxBytes'], $profile['duration'],
-            $profile['tlsVerify'], $profile['multi']
+            $profile['tlsVerify'], $profile['multi'], $profile['finishTimeout']
         );
 
         if ($this->decodeWorkers > 0) {
@@ -243,13 +298,27 @@ class Flv2HlsCompact
 
     public function handleSignal(int $signal): void
     {
+        $this->signalCount++;
+        if ($this->signalCount > 1) {
+            $this->forceExitRequested = true;
+            $this->log("再次收到信号 {$signal}，立即退出（不再等待收尾）", 'warning');
+            return;
+        }
         $this->stopSignaled = true;
-        $this->log("收到信号 {$signal}，准备停止并排空已接收数据...");
+        $this->log("收到信号 {$signal}，准备停止并排空已接收数据...（再次发送信号可立即退出）");
     }
 
-    public function handleWindowsCtrl(int $event): void
+    public function handleWindowsCtrl(int $event): bool
     {
-        $this->stopSignaled = true;
+        // 回调运行在独立线程：只置标量标志，不做日志/IO。返回true表示已接管该事件，
+        // 否则PHP会走默认处理直接杀进程，丢掉ENDLIST收尾机会。
+        $this->signalCount++;
+        if ($this->signalCount > 1) {
+            $this->forceExitRequested = true;
+        } else {
+            $this->stopSignaled = true;
+        }
+        return true;
     }
 
     public function getStreamDir(): string
@@ -273,6 +342,39 @@ class Flv2HlsCompact
     }
 
     /**
+     * 归一化配置项 finishTimeout（收尾等待基准，秒）。
+     * 未配置/非数字 → 默认30；≤0 → 视为未配置；<5 钳到5；>600 钳到600。
+     * 同时记录来源说明，启动日志据此展示实际生效值。
+     */
+    private function normalizeFinishWait(mixed $value): int
+    {
+        if ($value === null || $value === '') {
+            $this->finishWaitNote = '未配置，使用默认值';
+            return self::FINISH_WAIT_DEFAULT;
+        }
+        if (!is_numeric($value)) {
+            $this->finishWaitNote = '配置值非数字，使用默认值';
+            return self::FINISH_WAIT_DEFAULT;
+        }
+        $raw = (float)$value;
+        if ($raw <= 0) {
+            $this->finishWaitNote = sprintf('配置 %s 非法(≤0)，使用默认值', is_scalar($value) ? (string)$value : '?');
+            return self::FINISH_WAIT_DEFAULT;
+        }
+        $v = (int)round($raw);
+        if ($v < self::FINISH_WAIT_MIN) {
+            $this->finishWaitNote = sprintf('配置 %s 过小，钳制到下限 %ds', (string)$value, self::FINISH_WAIT_MIN);
+            return self::FINISH_WAIT_MIN;
+        }
+        if ($v > self::FINISH_WAIT_MAX) {
+            $this->finishWaitNote = sprintf('配置 %s 过大，钳制到上限 %ds', (string)$value, self::FINISH_WAIT_MAX);
+            return self::FINISH_WAIT_MAX;
+        }
+        $this->finishWaitNote = sprintf('配置 %ds', $v);
+        return $v;
+    }
+
+    /**
      * 启动转码客户端（阻塞运行：拉起拉流子进程 → 收帧转码 → 优雅收尾）
      */
     public function run(): void
@@ -292,6 +394,11 @@ class Flv2HlsCompact
         $this->log('协议: ' . $protocolLabel);
         $this->log("输出目录: {$this->streamDir}");
         $this->log("拉流进程最大重连: {$this->maxRetries} 次，转码落后容忍: " . round($this->queueMaxBytes / 1048576, 1) . ' MB（超限跳IDR追直播，不反压上游）');
+        $this->log(sprintf(
+            '收尾等待基准: %ds（%s，可配置 finishTimeout，范围 %d~%d）| 无进展判定 %ds / finish确认 %ds / 中断排空 %ds / 最终冲刷 %ds',
+            $this->finishWait, $this->finishWaitNote, self::FINISH_WAIT_MIN, self::FINISH_WAIT_MAX,
+            $this->drainStallTimeout, $this->finishStallTimeout, $this->signalDrainBudget, $this->forceFlushWait
+        ));
         $this->log('========================================');
 
         $parallel = $this->decodeWorkers > 0;
@@ -316,7 +423,7 @@ class Flv2HlsCompact
             $this->log('客户端异常: ' . $e->getMessage(), 'error');
         } finally {
             if ($parallel) {
-                if ($this->stopSignaled || $this->endReceived) {
+                if ($this->stopSignaled || $this->endReceived || $this->pullerIpcEnded) {
                     $this->log('正在冲刷末帧、关闭分片并写入ENDLIST...');
                 }
                 try {
@@ -464,6 +571,16 @@ class Flv2HlsCompact
     private function transcodeLoop(): void
     {
         while ($this->running) {
+            if ($this->forceExitRequested) {
+                $this->log('用户要求立即退出，跳过收尾', 'warning');
+                $this->running = false;
+                return;
+            }
+            if ($this->stopSignaled) {
+                // Ctrl+C/SIGINT：停止读取，交由 finally 冲刷末帧并写ENDLIST
+                $this->running = false;
+                return;
+            }
             if ($this->duration > 0 && microtime(true) - $this->startMicrotime >= $this->duration) {
                 $this->log("已达到运行时长 {$this->duration} 秒，停止");
                 $this->running = false;
@@ -540,6 +657,19 @@ class Flv2HlsCompact
             // end-of-sequence 与脚本元数据若算进来，firstMediaTimestamp 会被钉在 0，
             // 排空终点 drainContentLimit 立刻被末个时间戳越过，收尾排空吃不到在途数据
             if ($this->isMediaEntityTag($tagType, $body)) {
+                // 同类型时间戳前跳告警：拉流端时间轴被棘轮放大时，这里是最先出现异常的地方
+                $prevTs = $this->lastTsByType[$tagType] ?? -1;
+                if ($prevTs >= 0 && $timestamp - $prevTs > 500) {
+                    $this->tsJumpWarnings++;
+                    $this->log(sprintf(
+                        '时间戳跳变：%s 前进 %dms（%d → %d，当前偏移 %dms），累计 %d 次',
+                        $tagType === 9 ? '视频' : '音频',
+                        $timestamp - $prevTs, $prevTs, $timestamp,
+                        $timestamp - ($this->firstMediaTimestamp ?? $timestamp),
+                        $this->tsJumpWarnings
+                    ), 'warning');
+                }
+                $this->lastTsByType[$tagType] = $timestamp;
                 if ($this->firstMediaTimestamp === null) $this->firstMediaTimestamp = $timestamp;
                 $this->lastMediaTimestamp = $timestamp;
                 if ($tagType === 9) {
@@ -757,6 +887,17 @@ class Flv2HlsCompact
     private function pipelineLoop(): void
     {
         while (true) {
+            if ($this->forceExitRequested) {
+                $this->log('用户要求立即退出，跳过收尾', 'warning');
+                $this->running = false;
+                return;
+            }
+            if ($this->plProgressAt <= 0.0) $this->plProgressAt = microtime(true);
+            // 用户中断：给出有上界的排空预算，避免"永不停机"；二次中断已在上面直接退出
+            if ($this->stopSignaled && $this->signalCount > 0 && $this->stopDeadline <= 0.0) {
+                $this->stopDeadline = microtime(true) + $this->signalDrainBudget;
+                $this->log(sprintf('已停止拉流，最多再等 %d 秒排空已接收数据（再次按 Ctrl+C 立即退出）', $this->signalDrainBudget));
+            }
             if ($this->running && !$this->draining && $this->duration > 0
                 && microtime(true) - $this->startMicrotime >= $this->duration) {
                 // 到点后先进排空：保持读拉流IPC，把已拉到但未消化的内容吃完再收尾
@@ -781,6 +922,28 @@ class Flv2HlsCompact
 
             $outBytes = 0;
             foreach ($this->plOut as $buf) $outBytes += strlen($buf);
+            // 拉流子进程存活看门狗：子进程退出后 END/EOF 必须能读到，不能因为反压
+            // （hold/出站积压）关闭了拉流读取而永远看不到"上游已永久结束"。
+            if (!$this->plEndSent && !$this->pullerIpcEnded && !$this->endReceived
+                && microtime(true) - $this->pullerStatusAt >= 0.5) {
+                $this->pullerStatusAt = microtime(true);
+                if (is_resource($this->process)) {
+                    $ps = @proc_get_status($this->process);
+                    if ($ps && empty($ps['running'])) $this->pullerProcGone = true;
+                }
+                if ($this->pullerProcGone) $this->forceDrainPuller();
+            }
+            // 进度水位：tags/派发序号/READY回执/FINISHED/出站积压任一变化即视为有进展
+            $now = microtime(true);
+            if ($now - $this->plProgressCheckAt >= 0.2) {
+                $this->plProgressCheckAt = $now;
+                $sig = $this->tagsFed . ':' . $this->plSeq . ':' . $this->plFinished
+                    . ':' . $this->plInflightGops . ':' . $outBytes;
+                if ($sig !== $this->plProgressSig) {
+                    $this->plProgressSig = $sig;
+                    $this->plProgressAt = $now;
+                }
+            }
             // 出站（派往worker但未写入socket）积压门限：worker各自还有1MB输入高水位，
             // 此处3MB封顶。读取不要求worker READY——gopEnd必须靠读入下一个IDR才能生成，
             // 而worker处理完GOP帧后要等gopEnd才回报READY，若"无READY不读IPC"会死锁。
@@ -844,7 +1007,25 @@ class Flv2HlsCompact
             // 不提前通知 output，否则它会丢弃尚未编码的重排队列。
             $pendingInput = $this->readBuffer !== '' || $this->plHold !== '';
             foreach ($this->plOut as $buf) if ($buf !== '') { $pendingInput = true; break; }
-            if (!$this->plEndSent && ($this->endReceived || ($this->stopSignaled && !$pendingInput))) {
+            // 卡死兜底：输入已结束/收到停止信号后，若管线长时间无任何进展，说明有worker
+            // 不回READY（plInflightGops永远≥1，finish屏障永远发不出去），必须强制收尾，
+            // 否则主进程无限空转、Ctrl+C也只能置标志而无法退出。
+            $inputEnded = $this->endReceived || $this->pullerIpcEnded;
+            if (!$this->plEndSent && ($inputEnded || $this->stopSignaled)) {
+                $stalled = $now - $this->plProgressAt >= $this->drainStallTimeout;
+                $overBudget = $this->stopDeadline > 0.0 && $now >= $this->stopDeadline;
+                if ($stalled) {
+                    $this->forceFinishPipeline(sprintf('管线无任何进展 %.0fs', $now - $this->plProgressAt));
+                } elseif ($overBudget) {
+                    $this->forceFinishPipeline(sprintf(
+                        '中断后已等待 %.0fs 排空', $now - ($this->stopDeadline - $this->signalDrainBudget)
+                    ));
+                }
+            }
+            // 输入已结束：hold必须先派发再发finish，否则被hold的帧已占用的序号
+            // 会成为输出端重排缓冲的永久空洞（output worker永远等不到，收尾卡死）。
+            if (!$this->plEndSent && $this->plHold === ''
+                && ($this->endReceived || (($this->pullerIpcEnded || $this->stopSignaled) && !$pendingInput))) {
                 // GOP帧已随拉流实时派发；先为最后一个GOP补边界，所有GOP均READY后再finish
                 if (!$this->plGopClosed) {
                     $this->plCloseCurrentGop();
@@ -852,7 +1033,17 @@ class Flv2HlsCompact
                 }
                 if ($this->plInflightGops === 0) $this->sendPipelineFinish();
             }
-            if ($this->plEndSent && $this->plFinished >= $this->decodeWorkers) {
+            // finish屏障发出后：等全部worker确认FINISHED；长时间无任何进展（worker卡死）
+            // 也必须退出，不能无限空转（否则Ctrl+C也只能置标志）。
+            if ($this->plEndSent && ($this->plFinished >= $this->decodeWorkers
+                || microtime(true) - $this->plProgressAt >= $this->finishStallTimeout)) {
+                if ($this->plFinished < $this->decodeWorkers) {
+                    $this->plForceStopped = true;
+                    $this->log(sprintf(
+                        '强制收尾超时：仍有 %d/%d 个worker未确认，直接退出（末个分片可能不完整）',
+                        $this->decodeWorkers - $this->plFinished, $this->decodeWorkers
+                    ), 'warning');
+                }
                 $this->running = false;
                 return;
             }
@@ -1095,6 +1286,107 @@ class Flv2HlsCompact
             $this->plOut[$i] .= $finishFrame;
         }
         $this->plEndSent = true;
+        // 重置进度水位：finish 后的等待从这里开始计时
+        $this->plProgressAt = microtime(true);
+    }
+
+    /**
+     * 拉流子进程已退出但还没读到 END/EOF：无视管线反压把 IPC 读尽。
+     * 子进程退出后剩余数据只在其本地内存（已随进程丢失）+内核缓冲（有界），
+     * 不会造成无限读取；这样做保证三条拉流协议（HTTP/WS/RTMP）的结束都能被发现。
+     */
+    private function forceDrainPuller(): void
+    {
+        if (!is_resource($this->ipc)) {
+            $this->pullerIpcEnded = true;
+            return;
+        }
+        for ($i = 0; $i < 128 && !$this->endReceived; $i++) {
+            $chunk = @fread($this->ipc, 262144);
+            if ($chunk === false || $chunk === '') break;
+            $this->readBuffer .= $chunk;
+            $this->drainFrames(true);
+            if (strlen($chunk) < 262144) break;
+        }
+        if ($this->endReceived) {
+            $this->pullerIpcEnded = true;
+            return;
+        }
+        // 进程已退出：再读一次，空即代表不会再有数据（不必等FIN的半个处理周期）
+        $tail = @fread($this->ipc, 262144);
+        if ($tail === false || $tail === '') {
+            if ($tail !== false && $this->readBuffer !== '') $this->drainFrames(true);
+            $this->pullerIpcEnded = true;
+            $this->stopSignaled = true;
+        } else {
+            $this->readBuffer .= $tail;
+            $this->drainFrames(true);
+        }
+    }
+
+    /**
+     * 收尾卡死兜底：强制派发 hold、补最后一个GOP边界并发送finish屏障。
+     * 触发条件：输入已结束/收到停止信号后，管线长时间无任何进展（有worker不回READY）。
+     * 派发到"任意存活worker"是安全的：帧按worker内顺序追加，输出端序号仍连续。
+     */
+    private function forceFinishPipeline(string $reason = '管线无任何进展'): void
+    {
+        if ($this->plEndSent) return;
+        $unready = [];
+        for ($i = 0; $i < $this->decodeWorkers; $i++) {
+            if (empty($this->plReady[$i]) && !isset($this->plDead[$i])) {
+                $unready[] = '#' . $i . '(load=' . ($this->plLoad[$i] ?? 0) . ')';
+            }
+        }
+        $this->log(sprintf(
+            '收尾等待超时（%s）：%d 个worker未回报READY [%s]，强制派发在途GOP并发送finish屏障',
+            $reason, count($unready), implode(' ', $unready)
+        ), 'warning');
+        if ($this->plHold !== '') {
+            $worker = $this->plPickReadyWorker();
+            if ($worker < 0) $worker = $this->plPickLiveWorker();
+            $gop = $this->plGopSeq - 1;
+            if ($worker >= 0 && $gop >= 0 && ($this->plGopWorker[$gop] ?? -1) === -1) {
+                $this->plAssignGop($gop, $worker);
+                $this->plOut[$worker] .= $this->plHold;
+            } else {
+                $this->log(sprintf('强制收尾：无可用worker，丢弃 %d 字节未派发GOP', strlen($this->plHold)), 'warning');
+            }
+            $this->plHold = '';
+        }
+        if (!$this->plGopClosed) {
+            $this->plCloseCurrentGop();
+            $this->plGopClosed = true;
+        }
+        $this->sendPipelineFinish();
+    }
+
+    /** 选一个存活worker（不看READY，按负载最小），强制派发hold用；全部不可用返回-1。 */
+    private function plPickLiveWorker(): int
+    {
+        $worker = -1;
+        $best = null;
+        for ($i = 0; $i < $this->decodeWorkers; $i++) {
+            if (isset($this->plDead[$i]) || !is_resource($this->plSocks[$i] ?? null)) continue;
+            $load = $this->plLoad[$i] ?? 0;
+            if ($best === null || $load < $best) {
+                $best = $load;
+                $worker = $i;
+            }
+        }
+        return $worker;
+    }
+
+    /** 强制收尾后播放列表兜底：worker已无法正常完成时补写ENDLIST，避免留下永不结束的直播列表。 */
+    private function forceWriteEndlist(): void
+    {
+        $index = rtrim($this->streamDir, '/\\') . '/index.m3u8';
+        if (!is_file($index)) return;
+        $content = @file_get_contents($index);
+        if ($content === false || strpos($content, '#EXT-X-ENDLIST') !== false) return;
+        if (@file_put_contents($index, rtrim($content, "\r\n") . "\n#EXT-X-ENDLIST\n", LOCK_EX) !== false) {
+            $this->log('已为 index.m3u8 补写 ENDLIST（强制收尾）', 'warning');
+        }
     }
 
     private function shutdownPipeline(): void
@@ -1103,10 +1395,14 @@ class Flv2HlsCompact
         // 兜底广播finish（正常情况下pipelineLoop已发），并限时等待FINISHED
         if (!$this->plEndSent) $this->sendPipelineFinish();
         $this->stopPuller();
-        // 编码速度低于实时速度时，尾部可能积累数百 MB；正常收尾必须等待完整排空，
-        // 不能用15秒固定超时把尚未编码的数据直接丢掉。600秒仅作为异常worker兜底。
-        $deadline = microtime(true) + 600;
+        // 编码速度低于实时速度时，尾部可能积累数百 MB；正常收尾必须等待完整排空。
+        // 非强制收尾用 20×基准（默认600s）作为异常worker兜底；已判定卡死或用户已中断时
+        // 只用 1/3×基准（默认10s）做最后冲刷，否则Ctrl+C仍表现为"按了没用"。
+        $waitLimit = ($this->plForceStopped || $this->signalCount > 0)
+            ? $this->forceFlushWait : $this->shutdownMaxWait;
+        $deadline = microtime(true) + $waitLimit;
         while ($this->plFinished < $this->decodeWorkers && microtime(true) < $deadline) {
+            if ($this->forceExitRequested) break;
             $read = [];
             foreach ($this->plSocks as $id => $sock) {
                 if (is_resource($sock) && !isset($this->plDead[$id])) $read[$id] = $sock;
@@ -1140,6 +1436,8 @@ class Flv2HlsCompact
             @proc_close($p);
         }
         $this->plProcesses = [];
+        // 卡死/强制收回：worker 已无法正常完成 ENDLIST 收尾，主进程兜底补写
+        if ($this->plForceStopped) $this->forceWriteEndlist();
         $shutdownElapsed = microtime(true) - $shutdownStart;
         if ($this->plFinished >= $this->decodeWorkers) {
             $this->log(sprintf('收尾完成（%.2fs），ENDLIST 已写入', $shutdownElapsed));
@@ -1183,6 +1481,18 @@ class Flv2HlsCompact
         $this->log("开始拉流: {$pullStart}，结束拉流: {$pullEnd}");
         $this->log(sprintf('初始化耗时: %.1fs，拉流时长: %.1fs，收尾转码耗时: %.1fs', $initElapsed, $pullElapsed, $tailElapsed));
         $this->log('总耗时: ' . round($elapsed, 1) . "s，送转码tag: {$this->tagsFed} (视频{$this->videoTags}/音频{$this->audioTags})");
+        // 源时间轴跨度 / 拉流墙钟：正常应接近 1.0；>1.1 说明时间轴被放大（拉流重映射/源时间戳异常）
+        if ($pullElapsed > 1.0 && $this->firstMediaTimestamp !== null && $this->lastMediaTimestamp !== null) {
+            $mediaSpan = max(0, $this->lastMediaTimestamp - $this->firstMediaTimestamp) / 1000;
+            $ratio = $mediaSpan / $pullElapsed;
+            $abnormal = $ratio > 1.1;
+            $this->log(sprintf(
+                '源时间轴跨度: %.1fs，拉流时长: %.1fs，比值 %.2f%s（时间戳跳变告警 %d 次）',
+                $mediaSpan, $pullElapsed, $ratio,
+                $abnormal ? ' —— 超过1.1，时间轴被放大，请检查拉流端重映射与源时间戳' : '',
+                $this->tsJumpWarnings
+            ), $abnormal ? 'warning' : 'info');
+        }
         $this->log("播放列表: {$this->streamDir}index.m3u8");
         $this->log('========================================');
     }
