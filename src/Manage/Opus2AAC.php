@@ -4,11 +4,11 @@ namespace Xiaosongshu\Flv2mp4\Manage;
 
 use InvalidArgumentException;
 use RuntimeException;
-use Xiaosongshu\Flv2mp4\Opus\OggOpusReader;
-use Xiaosongshu\Flv2mp4\Opus\OpusToAacTranscoder;
 
 /**
  * @purpose 将 Ogg Opus 音频转码为 AAC-LC ADTS。
+ * 并行模式：Opus 解码子进程（应用 outputGainQ8）与 AAC 编码子进程通过管道同时进行。
+ * 解码输出以 f64 浮点传输，避免 16-bit 量化改变既有转码结果。
  * @author yanglong
  * @time 2026年9月8日17:38:38
  */
@@ -29,52 +29,34 @@ final class Opus2AAC
 
     public function run(): array
     {
-        $ogg = @file_get_contents($this->inputFile);
-        if ($ogg === false) {
-            throw new RuntimeException("无法读取 Opus 文件: {$this->inputFile}");
-        }
-        $reader = new OggOpusReader($ogg);
-        if ($reader->channels() !== 1 && $reader->channels() !== 2) {
-            throw new InvalidArgumentException('当前 Opus2AAC 只支持单声道或双声道 Ogg Opus');
-        }
-        if (($reader->head()['mappingFamily'] ?? null) !== 0) {
-            throw new InvalidArgumentException('当前 Opus2AAC 只支持 mapping-family-0 Ogg Opus');
-        }
-        $aac = OpusToAacTranscoder::transcodeOgg($ogg, $this->bitrate);
-        if ($aac === '') {
-            throw new RuntimeException('Opus 未生成 AAC 数据');
-        }
-        $dir = dirname($this->outputFile);
-        if (!is_dir($dir) && !mkdir($dir, 0777, true) && !is_dir($dir)) {
-            throw new RuntimeException("无法创建输出目录: {$dir}");
-        }
-        $part = $this->outputFile . '.part.' . bin2hex(random_bytes(6));
-        try {
-            if (file_put_contents($part, $aac) === false || !rename($part, $this->outputFile)) {
-                throw new RuntimeException("无法生成 AAC 文件: {$this->outputFile}");
-            }
-            return [
-                'output' => $this->outputFile,
-                'sampleRate' => $reader->sampleRate(),
-                'channels' => $reader->channels(),
-                'bitrate' => $this->bitrate,
-                'bytes' => strlen($aac),
-                'opusPackets' => count($reader->audioPackets()),
-                'duration' => $this->duration($reader),
-            ];
-        } finally {
-            if (is_file($part)) {
-                @unlink($part);
-            }
-        }
-    }
-
-    private function duration(OggOpusReader $reader): float
-    {
-        $samples = 0;
-        foreach ($reader->audioPackets() as $packet) {
-            $samples += $packet['durationSamples'] - $packet['trimStartSamples'] - $packet['trimEndSamples'];
-        }
-        return $samples / $reader->sampleRate();
+        $result = AudioParallelPipeline::run(
+            'opus',
+            $this->inputFile,
+            'aac',
+            $this->outputFile,
+            // 与原进程内 OpusToAacTranscoder 一致：码率直接使用传入值，不按声道折算
+            ['bitrate' => $this->bitrate, 'pcm' => 'f64'],
+            function (array $meta): void {
+                if ($meta['channels'] !== 1 && $meta['channels'] !== 2) {
+                    throw new InvalidArgumentException('当前 Opus2AAC 只支持单声道或双声道 Ogg Opus');
+                }
+                if ($meta['mappingFamily'] !== 0) {
+                    throw new InvalidArgumentException('当前 Opus2AAC 只支持 mapping-family-0 Ogg Opus');
+                }
+            },
+            null,
+            // 原 transcodeOgg 始终应用 OpusHead 的 outputGainQ8；
+            // worker 解码选项名为 --gain-q8（与 audio-worker.php decodeOpus 参数一致）
+            ['gain-q8' => 'auto', 'pcm' => 'f64']
+        );
+        return [
+            'output' => $this->outputFile,
+            'sampleRate' => $result['decode']['sampleRate'],
+            'channels' => $result['decode']['channels'],
+            'bitrate' => $result['encode']['bitrate'],
+            'bytes' => $result['encode']['bytes'],
+            'opusPackets' => $result['decode']['packets'],
+            'duration' => $result['decode']['seconds'],
+        ];
     }
 }

@@ -98,14 +98,14 @@ try {
         match ($format) {
             'wav' => decodeWav($file),
             'aac' => decodeAac($file),
-            'opus' => decodeOpus($file, $options['gain-q8'] ?? ''),
+            'opus' => decodeOpus($file, $options['gain-q8'] ?? '', $options['pcm'] ?? 's16'),
             'mp3' => decodeMp3($file),
         };
     } else {
         match ($format) {
             'wav' => encodeWav($file, (int)($options['rate'] ?? 0), (int)($options['channels'] ?? 0)),
             'mp3' => encodeMp3($file, (int)($options['rate'] ?? 0), (int)($options['channels'] ?? 0), (int)($options['bitrate'] ?? 128000)),
-            'aac' => encodeAac($file, (int)($options['rate'] ?? 0), (int)($options['channels'] ?? 0), (int)($options['bitrate'] ?? 128000)),
+            'aac' => encodeAac($file, (int)($options['rate'] ?? 0), (int)($options['channels'] ?? 0), (int)($options['bitrate'] ?? 128000), $options['pcm'] ?? 's16'),
             'opus' => encodeOpus($file, (int)($options['rate'] ?? 0), (int)($options['channels'] ?? 0), (int)($options['pre-skip'] ?? 312)),
         };
     }
@@ -210,7 +210,7 @@ function decodeAac(string $inputFile): void
 }
 
 /** Ogg Opus → PCM：元数据早发，逐包解码（trim 与 Opus2Wav/Opus2Mp3 语义一致） */
-function decodeOpus(string $inputFile, string $gainQ8): void
+function decodeOpus(string $inputFile, string $gainQ8, string $pcm = 's16'): void
 {
     $reader = OggOpusReader::fromFile($inputFile);
     $channels = $reader->channels();
@@ -223,7 +223,7 @@ function decodeOpus(string $inputFile, string $gainQ8): void
         'packets' => count($packets),
         'mappingFamily' => $reader->head()['mappingFamily'] ?? null,
     ]);
-    // 仅 Opus2Mp3 路径应用 outputGainQ8（与原 Opus2Mp3 行为一致；Opus2Wav 不应用）
+    // 调用方通过 --gain-q8 决定是否应用 outputGainQ8（Opus2AAC 应用；Opus2Wav 不应用）
     $gain = 1.0;
     if ($gainQ8 === 'auto') {
         $q8 = (int)($reader->head()['outputGainQ8'] ?? 0);
@@ -251,7 +251,9 @@ function decodeOpus(string $inputFile, string $gainQ8): void
             }
             unset($sample);
         }
-        $buffer .= Pcm16::floatsToS16le($samples, $channels);
+        $buffer .= $pcm === 'f64'
+            ? pack('e*', ...$samples)
+            : Pcm16::floatsToS16le($samples, $channels);
         if (strlen($buffer) >= 262144) {
             writeAll(STDOUT, $buffer);
             $buffer = '';
@@ -434,7 +436,7 @@ function encodeMp3(string $outputFile, int $rate, int $channels, int $bitrate): 
 }
 
 /** PCM → AAC-LC ADTS：码率由父进程按声道数折算后传入（镜像 Wav2Aac/Mp32Aac） */
-function encodeAac(string $outputFile, int $rate, int $channels, int $bitrate): void
+function encodeAac(string $outputFile, int $rate, int $channels, int $bitrate, string $pcm = 's16'): void
 {
     if ($rate !== 48000) {
         throw new InvalidArgumentException('AacLcEncoder 只支持 48000 Hz 输入');
@@ -450,7 +452,7 @@ function encodeAac(string $outputFile, int $rate, int $channels, int $bitrate): 
         throw new RuntimeException("无法创建 AAC 文件: {$part}");
     }
     try {
-        $frameBytes = $channels * 2;
+        $frameBytes = $channels * ($pcm === 'f64' ? 8 : 2);
         $pending = '';
         while (!feof(STDIN)) {
             $data = fread(STDIN, 1024 * 1024);
@@ -465,7 +467,10 @@ function encodeAac(string $outputFile, int $rate, int $channels, int $bitrate): 
             if ($usable === 0) {
                 continue;
             }
-            writeAll($output, $encoder->encodeS16le(substr($pending, 0, $usable)));
+            // f64 传输保持解码端浮点精度，供 Opus→AAC 与既有进程内转码逐字节一致
+            writeAll($output, $pcm === 'f64'
+                ? $encoder->encodeFloat(unpack('e*', substr($pending, 0, $usable)))
+                : $encoder->encodeS16le(substr($pending, 0, $usable)));
             $pending = substr($pending, $usable);
         }
         if ($pending !== '') {

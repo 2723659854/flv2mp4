@@ -85,6 +85,9 @@ final class AudioParallelPipeline
             if (isset($options['preSkip'])) {
                 $encCmd[] = '--pre-skip=' . (int)$options['preSkip'];
             }
+            if (isset($options['pcm'])) {
+                $encCmd[] = '--pcm=' . $options['pcm'];
+            }
             $enc = @proc_open($encCmd, [
                 0 => ['pipe', 'r'],
                 1 => ['file', $nullDevice, 'w'],
