@@ -557,6 +557,7 @@ WatermarkUtil::generateFromImage(__DIR__."/watermark_80x16.png",__DIR__ . '/test
 - Originally built to serve [xiaosongshu/rtmp_server](https://github.com/2723659854/rtmp-server).
 - Recommended static analysis: [PHPStan](https://phpstan.org/) Level 8.
 - H.264 re‑encoding uses a distributed multi‑process architecture to fully utilize multiple CPU cores; if the server has a single core, it is recommended to disable distributed mode.
+- If you are using PHP 8.4.3 TS, opcache.jit must be set to function. Do not use the default tracing mode; otherwise, it will cause issues with H.264 re-encoding.
 
 ## Open Source License & Disclaimer
 

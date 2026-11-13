@@ -540,6 +540,7 @@ WatermarkUtil::generateFromImage(__DIR__."/watermark_80x16.png",__DIR__ . '/test
 - 当前项目最初主要是为 [xiaosongshu/rtmp_server](https://github.com/2723659854/rtmp-server) 提供服务
 - 建议使用 [PHPStan](https://phpstan.org/) Level 8 进行静态分析
 - H.264 重编码采用分布式多进程架构，充分利用多CPU资源，若服务器是单核则建议关闭分布式。
+- 若使用php8.4.3ts 的Opcache.jit需要设置为function，不要使用默认的tracing，否则h.264重编码有问题
 
 ## 开源协议 & 免责声明
 
