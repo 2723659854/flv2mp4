@@ -1242,6 +1242,9 @@ class PurePhpHlsGenerator
 
         $sampleRates = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350];
         $sampleRate = $sampleRates[$this->samplingFrequencyIndex] ?? 44100;
+
+        /** ，采样率就是计算机一秒钟采样次数，一帧音频的真实时长 = 1 / 采样率 （单位：秒）  ，在 AAC 音频编码中，标准硬性规定：把 1024 个采样点打包成一帧（Frame）*/
+        /** 表示一帧占用的时长 */
         $frameDuration = (int)((1024 * 90000) / $sampleRate);
 
         if (is_resource($this->segmentWriter['handle'])) {
@@ -1265,6 +1268,7 @@ class PurePhpHlsGenerator
     private function writeAudioPayload(string $payload, bool $wrapAdts, ?int $pts90 = null): void
     {
         if (!is_resource($this->segmentWriter['handle']) || $payload === '') return;
+        // aac音频写adts头，告诉音频长度
         if ($wrapAdts) $payload = $this->createADTSHeader(strlen($payload)) . $payload;
         if ($pts90 === null) return;
         $pes = $this->createPES(0xC0, $payload, $pts90 + $this->tsPtsOffsetTicks, null);
@@ -1296,14 +1300,44 @@ class PurePhpHlsGenerator
         return $aacRaw;
     }
 
+    /**
+     * 解析avc的解码配置sps，pps
+     * @param string $data
+     * @return void
+     * sps（Sequence Parameter Set）: 视频全局配置
+     * 分辨率：宽、高（比如 720x1098）。
+     *
+     * Profile 和 Level：比如你是 Baseline 还是 High，Level 3.1 还是 4.0。
+     *
+     * 帧率（FPS）：时间基、帧率相关参数。
+     *
+     * 色度采样格式：比如 YUV420p。
+     *
+     * 参考帧数量：解码器需要准备多大的内存（DPB）来存历史帧。
+     *
+     * 宏块对齐信息（Cropping）：如果分辨率不是 16 的倍数，最后要裁掉多少像素。
+     *
+     * pps（Picture Parameter Set）:当前帧的局部配置
+     * 熵编码模式：这一帧是用 CAVLC 还是 CABAC 解？
+     *
+     * 初始 QP（量化参数）：亮度和色度的初始基准值是多少。
+     *
+     * 去块滤波（Deblocking）的强度偏移：滤波器的默认参数。
+     *
+     * 切片组（Slice Group）信息：帧怎么分片。
+     *
+     * 加权预测标志：是否开启了 P 帧或 B 帧的加权预测。
+     */
     private function parseAVCDecoderConfigurationRecord(string $data): void
     {
         $offset = 5;
+        // 获取sps数
         $numSps = ord($data[$offset]) & 0x1F;
         $offset++;
         $spsPpsBuf = '';
 
         for ($i = 0; $i < $numSps; $i++) {
+            // 解析sps信息
             $len = unpack('n', substr($data, $offset, 2))[1];
             $offset += 2;
             $spsData = substr($data, $offset, $len);
@@ -1312,7 +1346,9 @@ class PurePhpHlsGenerator
             $spsClean = NalUtil::removeEmulationPrevention($spsData);
             $spsPpsBuf .= "\x00\x00\x00\x01" . $spsData;
 
+            // 如果原视频信息没有初始化
             if (!$this->srcInitialized) {
+                // 解析sps数据
                 $rbspSps = substr($spsClean, 1);
                 $this->srcSpsData = $rbspSps;
                 $this->decoder->decode([['type' => 7, 'data' => $rbspSps]], true);
@@ -1349,6 +1385,7 @@ class PurePhpHlsGenerator
      * AVCC(4字节长度前缀) 转 AnnexB(0001起始码)
      * 注意：AVCC 中的 NAL 单元本身已包含防竞争字节（EP3），此处只替换长度前缀为起始码，
      * 绝不能再次转义，否则 00 00 03 xx 会被写成 00 00 03 03 xx，导致 H264 码流非法。
+     * @comment 这个是把flv的视频解码配置sps,pps解码出来，转换为mpegts的AnnexB格式，就是nalu数据前加上\x00\x00\x00\x01
      */
     private function avccToAnnexB(string $data): string
     {
@@ -1396,56 +1433,82 @@ class PurePhpHlsGenerator
      */
     private function parseAudioSpecificConfig(string $asc): void
     {
+        // 安全检查：ASC 最少需要 2 个字节（16个比特）才能表达基础信息。如果是空的或太短，直接退出。
         if (strlen($asc) < 2) return;
         $bits = '';
+        // 把 ASC 字节流按单个字节切分开，遍历每一个字节（$b 就是单个字符）。
         foreach (str_split($asc) as $b) {
+            // 把单个字符转换成 0~255 的整数（ASCII 码值）。
             $val = ord($b);
+            // 因为一个字节是 8 个比特，所以从高位（第7位）到低位（第0位）循环 8 次。
             for ($i = 7; $i >= 0; $i--) {
+                // 核心位运算：把整数右移 $i 位，然后和 1 做与运算（& 1），只保留最低位。 最终，$bits 会变成一个类似 "0001010000110000" 的长字符串。
                 $bits .= (($val >> $i) & 1) ? '1' : '0';
             }
         }
+        // 游标位置，记录我们当前读到第几个比特了。
         $pos = 0;
+        // 记录总比特数，防止越界读取。
         $maxBit = strlen($bits);
 
+        //从 $pos 开始，截取 5 个比特（这是标准规定）bindec 把二进制字符串转成十进制整数。比如读到 "00010" (2)，说明是 AAC-LC；读到 "00101" (5) 说明是 HE-AAC(SBR)。
         $audioObjType = (int)bindec(substr($bits, $pos, 5));
-        $pos += 5;
+        $pos += 5;// 游标往前走 5 位。
+        // 初始化 SBR（频带复制，也就是 HE-AAC 技术）的默认状态。
         $this->sbrPresent = false;
         $this->extensionSamplingIndex = null;
-
+        // 如果类型是 5（HE-AAC）或 29（HE-AACv2/PS），说明这个音频使用了 SBR 技术。这种格式比较奇葩，它会在头部插入一段“扩展采样率”信息，然后再写核心音频类型。
         if ($audioObjType === 5 || $audioObjType === 29) {
+            // 标记当前音频包含 SBR。
             $this->sbrPresent = true;
+            // 越界保护：保证接下来的 4 个比特是存在的。
             if ($pos + 4 > $maxBit) return;
+            // 读取 4 个比特的“扩展采样率索引”。
             $this->extensionSamplingIndex = (int)bindec(substr($bits, $pos, 4));
             $pos += 4;
+            // 如果索引是 15（0x0F），说明采样率不是查表得来的，而是后面直接写了 24 个比特的真实值。直接跳过这 24 位。
             if ($this->extensionSamplingIndex === 0x0F) $pos += 24;
             if ($pos + 5 > $maxBit) return;
+            // 跳过扩展信息后，再读 5 个比特，这次读到的才是真正的核心编码类型（比如 2=AAC-LC）。
             $audioObjType = (int)bindec(substr($bits, $pos, 5));
             $pos += 5;
         }
+        // 把解析出来的最终类型存到类属性里。
         $this->audioObjectType = $audioObjType;
 
         if ($pos + 4 > $maxBit) return;
+        // 读取 4 个比特的“采样率索引”。 比如读到 "0011" (3)，结合你之前的数组 [96000, 88200, 64000, 48000...]，索引 3 就是 48000Hz。
         $this->samplingFrequencyIndex = (int)bindec(substr($bits, $pos, 4));
         $pos += 4;
+        // 同理，如果是 15，说明后面跟着 24 个比特的真实采样率值，直接跳过。
         if ($this->samplingFrequencyIndex === 0x0F) $pos += 24;
 
         if ($pos + 4 > $maxBit) return;
+        // 读取 4 个比特的“声道配置”。读到 "0001" (1) 就是单声道(mono)；"0010" (2) 就是立体声(stereo)。读到就结束了。
         $this->channelConfiguration = (int)bindec(substr($bits, $pos, 4));
     }
 
     /**
      * 生成ADTS AAC头
+     * @comment 就是aac的音频配置，二进制位运算，对硬件来说是最高效、最省电的，播放器一般使用硬件芯片与非门电路解析，视频解码的芯片是VPU，
      */
     private function createADTSHeader(int $aacRawLen): string
     {
+        /** 编码等级 */
         $profile = $this->audioObjectType - 1;
         if ($profile < 0) $profile = 1;
+        /** 采样率指针 */
         $freqIdx = $this->samplingFrequencyIndex;
         if ($freqIdx < 0 || $freqIdx > 11) $freqIdx = 4;
+        /** 声道配置 */
         $chCfg = $this->channelConfiguration;
         if ($chCfg < 0 || $chCfg > 7) $chCfg = 2;
+        /** 音频帧长度 = 数据长度 + 头长度7 */
         $frameTotalLen = $aacRawLen + 7;
 
+        // 将这些信息塞到7个字节里面，合计56bite，这个属于压缩存储空间的写法，而且转换为10机器码方便芯片直接读取处理，1010表示电路，可以直接控制芯片电路，
+        // 假设调整为json字符串，则需要调用CPU的通用电路解析，判断语法等操作，最后才还原为1010机器码，中间会浪费很多时间
+        // 音视频设计的时候，机器方便优先作为第一原则，并不是为了人读写方便
         return pack('CCCCCCC',
             0xFF, 0xF1,
             (($profile & 0x03) << 6) | (($freqIdx & 0x0F) << 2) | (($chCfg >> 2) & 0x01),
