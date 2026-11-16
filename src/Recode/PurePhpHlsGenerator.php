@@ -172,14 +172,21 @@ class PurePhpHlsGenerator
             $this->presetAudioSoundFormat = (int)$config['sourceAudioSoundFormat'];
         }
 
+        // 解码器
         $this->decoder = new H264Decoder();
+        // 缩放器
         $this->scaler = new VideoScaler();
-
+        // 编码器
         $this->encoder = new H264Encoder();
+        // 运动估计子进程
         $this->encoder->motionWorkers = max(1, (int)($config['motionWorkers'] ?? 8));
+        // 设置视频编码压缩等级
         $this->encoder->setProfile($config['profile'] ?? 'baseline');
+        // 开启快速运动估计算法
         if (!empty($config['fastMotion'])) $this->encoder->setFastMotion(true);
+        // 开启8*8qp偏移
         if (isset($config['intra8x8QpOffset'])) $this->encoder->intra8x8QpOffset = max(-51, min(51, (int)$config['intra8x8QpOffset']));
+        // 构建输出目录
         if (!is_dir($this->outputDir)) {
             mkdir($this->outputDir, 0777, true);
         } else {
@@ -192,10 +199,12 @@ class PurePhpHlsGenerator
             if (is_file($this->outputDir . '/index.m3u8')) @unlink($this->outputDir . '/index.m3u8');
         }
 
+        // 加载水印
         if (!empty($config['watermark']) && !empty($config['watermarkFile'])) {
             $this->watermark = $this->loadWatermarkFile($config['watermarkFile']);
         }
 
+        // 确保播放时间戳大于解码时间戳
         // B 帧模式：TS 层 PTS 统一后移 2 帧时长（重排延迟），保证每帧 pts>=dts。
         // 音视频同移同一常量，A/V 相对同步不变；偏移量用 fps 计算（常数即可，
         // 只需大于最大 pts<dts 缺口 1 帧，无需与 worker 有效帧时长严格相等）
@@ -239,34 +248,47 @@ class PurePhpHlsGenerator
         if (($this->segmentWriter['sequence'] ?? 0) === 0) $this->resetPlaylists();
     }
 
+    /**
+     * 加载水印文件
+     * @param string $watermarkFile
+     * @return int[]
+     */
     private function loadWatermarkFile(string $watermarkFile): array
     {
+        // 检测文件是否存在
         if (!file_exists($watermarkFile)) {
             throw new \RuntimeException("水印文件不存在: {$watermarkFile}");
         }
 
+        // 读取水印文件内容
         $wmData = file_get_contents($watermarkFile);
         if ($wmData === false || $wmData === '') {
             throw new \RuntimeException("无法读取水印文件: {$watermarkFile}");
         }
 
+        // 通过水印文件的名称解析尺寸
         $basename = basename($watermarkFile, '.yuv');
         if (preg_match('/_(\d+)x(\d+)$/', $basename, $matches)) {
             $wmWidth = (int)$matches[1];
             $wmHeight = (int)$matches[2];
         } else {
+            // 如果获取不到尺寸，则使用默认的尺寸
             $wmWidth = 80;
             $wmHeight = 16;
         }
 
+        // Y尺寸 = 水印的宽 x 高
         $wmYSize = $wmWidth * $wmHeight;
+        // Uv尺寸 = Y方向右移2位
         $wmUvSize = $wmYSize >> 2;
+        // 计算水印内容长度
         $expectedSize = $wmYSize + $wmUvSize * 2;
-
+        // 校验水印内容的长度是否合法
         if (strlen($wmData) < $expectedSize) {
             throw new \RuntimeException("水印文件尺寸不匹配: 期望 {$expectedSize} 字节, 实际 " . strlen($wmData) . " 字节");
         }
 
+        // 水印文件内容是yuv：亮度 + 蓝色色度 + 红色色度 拼接的 = 水印长度
         return [
             'width' => $wmWidth,
             'height' => $wmHeight,
@@ -276,28 +298,49 @@ class PurePhpHlsGenerator
         ];
     }
 
+    /**
+     * 渲染水印
+     * @param string $yuvData 视频帧的yuv文件
+     * @param int $frameW 视频帧宽度
+     * @param int $frameH 视频帧高度
+     * @param array $wm 水印文件内容
+     * @return string 渲染完成后的视频帧内容 = 原始视频帧的yuv + 替换水印文件的yuv
+     */
     private function applyWatermarkToFrame(string $yuvData, int $frameW, int $frameH, array $wm): string
     {
+        // 如果水印文件的尺寸比视频帧大，那么就不渲染，因为水印文件已经遮蔽了视频内容
         if ($wm['width'] > $frameW || $wm['height'] > $frameH) {
             return $yuvData;
         }
 
+        // 计算水印文件亮度尺寸
         $ySize = $frameW * $frameH;
+        // 计算水印文件蓝色色度尺寸
         $uvW = $frameW >> 1;
+        // 计算水印文件红色色度尺寸
         $uvH = $frameH >> 1;
+        // 水印文件的色度的长度
         $uvSize = $uvW * $uvH;
 
+        // 初始化需要替换的x，y轴的需要替换的yuv终点的坐标，这个表示水印紧贴左上角，就是水印的偏移量是0
         $dstX = 0;
         $dstY = 0;
 
+        // 按水印文件的高度范围内，逐行搜索
         for ($row = 0; $row < $wm['height']; $row++) {
+            // 总结来说，下面两行代码，就是换行
+            // 初始化原始帧yuv每一行水印的起始坐标
             $srcOffset = $row * $wm['width'];
+            // 初始化生成帧yuv每一行水印的起点坐标
             $dstOffset = ($dstY + $row) * $frameW + $dstX;
+            // 每一排逐像素替换视频帧的内容，从左往右开始替换
             for ($col = 0; $col < $wm['width']; $col++) {
+                // 替换亮度
                 $yuvData[$dstOffset + $col] = $wm['y'][$srcOffset + $col];
             }
         }
 
+        // 水印文件色度的宽和高
         $wmUvW = $wm['width'] >> 1;
         $wmUvH = $wm['height'] >> 1;
         $dstUvX = $dstX >> 1;
@@ -306,11 +349,15 @@ class PurePhpHlsGenerator
         $uOffset = $ySize;
         $vOffset = $ySize + $uvSize;
 
+        // 替换色度，逐行处理
         for ($row = 0; $row < $wmUvH; $row++) {
             $srcOffset = $row * $wmUvW;
             $dstOffset = ($dstUvY + $row) * $uvW + $dstUvX;
+            // 逐列处理
             for ($col = 0; $col < $wmUvW; $col++) {
+                // 替换蓝色色度
                 $yuvData[$uOffset + $dstOffset + $col] = $wm['u'][$srcOffset + $col];
+                // 替换红色色度
                 $yuvData[$vOffset + $dstOffset + $col] = $wm['v'][$srcOffset + $col];
             }
         }
@@ -326,7 +373,10 @@ class PurePhpHlsGenerator
      */
     public function processFlv(string $flvFile): void
     {
+        /** 文件检测 */
         if (!file_exists($flvFile)) throw new \Exception("FLV file not found: {$flvFile}");
+
+        /** 是否开启多进程处理 */
         if ($this->multi) {
             // 严格按配置值创建——motionWorkers 配置多少就是每解码 worker 带多少运动进程。
             // fastMotion 只在 H264Encoder.setFastMotion 里缩小运动搜索范围到 8px，不干预进程数。
@@ -334,32 +384,42 @@ class PurePhpHlsGenerator
             return;
         }
 
+        /** 读取flv文件内容，并解析flv的tag */
         $flvData = file_get_contents($flvFile);
         FlvParse::setFlv($flvData);
 
         // 单进程路径：分片头 PMT 在首个视频帧写出，此前的音频 tag 可能尚未见到，
         // 先扫描首个音频 tag 的 SoundFormat 以决定音频 stream_type
         if ($this->presetAudioSoundFormat === null) {
+            // 遍历所有的flv标签单元
             foreach (FlvParse::getTags() as $probeTag) {
+                // 如果不是音频tag，则跳过
                 if (!property_exists($probeTag, 'tagType') || $probeTag->tagType !== 8) continue;
                 $probeBody = $probeTag->body ?? '';
+                // 解析音频编码格式采样率
                 if (strlen($probeBody) >= 1) $this->presetAudioSoundFormat = (ord($probeBody[0]) >> 4) & 0x0F;
                 break;
             }
         }
 
+        // 初始化统计数据
         $frameCount = 0;
         $videoCount = 0;
+        /** 遍历所有数据帧 */
         foreach (FlvParse::getTags() as $tag) {
             if (property_exists($tag, 'tagType')) {
+                /** 处理视频帧 */
                 if ($tag->tagType === 9) {
                     $this->handleVideoFrame($tag);
                     $videoCount++;
                 }
+                /** 处理音频帧 */
                 elseif ($tag->tagType === 8) $this->handleAudioFrame($tag);
             }
+            /** 统计数据帧 */
             $frameCount++;
-            if ($frameCount % 10 === 0) echo "Processed {$frameCount} frames ({$videoCount} video)\n";
+            if ($frameCount % 50 === 0) echo "Processed {$frameCount} frames ({$videoCount} video)\n";
+            /** 如果当前处理的视频帧达到设置的最大帧数，那么则停止 */
             if ($this->maxFrames !== null && $videoCount >= $this->maxFrames) {
                 echo "Reached max frames limit ({$this->maxFrames}), stopping...\n";
                 break;
@@ -396,14 +456,23 @@ class PurePhpHlsGenerator
         $this->closeAllSegments();
     }
 
-    /** EOF 冲洗转码器尾部帧（写入当前分片） */
+    /**
+     * EOF 冲洗转码器尾部帧（写入当前分片）
+     * @return void
+     * @comment 这里是处理音频转码的收尾，不需要转码的则不会处理
+     */
     private function flushAudioTranscoder(): void
     {
         if ($this->audioMode !== AudioPolicy::MODE_TRANSCODE || $this->audioTranscoder === null) return;
+        /** 获取真实采样率 */
         $rate = $this->audioOutputRate();
+        /** 将剩余的音频帧输入磁盘 */
         foreach ($this->audioTranscoder->flush() as $frame) {
+            // 根据采样率和时钟 计算播放时间戳 Pts
             $pts = (int)round(($this->audioAnchorMs + $this->audioOutputSamples * 1000 / max(1, $rate)) * 90);
+            // 音频输出采样率
             $this->audioOutputSamples += AudioPolicy::samplesPerFrame($this->audioOutputCodec);
+            // 写入音频数据，编码格式，pts播放时间戳
             $this->writeAudioPayload($frame['data'], $this->audioOutputCodec === AudioPolicy::CODEC_AAC, $pts);
         }
     }
@@ -415,8 +484,15 @@ class PurePhpHlsGenerator
         return $sampleRates[$this->samplingFrequencyIndex] ?? 44100;
     }
 
+    /**
+     * 处理数据帧逻辑
+     * @param array $metadata 帧媒体数据
+     * @param string $payload 载荷
+     * @return void
+     */
     public function processPipelineEvent(array $metadata, string $payload): void
     {
+        // 构造数据帧类
         $tag = new class($metadata, $payload) {
             public int $tagType;
             public string $body;
@@ -436,9 +512,13 @@ class PurePhpHlsGenerator
                 return !empty($this->metadata['keyFrame']);
             }
         };
+        // 如果当前帧已解码或者已编码
         if (!empty($metadata['decoded']) || !empty($metadata['encoded'])) {
+            // 解析数据载荷长度
             $bodyLength = unpack('N', substr($payload, 0, 4))[1];
+            // 解析载荷
             $tag->body = substr($payload, 4, $bodyLength);
+            // 真实的数据，音频，视频
             $this->pipelineEncodedPayload = substr($payload, 4 + $bodyLength);
             $this->pipelineEncodedVariant = $metadata['encodedVariant'] ?? null;
             // 暂存 worker 传来的 B 帧关键元数据（encoded/ctsTicks/dtsMs），handleVideoFrame 里消费
@@ -450,14 +530,18 @@ class PurePhpHlsGenerator
             ];
             $metadata['compositionTime'] = (int)($metadata['compositionTime'] ?? 0);
         }
+        /** 这里是抽帧逻辑 */
         // 抽帧丢弃帧：decoder 已解码维持参考链，输出端不编码、不写 TS，时间轴由保留帧推进
         if ($tag->tagType === 9 && !empty($metadata['drop'])) {
             $this->pipelineEncodedPayload = '';
             $this->pipelineEncodedVariant = null;
             return;
         }
+        // 处理视频帧
         if ($tag->tagType === 9) $this->handleVideoFrame($tag);
+        // 处理音频帧
         elseif ($tag->tagType === 8) $this->handleAudioFrame($tag);
+        // 清空临时状态和数据
         $this->pipelineEncodedPayload = '';
         $this->pipelineEncodedVariant = null;
         $this->pipelineFrameMeta = null;
@@ -482,17 +566,22 @@ class PurePhpHlsGenerator
         $body = $tag->body ?? null;
         if ($body === null) return;
 
+        // 读取视频帧载荷
         $videoData = $this->videoFrameDataRead($body);
         if (!$videoData) return;
 
+        // 解析avc包
         $avc = $this->avcPacketRead($videoData['data']);
         if (!$avc) return;
 
+        // 如果是avc序列帧
         if ($avc['avcPacketType'] === self::AVC_PACKET_TYPE_SEQUENCE_HEADER) {
+            // 解析avc的解码配置并暂存
             $this->parseAVCDecoderConfigurationRecord($avc['data']);
             return;
         }
 
+        // 如果avc不是nalu视频真实数据，丢弃
         if ($avc['avcPacketType'] !== self::AVC_PACKET_TYPE_NALU) return;
 
         // 关键帧判定：分布式管线下解码内容因 POC 重排滞后于 tag，body 首字节不可信，
@@ -503,11 +592,12 @@ class PurePhpHlsGenerator
             : ($videoData['frameType'] === self::VIDEO_FRAME_TYPE_KEY_FRAME);
         $timestamp = method_exists($tag, 'getTime') ? $tag->getTime() : 0;
 
-        // 首关键帧初始化时间基准
+        // 首关键帧初始化时间基准，需要用这个时间来处理hls的时间戳问题，不能使用自然时间戳，必须使用相对时间戳
         if ($this->baseTimestamp === null) {
             if (!$isKeyFrame) return;
             $this->baseTimestamp = $timestamp;
             $this->segmentStartTime = 0;
+            // 立即写入新切片
             $this->startSegment();
             // 时间基准建立后立即补放此前缓存的转码音频（源首个音频包可能先于首关键帧到达）
             $this->replayPreHeaderAudio();
@@ -516,6 +606,7 @@ class PurePhpHlsGenerator
         // 重编码流：worker 带 ctsTicks 时（B 帧 IBBP）直接用它（90kHz tick，无毫秒取整误差）；
         // 否则强制 cts=0 按均匀网格推进
         // 避免源流 cts 与重排后内容不配对导致 pts 倒挂（非单调 dts → muxer 报错）
+        // 从暂存区去除媒体数据
         $pm = $this->pipelineFrameMeta;
         if (is_array($pm) && !empty($pm['encoded']) && $pm['ctsTicks'] !== null) {
             $ctsTicks = (int)$pm['ctsTicks'];
@@ -530,6 +621,7 @@ class PurePhpHlsGenerator
         // B 模式编码序帧：worker 给出了真正的编码序 DTS（均匀网格），不走源流 timestamp
         $workerDtsMs = (is_array($pm) && !empty($pm['encoded']) && $pm['dtsMs'] !== null) ? (int)$pm['dtsMs'] : null;
         $workerFrameDurMs = (is_array($pm) && !empty($pm['encoded']) && $pm['frameDurMs'] !== null) ? (float)$pm['frameDurMs'] : null;
+        /** 处理视频帧，这个是视频帧的解码，缩放，加水印逻辑 */
         $job = $this->prepareVideoJob($avc['data'], $isKeyFrame, $timestamp - $this->baseTimestamp, $ctsTicks, $workerDtsMs, $workerFrameDurMs);
         if ($job === null) return;
 
@@ -540,8 +632,10 @@ class PurePhpHlsGenerator
             // 必须先清空在途标记：replayQueuedAudio 依赖它判断音频可直接写出，
             // 否则排队音频会被 handleAudioFrame 重新入队后清空，导致帧间音频全部丢失
             $this->pendingVideoJob = null;
+            // 写视频帧数据
             $this->emitPendingVideoFrame($pendingJob);
         }
+        //todo
         $this->replayQueuedAudio();
 
         // 上一帧与期间音频都已写入旧分片，此刻再为新帧切换分片
@@ -565,6 +659,7 @@ class PurePhpHlsGenerator
         // 注意：CTS 补码处理（FLV 24-bit compositionTime）已移到 handleVideoFrame，
         // 此处接收的 ctsTicks 已是 90kHz tick（源流毫秒×90 或 worker 直接提供），不再二次转换
 
+        /** 如果是关键帧，并且距离上一次切片时间大于设置的切片时间段 ，*/
         $segmentSwitch = $isKeyFrame
             && ($relativeTime - $this->segmentStartTime) >= ($this->segmentDuration * 1000);
 
@@ -587,6 +682,7 @@ class PurePhpHlsGenerator
             $frameDurMs = $fpsCfg > 0 ? 1000.0 / $fpsCfg : 0.0;
             $dts = (int)($relativeTime * 90);
             // 非 B 模式仍保留钳制（源流 timestamp 可能有碰撞）
+            /** 这里是防止dts重复的问题  */
             if ($this->lastVideoDtsTick !== null && $dts <= $this->lastVideoDtsTick) {
                 $dts = $this->lastVideoDtsTick + 1;
             }
@@ -600,29 +696,38 @@ class PurePhpHlsGenerator
 
         $skip = !is_resource($this->segmentWriter['handle']);
         $transcode = false;
+        // 不抽帧，需要编码
         if (!$skip && $this->pipelineEncodedVariant === null) {
+            // 目标尺寸，分辨率
             $targetW = $this->profile['width'] > 0 ? $this->profile['width'] : $this->srcWidth;
             $targetH = $this->profile['height'] > 0 ? $this->profile['height'] : $this->srcHeight;
+            /** 是否需要缩放： 如果视频帧原始尺寸！= 目标视频尺寸，那么就需要缩放 */
             $needTranscode = $this->srcInitialized && (
                 ($this->profile['width'] > 0 && $this->srcWidth !== $this->profile['width']) ||
                 ($this->profile['height'] > 0 && $this->srcHeight !== $this->profile['height']) ||
                 $this->watermark !== null
             );
 
+            // 需要缩放
             if ($needTranscode) {
+                // todo 在这里将视频帧数据解码为YUV(也就是亮度，蓝红色度)
                 $rawYuv = $this->decodeNaluToYuv($avcData);
                 if ($rawYuv !== null) {
+                    /** 第一步先缩放 */
                     $scaledYuv = ($targetW !== $this->srcWidth || $targetH !== $this->srcHeight)
                         ? $this->scaler->scaleYUV420P($rawYuv, $this->srcWidth, $this->srcHeight, $targetW, $targetH)
                         : $rawYuv;
+                    /** 第二步使用水印替换目标位置的yuv数据 */
                     if ($this->watermark !== null) {
                         $scaledYuv = $this->applyWatermarkToFrame($scaledYuv, $targetW, $targetH, $this->watermark);
                     }
+                    // 设置分辨率
                     $this->encoder->setResolution($targetW, $targetH);
                     $this->encoder->setBitrate($this->profile['bitrate']);
                     $this->encoder->setFps($this->profile['fps']);
                     $this->encoder->setQp($this->profile['qp'] ?? 26);
                     // 异步开始编码：worker 运动估计与上一帧的主进程 CAVLC 重叠
+                    /** 编码 */
                     $this->encoder->startFrame($scaledYuv, $isKeyFrame);
                     $transcode = true;
                 }
@@ -650,7 +755,9 @@ class PurePhpHlsGenerator
     {
         if (!empty($job['skip'])) return;
 
+        /** 取出视频帧数据 */
         $outputData = $job['avcData'];
+        /** 获取视频帧解码信息sps头 */
         $outputSpsPps = $this->spsPps;
         $isTranscoded = false;
 
@@ -664,10 +771,12 @@ class PurePhpHlsGenerator
             $outputData = '';
             $outputSpsPps = '';
             foreach ($encodedNals as $nal) {
+                /** 解析视频帧的nalu头表示符位置 */
                 $nalHeaderPos = $this->findNalHeaderPos($nal);
                 // encoder 返回裸 NAL（无 start code）时按位置 0 处理，不能跳过丢帧
                 if ($nalHeaderPos < 0) $nalHeaderPos = 0;
                 $nalType = ord($nal[$nalHeaderPos]) & 0x1F;
+                /** 解析媒体帧类型 */
                 if ($nalType === 7 || $nalType === 8) {
                     $outputSpsPps .= "\x00\x00\x00\x01" . substr($nal, $nalHeaderPos);
                 } else {
@@ -741,6 +850,10 @@ class PurePhpHlsGenerator
         if ($endTick > $this->segAudioEndTick) $this->segAudioEndTick = $endTick;
     }
 
+    /**
+     * 清空音频队列的aac帧
+     * @return void
+     */
     private function replayQueuedAudio(): void
     {
         foreach ($this->queuedAudioTags as $queuedTag) {
@@ -750,7 +863,12 @@ class PurePhpHlsGenerator
         $this->queuedAudioBytes = 0;
     }
 
-    /** 缓存首个视频关键帧确定时间基准前的音频 tag（有界；仅转码路径需要） */
+    /**
+     * 缓存首个视频关键帧确定时间基准前的音频 tag（有界；仅转码路径需要）
+     * @param $tag
+     * @return void
+     * @comment 防止丢失视频关键帧达到之前的音频帧，因为在实际场景中，可能音频帧先到
+     */
     private function queuePreHeaderAudio($tag): void
     {
         $this->preHeaderAudioBytes += strlen($tag->body ?? '');
@@ -760,6 +878,11 @@ class PurePhpHlsGenerator
         $this->preHeaderAudioTags[] = $tag;
     }
 
+    /**
+     * 清空暂存区的音频帧
+     * @return void
+     * @comment 将音频帧数据刷入到磁盘
+     */
     private function replayPreHeaderAudio(): void
     {
         if ($this->preHeaderAudioTags === []) return;
@@ -829,6 +952,7 @@ class PurePhpHlsGenerator
      */
     private function handleAudioFrame($tag): void
     {
+        /** 如果视频帧没有处理，那么音频帧先写入暂存区，*/
         // 有在途视频帧时音频排队，随该帧 finish 后按原 tag 顺序回放，维持 TS 音视频交错
         if ($this->pendingVideoJob !== null) {
             $this->queuedAudioBytes += strlen($tag->body ?? '');
@@ -839,13 +963,17 @@ class PurePhpHlsGenerator
             return;
         }
 
+        /** 检测音频帧是否合法 */
         $raw = $tag->body ?? null;
         if ($raw === null || strlen($raw) < 2) return;
 
+        /** 解析音频帧 */
         $info = AudioPolicy::parseFlvAudioTag($raw);
+        /** 音频编码格式 */
         $soundFormat = $info['soundFormat'];
         if ($this->detectedAudioSoundFormat === null) $this->detectedAudioSoundFormat = $soundFormat;
 
+        /** 如果音频编码格式为opus，pcm,并且未设置目标编码格式，那么就会执行转码为aac */
         $implicitAac = $this->audioTarget === null
             && ($info['codec'] === AudioPolicy::CODEC_OPUS || $info['codec'] === AudioPolicy::CODEC_PCM);
 
@@ -863,6 +991,7 @@ class PurePhpHlsGenerator
                 $this->writeAudioPayload($payload, false, $pts);
                 return;
             }
+            /** 原视音频如果无法解码，那么输出aac静音帧 */
             if ($soundFormat !== 10) {
                 // 源音频无解码器（Nellymoser/PCM 等）：输出静音 AAC 轨并如实声明
                 $this->handleUndecodableAudio($tag, $raw, $soundFormat, $info);
@@ -872,6 +1001,7 @@ class PurePhpHlsGenerator
                 $asc = $info['aacAsc'] ?? '';
                 if (strlen($asc) >= 2) {
                     $this->audioSpecificConfig = $asc;
+                    // 解析音频帧配置
                     $this->parseAudioSpecificConfig($asc);
                 }
                 return;
@@ -1050,6 +1180,10 @@ class PurePhpHlsGenerator
         return (int)round($this->audioPreSkip * 1000 / 48000);
     }
 
+    /**
+     * 将静音帧写入磁盘
+     * @return void
+     */
     private function writeSilentAudioFrame(): void
     {
         $source = $this->silentAudioSource;
