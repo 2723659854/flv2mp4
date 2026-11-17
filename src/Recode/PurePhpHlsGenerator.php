@@ -1228,6 +1228,12 @@ class PurePhpHlsGenerator
         }
     }
 
+    /**
+     * 打包aac音频
+     * @param $tag
+     * @param string $aacRaw
+     * @return void
+     */
     private function emitAacPassthrough($tag, string $aacRaw): void
     {
         $adts = $this->createADTSHeader(strlen($aacRaw));
@@ -1430,6 +1436,8 @@ class PurePhpHlsGenerator
 
     /**
      * 解析AAC ASC配置
+     * @comment aac的配置，比如aac-lc ,he-aac不同编码等级
+     * ord将字符转换为数字，使用char将数组还原为字符
      */
     private function parseAudioSpecificConfig(string $asc): void
     {
@@ -1521,6 +1529,16 @@ class PurePhpHlsGenerator
 
     /**
      * 构建PES包
+     * @note PAT理解为TS流的 “总目录”,PMT则是每个节目的 “章节详情”
+     * 包结构：ES（原始数据） -> 被装进 PES 包 -> 被切碎装进 TS 包。
+     *
+     * 从 FLV 里把 H.264 NALU 和 AAC 帧抠出来（拿到 ES）。
+     * 看看时间戳，给它们加上 PES 头（打上 PTS/DTS）。
+     * 把这个大包裹，强行切成 188 字节的小块，每一块前面加上 4 个字节的 TS 头，并分配好 PID（比如视频 PID=0x100，音频 PID=0x101）。
+     * 最后把这个文件存成 .ts 切片。
+     *
+     * 播放器需要拿到pat和pmt之后，才知道是什么格式的音频和视频，而es包装的是媒体数据，所以pat和pmt是直接写入ts包的。
+     * es和pes包的长度与媒体数据长度相关，可长可短。打包成ts的时候，pes被强制切割成188字节的块封装。
      */
     private function createPES(int $streamId, string $payload, int $pts, ?int $dts): string
     {
@@ -1575,31 +1593,94 @@ class PurePhpHlsGenerator
 
     /**
      * 写入PAT表
+     * @note 总目录all
      */
     private function writePAT(): void
     {
+        // "\x00"：table_id。在 MPEG-TS 标准中，PAT 表的固定身份证号就是 0x00。
+        //
+        //"\xB0"：section_syntax_indicator 等标志位。0xB0 的二进制是 1011 0000。前 3 位是固定的 101，后面 4 位是长度的最高位（这里是 0000）。
+        //
+        //"\x0D"：section_length（段长度）。0x0D 等于十进制的 13。
+        //
+        //这 13 个字节是怎么算出来的？后面的内容 00 01 C1 00 00 (5字节) + 00 01 (2字节) + PMT_PID (2字节) + CRC32 (4字节) = 刚好 13 个字节。算得非常精准。
+        //
+        //"\x00\x01"：transport_stream_id（传输流 ID）。表示当前这个 TS 流编号是 1。
+        //
+        //"\xC1"：包含版本号等信息。1100 0001，保留位（11）、版本号（00000）、当前下一个指示符（1）。
+        //
+        //"\x00"：section_number（当前表号），固定为 0。
+        //
+        //"\x00"：last_section_number（最后一个表号），固定为 0。
+        //
+        //"\x00\x01"：program_number（节目号）。代表当前节目的频道号是 1。如果流里有多个频道，这里会循环写入多个节目号。
+        //
+        //pack('n', 0xE000 | $this->pmtPid)：核心重点！ 0xE000 的高 3 位是保留位 111。后面 13 个比特用来存 PMT_PID。它告诉播放器：“你要找的 PMT 表，就在 $this->pmtPid 这个通道里。”
         $section = "\x00\xB0\x0D\x00\x01\xC1\x00\x00\x00\x01" . pack('n', 0xE000 | $this->pmtPid);
+        // 把前面拼好的数据，扔进 crc32mpeg（MPEG 专用 CRC32 算法，多项式 0x04C11DB7）里算一遍。
+        //pack('N', ...) 把算出的 32 位整数，以大端序（Big-Endian）打包成 4 个字节追加到尾部。如果传输中哪怕错了一个比特，这 4 个字节也会对不上，播放器直接丢弃。
         $section .= pack('N', $this->crc32mpeg($section));
+        // 添加 pointer_field 并发送,0x00 表示“没有偏移，紧接着就是完整的数据”
         $payload = "\x00" . $section;
         $this->writeTSPacketsRaw(0x0000, $payload);
     }
 
     /**
      * 写入PMT表
+     * @note more 章节
+     * 第一章 视频，第二章 音频
      */
     private function writePMT(): void
     {
+        //\x00\x01：program_number（节目号）。代表当前的频道编号是 1。如果你的流里有多个频道，就会有不同的编号。
+        //
+        //\xC1：这个字节极其重要，包含三个信息：
+        //
+        //二进制 1100 0001。
+        //
+        //前两位 11：保留位（固定值）。
+        //
+        //中间五位 00000：version_number（版本号），此处为 0。如果流里的视频参数变了，这个版本号要加 1。
+        //
+        //最后一位 1：current_next_indicator，表示这个表“当前有效”。
+        //
+        //\x00：section_number（当前表号），固定为 0。
+        //
+        //\x00：last_section_number（最后一个表号），固定为 0。
         $body = "\x00\x01\xC1\x00\x00"
+            //生成 2 个字节的 PCR_PID（节目时钟参考）告诉播放器，整条流的时间基准（心跳），请跟着视频的 PID 走。
             . pack('n', 0xE000 | $this->videoPid) . "\xF0\x00"
+            //\x1B 表示 H.264 (AVC) 视频流 ,此处声明h264视频流在pid=0x100里面，
             . "\x1B" . pack('n', 0xE000 | $this->videoPid) . "\xF0\x00";
         // 没有音频轨时不声明音频：否则 PMT 会声明一路实际零包的“幽灵音频流”
-        $audioStreamType = $this->audioStreamTypeByte();
+        $audioStreamType = $this->audioStreamTypeByte();// 获取音频格式
         if ($audioStreamType !== null) {
+            // 此处声明：如果存在音频，则在pid=0x101里面取
             $body .= $audioStreamType . pack('n', 0xE000 | $this->audioPid) . "\xF0\x00";
         }
+        # 加上后面 CRC_32（4个字节） 的长度
         $sectLen = strlen($body) + 4;
+        // "\x02"：table_id。MPEG-TS 规定，PMT 表的固定 ID 就是 0x02。
+        //
+        //chr(0xB0 | (($sectLen >> 8) & 0x0F))：这是段长度的高 8 位，但里面塞了 3 个标志位：
+        //
+        //二进制 1011 0000（即 0xB0）。
+        //
+        //最高位 1：section_syntax_indicator（表示后面带有 CRC 校验）。
+        //
+        //次高位 0：保留位（固定为 0）。
+        //
+        //第 3、4 位 11：保留位（固定为 1）。
+        //
+        //后 4 位：section_length 的高 4 位（通过 >> 8 和 & 0x0F 提取）。
+        //
+        //chr($sectLen & 0xFF)：段长度的低 8 位。
+        //
+        //. $body：把上一步拼好的内容直接接上。
         $section = "\x02" . chr(0xB0 | (($sectLen >> 8) & 0x0F)) . chr($sectLen & 0xFF) . $body;
+        // MPEG-TS 里的每一个 PSI 表（PAT、PMT），为了防止在传输中发生比特翻转，强制要求在最后附加一个 CRC32 校验和,把算出来的 32 位无符号整数，以大端序（Big-Endian）打包成 4 个字节，追加到段尾部。
         $section .= pack('N', $this->crc32mpeg($section));
+        # pointer_field :偏移量为 0，紧接着就是完整的 PMT 段
         $payload = "\x00" . $section;
         $this->writeTSPacketsRaw($this->pmtPid, $payload);
     }
@@ -1633,6 +1714,7 @@ class PurePhpHlsGenerator
      */
     private function writeTSPacketsRaw(int $pid, string $payload): void
     {
+        //TS 流里，同一个 PID 的数据包，必须有一个 0~15 循环递增的 continuity_counter（连续性计数器）。这里用了引用 & 和哈希数组，完美保证了每个 PID 都有自己独立的计数器。播放器只要发现计数器跳变，就知道中间丢包了。
         $cc = &$this->continuityCounters[$pid];
         if (!isset($cc)) $cc = 0;
         $offset = 0;
@@ -1640,16 +1722,24 @@ class PurePhpHlsGenerator
         $first = true;
         while ($offset < $totalPayload) {
             $rem = $totalPayload - $offset;
+            //播放器只要看到 0x47，就知道“新的一包开始了”
             $ts = "\x47"
+                //PUSI（载荷单元起始指示符）。如果是这个 Section 的第一个包，最高两位置为 01（即 0x40）；如果是后续被切碎的包，置为 00。这告诉解码器：“这里是一个新数据的开头”。
+                //取 PID 的高 5 位，拼接到字节里
                 . chr((($first ? 1 : 0) << 6) | (($pid >> 8) & 0x1F))
+                //取 PID 的低 8 位。和第 2 字节拼起来，就是完整的 13 位 PID。
                 . chr($pid & 0xFF)
-                . chr(0x10 | ($cc & 0x0F));
-            $cc = ($cc + 1) & 0x0F;
+                //0x10：01 代表 adaptation_field_control 标识为无自适应字段（即整包都是纯数据载荷）。0 是传输加扰控制（不加密）。
+                . chr(0x10 | ($cc & 0x0F));//把 0~15 的计数器拼进去。
+            $cc = ($cc + 1) & 0x0F;# 包id+1
+
             $chunk = substr($payload, $offset, min($rem, 184));
             $ts .= $chunk;
+            # MPEG-TS 标准规定，没用到的空位，必须用 0xFF（全 1）填充。 因为全 1 的比特流在物理层传输时是最稳定的
             $ts = str_pad($ts, 188, "\xFF");
             fwrite($this->segmentWriter['handle'], $ts);
             $offset += strlen($chunk);
+            # 标记已写入第一个包了，后面的包是连续包
             $first = false;
         }
     }
@@ -1659,6 +1749,7 @@ class PurePhpHlsGenerator
      */
     private function writeTSPackets(int $pid, string $payload, bool $writePCR = false, int $pcr = 0): void
     {
+        # 使用连续的包id
         $cc = &$this->continuityCounters[$pid];
         if (!isset($cc)) $cc = 0;
         $offset = 0;
@@ -1694,14 +1785,21 @@ class PurePhpHlsGenerator
                     $newAdapLen = min(255, ord($adaptField[0]) + $stuffLen);
                     $adaptField = chr($newAdapLen) . substr($adaptField, 1) . str_repeat("\xFF", $stuffLen);
                 }
+                // 计算剩余需要填充空白字符的长度
                 $payloadSpace = 188 - 4 - strlen($adaptField);
             }
 
+            // 写入控制字符 包id
             $tsHeader .= chr(($adaptCtrl << 4) | ($cc & 0x0F));
+            // 包id+1
             $cc = ($cc + 1) & 0x0F;
+            // 打包ts：header + 自适应字段 + pes包
             $tsPacket = $tsHeader . $adaptField . substr($payload, $offset, $payloadSpace);
+            // 填充空白使得长度满足188
             $tsPacket = str_pad($tsPacket, 188, "\xFF");
+            // 写入到磁盘
             fwrite($this->segmentWriter['handle'], $tsPacket);
+            // 更新指针
             $offset += $payloadSpace;
             $first = false;
         }
@@ -1742,6 +1840,7 @@ class PurePhpHlsGenerator
     {
         $writer = &$this->segmentWriter;
         if (!is_resource($writer['handle'])) return;
+        # 将数据立即刷入到磁盘并关闭文件
         fflush($writer['handle']);
         fclose($writer['handle']);
         $writer['handle'] = null;
